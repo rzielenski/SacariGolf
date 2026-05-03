@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="#0f0e0c"/>
+
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="470" fill="none" stroke="#b8922a" stroke-width="6"/>
+  <!-- Inner ring -->
+  <circle cx="512" cy="512" r="440" fill="none" stroke="#b8922a" stroke-width="1.5"/>
+
+  <!-- Golf club shaft (diagonal) -->
+  <line x1="340" y1="700" x2="610" y2="280" stroke="#b8922a" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Club head (iron, side-on) -->
+  <path d="M600 280 Q630 268 640 290 Q650 315 620 325 L595 315 Z" fill="#b8922a"/>
+
+  <!-- Golf ball (small circle near base) -->
+  <circle cx="338" cy="706" r="28" fill="none" stroke="#b8922a" stroke-width="5"/>
+  <circle cx="338" cy="706" r="6" fill="#b8922a"/>
+
+  <!-- "CoC" monogram -->
+  <text
+    x="512"
+    y="590"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="148"
+    font-weight="700"
+    fill="#b8922a"
+    text-anchor="middle"
+    letter-spacing="6"
+  >CoC</text>
+
+  <!-- Subtitle wordmark -->
+  <text
+    x="512"
+    y="660"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="38"
+    font-weight="400"
+    fill="#7a6230"
+    text-anchor="middle"
+    letter-spacing="8"
+  >CLASH OF CLUBS</text>
+
+  <!-- Top banner arc text placeholder (decorative rule) -->
+  <path id="topArc" d="M 180 512 A 332 332 0 0 1 844 512" fill="none"/>
+  <line x1="200" y1="380" x2="824" y2="380" stroke="#7a6230" stroke-width="1" stroke-dasharray="4 6"/>
+</svg>

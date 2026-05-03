@@ -1,0 +1,253 @@
+import React, { useState, useRef } from 'react';
+import {
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  Animated,
+} from 'react-native';
+import { router } from 'expo-router';
+import { useAuth } from '../../lib/auth';
+import { C, F } from '../../lib/colors';
+
+export default function LoginScreen() {
+  const { login, register } = useAuth();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [step, setStep] = useState<'email' | 'password' | 'newuser'>('email');
+  const [loading, setLoading] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+  const passwordRef = useRef<TextInput>(null);
+  const nameRef = useRef<TextInput>(null);
+
+  const fade = (cb: () => void) => {
+    Animated.timing(fadeAnim, { toValue: 0, duration: 120, useNativeDriver: true }).start(() => {
+      cb();
+      Animated.timing(fadeAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+    });
+  };
+
+  const handleContinue = async () => {
+    if (step === 'email') {
+      if (!email.trim() || !email.includes('@')) {
+        Alert.alert('Enter a valid email');
+        return;
+      }
+      // Check if account exists by attempting login with empty password (will fail with specific error)
+      setLoading(true);
+      try {
+        await login(email.trim().toLowerCase(), '__check__');
+      } catch (err: any) {
+        if (err.message === 'Wrong password' || err.message === 'This account uses Google Sign-In') {
+          // Account exists — show password field
+          fade(() => setStep('password'));
+          setTimeout(() => passwordRef.current?.focus(), 300);
+        } else {
+          // "No account with that email" or any other error → new user
+          fade(() => setStep('newuser'));
+          setTimeout(() => nameRef.current?.focus(), 300);
+        }
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (step === 'password') {
+      if (!password) return;
+      setLoading(true);
+      try {
+        await login(email.trim().toLowerCase(), password);
+        router.replace('/(tabs)/');
+      } catch (err: any) {
+        Alert.alert('Wrong password', err.message);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (step === 'newuser') {
+      if (!name.trim() || !password) {
+        Alert.alert('Fill in all fields');
+        return;
+      }
+      if (password.length < 6) {
+        Alert.alert('Password too short', 'Use at least 6 characters.');
+        return;
+      }
+      setLoading(true);
+      try {
+          const username = name.trim();
+        if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+          Alert.alert('Invalid username', 'Use 3–20 characters: letters, numbers, or underscores. No spaces.');
+          setLoading(false);
+          return;
+        }
+        await register(username, email.trim().toLowerCase(), password);
+        router.replace('/(tabs)/');
+      } catch (err: any) {
+        Alert.alert('Error', err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
+  const stepTitle = step === 'email'
+    ? 'Welcome'
+    : step === 'password'
+    ? 'Welcome back'
+    : 'Create account';
+
+  const stepSub = step === 'email'
+    ? 'Enter your email to continue'
+    : step === 'password'
+    ? email
+    : 'Just a couple details';
+
+  const btnLabel = step === 'email' ? 'Continue' : step === 'password' ? 'Sign In' : 'Start Playing';
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
+      <View style={styles.inner}>
+        {/* Logo */}
+        <View style={styles.logoBox}>
+          <View style={styles.logoMark}>
+            <Text style={styles.logoMarkText}>CoC</Text>
+          </View>
+          <Text style={styles.logoTitle}>Clash of Clubs</Text>
+          <Text style={styles.logoSub}>Est. 2026</Text>
+        </View>
+
+        {/* Form card */}
+        <Animated.View style={[styles.card, { opacity: fadeAnim }]}>
+          <Text style={styles.cardTitle}>{stepTitle}</Text>
+          <Text style={styles.cardSub} numberOfLines={1}>{stepSub}</Text>
+
+          {/* Email — always visible */}
+          {step === 'email' && (
+            <TextInput
+              style={styles.input}
+              value={email}
+              onChangeText={setEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              placeholder="your@email.com"
+              placeholderTextColor={C.textMuted}
+              returnKeyType="next"
+              onSubmitEditing={handleContinue}
+              autoFocus
+            />
+          )}
+
+          {/* Password */}
+          {(step === 'password' || step === 'newuser') && (
+            <TextInput
+              ref={passwordRef}
+              style={styles.input}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              placeholder={step === 'newuser' ? 'Choose a password (6+ chars)' : 'Password'}
+              placeholderTextColor={C.textMuted}
+              returnKeyType={step === 'newuser' ? 'next' : 'done'}
+              onSubmitEditing={step === 'newuser' ? () => nameRef.current?.focus() : handleContinue}
+            />
+          )}
+
+          {/* Username — new users only */}
+          {step === 'newuser' && (
+            <TextInput
+              ref={nameRef}
+              style={styles.input}
+              value={name}
+              onChangeText={setName}
+              placeholder="Choose a username (e.g. SwingKing99)"
+              placeholderTextColor={C.textMuted}
+              autoCapitalize="none"
+              returnKeyType="done"
+              onSubmitEditing={handleContinue}
+              maxLength={20}
+            />
+          )}
+
+          <TouchableOpacity
+            style={[styles.btn, loading && styles.btnDisabled]}
+            onPress={handleContinue}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#000" />
+              : <Text style={styles.btnText}>{btnLabel}</Text>}
+          </TouchableOpacity>
+
+          {step !== 'email' && (
+            <TouchableOpacity
+              onPress={() => { fade(() => { setStep('email'); setPassword(''); setName(''); }); }}
+              style={styles.backBtn}
+            >
+              <Text style={styles.backText}>← Use a different email</Text>
+            </TouchableOpacity>
+          )}
+
+          {step === 'newuser' && (
+            <Text style={styles.eloNote}>You'll start at 1200 ELO</Text>
+          )}
+        </Animated.View>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: C.bg },
+  inner: { flex: 1, justifyContent: 'center', paddingHorizontal: 24, gap: 32 },
+  logoBox: { alignItems: 'center', gap: 8 },
+  logoMark: {
+    width: 72, height: 72, borderRadius: 6, borderWidth: 2, borderColor: C.gold,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  logoMarkText: { fontFamily: F.serif, fontSize: 22, fontWeight: '700', color: C.gold, letterSpacing: 3 },
+  logoTitle: { fontFamily: F.serif, fontSize: 28, fontWeight: '700', color: C.text, letterSpacing: 2 },
+  logoSub: { fontSize: 10, color: C.textDim, letterSpacing: 4, textTransform: 'uppercase' },
+
+  card: {
+    backgroundColor: C.card,
+    borderRadius: 20,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: C.border,
+    gap: 12,
+  },
+  cardTitle: { color: C.text, fontSize: 22, fontWeight: '800' },
+  cardSub: { color: C.textMuted, fontSize: 14, marginBottom: 4 },
+
+  input: {
+    backgroundColor: C.surface,
+    color: C.text,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: 16,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+
+  btn: {
+    backgroundColor: C.gold,
+    borderRadius: 12,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  btnDisabled: { opacity: 0.6 },
+  btnText: { color: '#000', fontWeight: '800', fontSize: 16 },
+
+  backBtn: { alignItems: 'center', paddingVertical: 4 },
+  backText: { color: C.textMuted, fontSize: 13 },
+
+  eloNote: { color: C.textDim, fontSize: 12, textAlign: 'center' },
+});

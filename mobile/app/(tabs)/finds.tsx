@@ -1,0 +1,450 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, Image, ScrollView,
+  Alert, ActivityIndicator, Animated, Dimensions, RefreshControl,
+} from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { router } from 'expo-router';
+import { api, API_BASE } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
+import { C, F } from '../../lib/colors';
+
+const { width: W, height: H } = Dimensions.get('window');
+
+type Tab = 'vote' | 'leaderboard' | 'mine';
+
+export default function FindRankerScreen() {
+  const [tab, setTab] = useState<Tab>('vote');
+  const { user } = useAuth();
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <View style={{ width: 60 }} />
+        <View style={styles.titleBox}>
+          <Text style={styles.title}>Find Ranker</Text>
+          <Text style={styles.titleSub}>course discoveries, ranked</Text>
+        </View>
+        <UploadButton />
+      </View>
+
+      <View style={styles.tabRow}>
+        {(['vote', 'leaderboard', 'mine'] as Tab[]).map((t) => (
+          <TouchableOpacity
+            key={t}
+            style={[styles.tabBtn, tab === t && styles.tabBtnActive]}
+            onPress={() => setTab(t)}
+          >
+            <Text style={[styles.tabText, tab === t && styles.tabTextActive]}>
+              {t === 'vote' ? 'Vote' : t === 'leaderboard' ? 'Top Finds' : 'Mine'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {tab === 'vote' && <VoteTab />}
+      {tab === 'leaderboard' && <LeaderboardTab />}
+      {tab === 'mine' && <MineTab userId={user?.user_id ?? ''} />}
+    </View>
+  );
+}
+
+// ── Upload button ───────────────────────────────────────────────────────────
+function UploadButton() {
+  const [uploading, setUploading] = useState(false);
+
+  const pick = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Allow photo access to upload a find.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.45,
+      base64: true,
+      allowsEditing: true,
+      aspect: [4, 3],
+    });
+    if (result.canceled || !result.assets[0]) return;
+    const asset = result.assets[0];
+
+    Alert.prompt(
+      'Describe your find',
+      'What did you discover? (optional)',
+      async (description) => {
+        setUploading(true);
+        try {
+          await api.finds.upload(
+            asset.base64!,
+            asset.mimeType ?? 'image/jpeg',
+            description ?? ''
+          );
+          Alert.alert('Uploaded!', 'Your find is in the ranker.');
+        } catch (e: any) {
+          Alert.alert('Upload failed', e.message);
+        } finally {
+          setUploading(false);
+        }
+      },
+      'plain-text',
+      '',
+    );
+  };
+
+  return (
+    <TouchableOpacity style={styles.uploadBtn} onPress={pick} disabled={uploading}>
+      {uploading
+        ? <ActivityIndicator color={C.gold} size="small" />
+        : <Text style={styles.uploadBtnText}>+ Find</Text>}
+    </TouchableOpacity>
+  );
+}
+
+// ── Vote tab ────────────────────────────────────────────────────────────────
+function VoteTab() {
+  const [pair, setPair] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [voting, setVoting] = useState(false);
+  const [result, setResult] = useState<{ delta: number; winnerId: string } | null>(null);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  const loadPair = useCallback(async () => {
+    setLoading(true);
+    setResult(null);
+    try {
+      const p = await api.finds.pair();
+      setPair(p);
+    } catch (e: any) {
+      if (e.message === 'not_enough') {
+        setPair([]);
+      } else {
+        Alert.alert('Error', e.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadPair(); }, [loadPair]);
+
+  const vote = async (winnerId: string, loserId: string) => {
+    if (voting) return;
+    setVoting(true);
+    try {
+      const r = await api.finds.vote(winnerId, loserId);
+      setResult({ delta: r.delta, winnerId });
+      // Pause so user sees result, then fade to next pair
+      setTimeout(() => {
+        Animated.timing(fadeAnim, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => {
+          loadPair();
+          fadeAnim.setValue(1);
+        });
+      }, 900);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setVoting(false);
+    }
+  };
+
+  if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
+
+  if (pair.length < 2) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyTitle}>Not enough finds yet</Text>
+        <Text style={styles.emptySub}>Upload some course discoveries and invite friends to do the same — then voting opens up.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <Animated.View style={[styles.voteContainer, { opacity: fadeAnim }]}>
+      <Text style={styles.votePrompt}>Which find is cooler?</Text>
+      {pair.map((find, i) => {
+        const isWinner = result?.winnerId === find.find_id;
+        const isLoser = result && result.winnerId !== find.find_id;
+        return (
+          <TouchableOpacity
+            key={find.find_id}
+            style={[
+              styles.findCard,
+              isWinner && styles.findCardWin,
+              isLoser && styles.findCardLose,
+            ]}
+            onPress={() => vote(find.find_id, pair[1 - i].find_id)}
+            disabled={!!result || voting}
+            activeOpacity={0.85}
+          >
+            <Image
+              source={{ uri: `${API_BASE}${find.photo_url}` }}
+              style={styles.findImage}
+              resizeMode="cover"
+            />
+            <View style={styles.findOverlay}>
+              <View style={styles.findMeta}>
+                <Text style={styles.findUser}>{find.username}</Text>
+                {find.description ? <Text style={styles.findDesc} numberOfLines={2}>{find.description}</Text> : null}
+              </View>
+              <View style={styles.findEloBox}>
+                <Text style={styles.findElo}>{find.elo}</Text>
+                <Text style={styles.findEloLabel}>ELO</Text>
+              </View>
+            </View>
+            {isWinner && (
+              <View style={styles.winBanner}>
+                <Text style={styles.winBannerText}>+{result!.delta}</Text>
+              </View>
+            )}
+            {isLoser && (
+              <View style={styles.loseBanner}>
+                <Text style={styles.loseBannerText}>−{result!.delta}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </Animated.View>
+  );
+}
+
+// ── Leaderboard tab ─────────────────────────────────────────────────────────
+function LeaderboardTab() {
+  const [finds, setFinds] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    try {
+      setFinds(await api.finds.leaderboard());
+    } catch { /* silent */ } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} /></View>;
+
+  if (finds.length === 0) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyTitle}>No finds yet</Text>
+        <Text style={styles.emptySub}>Be the first to upload something cool from the course.</Text>
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView
+      style={styles.listScroll}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
+    >
+      {finds.map((f, i) => (
+        <FindRow key={f.find_id} find={f} rank={i + 1} />
+      ))}
+    </ScrollView>
+  );
+}
+
+// ── My finds tab ─────────────────────────────────────────────────────────────
+function MineTab({ userId }: { userId: string }) {
+  const [data, setData] = useState<{ finds: any[]; avgElo: number | null }>({ finds: [], avgElo: null });
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      setData(await api.finds.mine());
+    } catch { /* silent */ } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const deletFind = (id: string) => {
+    Alert.alert('Delete find?', 'This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: async () => {
+          try {
+            await api.finds.delete(id);
+            load();
+          } catch (e: any) { Alert.alert('Error', e.message); }
+        },
+      },
+    ]);
+  };
+
+  if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} /></View>;
+
+  return (
+    <ScrollView style={styles.listScroll}>
+      {data.avgElo !== null && (
+        <View style={styles.avgCard}>
+          <Text style={styles.avgNum}>{data.avgElo}</Text>
+          <Text style={styles.avgLabel}>Average Find ELO</Text>
+        </View>
+      )}
+      {data.finds.length === 0 ? (
+        <View style={styles.centered}>
+          <Text style={styles.emptyTitle}>No finds yet</Text>
+          <Text style={styles.emptySub}>Tap "+ Find" to upload your first course discovery.</Text>
+        </View>
+      ) : (
+        data.finds.map((f, i) => (
+          <FindRow key={f.find_id} find={f} rank={i + 1} onDelete={() => deletFind(f.find_id)} />
+        ))
+      )}
+    </ScrollView>
+  );
+}
+
+// ── Shared find row ──────────────────────────────────────────────────────────
+function FindRow({ find, rank, onDelete }: { find: any; rank: number; onDelete?: () => void }) {
+  const medalColor = rank === 1 ? C.gold : rank === 2 ? '#b0bec5' : rank === 3 ? '#a1673a' : C.textDim;
+
+  const reportFind = () => {
+    Alert.alert('Report Find', 'Why are you reporting this?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Inappropriate content', onPress: () => submitReport('inappropriate') },
+      { text: 'Spam', onPress: () => submitReport('spam') },
+      { text: 'Off-topic', onPress: () => submitReport('off-topic') },
+    ]);
+  };
+
+  const submitReport = async (reason: string) => {
+    try {
+      await api.finds.report(find.find_id, reason);
+      Alert.alert('Reported', 'Thanks — our team will review this find.');
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
+  return (
+    <View style={styles.findRow}>
+      <Text style={[styles.findRank, { color: medalColor }]}>#{rank}</Text>
+      <Image
+        source={{ uri: `${API_BASE}${find.photo_url}` }}
+        style={styles.findThumb}
+        resizeMode="cover"
+      />
+      <View style={{ flex: 1 }}>
+        {find.username && <Text style={styles.findRowUser}>{find.username}</Text>}
+        {find.description
+          ? <Text style={styles.findRowDesc} numberOfLines={2}>{find.description}</Text>
+          : <Text style={styles.findRowDesc}>No description</Text>}
+        <Text style={styles.findRowVotes}>{find.total_votes} votes</Text>
+      </View>
+      <View style={styles.findRowEloBox}>
+        <Text style={styles.findRowElo}>{find.elo}</Text>
+        <Text style={styles.findRowEloLabel}>ELO</Text>
+      </View>
+      {onDelete ? (
+        <TouchableOpacity onPress={onDelete} style={styles.deleteBtn}>
+          <Text style={styles.deleteBtnText}>✕</Text>
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity onPress={reportFind} style={styles.deleteBtn}>
+          <Text style={styles.reportBtnText}>···</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+}
+
+const CARD_H = (H - 240) / 2;
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: C.bg },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
+
+  header: {
+    flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
+    paddingTop: 56, paddingHorizontal: 20, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  backBtn: { paddingBottom: 2 },
+  backText: { color: C.gold, fontSize: 15, fontWeight: '600' },
+  titleBox: { alignItems: 'center' },
+  title: { color: C.text, fontSize: 18, fontWeight: '900' },
+  titleSub: { color: C.textDim, fontSize: 10, letterSpacing: 0.5 },
+  uploadBtn: {
+    backgroundColor: C.gold + '22', borderRadius: 4, paddingHorizontal: 12,
+    paddingVertical: 6, borderWidth: 1, borderColor: C.gold,
+  },
+  uploadBtnText: { color: C.gold, fontWeight: '700', fontSize: 13 },
+
+  tabRow: { flexDirection: 'row', padding: 12, gap: 8 },
+  tabBtn: { flex: 1, paddingVertical: 8, borderRadius: 4, alignItems: 'center', backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
+  tabBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
+  tabText: { color: C.textMuted, fontWeight: '600', fontSize: 13 },
+  tabTextActive: { color: C.gold },
+
+  // Vote
+  voteContainer: { flex: 1, paddingHorizontal: 12, paddingBottom: 12, gap: 10 },
+  votePrompt: { color: C.textMuted, fontSize: 12, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase', textAlign: 'center', marginBottom: 4 },
+  findCard: {
+    flex: 1, borderRadius: 6, overflow: 'hidden',
+    borderWidth: 2, borderColor: C.border, position: 'relative',
+  },
+  findCardWin: { borderColor: C.green },
+  findCardLose: { borderColor: C.red, opacity: 0.6 },
+  findImage: { width: '100%', height: '100%' },
+  findOverlay: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: 'rgba(0,0,0,0.55)', flexDirection: 'row',
+    alignItems: 'flex-end', padding: 12, gap: 8,
+  },
+  findMeta: { flex: 1 },
+  findUser: { color: C.gold, fontWeight: '700', fontSize: 12 },
+  findDesc: { color: '#fff', fontSize: 13, marginTop: 2 },
+  findEloBox: { alignItems: 'center' },
+  findElo: { color: '#fff', fontSize: 18, fontWeight: '900' },
+  findEloLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 9 },
+
+  winBanner: {
+    position: 'absolute', top: 10, right: 10,
+    backgroundColor: C.green, borderRadius: 4, paddingHorizontal: 10, paddingVertical: 4,
+  },
+  winBannerText: { color: '#fff', fontWeight: '900', fontSize: 13 },
+  loseBanner: {
+    position: 'absolute', top: 10, right: 10,
+    backgroundColor: C.red, borderRadius: 4, paddingHorizontal: 10, paddingVertical: 4,
+  },
+  loseBannerText: { color: '#fff', fontWeight: '900', fontSize: 13 },
+
+  // Lists
+  listScroll: { flex: 1 },
+  findRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: C.card, borderRadius: 6, marginHorizontal: 12,
+    marginBottom: 8, padding: 10, borderWidth: 1, borderColor: C.border,
+  },
+  findRank: { fontFamily: F.serif, fontSize: 15, fontWeight: '700', width: 28, textAlign: 'center' },
+  findThumb: { width: 60, height: 60, borderRadius: 4 },
+  findRowUser: { color: C.gold, fontSize: 11, fontWeight: '700', marginBottom: 2 },
+  findRowDesc: { color: C.text, fontSize: 13, fontWeight: '500' },
+  findRowVotes: { color: C.textDim, fontSize: 11, marginTop: 3 },
+  findRowEloBox: { alignItems: 'center', minWidth: 48 },
+  findRowElo: { color: C.text, fontSize: 18, fontWeight: '900' },
+  findRowEloLabel: { color: C.textDim, fontSize: 9 },
+  deleteBtn: { padding: 6 },
+  deleteBtnText: { color: C.red, fontWeight: '700', fontSize: 14 },
+  reportBtnText: { color: C.textDim, fontWeight: '700', fontSize: 16, letterSpacing: 1 },
+
+  // Mine
+  avgCard: {
+    backgroundColor: C.card, borderRadius: 6, margin: 12, padding: 20,
+    alignItems: 'center', borderWidth: 1, borderColor: C.border,
+  },
+  avgNum: { fontFamily: F.serif, color: C.gold, fontSize: 36, fontWeight: '700' },
+  avgLabel: { color: C.textMuted, fontSize: 13, marginTop: 4 },
+
+  // Empty
+  emptyTitle: { color: C.text, fontWeight: '700', fontSize: 16, marginBottom: 8 },
+  emptySub: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 4, lineHeight: 20 },
+});
