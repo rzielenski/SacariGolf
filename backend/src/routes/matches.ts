@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { sendPush } from '../utils/notify';
 
 const router = Router();
 
@@ -23,23 +24,73 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 
 // Create match
 router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId } = req.body;
+  const { matchType, name, isPractice, teeboxId, clanId } = req.body;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Squad matches: only clan leaders can create
+    if (matchType === 'squad' && clanId) {
+      const { rows: roleRows } = await client.query(
+        `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+        [clanId, req.userId]
+      );
+      if (!roleRows.length || roleRows[0].role !== 'leader') {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Only the clan leader can start a squad match' });
+      }
+    }
+
     const { rows } = await client.query(
       `INSERT INTO matches (match_type, name, is_practice)
        VALUES ($1, $2, $3) RETURNING *`,
       [matchType, name || null, isPractice || false]
     );
     const match = rows[0];
+
     await client.query(
       `INSERT INTO match_players (match_id, user_id, teebox_id, side)
        VALUES ($1, $2, $3, 1)`,
       [match.match_id, req.userId, teeboxId || null]
     );
+
+    // Auto-invite clan members for duo/squad matches
+    if ((matchType === 'duo' || matchType === 'squad') && clanId) {
+      const { rows: memberRows } = await client.query(
+        `SELECT cm.user_id, u.push_token, u.username,
+                me.username AS my_name
+         FROM clan_members cm
+         JOIN users u ON u.user_id = cm.user_id
+         JOIN users me ON me.user_id = $2
+         WHERE cm.clan_id = $1 AND cm.user_id != $2`,
+        [clanId, req.userId]
+      );
+
+      const { rows: senderRows } = await client.query(
+        `SELECT username FROM users WHERE user_id = $1`, [req.userId]
+      );
+      const senderName = senderRows[0]?.username ?? 'Your partner';
+
+      for (const member of memberRows) {
+        await client.query(
+          `INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
+           VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
+           ON CONFLICT DO NOTHING`,
+          [match.match_id, req.userId, member.user_id]
+        );
+        if (member.push_token) {
+          await sendPush(
+            [member.push_token],
+            `${matchType === 'duo' ? 'Duo' : 'Squad'} Match Invite`,
+            `${senderName} is starting a ${matchType} match — accept within 24 hours!`,
+            { type: 'invite', matchId: match.match_id }
+          );
+        }
+      }
+    }
+
     await client.query('COMMIT');
     return res.status(201).json(match);
   } catch (err) {

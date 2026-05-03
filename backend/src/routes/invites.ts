@@ -12,12 +12,12 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
 
   try {
     await pool.query(
-      `INSERT INTO match_invites (match_id, from_user_id, to_user_id)
-       VALUES ($1, $2, $3) ON CONFLICT (match_id, to_user_id) DO NOTHING`,
+      `INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
+       ON CONFLICT (match_id, to_user_id) DO NOTHING`,
       [matchId, req.userId, toUserId]
     );
 
-    // Push notify the invitee
     const { rows } = await pool.query(
       `SELECT u.push_token, u2.username AS from_name
        FROM users u, users u2
@@ -40,16 +40,19 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /invites — get my pending invites
+// GET /invites — get my pending invites (excludes expired)
 router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT i.invite_id, i.match_id, i.created_at,
+    `SELECT i.invite_id, i.match_id, i.created_at, i.expires_at,
             u.username AS from_username, u.elo AS from_elo,
             m.match_type, m.name AS match_name
      FROM match_invites i
      JOIN users u ON u.user_id = i.from_user_id
      JOIN matches m ON m.match_id = i.match_id
-     WHERE i.to_user_id = $1 AND i.status = 'pending' AND m.completed = false
+     WHERE i.to_user_id = $1
+       AND i.status = 'pending'
+       AND m.completed = false
+       AND (i.expires_at IS NULL OR i.expires_at > NOW())
      ORDER BY i.created_at DESC`,
     [req.userId]
   );
@@ -61,22 +64,44 @@ router.post('/:id/accept', requireAuth, async (req: AuthRequest, res: Response) 
   const { rows } = await pool.query(
     `UPDATE match_invites SET status = 'accepted'
      WHERE invite_id = $1 AND to_user_id = $2
-     RETURNING match_id`,
+       AND (expires_at IS NULL OR expires_at > NOW())
+     RETURNING match_id, from_user_id`,
     [req.params.id, req.userId]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Invite not found' });
+  if (!rows.length) return res.status(404).json({ error: 'Invite not found or expired' });
 
-  // Auto-join the match
+  const { match_id: matchId, from_user_id: fromUserId } = rows[0];
+
   try {
+    // For duo/squad matches join on same side as the inviter; otherwise next available side
+    const { rows: matchRows } = await pool.query(
+      `SELECT match_type FROM matches WHERE match_id = $1`, [matchId]
+    );
+    const matchType = matchRows[0]?.match_type;
+
+    let side: number;
+    if (matchType === 'duo' || matchType === 'squad') {
+      const { rows: sideRows } = await pool.query(
+        `SELECT side FROM match_players WHERE match_id = $1 AND user_id = $2`,
+        [matchId, fromUserId]
+      );
+      side = sideRows[0]?.side ?? 1;
+    } else {
+      const { rows: maxRows } = await pool.query(
+        `SELECT COALESCE(MAX(side), 0) + 1 AS next FROM match_players WHERE match_id = $1`,
+        [matchId]
+      );
+      side = maxRows[0].next;
+    }
+
     await pool.query(
       `INSERT INTO match_players (match_id, user_id, side)
-       SELECT $1, $2, COALESCE(MAX(side), 0) + 1 FROM match_players WHERE match_id = $1
-       ON CONFLICT DO NOTHING`,
-      [rows[0].match_id, req.userId]
+       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [matchId, req.userId, side]
     );
   } catch { /* already a player */ }
 
-  return res.json({ matchId: rows[0].match_id });
+  return res.json({ matchId });
 });
 
 // POST /invites/:id/decline

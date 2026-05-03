@@ -95,6 +95,40 @@ function FriendsTab() {
     } catch { /* silent */ }
   };
 
+  const challengeFriend = (friend: any) => {
+    Alert.alert(
+      `Challenge ${friend.username}`,
+      'Pick a match format',
+      [
+        {
+          text: '9 Holes',
+          onPress: () => sendChallenge(friend, '9'),
+        },
+        {
+          text: '18 Holes',
+          onPress: () => sendChallenge(friend, '18'),
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const sendChallenge = async (friend: any, holes: string) => {
+    try {
+      const match = await api.matches.create({
+        matchType: 'solo',
+        name: `${holes}-hole challenge`,
+      });
+      await api.invites.send(match.match_id, friend.user_id);
+      Alert.alert('Challenge sent!', `${friend.username} has been invited to your match.`, [
+        { text: 'Go to Match', onPress: () => router.push(`/match/${match.match_id}` as any) },
+        { text: 'Stay' },
+      ]);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    }
+  };
+
   if (loading) return <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />;
 
   return (
@@ -187,10 +221,16 @@ function FriendsTab() {
                 <Text style={styles.userElo}>{u.elo} ELO</Text>
               </View>
               <TouchableOpacity
-                style={styles.addBtn}
+                style={[styles.addBtn, { marginRight: 6 }]}
+                onPress={() => challengeFriend(u)}
+              >
+                <Text style={styles.addBtnText}>⚔ Challenge</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.addBtn, { backgroundColor: C.card, borderColor: C.border }]}
                 onPress={() => router.push(`/chat/dm/${u.user_id}?name=${encodeURIComponent(u.username)}` as any)}
               >
-                <Text style={styles.addBtnText}>Message</Text>
+                <Text style={[styles.addBtnText, { color: C.textMuted }]}>Message</Text>
               </TouchableOpacity>
             </View>
           ))}

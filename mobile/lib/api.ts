@@ -80,7 +80,7 @@ export const api = {
   matches: {
     list: () => request<any[]>('GET', '/matches'),
     get: (id: string) => request<any>('GET', `/matches/${id}`),
-    create: (body: object) => request<any>('POST', '/matches', body),
+    create: (body: { matchType: string; isPractice?: boolean; teeboxId?: string; clanId?: string; name?: string }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
   },

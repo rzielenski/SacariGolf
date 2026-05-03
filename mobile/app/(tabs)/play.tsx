@@ -6,41 +6,33 @@ import {
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { api } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Course, Teebox } from '../../types';
 
-type MatchType = 'solo' | 'duo' | 'practice';
+type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
+type Step = 'type' | 'clan' | 'join' | 'course' | 'teebox';
 
 export default function PlayScreen() {
-  const [step, setStep] = useState<'type' | 'join' | 'course' | 'teebox'>('type');
+  const { user } = useAuth();
+  const [step, setStep] = useState<Step>('type');
   const [joinId, setJoinId] = useState('');
   const [joining, setJoining] = useState(false);
-
-  const handleJoinById = async () => {
-    if (!joinId.trim()) { Alert.alert('Enter a Match ID'); return; }
-    setJoining(true);
-    try {
-      const match = await api.matches.get(joinId.trim());
-      if (match.completed) { Alert.alert('Match already completed'); setJoining(false); return; }
-      await api.matches.join(joinId.trim(), {});
-      router.push(`/match/${joinId.trim()}` as any);
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    } finally { setJoining(false); }
-  };
   const [matchType, setMatchType] = useState<MatchType>('solo');
   const [numHoles, setNumHoles] = useState<9 | 18>(18);
+  const [selectedClanId, setSelectedClanId] = useState<string | null>(null);
+  const [myclans, setMyClans] = useState<any[]>([]);
+  const [loadingClans, setLoadingClans] = useState(false);
   const [query, setQuery] = useState('');
   const [courses, setCourses] = useState<Course[]>([]);
   const [nearbyCourses, setNearbyCourses] = useState<Course[]>([]);
   const [loadingNearby, setLoadingNearby] = useState(false);
   const [searching, setSearching] = useState(false);
-  const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
   const [courseDetails, setCourseDetails] = useState<Course | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [creating, setCreating] = useState(false);
 
-  // Load nearby courses once when the course step becomes active
+  // Load nearby courses once
   useEffect(() => {
     if (step !== 'course' || nearbyCourses.length > 0) return;
     (async () => {
@@ -51,11 +43,37 @@ export default function PlayScreen() {
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         const results = await api.courses.nearby(pos.coords.latitude, pos.coords.longitude);
         setNearbyCourses(results);
-      } catch { /* silent — nearby is best-effort */ } finally {
-        setLoadingNearby(false);
-      }
+      } catch { } finally { setLoadingNearby(false); }
     })();
   }, [step]);
+
+  // Load clans when clan step becomes active
+  useEffect(() => {
+    if (step !== 'clan') return;
+    setLoadingClans(true);
+    api.clans.mine()
+      .then((all) => {
+        const filtered = matchType === 'duo'
+          ? all.filter((c: any) => c.clan_mode === 'duo')
+          : all.filter((c: any) => c.clan_mode === 'squad' && c.role === 'leader');
+        setMyClans(filtered);
+      })
+      .catch(() => { })
+      .finally(() => setLoadingClans(false));
+  }, [step, matchType]);
+
+  const handleJoinById = async () => {
+    if (!joinId.trim()) { Alert.alert('Enter a Match ID'); return; }
+    setJoining(true);
+    try {
+      const match = await api.matches.get(joinId.trim());
+      if (match.completed) { Alert.alert('Match already completed'); return; }
+      await api.matches.join(joinId.trim(), {});
+      router.push(`/match/${joinId.trim()}` as any);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally { setJoining(false); }
+  };
 
   const searchCourses = useCallback(async (q: string) => {
     setQuery(q);
@@ -64,13 +82,10 @@ export default function PlayScreen() {
     try {
       const results = await api.courses.search(q);
       setCourses(results);
-    } catch { /* silent */ } finally {
-      setSearching(false);
-    }
+    } catch { } finally { setSearching(false); }
   }, []);
 
   const selectCourse = async (course: Course) => {
-    setSelectedCourse(course);
     setLoadingDetails(true);
     try {
       const details = await api.courses.get(course.course_id);
@@ -78,9 +93,7 @@ export default function PlayScreen() {
       setStep('teebox');
     } catch (e: any) {
       Alert.alert('Error', e.message);
-    } finally {
-      setLoadingDetails(false);
-    }
+    } finally { setLoadingDetails(false); }
   };
 
   const startMatch = async (teebox: Teebox) => {
@@ -90,23 +103,38 @@ export default function PlayScreen() {
         matchType,
         isPractice: matchType === 'practice',
         teeboxId: teebox.teebox_id,
+        clanId: selectedClanId ?? undefined,
       });
-      // Skip lobby — go straight to scoring, pass the selected hole count
-      router.push(`/match/scoring/${match.match_id}?holes=${numHoles}` as any);
+      if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
+        Alert.alert(
+          'Match Created!',
+          'Your clan partners have been invited. They have 24 hours to accept.',
+          [{ text: 'OK', onPress: () => router.push(`/match/${match.match_id}` as any) }]
+        );
+      } else {
+        router.push(`/match/scoring/${match.match_id}?holes=${numHoles}` as any);
+      }
     } catch (e: any) {
       Alert.alert('Error', e.message);
-    } finally {
-      setCreating(false);
+    } finally { setCreating(false); }
+  };
+
+  const goToNextStep = () => {
+    if (matchType === 'duo' || matchType === 'squad') {
+      setStep('clan');
+    } else {
+      setStep('course');
     }
   };
 
+  // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
     return (
       <View style={styles.container}>
         <Text style={styles.title}>Start a Round</Text>
         <Text style={styles.subtitle}>Choose your match type</Text>
 
-        {(['solo', 'duo', 'practice'] as MatchType[]).map((t) => (
+        {(['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -114,16 +142,17 @@ export default function PlayScreen() {
           >
             <View style={styles.typeMark}>
               <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : 'PRC'}
+                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : 'PRC'}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : 'Practice'}
+                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
                 {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
-                  : t === 'duo' ? 'Ranked 2v2 — play with a partner'
+                  : t === 'duo' ? 'Ranked 2v2 — play with your duo partner'
+                  : t === 'squad' ? 'Ranked 4v4 — clan leaders only'
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>
@@ -131,7 +160,6 @@ export default function PlayScreen() {
           </TouchableOpacity>
         ))}
 
-        {/* Hole count */}
         <Text style={styles.holeLabel}>Holes</Text>
         <View style={styles.holeRow}>
           {([9, 18] as const).map((n) => (
@@ -145,8 +173,10 @@ export default function PlayScreen() {
           ))}
         </View>
 
-        <TouchableOpacity style={styles.nextBtn} onPress={() => setStep('course')}>
-          <Text style={styles.nextBtnText}>Select Course →</Text>
+        <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
+          <Text style={styles.nextBtnText}>
+            {matchType === 'duo' || matchType === 'squad' ? 'Select Clan →' : 'Select Course →'}
+          </Text>
         </TouchableOpacity>
 
         <View style={styles.divider}>
@@ -162,6 +192,62 @@ export default function PlayScreen() {
     );
   }
 
+  // ── Clan selection ────────────────────────────────────────────────────────────
+  if (step === 'clan') {
+    return (
+      <View style={styles.container}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
+          <Text style={styles.backBtnText}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.title}>
+          {matchType === 'duo' ? 'Pick Your Duo' : 'Pick Your Squad'}
+        </Text>
+        <Text style={styles.subtitle}>
+          {matchType === 'duo'
+            ? 'Your partner will be notified and must accept within 24 hours'
+            : 'All squad members will be notified. Only leaders can start squad matches.'}
+        </Text>
+
+        {loadingClans
+          ? <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
+          : myclans.length === 0
+            ? (
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyText}>
+                  {matchType === 'duo'
+                    ? 'You have no duo clans'
+                    : 'You are not a leader of any squad clan'}
+                </Text>
+                <Text style={styles.emptySub}>
+                  Go to Social → Clans to create or join one first
+                </Text>
+              </View>
+            )
+            : myclans.map((c) => (
+              <TouchableOpacity
+                key={c.clan_id}
+                style={[styles.clanCard, selectedClanId === c.clan_id && styles.clanCardActive]}
+                onPress={() => setSelectedClanId(c.clan_id)}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.clanName, selectedClanId === c.clan_id && { color: C.gold }]}>{c.name}</Text>
+                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.elo} ELO</Text>
+                </View>
+                {selectedClanId === c.clan_id && <Text style={{ color: C.gold, fontSize: 18 }}>✓</Text>}
+              </TouchableOpacity>
+            ))
+        }
+
+        {selectedClanId && (
+          <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('course')}>
+            <Text style={styles.nextBtnText}>Select Course →</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  }
+
+  // ── Join by ID ────────────────────────────────────────────────────────────────
   if (step === 'join') {
     return (
       <View style={styles.container}>
@@ -170,7 +256,6 @@ export default function PlayScreen() {
         </TouchableOpacity>
         <Text style={styles.title}>Join a Match</Text>
         <Text style={styles.subtitle}>Enter the Match ID shared by your friend</Text>
-
         <TextInput
           style={styles.searchInput}
           value={joinId}
@@ -179,31 +264,27 @@ export default function PlayScreen() {
           placeholderTextColor={C.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
-          autoFocus
         />
-
         <TouchableOpacity
           style={[styles.nextBtn, joining && { opacity: 0.6 }]}
           onPress={handleJoinById}
           disabled={joining}
         >
-          {joining
-            ? <ActivityIndicator color="#000" />
-            : <Text style={styles.nextBtnText}>Join Match →</Text>}
+          {joining ? <ActivityIndicator color="#000" /> : <Text style={styles.nextBtnText}>Join Match →</Text>}
         </TouchableOpacity>
       </View>
     );
   }
 
+  // ── Course search ─────────────────────────────────────────────────────────────
   if (step === 'course') {
     return (
       <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'clan' : 'type')}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Find a Course</Text>
         <Text style={styles.subtitle}>Search by name, city, or state</Text>
-
         <TextInput
           style={styles.searchInput}
           value={query}
@@ -212,12 +293,7 @@ export default function PlayScreen() {
           placeholderTextColor={C.textMuted}
           autoFocus
         />
-
-        {(searching || loadingDetails) && (
-          <ActivityIndicator color={C.gold} style={{ marginTop: 20 }} />
-        )}
-
-        {/* Before search: show nearby courses */}
+        {(searching || loadingDetails) && <ActivityIndicator color={C.gold} style={{ marginTop: 20 }} />}
         {query.length < 2 && !searching && (
           <>
             {loadingNearby
@@ -235,8 +311,6 @@ export default function PlayScreen() {
               )}
           </>
         )}
-
-        {/* Search results */}
         {query.length >= 2 && (
           <FlatList
             data={courses}
@@ -249,7 +323,7 @@ export default function PlayScreen() {
     );
   }
 
-  // Teebox selection
+  // ── Teebox selection ──────────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.backBtn} onPress={() => { setStep('course'); setCourseDetails(null); }}>
@@ -257,7 +331,6 @@ export default function PlayScreen() {
       </TouchableOpacity>
       <Text style={styles.title}>{courseDetails?.course_name}</Text>
       <Text style={styles.subtitle}>Select your tee box</Text>
-
       <ScrollView>
         {(courseDetails?.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).map((t) => (
           <TouchableOpacity key={t.teebox_id} style={styles.teeboxCard} onPress={() => startMatch(t)}>
@@ -304,15 +377,9 @@ const styles = StyleSheet.create({
   backBtnText: { color: C.gold, fontSize: 16 },
 
   typeCard: {
-    backgroundColor: C.card,
-    borderRadius: 6,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: C.border,
+    backgroundColor: C.card, borderRadius: 6, padding: 16,
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    marginBottom: 10, borderWidth: 1, borderColor: C.border,
   },
   typeCardActive: { borderColor: C.gold },
   typeMark: { width: 44, height: 44, borderRadius: 4, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' },
@@ -328,13 +395,7 @@ const styles = StyleSheet.create({
   holeBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 15 },
   holeBtnTextActive: { color: C.gold },
 
-  nextBtn: {
-    backgroundColor: C.gold,
-    borderRadius: 14,
-    paddingVertical: 16,
-    alignItems: 'center',
-    marginTop: 12,
-  },
+  nextBtn: { backgroundColor: C.gold, borderRadius: 14, paddingVertical: 16, alignItems: 'center', marginTop: 12 },
   nextBtnText: { color: '#000', fontWeight: '800', fontSize: 16 },
   divider: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 16 },
   dividerLine: { flex: 1, height: 1, backgroundColor: C.border },
@@ -342,40 +403,33 @@ const styles = StyleSheet.create({
   joinMatchBtn: { borderRadius: 14, paddingVertical: 14, alignItems: 'center', borderWidth: 1, borderColor: C.border },
   joinMatchText: { color: C.textMuted, fontWeight: '600', fontSize: 15 },
 
-  searchInput: {
-    backgroundColor: C.card,
-    color: C.text,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    borderWidth: 1,
-    borderColor: C.border,
-    marginBottom: 8,
+  clanCard: {
+    backgroundColor: C.card, borderRadius: 6, padding: 16,
+    flexDirection: 'row', alignItems: 'center',
+    marginBottom: 10, borderWidth: 1, borderColor: C.border,
   },
+  clanCardActive: { borderColor: C.gold },
+  clanName: { color: C.text, fontWeight: '700', fontSize: 15 },
+  clanMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
 
-  nearbyLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginTop: 12, marginBottom: 8 },
-  courseCard: {
-    backgroundColor: C.card,
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: C.border,
+  emptyBox: { alignItems: 'center', paddingTop: 50 },
+  emptyText: { color: C.text, fontWeight: '700', fontSize: 16, textAlign: 'center' },
+  emptySub: { color: C.textMuted, fontSize: 13, marginTop: 8, textAlign: 'center' },
+
+  searchInput: {
+    backgroundColor: C.card, color: C.text, borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 14, fontSize: 16,
+    borderWidth: 1, borderColor: C.border, marginBottom: 8,
   },
+  nearbyLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginTop: 12, marginBottom: 8 },
+  courseCard: { backgroundColor: C.card, borderRadius: 14, padding: 16, marginBottom: 8, borderWidth: 1, borderColor: C.border },
   courseName: { color: C.text, fontWeight: '700', fontSize: 15 },
   clubName: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   courseLocation: { color: C.gold, fontSize: 12, marginTop: 4 },
 
   teeboxCard: {
-    backgroundColor: C.card,
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 10,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: C.border,
+    backgroundColor: C.card, borderRadius: 14, padding: 18, marginBottom: 10,
+    flexDirection: 'row', justifyContent: 'space-between', borderWidth: 1, borderColor: C.border,
   },
   teeboxLeft: { flex: 1 },
   teeboxName: { color: C.text, fontWeight: '800', fontSize: 17 },
@@ -383,7 +437,4 @@ const styles = StyleSheet.create({
   teeboxRight: { alignItems: 'flex-end' },
   teeboxRating: { color: C.gold, fontWeight: '700', fontSize: 13 },
   teeboxSlope: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-
-  loadingOverlay: { alignItems: 'center', marginTop: 30 },
-  loadingText: { color: C.textMuted, marginTop: 10 },
 });
