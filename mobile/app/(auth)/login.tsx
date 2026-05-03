@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-  Animated,
+  Animated, ScrollView, Keyboard,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
@@ -20,6 +20,7 @@ export default function LoginScreen() {
   const nameRef = useRef<TextInput>(null);
 
   const fade = (cb: () => void) => {
+    Keyboard.dismiss();
     Animated.timing(fadeAnim, { toValue: 0, duration: 120, useNativeDriver: true }).start(() => {
       cb();
       Animated.timing(fadeAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
@@ -38,13 +39,9 @@ export default function LoginScreen() {
         await login(email.trim().toLowerCase(), '__check__');
       } catch (err: any) {
         if (err.message === 'Wrong password' || err.message === 'This account uses Google Sign-In') {
-          // Account exists — show password field
           fade(() => setStep('password'));
-          setTimeout(() => passwordRef.current?.focus(), 300);
         } else {
-          // "No account with that email" or any other error → new user
           fade(() => setStep('newuser'));
-          setTimeout(() => nameRef.current?.focus(), 300);
         }
       } finally {
         setLoading(false);
@@ -112,7 +109,11 @@ export default function LoginScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
-      <View style={styles.inner}>
+      <ScrollView
+        contentContainerStyle={styles.inner}
+        keyboardShouldPersistTaps="handled"
+        bounces={false}
+      >
         {/* Logo */}
         <View style={styles.logoBox}>
           <View style={styles.logoMark}>
@@ -139,7 +140,6 @@ export default function LoginScreen() {
               placeholderTextColor={C.textMuted}
               returnKeyType="next"
               onSubmitEditing={handleContinue}
-              autoFocus
             />
           )}
 
@@ -197,14 +197,14 @@ export default function LoginScreen() {
             <Text style={styles.eloNote}>You'll start at 1200 ELO</Text>
           )}
         </Animated.View>
-      </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
-  inner: { flex: 1, justifyContent: 'center', paddingHorizontal: 24, gap: 32 },
+  inner: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 24, paddingVertical: 40, gap: 32 },
   logoBox: { alignItems: 'center', gap: 8 },
   logoMark: {
     width: 72, height: 72, borderRadius: 6, borderWidth: 2, borderColor: C.gold,
