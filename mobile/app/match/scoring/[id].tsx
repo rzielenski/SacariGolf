@@ -514,13 +514,10 @@ export default function ScoringScreen() {
       <Animated.View style={[styles.panel, { height: panelAnim }]}>
         {/* Handle / collapsed row — always visible, tap to toggle */}
         {/* When collapsed: tap OR drag up to open. When expanded: drag down to close. */}
-        <TouchableOpacity
-          style={styles.panelHandle}
-          activeOpacity={panelExpanded ? 1 : 0.7}
-          onPress={() => { if (!panelExpanded) snapPanel(true); }}
-          {...panResponder.panHandlers}
-        >
-          <View style={styles.handleBar} />
+        <View style={styles.panelHandle} {...panResponder.panHandlers}>
+          <TouchableOpacity onPress={() => snapPanel(!panelExpanded)} activeOpacity={0.6}>
+            <View style={styles.handleBar} />
+          </TouchableOpacity>
           <View style={styles.collapsedRow}>
             {/* Prev */}
             <TouchableOpacity
@@ -563,7 +560,7 @@ export default function ScoringScreen() {
               </TouchableOpacity>
             )}
           </View>
-        </TouchableOpacity>
+        </View>
 
         {/* Expanded content */}
         {panelExpanded && (
