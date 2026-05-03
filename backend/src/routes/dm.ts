@@ -1,10 +1,10 @@
 import { Router, Request, Response } from 'express';
 import pool from '../db/pool';
-import { authMiddleware } from '../middleware/auth';
+import { requireAuth } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 
 const router = Router();
-router.use(authMiddleware);
+router.use(requireAuth);
 
 // GET /dm/:userId — conversation with another user
 router.get('/:userId', async (req: Request, res: Response) => {
