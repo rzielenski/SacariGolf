@@ -97,6 +97,11 @@ export const api = {
     report: (id: string, reason: string) => request<any>('POST', `/finds/${id}/report`, { reason }),
   },
 
+  dm: {
+    list: (userId: string) => request<any[]>('GET', `/dm/${userId}`),
+    send: (userId: string, body: string) => request<any>('POST', `/dm/${userId}`, { body }),
+  },
+
   clans: {
     list: () => request<any[]>('GET', '/clans'),
     mine: () => request<any[]>('GET', '/clans/mine'),

@@ -186,6 +186,12 @@ function FriendsTab() {
                 <Text style={styles.userName}>{u.username}</Text>
                 <Text style={styles.userElo}>{u.elo} ELO</Text>
               </View>
+              <TouchableOpacity
+                style={styles.addBtn}
+                onPress={() => router.push(`/chat/dm/${u.user_id}?name=${encodeURIComponent(u.username)}` as any)}
+              >
+                <Text style={styles.addBtnText}>Message</Text>
+              </TouchableOpacity>
             </View>
           ))}
         </>

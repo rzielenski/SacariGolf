@@ -11,6 +11,7 @@ import clansRouter from './routes/clans';
 import findsRouter from './routes/finds';
 import messagesRouter from './routes/messages';
 import invitesRouter from './routes/invites';
+import dmRouter from './routes/dm';
 
 const app = express();
 app.use(cors());
@@ -29,6 +30,7 @@ app.use('/clans', clansRouter);
 app.use('/finds', findsRouter);
 app.use('/messages', messagesRouter);
 app.use('/invites', invitesRouter);
+app.use('/dm', dmRouter);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Clash of Clubs API running on :${PORT}`));

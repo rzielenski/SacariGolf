@@ -10,7 +10,7 @@ import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
 
 export default function ChatScreen() {
-  const { type, id } = useLocalSearchParams<{ type: 'match' | 'clan'; id: string }>();
+  const { type, id, name } = useLocalSearchParams<{ type: 'match' | 'clan' | 'dm'; id: string; name?: string }>();
   const { user } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,15 +21,19 @@ export default function ChatScreen() {
 
   const load = useCallback(async () => {
     try {
-      const params = type === 'match' ? { matchId: id } : { clanId: id };
-      const data = await api.messages.list(params);
+      let data: ChatMessage[];
+      if (type === 'dm') {
+        data = await api.dm.list(id);
+      } else {
+        const params = type === 'match' ? { matchId: id } : { clanId: id };
+        data = await api.messages.list(params);
+      }
       setMessages(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, [type, id]);
 
   useEffect(() => {
     load();
-    // Poll for new messages every 5 seconds
     pollRef.current = setInterval(load, 5000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [load]);
@@ -46,16 +50,21 @@ export default function ChatScreen() {
     setSending(true);
     setText('');
     try {
-      const params = type === 'match'
-        ? { matchId: id, body: trimmed }
-        : { clanId: id, body: trimmed };
-      const msg = await api.messages.send(params);
+      let msg: ChatMessage;
+      if (type === 'dm') {
+        msg = await api.dm.send(id, trimmed);
+      } else {
+        const params = type === 'match'
+          ? { matchId: id, body: trimmed }
+          : { clanId: id, body: trimmed };
+        msg = await api.messages.send(params);
+      }
       setMessages((prev) => [...prev, msg]);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     } catch { setText(trimmed); } finally { setSending(false); }
   };
 
-  const title = type === 'match' ? 'Match Chat' : 'Clan Chat';
+  const title = type === 'dm' ? (name ?? 'Direct Message') : type === 'match' ? 'Match Chat' : 'Clan Chat';
 
   return (
     <KeyboardAvoidingView
