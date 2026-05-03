@@ -21,13 +21,8 @@ export default function ChatScreen() {
 
   const load = useCallback(async () => {
     try {
-      let data: ChatMessage[];
-      if (type === 'dm') {
-        data = await api.dm.list(id);
-      } else {
-        const params = type === 'match' ? { matchId: id } : { clanId: id };
-        data = await api.messages.list(params);
-      }
+      const params = type === 'match' ? { matchId: id } : type === 'clan' ? { clanId: id } : { toUserId: id };
+      const data = await api.messages.list(params);
       setMessages(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, [type, id]);
@@ -50,15 +45,12 @@ export default function ChatScreen() {
     setSending(true);
     setText('');
     try {
-      let msg: ChatMessage;
-      if (type === 'dm') {
-        msg = await api.dm.send(id, trimmed);
-      } else {
-        const params = type === 'match'
-          ? { matchId: id, body: trimmed }
-          : { clanId: id, body: trimmed };
-        msg = await api.messages.send(params);
-      }
+      const params = type === 'match'
+        ? { matchId: id, body: trimmed }
+        : type === 'clan'
+        ? { clanId: id, body: trimmed }
+        : { toUserId: id, body: trimmed };
+      const msg = await api.messages.send(params);
       setMessages((prev) => [...prev, msg]);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     } catch { setText(trimmed); } finally { setSending(false); }

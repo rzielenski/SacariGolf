@@ -56,11 +56,11 @@ export const api = {
   },
 
   messages: {
-    list: (params: { matchId?: string; clanId?: string }) => {
-      const q = params.matchId ? `matchId=${params.matchId}` : `clanId=${params.clanId}`;
+    list: (params: { matchId?: string; clanId?: string; toUserId?: string }) => {
+      const q = params.matchId ? `matchId=${params.matchId}` : params.clanId ? `clanId=${params.clanId}` : `toUserId=${params.toUserId}`;
       return request<any[]>('GET', `/messages?${q}`);
     },
-    send: (body: { matchId?: string; clanId?: string; body: string }) =>
+    send: (body: { matchId?: string; clanId?: string; toUserId?: string; body: string }) =>
       request<any>('POST', '/messages', body),
   },
 

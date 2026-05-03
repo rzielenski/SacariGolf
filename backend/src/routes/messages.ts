@@ -5,11 +5,23 @@ import { sendPush } from '../utils/notify';
 
 const router = Router();
 
-// GET /messages?matchId=&clan_id= — fetch last 100 messages
+// GET /messages?matchId=&clanId=&toUserId= — fetch last 100 messages
 router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId } = req.query;
-  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId or clanId required' });
+  const { matchId, clanId, toUserId } = req.query;
 
+  if (toUserId) {
+    const { rows } = await pool.query(
+      `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id, u.username
+       FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
+       WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
+          OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
+       ORDER BY dm.created_at ASC LIMIT 100`,
+      [req.userId, toUserId]
+    );
+    return res.json(rows);
+  }
+
+  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
   const col = matchId ? 'match_id' : 'clan_id';
   const val = matchId ?? clanId;
 
@@ -26,9 +38,32 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
 
 // POST /messages — send a message
 router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId, body } = req.body;
+  const { matchId, clanId, toUserId, body } = req.body;
   if (!body?.trim()) return res.status(400).json({ error: 'body required' });
-  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId or clanId required' });
+
+  // Direct message
+  if (toUserId) {
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO direct_messages (from_user_id, to_user_id, body) VALUES ($1, $2, $3)
+         RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id`,
+        [req.userId, toUserId, body.trim()]
+      );
+      const msg = rows[0];
+      const { rows: senderRows } = await pool.query('SELECT username FROM users WHERE user_id = $1', [req.userId]);
+      const senderName = senderRows[0]?.username ?? 'Someone';
+      const { rows: recipRows } = await pool.query('SELECT push_token FROM users WHERE user_id = $1', [toUserId]);
+      if (recipRows[0]?.push_token) {
+        await sendPush([recipRows[0].push_token], senderName, body.trim(), { type: 'dm', fromUserId: req.userId });
+      }
+      return res.status(201).json({ ...msg, username: senderName });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: 'Server error' });
+    }
+  }
+
+  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
 
   const col = matchId ? 'match_id' : 'clan_id';
   const val = matchId ?? clanId;
