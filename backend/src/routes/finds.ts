@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 const UPLOADS_DIR = '/app/uploads';
@@ -16,8 +17,7 @@ function expectedScore(rA: number, rB: number) {
   return 1 / (1 + Math.pow(10, (rB - rA) / 400));
 }
 
-// Upload a find
-router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { imageBase64, mimeType, description } = req.body;
   if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
 
@@ -38,14 +38,12 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
     );
     return res.status(201).json(rows[0]);
   } catch (err) {
-    fs.unlinkSync(filepath);
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
+    if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+    throw err;
   }
-});
+}));
 
-// Random pair for voting (never the current user's own finds)
-router.get('/pair', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/pair', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes,
             u.username, u.user_id
@@ -57,10 +55,9 @@ router.get('/pair', requireAuth, async (req: AuthRequest, res: Response) => {
   );
   if (rows.length < 2) return res.status(404).json({ error: 'not_enough' });
   return res.json(rows);
-});
+}));
 
-// Vote — winner beats loser
-router.post('/vote', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/vote', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { winnerId, loserId } = req.body;
   if (!winnerId || !loserId) return res.status(400).json({ error: 'winnerId and loserId required' });
 
@@ -91,15 +88,13 @@ router.post('/vote', requireAuth, async (req: AuthRequest, res: Response) => {
     return res.json({ delta, winnerElo: w.elo + delta, loserElo: Math.max(100, l.elo - delta) });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
+    throw err;
   } finally {
     client.release();
   }
-});
+}));
 
-// Global leaderboard
-router.get('/leaderboard', requireAuth, async (_req: AuthRequest, res: Response) => {
+router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes, f.created_at,
             u.username, u.user_id
@@ -107,10 +102,9 @@ router.get('/leaderboard', requireAuth, async (_req: AuthRequest, res: Response)
      ORDER BY f.elo DESC LIMIT 50`
   );
   return res.json(rows);
-});
+}));
 
-// My finds + average ELO
-router.get('/mine', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/mine', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT find_id, photo_url, description, elo, total_votes, created_at
      FROM finds WHERE user_id = $1 ORDER BY elo DESC`,
@@ -120,27 +114,20 @@ router.get('/mine', requireAuth, async (req: AuthRequest, res: Response) => {
     ? Math.round(rows.reduce((s, f) => s + f.elo, 0) / rows.length)
     : null;
   return res.json({ finds: rows, avgElo });
-});
+}));
 
-// Report a find
-router.post('/:id/report', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/report', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { reason } = req.body;
   if (!reason) return res.status(400).json({ error: 'reason required' });
-  try {
-    await pool.query(
-      `INSERT INTO find_reports (find_id, reporter_id, reason)
-       VALUES ($1, $2, $3) ON CONFLICT (find_id, reporter_id) DO NOTHING`,
-      [req.params.id, req.userId, reason]
-    );
-    return res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
+  await pool.query(
+    `INSERT INTO find_reports (find_id, reporter_id, reason)
+     VALUES ($1, $2, $3) ON CONFLICT (find_id, reporter_id) DO NOTHING`,
+    [req.params.id, req.userId, reason]
+  );
+  return res.json({ success: true });
+}));
 
-// Delete a find (own only)
-router.delete('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `DELETE FROM finds WHERE find_id = $1 AND user_id = $2 RETURNING photo_url`,
     [req.params.id, req.userId]
@@ -149,6 +136,6 @@ router.delete('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
   const filepath = path.join(UPLOADS_DIR, path.basename(rows[0].photo_url));
   if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
   return res.json({ success: true });
-});
+}));
 
 export default router;

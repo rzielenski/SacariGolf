@@ -2,10 +2,11 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
+import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 
-router.get('/', requireAuth, async (_req: AuthRequest, res: Response) => {
+router.get('/', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT c.clan_id, c.name, c.clan_mode, c.elo, c.total_matches, c.total_wins, c.is_public,
             COUNT(cm.user_id)::int AS member_count, c.max_players
@@ -13,9 +14,9 @@ router.get('/', requireAuth, async (_req: AuthRequest, res: Response) => {
      WHERE c.is_public = true GROUP BY c.clan_id ORDER BY c.elo DESC LIMIT 50`
   );
   return res.json(rows);
-});
+}));
 
-router.get('/mine', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/mine', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT c.clan_id, c.name, c.clan_mode, c.elo, c.total_matches, c.total_wins,
             cm.role, c.max_players, COUNT(cm2.user_id)::int AS member_count
@@ -27,10 +28,10 @@ router.get('/mine', requireAuth, async (req: AuthRequest, res: Response) => {
     [req.userId]
   );
   return res.json(rows);
-});
+}));
 
 // GET /clans/invites — my pending clan invites (must be before /:id)
-router.get('/invites', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/invites', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT ci.invite_id, ci.clan_id, ci.created_at,
             u.username AS from_username,
@@ -48,10 +49,10 @@ router.get('/invites', requireAuth, async (req: AuthRequest, res: Response) => {
     [req.userId]
   );
   return res.json(rows);
-});
+}));
 
 // POST /clans/invites/:inviteId/accept (must be before /:id)
-router.post('/invites/:inviteId/accept', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/invites/:inviteId/accept', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `UPDATE clan_invites SET status = 'accepted'
      WHERE invite_id = $1 AND to_user_id = $2 AND status = 'pending'
@@ -76,18 +77,18 @@ router.post('/invites/:inviteId/accept', requireAuth, async (req: AuthRequest, r
     [clanId, req.userId]
   );
   return res.json({ clanId });
-});
+}));
 
 // POST /clans/invites/:inviteId/decline (must be before /:id)
-router.post('/invites/:inviteId/decline', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/invites/:inviteId/decline', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   await pool.query(
     `UPDATE clan_invites SET status = 'declined' WHERE invite_id = $1 AND to_user_id = $2`,
     [req.params.inviteId, req.userId]
   );
   return res.json({ success: true });
-});
+}));
 
-router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { name, clanMode } = req.body;
   if (!name || !clanMode) return res.status(400).json({ error: 'name and clanMode required' });
   const maxPlayers = clanMode === 'duo' ? 2 : 4;
@@ -107,14 +108,13 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
     return res.status(201).json(clan);
   } catch (err) {
     await client.query('ROLLBACK');
-    return res.status(500).json({ error: 'Server error' });
+    throw err;
   } finally {
     client.release();
   }
-});
+}));
 
-// Get clan details with members
-router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: clanRows } = await pool.query(
     `SELECT c.*, COUNT(cm.user_id)::int AS member_count
      FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
@@ -132,10 +132,9 @@ router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
   );
 
   return res.json({ ...clanRows[0], members });
-});
+}));
 
-// Update clan (leader only) — name and/or is_public
-router.patch('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { name, isPublic } = req.body;
   const { rows } = await pool.query(
     `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
@@ -155,10 +154,9 @@ router.patch('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
     vals
   );
   return res.json(updated[0]);
-});
+}));
 
-// Kick a member (leader only) or leave (self)
-router.delete('/:id/members/:userId', requireAuth, async (req: AuthRequest, res: Response) => {
+router.delete('/:id/members/:userId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const isSelf = req.params.userId === req.userId;
   if (!isSelf) {
     const { rows } = await pool.query(
@@ -168,14 +166,12 @@ router.delete('/:id/members/:userId', requireAuth, async (req: AuthRequest, res:
     if (!rows.length || rows[0].role !== 'leader') {
       return res.status(403).json({ error: 'Only the clan leader can kick members' });
     }
-    // Cannot kick leader
     const { rows: target } = await pool.query(
       `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
       [req.params.id, req.params.userId]
     );
     if (target[0]?.role === 'leader') return res.status(400).json({ error: 'Cannot kick the leader' });
   } else {
-    // Leaving — leader must transfer first
     const { rows } = await pool.query(
       `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
       [req.params.id, req.userId]
@@ -193,10 +189,9 @@ router.delete('/:id/members/:userId', requireAuth, async (req: AuthRequest, res:
     [req.params.id, req.params.userId]
   );
   return res.json({ success: true });
-});
+}));
 
-// Transfer leadership
-router.post('/:id/transfer', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { toUserId } = req.body;
   if (!toUserId) return res.status(400).json({ error: 'toUserId required' });
   const { rows } = await pool.query(
@@ -221,13 +216,13 @@ router.post('/:id/transfer', requireAuth, async (req: AuthRequest, res: Response
     return res.json({ success: true });
   } catch (err) {
     await client.query('ROLLBACK');
-    return res.status(500).json({ error: 'Server error' });
+    throw err;
   } finally {
     client.release();
   }
-});
+}));
 
-router.post('/:id/join', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: clanRows } = await pool.query(
     `SELECT c.clan_id, c.max_players, COUNT(cm.user_id)::int AS member_count
      FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
@@ -235,23 +230,17 @@ router.post('/:id/join', requireAuth, async (req: AuthRequest, res: Response) =>
     [req.params.id]
   );
   if (!clanRows.length) return res.status(404).json({ error: 'Clan not found' });
-  const clan = clanRows[0];
-  if (clan.member_count >= clan.max_players) {
+  if (clanRows[0].member_count >= clanRows[0].max_players) {
     return res.status(409).json({ error: 'Clan is full' });
   }
-  try {
-    await pool.query(
-      `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [req.params.id, req.userId]
-    );
-    return res.json({ success: true });
-  } catch {
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
+  await pool.query(
+    `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [req.params.id, req.userId]
+  );
+  return res.json({ success: true });
+}));
 
-// POST /clans/:id/invite — leader invites a friend
-router.post('/:id/invite', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { toUserId } = req.body;
   if (!toUserId) return res.status(400).json({ error: 'toUserId required' });
 
@@ -274,32 +263,27 @@ router.post('/:id/invite', requireAuth, async (req: AuthRequest, res: Response) 
     return res.status(409).json({ error: 'Clan is full' });
   }
 
-  try {
-    await pool.query(
-      `INSERT INTO clan_invites (clan_id, from_user_id, to_user_id)
-       VALUES ($1, $2, $3) ON CONFLICT (clan_id, to_user_id) DO NOTHING`,
-      [req.params.id, req.userId, toUserId]
-    );
+  await pool.query(
+    `INSERT INTO clan_invites (clan_id, from_user_id, to_user_id)
+     VALUES ($1, $2, $3) ON CONFLICT (clan_id, to_user_id) DO NOTHING`,
+    [req.params.id, req.userId, toUserId]
+  );
 
-    const { rows } = await pool.query(
-      `SELECT u.push_token, u2.username AS from_name, c.name AS clan_name
-       FROM users u, users u2, clans c
-       WHERE u.user_id = $1 AND u2.user_id = $2 AND c.clan_id = $3`,
-      [toUserId, req.userId, req.params.id]
+  const { rows } = await pool.query(
+    `SELECT u.push_token, u2.username AS from_name, c.name AS clan_name
+     FROM users u, users u2, clans c
+     WHERE u.user_id = $1 AND u2.user_id = $2 AND c.clan_id = $3`,
+    [toUserId, req.userId, req.params.id]
+  );
+  if (rows[0]?.push_token) {
+    await sendPush(
+      [rows[0].push_token],
+      'Clan Invite',
+      `${rows[0].from_name} invited you to join ${rows[0].clan_name}!`,
+      { type: 'clanInvite', clanId: req.params.id }
     );
-    if (rows[0]?.push_token) {
-      await sendPush(
-        [rows[0].push_token],
-        'Clan Invite',
-        `${rows[0].from_name} invited you to join ${rows[0].clan_name}!`,
-        { type: 'clanInvite', clanId: req.params.id }
-      );
-    }
-    return res.status(201).json({ success: true });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
   }
-});
+  return res.status(201).json({ success: true });
+}));
 
 export default router;

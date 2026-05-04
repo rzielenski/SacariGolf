@@ -1,10 +1,11 @@
 import { Router, Request, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth } from '../middleware/auth';
+import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 
-router.get('/nearby', requireAuth, async (req: Request, res: Response) => {
+router.get('/nearby', requireAuth, wrap(async (req: Request, res: Response) => {
   const lat = parseFloat(req.query.lat as string);
   const lng = parseFloat(req.query.lng as string);
   const limit = Math.min(Number(req.query.limit) || 20, 50);
@@ -18,9 +19,9 @@ router.get('/nearby', requireAuth, async (req: Request, res: Response) => {
     [lat, lng, limit]
   );
   return res.json(rows);
-});
+}));
 
-router.get('/search', requireAuth, async (req: Request, res: Response) => {
+router.get('/search', requireAuth, wrap(async (req: Request, res: Response) => {
   const q = (req.query.q as string) || '';
   const limit = Math.min(Number(req.query.limit) || 20, 50);
   if (!q.trim()) return res.json([]);
@@ -37,9 +38,9 @@ router.get('/search', requireAuth, async (req: Request, res: Response) => {
     [`%${q}%`, `%${q}%`, limit]
   );
   return res.json(rows);
-});
+}));
 
-router.get('/:id', requireAuth, async (req: Request, res: Response) => {
+router.get('/:id', requireAuth, wrap(async (req: Request, res: Response) => {
   const { rows: courseRows } = await pool.query(
     `SELECT course_id, course_name, club_name, address, city, state, country, latitude, longitude
      FROM courses WHERE course_id = $1`,
@@ -71,6 +72,6 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
   }));
 
   return res.json({ ...courseRows[0], teeboxes });
-});
+}));
 
 export default router;

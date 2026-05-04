@@ -1,10 +1,12 @@
 import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { sendPush } from '../utils/notify';
+import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 
-router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT user_id, username, email, elo, total_matches, total_wins, avatar_url, created_at,
             handicap_index
@@ -13,9 +15,9 @@ router.get('/me', requireAuth, async (req: AuthRequest, res: Response) => {
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
   return res.json(rows[0]);
-});
+}));
 
-router.patch('/me', requireAuth, async (req: AuthRequest, res: Response) => {
+router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { pushToken, handicapIndex } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
@@ -34,9 +36,9 @@ router.patch('/me', requireAuth, async (req: AuthRequest, res: Response) => {
     values
   );
   return res.json({ success: true });
-});
+}));
 
-router.get('/search', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { q } = req.query;
   if (!q) return res.json([]);
   const { rows } = await pool.query(
@@ -45,20 +47,10 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response) => {
     [`%${q}%`, req.userId]
   );
   return res.json(rows);
-});
+}));
 
-router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { rows } = await pool.query(
-    `SELECT user_id, username, elo, total_matches, total_wins, avatar_url, created_at
-     FROM users WHERE user_id = $1`,
-    [req.params.id]
-  );
-  if (!rows.length) return res.status(404).json({ error: 'User not found' });
-  return res.json(rows[0]);
-});
-
-// Friends
-router.get('/me/friends', requireAuth, async (req: AuthRequest, res: Response) => {
+// Friends — must be before /:id
+router.get('/me/friends', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.status
      FROM friends f
@@ -67,9 +59,9 @@ router.get('/me/friends', requireAuth, async (req: AuthRequest, res: Response) =
     [req.userId]
   );
   return res.json(rows);
-});
+}));
 
-router.get('/me/friend-requests', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/me/friend-requests', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.created_at
      FROM friends f JOIN users u ON u.user_id = f.user_id
@@ -77,53 +69,66 @@ router.get('/me/friend-requests', requireAuth, async (req: AuthRequest, res: Res
     [req.userId]
   );
   return res.json(rows);
-});
+}));
 
-router.post('/me/friends/request', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/me/friends/request', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { friendId } = req.body;
   if (!friendId) return res.status(400).json({ error: 'friendId required' });
-  try {
-    await pool.query(
-      `INSERT INTO friends (user_id, friend_id, status) VALUES ($1, $2, 'pending')
-       ON CONFLICT DO NOTHING`,
-      [req.userId, friendId]
-    );
-    return res.json({ success: true });
-  } catch (err) {
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
 
-router.post('/me/friends/accept', requireAuth, async (req: AuthRequest, res: Response) => {
+  await pool.query(
+    `INSERT INTO friends (user_id, friend_id, status) VALUES ($1, $2, 'pending')
+     ON CONFLICT DO NOTHING`,
+    [req.userId, friendId]
+  );
+
+  const { rows } = await pool.query(
+    `SELECT u.push_token, u2.username AS from_name
+     FROM users u, users u2
+     WHERE u.user_id = $1 AND u2.user_id = $2`,
+    [friendId, req.userId]
+  );
+  if (rows[0]?.push_token) {
+    await sendPush(
+      [rows[0].push_token],
+      'Friend Request',
+      `${rows[0].from_name} sent you a friend request!`,
+      { type: 'friendRequest' }
+    );
+  }
+
+  return res.json({ success: true });
+}));
+
+router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { friendId } = req.body;
   await pool.query(
-    `UPDATE friends SET status = 'accepted'
-     WHERE user_id = $1 AND friend_id = $2`,
+    `UPDATE friends SET status = 'accepted' WHERE user_id = $1 AND friend_id = $2`,
     [friendId, req.userId]
   );
   return res.json({ success: true });
-});
+}));
 
-// Global ELO leaderboard
-router.get('/leaderboard', requireAuth, async (_req: AuthRequest, res: Response) => {
+router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, total_matches, total_wins, avatar_url
-     FROM users
-     ORDER BY elo DESC
-     LIMIT 100`
+     FROM users ORDER BY elo DESC LIMIT 100`
   );
   return res.json(rows);
-});
+}));
 
-// Account deletion — removes user and all associated data via CASCADE
-router.delete('/me', requireAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    await pool.query(`DELETE FROM users WHERE user_id = $1`, [req.userId]);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
+router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT user_id, username, elo, total_matches, total_wins, avatar_url, created_at
+     FROM users WHERE user_id = $1`,
+    [req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'User not found' });
+  return res.json(rows[0]);
+}));
+
+router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  await pool.query(`DELETE FROM users WHERE user_id = $1`, [req.userId]);
+  return res.json({ success: true });
+}));
 
 export default router;
