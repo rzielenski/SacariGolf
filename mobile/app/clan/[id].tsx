@@ -30,6 +30,11 @@ export default function ClanDetailScreen() {
   const [editPublic, setEditPublic] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // Invite state
+  const [inviteVisible, setInviteVisible] = useState(false);
+  const [friends, setFriends] = useState<any[]>([]);
+  const [loadingFriends, setLoadingFriends] = useState(false);
+
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
@@ -124,6 +129,23 @@ export default function ClanDetailScreen() {
         },
       ]
     );
+  };
+
+  const openInvite = async () => {
+    setInviteVisible(true);
+    setLoadingFriends(true);
+    try {
+      const memberIds = new Set((clan?.members ?? []).map((m) => m.user_id));
+      const all = await api.users.friends();
+      setFriends((all as any[]).filter((f: any) => !memberIds.has(f.user_id)));
+    } catch { setFriends([]); } finally { setLoadingFriends(false); }
+  };
+
+  const inviteFriend = async (friendId: string, friendName: string) => {
+    try {
+      await api.clans.invite(id, friendId);
+      Alert.alert('Invite sent!', `${friendName} has been invited to the clan.`);
+    } catch (e: any) { Alert.alert('Error', e.message); }
   };
 
   const joinClan = async () => {
@@ -233,6 +255,11 @@ export default function ClanDetailScreen() {
               <Text style={styles.chatBtnText}>Clan Chat</Text>
             </TouchableOpacity>
           )}
+          {isLeader && clan.member_count < clan.max_players && (
+            <TouchableOpacity style={styles.inviteBtn} onPress={openInvite}>
+              <Text style={styles.inviteBtnText}>+ Invite Friend</Text>
+            </TouchableOpacity>
+          )}
           {!isMember && clan.member_count < clan.max_players && (
             <TouchableOpacity style={styles.joinBtn} onPress={joinClan}>
               <Text style={styles.joinBtnText}>Join Clan</Text>
@@ -250,6 +277,49 @@ export default function ClanDetailScreen() {
           )}
         </View>
       </ScrollView>
+
+      {/* Invite Friend Modal */}
+      <Modal
+        visible={inviteVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setInviteVisible(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Invite a Friend</Text>
+            <TouchableOpacity onPress={() => setInviteVisible(false)}>
+              <Text style={styles.modalCancel}>Done</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.modalBody}>
+            {loadingFriends
+              ? <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
+              : friends.length === 0
+                ? <Text style={{ color: C.textMuted, textAlign: 'center', marginTop: 40 }}>
+                    No friends available to invite
+                  </Text>
+                : friends.map((f) => (
+                  <View key={f.user_id} style={styles.friendInviteRow}>
+                    <View style={styles.memberAvatar}>
+                      <Text style={styles.memberAvatarText}>{f.username[0].toUpperCase()}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.memberName}>{f.username}</Text>
+                      <Text style={styles.memberMeta}>{f.elo} ELO</Text>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.inviteBtn}
+                      onPress={() => inviteFriend(f.user_id, f.username)}
+                    >
+                      <Text style={styles.inviteBtnText}>Invite</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+            }
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* Edit Modal */}
       <Modal
@@ -485,4 +555,12 @@ const styles = StyleSheet.create({
   },
   saveBtn: { backgroundColor: C.gold, borderRadius: 6, padding: 15, alignItems: 'center', marginTop: 24 },
   saveBtnText: { color: '#000', fontWeight: '900', fontSize: 15 },
+
+  inviteBtn: { backgroundColor: C.gold + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: C.gold },
+  inviteBtnText: { color: C.gold, fontWeight: '700', fontSize: 13 },
+  friendInviteRow: {
+    backgroundColor: C.card, borderRadius: 6, padding: 14,
+    flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8,
+    borderWidth: 1, borderColor: C.border,
+  },
 });

@@ -39,6 +39,7 @@ function FriendsTab() {
   const [friends, setFriends] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
   const [invites, setInvites] = useState<any[]>([]);
+  const [clanInvites, setClanInvites] = useState<any[]>([]);
   const [searchQ, setSearchQ] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,14 +47,16 @@ function FriendsTab() {
 
   const load = useCallback(async () => {
     try {
-      const [f, r, inv] = await Promise.all([
+      const [f, r, inv, ci] = await Promise.all([
         api.users.friends(),
         api.users.friendRequests(),
         api.invites.list(),
+        api.clans.clanInvites(),
       ]);
       setFriends(f);
       setRequests(r);
       setInvites(inv);
+      setClanInvites(ci);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
 
@@ -92,6 +95,24 @@ function FriendsTab() {
     try {
       await api.invites.decline(inviteId);
       setInvites((prev) => prev.filter((i) => i.invite_id !== inviteId));
+    } catch { /* silent */ }
+  };
+
+  const acceptClanInvite = async (invite: any) => {
+    try {
+      const result = await api.clans.acceptClanInvite(invite.invite_id);
+      setClanInvites((prev) => prev.filter((i) => i.invite_id !== invite.invite_id));
+      Alert.alert('Joined!', `You joined ${invite.clan_name}.`, [
+        { text: 'View Clan', onPress: () => router.push(`/clan/${result.clanId}` as any) },
+        { text: 'OK' },
+      ]);
+    } catch (e: any) { Alert.alert('Error', e.message); }
+  };
+
+  const declineClanInvite = async (inviteId: string) => {
+    try {
+      await api.clans.declineClanInvite(inviteId);
+      setClanInvites((prev) => prev.filter((i) => i.invite_id !== inviteId));
     } catch { /* silent */ }
   };
 
@@ -164,6 +185,36 @@ function FriendsTab() {
               <TouchableOpacity
                 style={[styles.addBtn, { backgroundColor: C.card, borderColor: C.border }]}
                 onPress={() => declineInvite(inv.invite_id)}
+              >
+                <Text style={[styles.addBtnText, { color: C.textMuted }]}>Decline</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </>
+      )}
+
+      {/* Clan Invites */}
+      {clanInvites.length > 0 && (
+        <>
+          <Text style={styles.sectionTitle}>Clan Invites</Text>
+          {clanInvites.map((inv) => (
+            <View key={inv.invite_id} style={styles.inviteRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.userName}>{inv.clan_name}</Text>
+                <Text style={styles.userElo}>
+                  {inv.clan_mode.toUpperCase()} · {inv.member_count}/{inv.max_players} members · {inv.clan_elo} ELO
+                </Text>
+                <Text style={[styles.userElo, { marginTop: 2 }]}>Invited by {inv.from_username}</Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.addBtn, { backgroundColor: C.green + '22', borderColor: C.green, marginRight: 6 }]}
+                onPress={() => acceptClanInvite(inv)}
+              >
+                <Text style={[styles.addBtnText, { color: C.green }]}>Join</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.addBtn, { backgroundColor: C.card, borderColor: C.border }]}
+                onPress={() => declineClanInvite(inv.invite_id)}
               >
                 <Text style={[styles.addBtnText, { color: C.textMuted }]}>Decline</Text>
               </TouchableOpacity>

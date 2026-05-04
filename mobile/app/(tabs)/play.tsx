@@ -54,8 +54,8 @@ export default function PlayScreen() {
     api.clans.mine()
       .then((all) => {
         const filtered = matchType === 'duo'
-          ? all.filter((c: any) => c.clan_mode === 'duo')
-          : all.filter((c: any) => c.clan_mode === 'squad' && c.role === 'leader');
+          ? all.filter((c: any) => c.clan_mode === 'duo' && c.member_count === 2)
+          : all.filter((c: any) => c.clan_mode === 'squad' && c.role === 'leader' && c.member_count >= 3);
         setMyClans(filtered);
       })
       .catch(() => { })
@@ -215,11 +215,13 @@ export default function PlayScreen() {
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyText}>
                   {matchType === 'duo'
-                    ? 'You have no duo clans'
-                    : 'You are not a leader of any squad clan'}
+                    ? 'No eligible duo clans'
+                    : 'No eligible squad clans'}
                 </Text>
                 <Text style={styles.emptySub}>
-                  Go to Social → Clans to create or join one first
+                  {matchType === 'duo'
+                    ? 'Your duo clan must have both members before starting a match'
+                    : 'Your squad clan needs at least 3 members and you must be the leader'}
                 </Text>
               </View>
             )
@@ -231,7 +233,7 @@ export default function PlayScreen() {
               >
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.clanName, selectedClanId === c.clan_id && { color: C.gold }]}>{c.name}</Text>
-                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.elo} ELO</Text>
+                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.member_count}/{c.max_players} members · {c.elo} ELO</Text>
                 </View>
                 {selectedClanId === c.clan_id && <Text style={{ color: C.gold, fontSize: 18 }}>✓</Text>}
               </TouchableOpacity>
