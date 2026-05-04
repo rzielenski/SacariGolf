@@ -6,6 +6,34 @@ import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 
+router.get('/conversations', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT ON (other_id)
+       other_id,
+       u.username AS other_username,
+       u.elo AS other_elo,
+       last_msg.body AS last_message,
+       last_msg.created_at AS last_at
+     FROM (
+       SELECT
+         CASE WHEN from_user_id = $1 THEN to_user_id ELSE from_user_id END AS other_id,
+         body,
+         created_at,
+         ROW_NUMBER() OVER (
+           PARTITION BY CASE WHEN from_user_id = $1 THEN to_user_id ELSE from_user_id END
+           ORDER BY created_at DESC
+         ) AS rn
+       FROM direct_messages
+       WHERE from_user_id = $1 OR to_user_id = $1
+     ) last_msg
+     JOIN users u ON u.user_id = last_msg.other_id
+     WHERE last_msg.rn = 1
+     ORDER BY other_id, last_msg.created_at DESC`,
+    [req.userId]
+  );
+  return res.json(rows);
+}));
+
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { matchId, clanId, toUserId } = req.query;
 

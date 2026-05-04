@@ -10,7 +10,7 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Course, Teebox } from '../../types';
 
-type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
+type MatchType = 'solo' | 'duo' | 'squad' | 'practice' | 'scramble';
 type Step = 'type' | 'clan' | 'join' | 'course' | 'teebox';
 
 export default function PlayScreen() {
@@ -127,6 +127,9 @@ export default function PlayScreen() {
     }
   };
 
+  // Button label for next step
+  const nextStepLabel = matchType === 'duo' || matchType === 'squad' ? 'Select Clan →' : 'Select Course →';
+
   // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
     return (
@@ -134,7 +137,7 @@ export default function PlayScreen() {
         <Text style={styles.title}>Start a Round</Text>
         <Text style={styles.subtitle}>Choose your match type</Text>
 
-        {(['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
+        {(['solo', 'duo', 'squad', 'practice', 'scramble'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -142,17 +145,18 @@ export default function PlayScreen() {
           >
             <View style={styles.typeMark}>
               <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : 'PRC'}
+                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'scramble' ? 'SCR' : 'PRC'}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : 'Practice'}
+                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'scramble' ? 'Scramble' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
                 {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
                   : t === 'duo' ? 'Ranked 2v2 — play with your duo partner'
                   : t === 'squad' ? 'Ranked 4v4 — clan leaders only'
+                  : t === 'scramble' ? 'Best ball team format — all play from the best shot'
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>
@@ -174,9 +178,7 @@ export default function PlayScreen() {
         </View>
 
         <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
-          <Text style={styles.nextBtnText}>
-            {matchType === 'duo' || matchType === 'squad' ? 'Select Clan →' : 'Select Course →'}
-          </Text>
+          <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
         </TouchableOpacity>
 
         <View style={styles.divider}>
@@ -282,7 +284,7 @@ export default function PlayScreen() {
   if (step === 'course') {
     return (
       <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'clan' : 'type')}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'clan' : 'type')} >
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Find a Course</Text>

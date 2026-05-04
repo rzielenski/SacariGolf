@@ -458,6 +458,23 @@ export default function ScoringScreen() {
         )}
       </MapView>
 
+      {/* ── Leave button (top-left, below status bar) ── */}
+      <TouchableOpacity
+        style={styles.leaveBtn}
+        onPress={() => {
+          Alert.alert(
+            'Leave Round?',
+            'Your scores for this round will be lost.',
+            [
+              { text: 'Stay', style: 'cancel' },
+              { text: 'Leave', style: 'destructive', onPress: () => router.back() },
+            ]
+          );
+        }}
+      >
+        <Text style={styles.leaveBtnText}>← Leave</Text>
+      </TouchableOpacity>
+
       {/* ── Top bar (floats over map) ── */}
       <View style={styles.topBar}>
         <TouchableOpacity onPress={() => router.back()} style={styles.topBarBack}>
@@ -731,6 +748,15 @@ const styles = StyleSheet.create({
   teeboxMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
   rating: { color: C.gold, fontWeight: '700', fontSize: 12 },
   slope: { color: C.textMuted, fontSize: 12 },
+
+  // Leave button
+  leaveBtn: {
+    position: 'absolute', top: 56, left: 12, zIndex: 20,
+    backgroundColor: C.bg + 'ee', borderRadius: 6,
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderWidth: 1, borderColor: C.border,
+  },
+  leaveBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 12 },
 
   // Top bar (floating over map)
   topBar: {

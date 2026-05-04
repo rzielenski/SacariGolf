@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
 import { useAuth } from '../../lib/auth';
+import { api } from '../../lib/api';
 import { C } from '../../lib/colors';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
@@ -44,6 +45,28 @@ export default function ProfileScreen() {
     ]);
   };
 
+  const changeUsername = () => {
+    Alert.prompt(
+      'Change Username',
+      'Enter a new username (3-20 chars, letters/numbers/underscores)',
+      async (newUsername) => {
+        if (!newUsername) return;
+        if (!/^[a-zA-Z0-9_]{3,20}$/.test(newUsername.trim())) {
+          Alert.alert('Invalid', 'Use 3–20 characters: letters, numbers, or underscores.');
+          return;
+        }
+        try {
+          await api.users.update({ username: newUsername.trim() });
+          Alert.alert('Done!', 'Username updated. Please log out and back in to see the change.');
+        } catch (e: any) {
+          Alert.alert('Error', e.message);
+        }
+      },
+      'plain-text',
+      user.username
+    );
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Avatar */}
@@ -51,7 +74,12 @@ export default function ProfileScreen() {
         <View style={[styles.avatar, { borderColor: rank.color }]}>
           <Text style={styles.avatarText}>{user.username[0].toUpperCase()}</Text>
         </View>
-        <Text style={styles.username}>{user.username}</Text>
+        <View style={styles.usernameRow}>
+          <Text style={styles.username}>{user.username}</Text>
+          <TouchableOpacity onPress={changeUsername} style={styles.editUsernameBtn}>
+            <Text style={styles.editUsernameBtnText}>Edit</Text>
+          </TouchableOpacity>
+        </View>
         <Text style={styles.email}>{user.email}</Text>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
@@ -110,7 +138,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center', borderWidth: 3, marginBottom: 12,
   },
   avatarText: { fontSize: 40, color: C.gold, fontWeight: '900' },
+  usernameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
   username: { color: C.text, fontSize: 24, fontWeight: '900' },
+  editUsernameBtn: { borderRadius: 4, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: C.gold + '88' },
+  editUsernameBtnText: { color: C.gold, fontSize: 11, fontWeight: '700' },
   email: { color: C.textMuted, fontSize: 13, marginTop: 2 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5, marginTop: 10 },
   rankLabel: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },

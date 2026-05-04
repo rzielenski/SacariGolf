@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image, ScrollView,
-  Alert, ActivityIndicator, Animated, Dimensions, RefreshControl,
+  Alert, ActivityIndicator, Animated, Dimensions, RefreshControl, Modal,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
@@ -15,10 +15,25 @@ type Tab = 'vote' | 'leaderboard' | 'mine';
 
 export default function FindRankerScreen() {
   const [tab, setTab] = useState<Tab>('vote');
+  const [selectedFind, setSelectedFind] = useState<any>(null);
   const { user } = useAuth();
 
   return (
     <View style={styles.container}>
+      <Modal visible={!!selectedFind} transparent animationType="fade" onRequestClose={() => setSelectedFind(null)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' }}>
+          <TouchableOpacity style={{ position: 'absolute', top: 56, right: 20, zIndex: 10 }} onPress={() => setSelectedFind(null)}>
+            <Text style={{ color: '#fff', fontSize: 28, fontWeight: '300' }}>✕</Text>
+          </TouchableOpacity>
+          {selectedFind && (
+            <>
+              <Image source={{ uri: `${API_BASE}${selectedFind.photo_url}` }} style={{ width: '100%', height: '70%' }} resizeMode="contain" />
+              {selectedFind.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }}>{selectedFind.description}</Text> : null}
+              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }}>by {selectedFind.username}  ·  {selectedFind.elo} ELO</Text>
+            </>
+          )}
+        </View>
+      </Modal>
       <View style={styles.header}>
         <View style={{ width: 60 }} />
         <View style={styles.titleBox}>
@@ -43,8 +58,8 @@ export default function FindRankerScreen() {
       </View>
 
       {tab === 'vote' && <VoteTab />}
-      {tab === 'leaderboard' && <LeaderboardTab />}
-      {tab === 'mine' && <MineTab userId={user?.user_id ?? ''} />}
+      {tab === 'leaderboard' && <LeaderboardTab onSelectFind={setSelectedFind} />}
+      {tab === 'mine' && <MineTab userId={user?.user_id ?? ''} onSelectFind={setSelectedFind} />}
     </View>
   );
 }
@@ -107,13 +122,18 @@ function VoteTab() {
   const [loading, setLoading] = useState(true);
   const [voting, setVoting] = useState(false);
   const [result, setResult] = useState<{ delta: number; winnerId: string } | null>(null);
+  const seenIdsRef = useRef<Set<string>>(new Set());
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
-  const loadPair = useCallback(async () => {
+  const loadPair = useCallback(async (attempt = 0) => {
     setLoading(true);
     setResult(null);
     try {
       const p = await api.finds.pair();
+      // If we've already seen both, try again (up to 3 attempts)
+      if (attempt < 3 && p.length === 2 && seenIdsRef.current.has(p[0].find_id) && seenIdsRef.current.has(p[1].find_id)) {
+        return loadPair(attempt + 1);
+      }
       setPair(p);
     } catch (e: any) {
       if (e.message === 'not_enough') {
@@ -134,6 +154,7 @@ function VoteTab() {
     try {
       const r = await api.finds.vote(winnerId, loserId);
       setResult({ delta: r.delta, winnerId });
+      seenIdsRef.current = new Set([...seenIdsRef.current, winnerId, loserId]);
       // Pause so user sees result, then fade to next pair
       setTimeout(() => {
         Animated.timing(fadeAnim, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => {
@@ -210,7 +231,7 @@ function VoteTab() {
 }
 
 // ── Leaderboard tab ─────────────────────────────────────────────────────────
-function LeaderboardTab() {
+function LeaderboardTab({ onSelectFind }: { onSelectFind: (f: any) => void }) {
   const [finds, setFinds] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -244,14 +265,14 @@ function LeaderboardTab() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
       {finds.map((f, i) => (
-        <FindRow key={f.find_id} find={f} rank={i + 1} />
+        <FindRow key={f.find_id} find={f} rank={i + 1} onPress={() => onSelectFind(f)} />
       ))}
     </ScrollView>
   );
 }
 
 // ── My finds tab ─────────────────────────────────────────────────────────────
-function MineTab({ userId }: { userId: string }) {
+function MineTab({ userId, onSelectFind }: { userId: string; onSelectFind: (f: any) => void }) {
   const [data, setData] = useState<{ finds: any[]; avgElo: number | null }>({ finds: [], avgElo: null });
   const [loading, setLoading] = useState(true);
 
@@ -295,7 +316,7 @@ function MineTab({ userId }: { userId: string }) {
         </View>
       ) : (
         data.finds.map((f, i) => (
-          <FindRow key={f.find_id} find={f} rank={i + 1} onDelete={() => deletFind(f.find_id)} />
+          <FindRow key={f.find_id} find={f} rank={i + 1} onPress={() => onSelectFind(f)} onDelete={() => deletFind(f.find_id)} />
         ))
       )}
     </ScrollView>
@@ -303,7 +324,7 @@ function MineTab({ userId }: { userId: string }) {
 }
 
 // ── Shared find row ──────────────────────────────────────────────────────────
-function FindRow({ find, rank, onDelete }: { find: any; rank: number; onDelete?: () => void }) {
+function FindRow({ find, rank, onDelete, onPress }: { find: any; rank: number; onDelete?: () => void; onPress?: () => void }) {
   const medalColor = rank === 1 ? C.gold : rank === 2 ? '#b0bec5' : rank === 3 ? '#a1673a' : C.textDim;
 
   const reportFind = () => {
@@ -325,7 +346,7 @@ function FindRow({ find, rank, onDelete }: { find: any; rank: number; onDelete?:
   };
 
   return (
-    <View style={styles.findRow}>
+    <TouchableOpacity onPress={onPress} activeOpacity={onPress ? 0.75 : 1} style={styles.findRow}>
       <Text style={[styles.findRank, { color: medalColor }]}>#{rank}</Text>
       <Image
         source={{ uri: `${API_BASE}${find.photo_url}` }}
@@ -352,7 +373,7 @@ function FindRow({ find, rank, onDelete }: { find: any; rank: number; onDelete?:
           <Text style={styles.reportBtnText}>···</Text>
         </TouchableOpacity>
       )}
-    </View>
+    </TouchableOpacity>
   );
 }
 

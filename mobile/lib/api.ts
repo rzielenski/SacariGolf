@@ -44,7 +44,7 @@ export const api = {
 
   users: {
     me: () => request<any>('GET', '/users/me'),
-    update: (body: { pushToken?: string; handicapIndex?: number | null }) => request<any>('PATCH', '/users/me', body),
+    update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string }) => request<any>('PATCH', '/users/me', body),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
@@ -62,6 +62,7 @@ export const api = {
     },
     send: (body: { matchId?: string; clanId?: string; toUserId?: string; body: string }) =>
       request<any>('POST', '/messages', body),
+    conversations: () => request<any[]>('GET', '/messages/conversations'),
   },
 
   invites: {

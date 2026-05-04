@@ -9,7 +9,7 @@ import { MatchInvite } from '../../types';
 import { C } from '../../lib/colors';
 import { Clan } from '../../types';
 
-type Tab = 'friends' | 'clans';
+type Tab = 'friends' | 'clans' | 'chats';
 
 export default function SocialScreen() {
   const [tab, setTab] = useState<Tab>('friends');
@@ -18,19 +18,21 @@ export default function SocialScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Social</Text>
       <View style={styles.tabRow}>
-        {(['friends', 'clans'] as Tab[]).map((t) => (
+        {(['friends', 'clans', 'chats'] as Tab[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.tabBtn, tab === t && styles.tabBtnActive]}
             onPress={() => setTab(t)}
           >
             <Text style={[styles.tabLabel, tab === t && styles.tabLabelActive]}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
+              {t === 'friends' ? 'Friends' : t === 'clans' ? 'Clans' : 'Chats'}
             </Text>
           </TouchableOpacity>
         ))}
       </View>
-      {tab === 'friends' ? <FriendsTab /> : <ClansTab />}
+      {tab === 'friends' && <FriendsTab />}
+      {tab === 'clans' && <ClansTab />}
+      {tab === 'chats' && <ChatsTab />}
     </View>
   );
 }
@@ -401,6 +403,90 @@ function ClanCard({ clan, joined, onJoin }: { clan: Clan; joined?: boolean; onJo
       )}
       {joined && <Text style={styles.joinedBadge}>✓</Text>}
     </TouchableOpacity>
+  );
+}
+
+function ChatsTab() {
+  const [dms, setDms] = useState<any[]>([]);
+  const [matches, setMatches] = useState<any[]>([]);
+  const [clans, setClans] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const [convs, allMatches, myClans] = await Promise.all([
+        api.messages.conversations(),
+        api.matches.list(),
+        api.clans.mine(),
+      ]);
+      setDms(convs);
+      setMatches(allMatches.filter((m: any) => !m.completed));
+      setClans(myClans);
+    } catch { /* silent */ } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />;
+
+  return (
+    <ScrollView style={{ flex: 1 }}>
+      <Text style={styles.sectionTitle}>Direct Messages</Text>
+      {dms.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No conversations yet</Text>}
+      {dms.map((conv) => (
+        <TouchableOpacity
+          key={conv.other_id}
+          style={styles.userRow}
+          onPress={() => router.push(`/chat/dm/${conv.other_id}?name=${encodeURIComponent(conv.other_username)}` as any)}
+        >
+          <View style={styles.userAvatar}>
+            <Text style={styles.avatarText}>{conv.other_username[0].toUpperCase()}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.userName}>{conv.other_username}</Text>
+            {conv.last_message ? <Text style={styles.userElo} numberOfLines={1}>{conv.last_message}</Text> : null}
+          </View>
+        </TouchableOpacity>
+      ))}
+
+      <Text style={styles.sectionTitle}>Match Chats</Text>
+      {matches.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No active matches</Text>}
+      {matches.map((m) => (
+        <TouchableOpacity
+          key={m.match_id}
+          style={styles.userRow}
+          onPress={() => router.push(`/chat/match/${m.match_id}` as any)}
+        >
+          <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
+            <Text style={[styles.avatarText, { fontSize: 12 }]}>
+              {m.match_type === 'solo' ? '1v1' : m.match_type === 'duo' ? '2v2' : m.match_type === 'squad' ? '4v4' : 'PRC'}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.userName}>{m.name || m.match_type}</Text>
+            <Text style={styles.userElo}>Match ID: {m.match_id.slice(0, 8)}…</Text>
+          </View>
+        </TouchableOpacity>
+      ))}
+
+      <Text style={styles.sectionTitle}>Clan Chats</Text>
+      {clans.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No clans joined</Text>}
+      {clans.map((c) => (
+        <TouchableOpacity
+          key={c.clan_id}
+          style={styles.userRow}
+          onPress={() => router.push(`/chat/clan/${c.clan_id}` as any)}
+        >
+          <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
+            <Text style={styles.avatarText}>{c.name[0].toUpperCase()}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.userName}>{c.name}</Text>
+            <Text style={styles.userElo}>{c.clan_mode.toUpperCase()} · {c.member_count} members</Text>
+          </View>
+        </TouchableOpacity>
+      ))}
+    </ScrollView>
   );
 }
 

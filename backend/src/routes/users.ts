@@ -18,7 +18,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex } = req.body;
+  const { pushToken, handicapIndex, username } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -27,6 +27,17 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     const hi = parseFloat(handicapIndex);
     if (isNaN(hi) || hi < 0 || hi > 54) return res.status(400).json({ error: 'handicapIndex must be 0–54' });
     values.push(hi); updates.push(`handicap_index = $${values.length}`);
+  }
+  if (username !== undefined) {
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+      return res.status(400).json({ error: 'Username must be 3–20 characters: letters, numbers, or underscores' });
+    }
+    const { rows: existing } = await pool.query(
+      `SELECT 1 FROM users WHERE username = $1 AND user_id != $2`,
+      [username, req.userId]
+    );
+    if (existing.length) return res.status(409).json({ error: 'Username already taken' });
+    values.push(username); updates.push(`username = $${values.length}`);
   }
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
 
@@ -52,10 +63,11 @@ router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) 
 // Friends — must be before /:id
 router.get('/me/friends', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.status
+    `SELECT DISTINCT ON (u.user_id) u.user_id, u.username, u.elo, u.avatar_url, f.status
      FROM friends f
      JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
-     WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'`,
+     WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
+     ORDER BY u.user_id`,
     [req.userId]
   );
   return res.json(rows);
