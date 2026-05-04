@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
+import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
 
@@ -23,9 +24,10 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 }
 
 // Create match
-router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId, clanId } = req.body;
+router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { matchType, name, isPractice, teeboxId, clanId, format } = req.body;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
+  const resolvedFormat = (matchType === 'duo' || matchType === 'squad') && format === 'scramble' ? 'scramble' : 'stroke';
 
   const client = await pool.connect();
   try {
@@ -44,9 +46,9 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
     }
 
     const { rows } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [matchType, name || null, isPractice || false]
+      `INSERT INTO matches (match_type, name, is_practice, format)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [matchType, name || null, isPractice || false, resolvedFormat]
     );
     const match = rows[0];
 
@@ -100,10 +102,10 @@ router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
   } finally {
     client.release();
   }
-});
+}));
 
 // Get match details
-router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: matchRows } = await pool.query(
     `SELECT * FROM matches WHERE match_id = $1`,
     [req.params.id]
@@ -128,10 +130,10 @@ router.get('/:id', requireAuth, async (req: AuthRequest, res: Response) => {
   );
 
   return res.json({ ...matchRows[0], players, result: resultRows[0] || null });
-});
+}));
 
 // List my matches
-router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
+router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.match_id, m.match_type, m.name, m.completed, m.created_at, m.is_practice,
             mr.winner_side, mr.delta_elo,
@@ -143,10 +145,10 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response) => {
     [req.userId]
   );
   return res.json(rows);
-});
+}));
 
 // Join a match (opponent side)
-router.post('/:id/join', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { teeboxId } = req.body;
   const client = await pool.connect();
   try {
@@ -192,10 +194,10 @@ router.post('/:id/join', requireAuth, async (req: AuthRequest, res: Response) =>
   } finally {
     client.release();
   }
-});
+}));
 
 // Submit scores for a round
-router.post('/:id/scores', requireAuth, async (req: AuthRequest, res: Response) => {
+router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { holeScores, courseId, teeboxId } = req.body;
   if (!Array.isArray(holeScores) || holeScores.length === 0) {
     return res.status(400).json({ error: 'holeScores array required' });
@@ -223,9 +225,27 @@ router.post('/:id/scores', requireAuth, async (req: AuthRequest, res: Response) 
       return res.status(409).json({ error: 'Match already completed' });
     }
 
+    const matchFormat: string = matchRows[0].format ?? 'stroke';
+    const myeSide: number = matchRows[0].side;
     const resolvedTeeboxId = teeboxId || matchRows[0].player_teebox;
 
-    // Upsert round
+    // Scramble: validate equal team sizes before accepting first submission
+    if (matchFormat === 'scramble') {
+      const { rows: sideCountRows } = await client.query(
+        `SELECT side, COUNT(*) AS cnt FROM match_players WHERE match_id = $1 GROUP BY side`,
+        [req.params.id]
+      );
+      if (sideCountRows.length >= 2) {
+        const counts = sideCountRows.map((r: any) => parseInt(r.cnt, 10));
+        const allEqual = counts.every((c: number) => c === counts[0]);
+        if (!allEqual) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Scramble requires equal players on each side' });
+        }
+      }
+    }
+
+    // Upsert round (only for the submitting player; scramble teammates share the same final score)
     await client.query(
       `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -234,12 +254,21 @@ router.post('/:id/scores', requireAuth, async (req: AuthRequest, res: Response) 
       [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, totalScore, matchRows[0].match_type]
     );
 
-    // Update match_players
+    // Update match_players for the submitting player
     await client.query(
       `UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
        WHERE match_id = $3 AND user_id = $4`,
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
+
+    // Scramble: mark ALL teammates on the same side as done with the same score
+    if (matchFormat === 'scramble') {
+      await client.query(
+        `UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+         WHERE match_id = $3 AND side = $4 AND user_id != $5`,
+        [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]
+      );
+    }
 
     // Check if all players have submitted
     const { rows: allPlayers } = await client.query(
@@ -420,9 +449,6 @@ router.post('/:id/scores', requireAuth, async (req: AuthRequest, res: Response) 
   } finally {
     client.release();
   }
-});
-
-// Fix: add unique constraint for rounds
-// We need to handle the ON CONFLICT — add it to schema.
+}));
 
 export default router;

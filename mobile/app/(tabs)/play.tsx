@@ -10,8 +10,9 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Course, Teebox } from '../../types';
 
-type MatchType = 'solo' | 'duo' | 'squad' | 'practice' | 'scramble';
-type Step = 'type' | 'clan' | 'join' | 'course' | 'teebox';
+type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
+type Format = 'stroke' | 'scramble';
+type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
 export default function PlayScreen() {
   const { user } = useAuth();
@@ -20,6 +21,7 @@ export default function PlayScreen() {
   const [joining, setJoining] = useState(false);
   const [matchType, setMatchType] = useState<MatchType>('solo');
   const [numHoles, setNumHoles] = useState<9 | 18>(18);
+  const [format, setFormat] = useState<Format>('stroke');
   const [selectedClanId, setSelectedClanId] = useState<string | null>(null);
   const [myclans, setMyClans] = useState<any[]>([]);
   const [loadingClans, setLoadingClans] = useState(false);
@@ -104,6 +106,7 @@ export default function PlayScreen() {
         isPractice: matchType === 'practice',
         teeboxId: teebox.teebox_id,
         clanId: selectedClanId ?? undefined,
+        format: (matchType === 'duo' || matchType === 'squad') ? format : 'stroke',
       });
       if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
         Alert.alert(
@@ -137,7 +140,7 @@ export default function PlayScreen() {
         <Text style={styles.title}>Start a Round</Text>
         <Text style={styles.subtitle}>Choose your match type</Text>
 
-        {(['solo', 'duo', 'squad', 'practice', 'scramble'] as MatchType[]).map((t) => (
+        {(['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -145,18 +148,17 @@ export default function PlayScreen() {
           >
             <View style={styles.typeMark}>
               <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'scramble' ? 'SCR' : 'PRC'}
+                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : 'PRC'}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'scramble' ? 'Scramble' : 'Practice'}
+                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
                 {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
-                  : t === 'duo' ? 'Ranked 2v2 — play with your duo partner'
-                  : t === 'squad' ? 'Ranked 4v4 — clan leaders only'
-                  : t === 'scramble' ? 'Best ball team format — all play from the best shot'
+                  : t === 'duo' ? 'Ranked 2v2 — stroke play or scramble'
+                  : t === 'squad' ? 'Ranked 4v4 — stroke play or scramble'
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>
@@ -243,10 +245,61 @@ export default function PlayScreen() {
         }
 
         {selectedClanId && (
-          <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('course')}>
-            <Text style={styles.nextBtnText}>Select Course →</Text>
+          <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('format')}>
+            <Text style={styles.nextBtnText}>Choose Format →</Text>
           </TouchableOpacity>
         )}
+      </View>
+    );
+  }
+
+  // ── Format selection ──────────────────────────────────────────────────────────
+  if (step === 'format') {
+    return (
+      <View style={styles.container}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep('clan')}>
+          <Text style={styles.backBtnText}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.title}>Choose Format</Text>
+        <Text style={styles.subtitle}>How will your team play?</Text>
+
+        <TouchableOpacity
+          style={[styles.formatCard, format === 'stroke' && styles.formatCardActive]}
+          onPress={() => setFormat('stroke')}
+        >
+          <View style={styles.formatIcon}>
+            <Text style={[styles.formatIconText, format === 'stroke' && { color: C.gold }]}>STK</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.formatName, format === 'stroke' && { color: C.gold }]}>Stroke Play</Text>
+            <Text style={styles.formatDesc}>
+              Each player plays their own ball. Scores are averaged after course normalization.
+            </Text>
+          </View>
+          {format === 'stroke' && <Text style={{ color: C.gold, fontSize: 20 }}>✓</Text>}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.formatCard, format === 'scramble' && styles.formatCardActive]}
+          onPress={() => setFormat('scramble')}
+        >
+          <View style={styles.formatIcon}>
+            <Text style={[styles.formatIconText, format === 'scramble' && { color: C.gold }]}>SCR</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.formatName, format === 'scramble' && { color: C.gold }]}>Scramble</Text>
+            <Text style={styles.formatDesc}>
+              Everyone plays from the best shot each time. One final team score per side.
+              {'\n'}
+              <Text style={{ color: C.gold }}>Both teams must have equal players.</Text>
+            </Text>
+          </View>
+          {format === 'scramble' && <Text style={{ color: C.gold, fontSize: 20 }}>✓</Text>}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('course')}>
+          <Text style={styles.nextBtnText}>Select Course →</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -284,7 +337,7 @@ export default function PlayScreen() {
   if (step === 'course') {
     return (
       <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'clan' : 'type')} >
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'format' : 'type')} >
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Find a Course</Text>
@@ -415,6 +468,17 @@ const styles = StyleSheet.create({
   clanCardActive: { borderColor: C.gold },
   clanName: { color: C.text, fontWeight: '700', fontSize: 15 },
   clanMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
+
+  formatCard: {
+    backgroundColor: C.card, borderRadius: 6, padding: 16,
+    flexDirection: 'row', alignItems: 'flex-start', gap: 14,
+    marginBottom: 12, borderWidth: 1, borderColor: C.border,
+  },
+  formatCardActive: { borderColor: C.gold },
+  formatIcon: { width: 48, height: 48, borderRadius: 4, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center', marginTop: 2 },
+  formatIconText: { fontFamily: F.serif, fontSize: 12, fontWeight: '700', color: C.textMuted, letterSpacing: 1 },
+  formatName: { color: C.text, fontWeight: '700', fontSize: 15, marginBottom: 4 },
+  formatDesc: { color: C.textMuted, fontSize: 12, lineHeight: 18 },
 
   emptyBox: { alignItems: 'center', paddingTop: 50 },
   emptyText: { color: C.text, fontWeight: '700', fontSize: 16, textAlign: 'center' },

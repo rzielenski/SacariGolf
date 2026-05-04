@@ -98,7 +98,7 @@ CREATE TABLE matches (
   match_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   match_type TEXT NOT NULL DEFAULT 'solo', -- solo | duo | squad | practice
-  format TEXT NOT NULL DEFAULT 'stroke', -- stroke | match_play
+  format TEXT NOT NULL DEFAULT 'stroke', -- stroke | scramble
   completed BOOLEAN NOT NULL DEFAULT FALSE,
   name TEXT,
   is_public BOOLEAN NOT NULL DEFAULT TRUE,
