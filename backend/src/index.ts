@@ -32,5 +32,15 @@ app.use('/messages', messagesRouter);
 app.use('/invites', invitesRouter);
 app.use('/dm', dmRouter);
 
+// Catch unhandled errors so the server doesn't crash
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Server error' });
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Clash of Clubs API running on :${PORT}`));

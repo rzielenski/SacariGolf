@@ -265,16 +265,19 @@ router.post('/:id/scores', requireAuth, async (req: AuthRequest, res: Response) 
       matchId: string,
       matchType: string
     ) => {
-      const getDiff = (players: typeof allPlayers) => {
+      const getDiff = (players: typeof allPlayers, topN?: number) => {
         const diffs = players.map((p) =>
           p.course_rating && p.slope_rating
             ? scoreDifferential(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played)
             : p.strokes
-        );
-        return diffs.reduce((a: number, b: number) => a + b, 0) / diffs.length;
+        ).sort((a: number, b: number) => a - b); // ascending — lower is better in golf
+        const used = topN ? diffs.slice(0, topN) : diffs;
+        return used.reduce((a: number, b: number) => a + b, 0) / used.length;
       };
-      const side1Diff = getDiff(side1Players);
-      const side2Diff = getDiff(side2Players);
+      // If team sizes differ, compare using the smaller team's count (best N scores)
+      const compareCount = Math.min(side1Players.length, side2Players.length);
+      const side1Diff = getDiff(side1Players, compareCount);
+      const side2Diff = getDiff(side2Players, compareCount);
       const side1Wins = side1Diff <= side2Diff;
       const p1 = side1Players[0];
       const p2 = side2Players[0];

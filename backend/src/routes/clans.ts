@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { sendPush } from '../utils/notify';
 
 const router = Router();
 
@@ -16,12 +17,74 @@ router.get('/', requireAuth, async (_req: AuthRequest, res: Response) => {
 
 router.get('/mine', requireAuth, async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT c.clan_id, c.name, c.clan_mode, c.elo, c.total_matches, c.total_wins, cm.role
-     FROM clans c JOIN clan_members cm ON cm.clan_id = c.clan_id
-     WHERE cm.user_id = $1`,
+    `SELECT c.clan_id, c.name, c.clan_mode, c.elo, c.total_matches, c.total_wins,
+            cm.role, c.max_players, COUNT(cm2.user_id)::int AS member_count
+     FROM clans c
+     JOIN clan_members cm ON cm.clan_id = c.clan_id AND cm.user_id = $1
+     LEFT JOIN clan_members cm2 ON cm2.clan_id = c.clan_id
+     WHERE cm.user_id = $1
+     GROUP BY c.clan_id, cm.role`,
     [req.userId]
   );
   return res.json(rows);
+});
+
+// GET /clans/invites — my pending clan invites (must be before /:id)
+router.get('/invites', requireAuth, async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT ci.invite_id, ci.clan_id, ci.created_at,
+            u.username AS from_username,
+            c.name AS clan_name, c.clan_mode, c.elo AS clan_elo, c.max_players,
+            COUNT(cm.user_id)::int AS member_count
+     FROM clan_invites ci
+     JOIN users u ON u.user_id = ci.from_user_id
+     JOIN clans c ON c.clan_id = ci.clan_id
+     LEFT JOIN clan_members cm ON cm.clan_id = ci.clan_id
+     WHERE ci.to_user_id = $1
+       AND ci.status = 'pending'
+       AND (ci.expires_at IS NULL OR ci.expires_at > NOW())
+     GROUP BY ci.invite_id, u.username, c.clan_id
+     ORDER BY ci.created_at DESC`,
+    [req.userId]
+  );
+  return res.json(rows);
+});
+
+// POST /clans/invites/:inviteId/accept (must be before /:id)
+router.post('/invites/:inviteId/accept', requireAuth, async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `UPDATE clan_invites SET status = 'accepted'
+     WHERE invite_id = $1 AND to_user_id = $2 AND status = 'pending'
+       AND (expires_at IS NULL OR expires_at > NOW())
+     RETURNING clan_id`,
+    [req.params.inviteId, req.userId]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Invite not found or expired' });
+  const { clan_id: clanId } = rows[0];
+
+  const { rows: clanRows } = await pool.query(
+    `SELECT c.max_players, COUNT(cm.user_id)::int AS member_count
+     FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
+     WHERE c.clan_id = $1 GROUP BY c.clan_id`,
+    [clanId]
+  );
+  if (clanRows[0]?.member_count >= clanRows[0]?.max_players) {
+    return res.status(409).json({ error: 'Clan is now full' });
+  }
+  await pool.query(
+    `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [clanId, req.userId]
+  );
+  return res.json({ clanId });
+});
+
+// POST /clans/invites/:inviteId/decline (must be before /:id)
+router.post('/invites/:inviteId/decline', requireAuth, async (req: AuthRequest, res: Response) => {
+  await pool.query(
+    `UPDATE clan_invites SET status = 'declined' WHERE invite_id = $1 AND to_user_id = $2`,
+    [req.params.inviteId, req.userId]
+  );
+  return res.json({ success: true });
 });
 
 router.post('/', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -183,6 +246,58 @@ router.post('/:id/join', requireAuth, async (req: AuthRequest, res: Response) =>
     );
     return res.json({ success: true });
   } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /clans/:id/invite — leader invites a friend
+router.post('/:id/invite', requireAuth, async (req: AuthRequest, res: Response) => {
+  const { toUserId } = req.body;
+  if (!toUserId) return res.status(400).json({ error: 'toUserId required' });
+
+  const { rows: roleRows } = await pool.query(
+    `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!roleRows.length || roleRows[0].role !== 'leader') {
+    return res.status(403).json({ error: 'Only the clan leader can invite members' });
+  }
+
+  const { rows: clanRows } = await pool.query(
+    `SELECT c.max_players, COUNT(cm.user_id)::int AS member_count
+     FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
+     WHERE c.clan_id = $1 GROUP BY c.clan_id`,
+    [req.params.id]
+  );
+  if (!clanRows.length) return res.status(404).json({ error: 'Clan not found' });
+  if (clanRows[0].member_count >= clanRows[0].max_players) {
+    return res.status(409).json({ error: 'Clan is full' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO clan_invites (clan_id, from_user_id, to_user_id)
+       VALUES ($1, $2, $3) ON CONFLICT (clan_id, to_user_id) DO NOTHING`,
+      [req.params.id, req.userId, toUserId]
+    );
+
+    const { rows } = await pool.query(
+      `SELECT u.push_token, u2.username AS from_name, c.name AS clan_name
+       FROM users u, users u2, clans c
+       WHERE u.user_id = $1 AND u2.user_id = $2 AND c.clan_id = $3`,
+      [toUserId, req.userId, req.params.id]
+    );
+    if (rows[0]?.push_token) {
+      await sendPush(
+        [rows[0].push_token],
+        'Clan Invite',
+        `${rows[0].from_name} invited you to join ${rows[0].clan_name}!`,
+        { type: 'clanInvite', clanId: req.params.id }
+      );
+    }
+    return res.status(201).json({ success: true });
+  } catch (err) {
+    console.error(err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
