@@ -17,7 +17,8 @@ CREATE TABLE users (
   push_token TEXT,
   handicap_index REAL,
   bio TEXT,
-  home_course_id UUID REFERENCES courses(course_id) ON DELETE SET NULL
+  home_course_id UUID REFERENCES courses(course_id) ON DELETE SET NULL,
+  notifications_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Friends
@@ -105,7 +106,8 @@ CREATE TABLE matches (
   completed BOOLEAN NOT NULL DEFAULT FALSE,
   name TEXT,
   is_public BOOLEAN NOT NULL DEFAULT TRUE,
-  is_practice BOOLEAN NOT NULL DEFAULT FALSE
+  is_practice BOOLEAN NOT NULL DEFAULT FALSE,
+  started_notified BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Match Players (each user/clan slot in a match)

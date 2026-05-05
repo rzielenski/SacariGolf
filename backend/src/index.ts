@@ -17,8 +17,9 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '8mb' }));
 
-// Serve uploaded find photos
-app.use('/uploads', express.static('/app/uploads'));
+// Serve uploaded find photos and avatars (path overridable via UPLOADS_DIR env var)
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
+app.use('/uploads', express.static(UPLOADS_DIR));
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

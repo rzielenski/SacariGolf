@@ -534,6 +534,90 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
   }
 }));
 
+// Save in-progress hole scores so friends (not in this match) can watch live.
+// Stores partial scores on the rounds row without marking it complete.
+router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { holeScores } = req.body;
+  if (!Array.isArray(holeScores)) return res.status(400).json({ error: 'holeScores required' });
+
+  // Look up player's teebox/course on this match
+  const { rows: pRows } = await pool.query(
+    `SELECT mp.teebox_id, t.course_id FROM match_players mp
+     LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     WHERE mp.match_id = $1 AND mp.user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!pRows.length) return res.status(404).json({ error: 'Not in this match' });
+
+  // Don't accept progress for already-finished matches
+  const { rows: matchRows } = await pool.query(
+    `SELECT completed FROM matches WHERE match_id = $1`,
+    [req.params.id]
+  );
+  if (matchRows[0]?.completed) return res.json({ success: true, ignored: 'completed' });
+
+  await pool.query(
+    `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (match_id, user_id)
+     DO UPDATE SET hole_scores = $5,
+                   course_id = EXCLUDED.course_id,
+                   teebox_id = EXCLUDED.teebox_id`,
+    [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores]
+  );
+  return res.json({ success: true });
+}));
+
+// Notify friends that the user has started a round. Idempotent — only fires once per match.
+router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Atomic flip: only the first caller for this match gets a row back
+  const { rows: flipped } = await pool.query(
+    `UPDATE matches SET started_notified = true
+     WHERE match_id = $1 AND started_notified = false AND completed = false AND is_practice = false
+     RETURNING match_id`,
+    [req.params.id]
+  );
+  if (!flipped.length) return res.json({ success: true, sent: false });
+
+  // Verify caller is in the match
+  const { rows: playerRows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!playerRows.length) return res.json({ success: true, sent: false });
+
+  // Course name (from any player's teebox), starter username
+  const { rows: meRows } = await pool.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
+  const starterName = meRows[0]?.username ?? 'A friend';
+
+  const { rows: courseRows } = await pool.query(
+    `SELECT c.course_name FROM match_players mp
+     JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     JOIN courses c ON c.course_id = t.course_id
+     WHERE mp.match_id = $1 LIMIT 1`,
+    [req.params.id]
+  );
+  const courseName = courseRows[0]?.course_name ?? 'a course';
+
+  // Friends with push tokens
+  const { rows: friends } = await pool.query(
+    `SELECT u.push_token FROM friends f
+     JOIN users u ON u.user_id = f.friend_id
+     WHERE f.user_id = $1 AND f.status = 'accepted' AND u.push_token IS NOT NULL`,
+    [req.userId]
+  );
+  const tokens = friends.map((f) => f.push_token).filter(Boolean);
+  if (tokens.length) {
+    await sendPush(
+      tokens,
+      `${starterName} started a round`,
+      `Tap to watch their scorecard live at ${courseName}`,
+      { type: 'round_started', userId: req.userId, matchId: req.params.id }
+    );
+  }
+  return res.json({ success: true, sent: true, recipientCount: tokens.length });
+}));
+
 // Cancel / delete a match — only allowed if no player has submitted scores yet (no ELO penalty)
 router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const client = await pool.connect();

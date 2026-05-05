@@ -6,7 +6,8 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 
-const AVATARS_DIR = '/app/uploads/avatars';
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
+const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
 if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
 const router = Router();
@@ -200,6 +201,113 @@ router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =
   return res.json({ success: true });
 }));
 
+// Live in-progress round (if any). Returns null when:
+//   - the user has no in-progress match with a teebox set
+//   - the requesting viewer is in the same match (anti-cheat)
+router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT mp.match_id, mp.teebox_id,
+            r.hole_scores, r.created_at AS round_started_at,
+            t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
+            c.course_id, c.course_name
+     FROM match_players mp
+     JOIN matches m ON m.match_id = mp.match_id
+     LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+     LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     WHERE mp.user_id = $1
+       AND m.completed = false
+       AND mp.completed = false
+       AND m.is_practice = false
+       AND mp.teebox_id IS NOT NULL
+     ORDER BY m.created_at DESC
+     LIMIT 1`,
+    [req.params.id]
+  );
+  if (!rows.length || !rows[0].hole_scores?.length) return res.json(null);
+
+  const active = rows[0];
+
+  // Anti-cheat: hide the live scorecard from anyone in the same match
+  if (req.userId !== req.params.id) {
+    const { rows: shareRows } = await pool.query(
+      `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+      [active.match_id, req.userId]
+    );
+    if (shareRows.length) return res.json(null);
+  }
+
+  return res.json(active);
+}));
+
+// WHS-style handicap index calculator from a player's last 20 rated rounds.
+// Returns { handicap_index, num_rounds_used, total_rounds, differentials }
+router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: rounds } = await pool.query(
+    `SELECT r.round_id, r.total_score, r.created_at,
+            COALESCE(array_length(r.hole_scores, 1), t.num_holes) AS holes_played,
+            t.course_rating, t.slope_rating, t.num_holes AS teebox_holes,
+            t.name AS teebox_name, c.course_name
+     FROM rounds r
+     JOIN matches m ON m.match_id = r.match_id
+     LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     WHERE r.user_id = $1 AND r.total_score IS NOT NULL
+       AND m.completed = true AND m.is_practice = false
+       AND t.course_rating IS NOT NULL AND t.slope_rating IS NOT NULL
+     ORDER BY r.created_at DESC
+     LIMIT 20`,
+    [req.params.id]
+  );
+
+  // Score differential = (113 / slope) × (gross − adjusted course rating)
+  // For partial rounds (e.g. 9 holes on an 18-hole rated teebox), prorate the rating.
+  const differentials = rounds.map((r) => {
+    const ratingAdj = r.course_rating * (r.holes_played / (r.teebox_holes || r.holes_played));
+    const diff = (113 / r.slope_rating) * (r.total_score - ratingAdj);
+    return {
+      round_id: r.round_id,
+      created_at: r.created_at,
+      total_score: r.total_score,
+      course_name: r.course_name,
+      teebox_name: r.teebox_name,
+      holes_played: r.holes_played,
+      differential: Math.round(diff * 10) / 10,
+    };
+  });
+
+  // WHS lookup: how many of the lowest differentials to use, plus an adjustment
+  const N = differentials.length;
+  let useCount = 0;
+  let adjustment = 0;
+  if (N >= 20) { useCount = 8; }
+  else if (N >= 19) { useCount = 7; }
+  else if (N >= 17) { useCount = 6; }
+  else if (N >= 15) { useCount = 5; }
+  else if (N >= 12) { useCount = 4; }
+  else if (N >= 9)  { useCount = 3; }
+  else if (N >= 7)  { useCount = 2; }
+  else if (N >= 6)  { useCount = 2; adjustment = -1; }
+  else if (N >= 5)  { useCount = 1; }
+  else if (N >= 4)  { useCount = 1; adjustment = -1; }
+  else if (N >= 3)  { useCount = 1; adjustment = -2; }
+
+  let handicapIndex: number | null = null;
+  if (useCount > 0) {
+    const sorted = [...differentials].map((d) => d.differential).sort((a, b) => a - b);
+    const best = sorted.slice(0, useCount);
+    const avg = best.reduce((a, b) => a + b, 0) / best.length;
+    handicapIndex = Math.round((avg + adjustment) * 10) / 10;
+  }
+
+  return res.json({
+    handicap_index: handicapIndex,
+    num_rounds_used: useCount,
+    total_rated_rounds: N,
+    differentials,
+  });
+}));
+
 // Avatar upload
 router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { imageBase64, mimeType } = req.body;
@@ -213,46 +321,60 @@ router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Respon
   return res.json({ avatar_url: avatarUrl });
 }));
 
-// Notifications feed
+// Notifications feed — all sources are filtered to the last 3 days; an unread_count
+// is computed against the user's notifications_seen_at timestamp.
 router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const notes: any[] = [];
 
-  // Pending friend requests
+  // Get user's seen-at timestamp for unread calculation
+  const { rows: seenRows } = await pool.query(
+    `SELECT notifications_seen_at FROM users WHERE user_id = $1`,
+    [req.userId]
+  );
+  const seenAt = seenRows[0]?.notifications_seen_at ?? new Date(0);
+
+  // Pending friend requests (3-day window)
   const { rows: frs } = await pool.query(
     `SELECT u.user_id, u.username, f.created_at FROM friends f
      JOIN users u ON u.user_id = f.user_id
-     WHERE f.friend_id = $1 AND f.status = 'pending' ORDER BY f.created_at DESC LIMIT 10`,
+     WHERE f.friend_id = $1 AND f.status = 'pending'
+       AND f.created_at > NOW() - INTERVAL '3 days'
+     ORDER BY f.created_at DESC LIMIT 10`,
     [req.userId]
   );
   for (const r of frs) notes.push({ type: 'friend_request', title: 'Friend Request', body: `${r.username} sent you a friend request`, data: { userId: r.user_id }, created_at: r.created_at });
 
-  // Pending match invites
+  // Pending match invites (3-day window)
   const { rows: mis } = await pool.query(
     `SELECT mi.invite_id, mi.match_id, mi.created_at, u.username AS from_name, m.match_type
      FROM match_invites mi JOIN users u ON u.user_id = mi.from_user_id JOIN matches m ON m.match_id = mi.match_id
      WHERE mi.to_user_id = $1 AND mi.status = 'pending'
-     AND (mi.expires_at IS NULL OR mi.expires_at > NOW()) ORDER BY mi.created_at DESC LIMIT 10`,
+       AND mi.created_at > NOW() - INTERVAL '3 days'
+       AND (mi.expires_at IS NULL OR mi.expires_at > NOW())
+     ORDER BY mi.created_at DESC LIMIT 10`,
     [req.userId]
   );
   for (const r of mis) notes.push({ type: 'match_invite', title: 'Match Invite', body: `${r.from_name} invited you to a ${r.match_type} match`, data: { matchId: r.match_id, inviteId: r.invite_id }, created_at: r.created_at });
 
-  // Pending clan invites (if clan_invites table exists)
+  // Pending clan invites (3-day window)
   try {
     const { rows: cis } = await pool.query(
       `SELECT ci.invite_id, ci.clan_id, ci.created_at, u.username AS from_name, c.name AS clan_name
        FROM clan_invites ci JOIN users u ON u.user_id = ci.from_user_id JOIN clans c ON c.clan_id = ci.clan_id
-       WHERE ci.to_user_id = $1 AND ci.status = 'pending' ORDER BY ci.created_at DESC LIMIT 10`,
+       WHERE ci.to_user_id = $1 AND ci.status = 'pending'
+         AND ci.created_at > NOW() - INTERVAL '3 days'
+       ORDER BY ci.created_at DESC LIMIT 10`,
       [req.userId]
     );
     for (const r of cis) notes.push({ type: 'clan_invite', title: 'Clan Invite', body: `${r.from_name} invited you to join ${r.clan_name}`, data: { clanId: r.clan_id, inviteId: r.invite_id }, created_at: r.created_at });
   } catch { /* table may not exist yet */ }
 
-  // Recent match results (last 48h)
+  // Recent match results (3-day window)
   const { rows: mrs } = await pool.query(
     `SELECT mr.match_id, mr.winner_side, mr.delta_elo, mr.created_at, m.match_type, mp.side AS my_side
      FROM match_results mr JOIN matches m ON m.match_id = mr.match_id
      JOIN match_players mp ON mp.match_id = m.match_id AND mp.user_id = $1
-     WHERE mr.created_at > NOW() - INTERVAL '48 hours' AND m.is_practice = false
+     WHERE mr.created_at > NOW() - INTERVAL '3 days' AND m.is_practice = false
      ORDER BY mr.created_at DESC LIMIT 10`,
     [req.userId]
   );
@@ -262,7 +384,18 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
   }
 
   notes.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  return res.json(notes);
+
+  const unreadCount = notes.filter((n) => new Date(n.created_at) > new Date(seenAt)).length;
+  return res.json({ notifications: notes, unread_count: unreadCount });
+}));
+
+// Mark notifications as seen (resets the unread badge)
+router.post('/me/notifications/seen', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  await pool.query(
+    `UPDATE users SET notifications_seen_at = NOW() WHERE user_id = $1`,
+    [req.userId]
+  );
+  return res.json({ success: true });
 }));
 
 export default router;

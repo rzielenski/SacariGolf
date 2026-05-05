@@ -49,6 +49,9 @@ export default function ProfileScreen() {
   const [recentRounds, setRecentRounds] = useState<any[]>([]);
   const [bestRound, setBestRound] = useState<any | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+  const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
+  const [hcapModalVisible, setHcapModalVisible] = useState(false);
+  const [hcapDifferentials, setHcapDifferentials] = useState<any[]>([]);
 
   const openScorecard = (round: any) => {
     if (!user) return;
@@ -70,7 +73,7 @@ export default function ProfileScreen() {
   useEffect(() => {
     if (!user) return;
     api.users.notifications()
-      .then((notes) => setNotifCount(notes.length))
+      .then((res) => setNotifCount(res.unread_count ?? 0))
       .catch(() => { });
   }, [user?.user_id]);
 
@@ -85,13 +88,26 @@ export default function ProfileScreen() {
       .catch(() => { });
   }, [user?.user_id]);
 
+  // Load calculated handicap
+  useEffect(() => {
+    if (!user) return;
+    api.users.handicap(user.user_id)
+      .then((data) => {
+        setHandicap(data);
+        setHcapDifferentials(data.differentials ?? []);
+      })
+      .catch(() => { });
+  }, [user?.user_id]);
+
   const openNotifications = useCallback(async () => {
     setNotifVisible(true);
     setLoadingNotifs(true);
+    // Persist "seen" state on the server so the badge stays cleared across reloads
+    api.users.markNotificationsSeen().catch(() => { });
+    setNotifCount(0);
     try {
-      const notes = await api.users.notifications();
-      setNotifications(notes);
-      setNotifCount(0);
+      const res = await api.users.notifications();
+      setNotifications(res.notifications ?? []);
     } catch { /* silent */ } finally {
       setLoadingNotifs(false);
     }
@@ -287,6 +303,24 @@ export default function ProfileScreen() {
               {[(user as any).home_course_city, (user as any).home_course_state].filter(Boolean).join(', ')}
             </Text>
           )}
+        </View>
+        <Text style={styles.editChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Calculated Handicap */}
+      <TouchableOpacity style={styles.editableCard} onPress={() => setHcapModalVisible(true)}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.editableLabel}>HANDICAP INDEX</Text>
+          <Text style={styles.editableValue}>
+            {handicap?.handicap_index != null
+              ? handicap.handicap_index.toFixed(1)
+              : 'Need 3+ rated rounds'}
+          </Text>
+          <Text style={styles.editableSub}>
+            {handicap?.num_rounds_used
+              ? `Best ${handicap.num_rounds_used} of last ${handicap.total_rated_rounds} rounds · Tap for breakdown`
+              : `${handicap?.total_rated_rounds ?? 0} rated rounds played`}
+          </Text>
         </View>
         <Text style={styles.editChev}>›</Text>
       </TouchableOpacity>
@@ -536,6 +570,65 @@ export default function ProfileScreen() {
         entry={scorecardEntry}
         onClose={() => setScorecardEntry(null)}
       />
+
+      {/* Handicap breakdown modal */}
+      <Modal
+        visible={hcapModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setHcapModalVisible(false)}
+      >
+        <View style={styles.notifContainer}>
+          <View style={styles.notifHeader}>
+            <View style={{ width: 60 }} />
+            <Text style={styles.notifTitle}>Handicap Index</Text>
+            <TouchableOpacity onPress={() => setHcapModalVisible(false)} style={styles.notifClose}>
+              <Text style={styles.notifCloseText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 20 }}>
+            <View style={styles.hcapHero}>
+              <Text style={styles.hcapBigNum}>
+                {handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
+              </Text>
+              <Text style={styles.hcapBigLabel}>
+                {handicap?.num_rounds_used
+                  ? `Best ${handicap.num_rounds_used} of last ${handicap.total_rated_rounds} rounds`
+                  : 'Play 3+ rated rounds for an index'}
+              </Text>
+            </View>
+            <Text style={styles.hcapExplain}>
+              World Handicap System: differential = (113 / slope) × (gross − course rating).
+              Your index is the average of your best differentials.
+            </Text>
+            <Text style={styles.profSectionTitle}>RATED ROUNDS</Text>
+            {hcapDifferentials.length === 0 ? (
+              <Text style={{ color: C.textMuted, fontSize: 13 }}>
+                No rated rounds yet. Play a course with rating + slope data.
+              </Text>
+            ) : (
+              hcapDifferentials.map((d) => (
+                <View key={d.round_id} style={styles.hcapRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: C.text, fontWeight: '700', fontSize: 13 }}>
+                      {d.course_name ?? 'Unknown'}
+                    </Text>
+                    <Text style={{ color: C.textMuted, fontSize: 11 }}>
+                      {d.teebox_name} · {d.holes_played} holes · {new Date(d.created_at).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ color: C.text, fontSize: 13, fontWeight: '700' }}>{d.total_score}</Text>
+                    <Text style={{ color: C.gold, fontSize: 12, fontFamily: F.serif }}>
+                      {d.differential > 0 ? `+${d.differential}` : d.differential}
+                    </Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -632,6 +725,16 @@ const styles = StyleSheet.create({
   roundScoreBox: { alignItems: 'flex-end', minWidth: 50 },
   roundScore: { color: C.text, fontFamily: F.serif, fontSize: 22, fontWeight: '700' },
   roundToPar: { fontSize: 12, fontWeight: '700', marginTop: 1 },
+
+  hcapHero: { alignItems: 'center', paddingVertical: 24, marginBottom: 8 },
+  hcapBigNum: { fontFamily: F.serif, fontSize: 64, fontWeight: '700', color: C.gold },
+  hcapBigLabel: { color: C.textMuted, fontSize: 13, marginTop: 6 },
+  hcapExplain: { color: C.textDim, fontSize: 12, lineHeight: 18, marginBottom: 8 },
+  hcapRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: C.card, borderRadius: 8, padding: 12,
+    marginBottom: 6, borderWidth: 1, borderColor: C.border,
+  },
   cardRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   eloNum: { fontSize: 44, fontWeight: '900', color: C.gold },
   eloLabel: { fontSize: 14, color: C.textMuted },

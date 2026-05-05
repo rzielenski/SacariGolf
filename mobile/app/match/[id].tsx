@@ -155,6 +155,7 @@ export default function MatchLobbyScreen() {
           key={p.user_id}
           player={p}
           isMe={p.user_id === user?.user_id}
+          matchCompleted={isCompleted}
           onPress={() => router.push(`/user/${p.user_id}` as any)}
         />
       ))}
@@ -289,7 +290,12 @@ export default function MatchLobbyScreen() {
   );
 }
 
-function PlayerCard({ player, isMe, onPress }: { player: MatchPlayer; isMe: boolean; onPress: () => void }) {
+function PlayerCard({ player, isMe, matchCompleted, onPress }: {
+  player: MatchPlayer; isMe: boolean; matchCompleted: boolean; onPress: () => void;
+}) {
+  // Anti-cheat: only show stroke totals for me OR when the match is fully completed
+  const canSeeStrokes = isMe || matchCompleted;
+
   return (
     <TouchableOpacity
       style={[styles.playerCard, isMe && { borderColor: C.gold }]}
@@ -312,7 +318,9 @@ function PlayerCard({ player, isMe, onPress }: { player: MatchPlayer; isMe: bool
         {player.completed ? (
           <>
             <Text style={[styles.statusDot, { color: C.green }]}>●</Text>
-            <Text style={styles.playerStrokes}>{player.strokes} strokes</Text>
+            <Text style={styles.playerStrokes}>
+              {canSeeStrokes ? `${player.strokes} strokes` : 'Done'}
+            </Text>
           </>
         ) : (
           <Text style={[styles.statusDot, { color: C.textDim }]}>○</Text>

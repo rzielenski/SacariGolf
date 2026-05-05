@@ -51,9 +51,12 @@ export const api = {
     me: () => request<any>('GET', '/users/me'),
     update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string; bio?: string | null; homeCourseId?: string | null }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
-    notifications: () => request<any[]>('GET', '/users/me/notifications'),
+    notifications: () => request<{ notifications: any[]; unread_count: number }>('GET', '/users/me/notifications'),
+    markNotificationsSeen: () => request<any>('POST', '/users/me/notifications/seen', {}),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
+    handicap: (id: string) => request<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number; differentials: any[] }>('GET', `/users/${id}/handicap`),
+    activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
     sendRequest: (friendId: string) => request<any>('POST', '/users/me/friends/request', { friendId }),
@@ -94,6 +97,8 @@ export const api = {
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
+    started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
+    progress: (id: string, body: { holeScores: number[] }) => request<any>('POST', `/matches/${id}/progress`, body),
   },
 
   finds: {

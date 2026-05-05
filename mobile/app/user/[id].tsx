@@ -22,6 +22,8 @@ export default function UserProfileScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+  const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
+  const [activeRound, setActiveRound] = useState<any | null>(null);
 
   const openScorecard = (round: any) => {
     setScorecardEntry({
@@ -49,6 +51,21 @@ export default function UserProfileScreen() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    api.users.handicap(id).then(setHandicap).catch(() => { });
+  }, [id]);
+
+  // Poll the player's live in-progress round every 30s while the screen is open
+  useEffect(() => {
+    let cancelled = false;
+    const fetchActive = () => api.users.activeRound(id)
+      .then((data) => { if (!cancelled) setActiveRound(data); })
+      .catch(() => { });
+    fetchActive();
+    const t = setInterval(fetchActive, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [id]);
 
   if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
   if (!profile) {
@@ -119,7 +136,49 @@ export default function UserProfileScreen() {
         <Stat label="Matches" value={profile.total_matches} />
         <Stat label="Wins" value={profile.total_wins} />
         <Stat label="Win Rate" value={`${winRate}%`} />
+        <Stat
+          label="Handicap"
+          value={handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
+        />
       </View>
+
+      {/* Live round (in-progress) */}
+      {activeRound && activeRound.hole_scores?.length > 0 && (
+        <>
+          <View style={styles.liveBadgeRow}>
+            <View style={styles.liveDot} />
+            <Text style={styles.liveLabel}>PLAYING NOW</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.roundCard, { borderColor: C.green }]}
+            onPress={() => setScorecardEntry({
+              username: profile.username,
+              user_id: profile.user_id,
+              teebox_name: activeRound.teebox_name,
+              hole_scores: activeRound.hole_scores,
+              course_id: activeRound.course_id,
+              course_name: activeRound.course_name,
+              teebox_id: activeRound.teebox_id,
+              total_score: activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0),
+              created_at: activeRound.round_started_at,
+            })}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.roundCourseName}>{activeRound.course_name ?? 'Unknown course'}</Text>
+              <Text style={styles.roundMeta}>
+                {activeRound.teebox_name} · Hole {activeRound.hole_scores.length} of {activeRound.num_holes}
+              </Text>
+              <Text style={styles.roundDate}>Tap to view live scorecard</Text>
+            </View>
+            <View style={styles.roundScoreBox}>
+              <Text style={[styles.roundScore, { color: C.green }]}>
+                {activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0)}
+              </Text>
+              <Text style={[styles.roundToPar, { color: C.textMuted }]}>thru {activeRound.hole_scores.length}</Text>
+            </View>
+          </TouchableOpacity>
+        </>
+      )}
 
       {/* Best round */}
       {profile.best_round && (
@@ -241,9 +300,9 @@ const styles = StyleSheet.create({
   homeCourseName: { color: C.text, fontSize: 16, fontWeight: '700' },
   homeCourseLoc: { color: C.textMuted, fontSize: 12, marginTop: 2 },
 
-  statsGrid: { flexDirection: 'row', gap: 10, marginBottom: 18 },
+  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
   statBox: {
-    flex: 1, backgroundColor: C.card, borderRadius: 10, padding: 14,
+    flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 10, padding: 14,
     alignItems: 'center', borderWidth: 1, borderColor: C.border,
   },
   statValue: { color: C.text, fontSize: 22, fontWeight: '900' },
@@ -267,4 +326,11 @@ const styles = StyleSheet.create({
 
   empty: { color: C.textMuted, fontSize: 13, paddingVertical: 12 },
   joined: { color: C.textDim, textAlign: 'center', fontSize: 12, marginTop: 24 },
+
+  liveBadgeRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginTop: 14, marginBottom: 6,
+  },
+  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.green },
+  liveLabel: { color: C.green, fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
 });

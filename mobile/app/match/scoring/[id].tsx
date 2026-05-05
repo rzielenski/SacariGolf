@@ -98,6 +98,19 @@ export default function ScoringScreen() {
 
   const SAVE_KEY = `scores_${id}`;
 
+  // ── Live progress upload (so friends can watch) ─────────────────────────────
+  // Sends scores to backend ~3s after the last edit so friends watching the
+  // user's profile see live updates without hammering the API on every tap.
+  const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (selectingCourse || holes.length === 0 || scores.length === 0) return;
+    if (progressTimer.current) clearTimeout(progressTimer.current);
+    progressTimer.current = setTimeout(() => {
+      api.matches.progress(id, { holeScores: scores.slice(0, currentHole + 1) }).catch(() => { });
+    }, 3000);
+    return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
+  }, [scores, currentHole, selectingCourse, holes.length, id]);
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const load = useCallback(async () => {
@@ -136,6 +149,8 @@ export default function ScoringScreen() {
           setScores(saved?.scores ?? sorted.map((h) => h.par));
           setCurrentHole(saved?.currentHole ?? 0);
           setSelectingCourse(false);
+          // Notify friends a round has started (idempotent — backend only fires once)
+          api.matches.started(id).catch(() => { });
         }
       }
     } catch (e: any) {
@@ -276,6 +291,8 @@ export default function ScoringScreen() {
     setScores(h.map((hole) => hole.par));
     setSelectingCourse(false);
     setCurrentHole(0);
+    // Notify friends a round has started (idempotent — backend only fires once)
+    api.matches.started(id).catch(() => { });
   };
 
   const pickCourse = async (c: Course) => {

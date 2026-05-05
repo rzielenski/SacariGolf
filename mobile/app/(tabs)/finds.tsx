@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image, ScrollView,
   Alert, ActivityIndicator, Animated, Dimensions, RefreshControl, Modal,
+  PanResponder,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
@@ -33,20 +34,7 @@ export default function FindRankerScreen() {
 
   return (
     <View style={styles.container}>
-      <Modal visible={!!selectedFind} transparent animationType="fade" onRequestClose={() => setSelectedFind(null)}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' }}>
-          <TouchableOpacity style={{ position: 'absolute', top: 56, right: 20, zIndex: 10 }} onPress={() => setSelectedFind(null)}>
-            <Text style={{ color: '#fff', fontSize: 28, fontWeight: '300' }}>✕</Text>
-          </TouchableOpacity>
-          {selectedFind && (
-            <>
-              <Image source={{ uri: `${API_BASE}${selectedFind.photo_url}` }} style={{ width: '100%', height: '70%' }} resizeMode="contain" />
-              {selectedFind.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }}>{selectedFind.description}</Text> : null}
-              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }}>by {selectedFind.username}  ·  {selectedFind.elo} ELO</Text>
-            </>
-          )}
-        </View>
-      </Modal>
+      <FindViewer find={selectedFind} onClose={() => setSelectedFind(null)} />
       <View style={styles.header}>
         <View style={{ width: 60 }} />
         <View style={styles.titleBox}>
@@ -74,6 +62,70 @@ export default function FindRankerScreen() {
       {tab === 'leaderboard' && <LeaderboardTab onSelectFind={setSelectedFind} />}
       {tab === 'mine' && <MineTab userId={user?.user_id ?? ''} onSelectFind={setSelectedFind} />}
     </View>
+  );
+}
+
+// ── Find image viewer (swipe down/up to dismiss) ────────────────────────────
+function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }) {
+  const translateY = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  // Reset animation values whenever a new find is shown
+  useEffect(() => {
+    if (find) {
+      translateY.setValue(0);
+      opacity.setValue(1);
+    }
+  }, [find]);
+
+  const dismiss = (direction: 1 | -1) => {
+    Animated.parallel([
+      Animated.timing(translateY, { toValue: direction * H, duration: 220, useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => onClose());
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 8,
+      onPanResponderMove: (_, { dy }) => {
+        translateY.setValue(dy);
+        opacity.setValue(1 - Math.min(Math.abs(dy) / 400, 0.6));
+      },
+      onPanResponderRelease: (_, { dy, vy }) => {
+        if (Math.abs(dy) > 120 || Math.abs(vy) > 0.8) {
+          dismiss(dy >= 0 ? 1 : -1);
+        } else {
+          Animated.parallel([
+            Animated.spring(translateY, { toValue: 0, useNativeDriver: true, friction: 8 }),
+            Animated.spring(opacity, { toValue: 1, useNativeDriver: true, friction: 8 }),
+          ]).start();
+        }
+      },
+    })
+  ).current;
+
+  return (
+    <Modal visible={!!find} transparent animationType="fade" onRequestClose={onClose}>
+      <Animated.View
+        style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', opacity }}
+        {...panResponder.panHandlers}
+      >
+        <Animated.View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', transform: [{ translateY }] }}>
+          <TouchableOpacity style={{ position: 'absolute', top: 56, right: 20, zIndex: 10 }} onPress={onClose}>
+            <Text style={{ color: '#fff', fontSize: 28, fontWeight: '300' }}>✕</Text>
+          </TouchableOpacity>
+          {find && (
+            <>
+              <Image source={{ uri: `${API_BASE}${find.photo_url}` }} style={{ width: '100%', height: '70%' }} resizeMode="contain" />
+              {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }}>{find.description}</Text> : null}
+              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }}>by {find.username}  ·  {find.elo} ELO</Text>
+              <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }}>Swipe up or down to dismiss</Text>
+            </>
+          )}
+        </Animated.View>
+      </Animated.View>
+    </Modal>
   );
 }
 
