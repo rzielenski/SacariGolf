@@ -1,13 +1,14 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert,
-  Image, Modal, ActivityIndicator,
+  Image, Modal, ActivityIndicator, TextInput, FlatList,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../lib/auth';
 import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
+import type { Course } from '../../types';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -37,6 +38,13 @@ export default function ProfileScreen() {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loadingNotifs, setLoadingNotifs] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
+  const [bioModalVisible, setBioModalVisible] = useState(false);
+  const [bioInput, setBioInput] = useState('');
+  const [savingBio, setSavingBio] = useState(false);
+  const [homeCourseModalVisible, setHomeCourseModalVisible] = useState(false);
+  const [homeCourseQuery, setHomeCourseQuery] = useState('');
+  const [homeCourseResults, setHomeCourseResults] = useState<Course[]>([]);
+  const [searchingHomeCourse, setSearchingHomeCourse] = useState(false);
 
   // Load notification count badge — must be before any early return
   useEffect(() => {
@@ -125,6 +133,44 @@ export default function ProfileScreen() {
     }
   };
 
+  const openBioModal = () => {
+    setBioInput((user as any)?.bio ?? '');
+    setBioModalVisible(true);
+  };
+
+  const saveBio = async () => {
+    setSavingBio(true);
+    try {
+      await api.users.update({ bio: bioInput.trim() || null });
+      await refreshUser();
+      setBioModalVisible(false);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setSavingBio(false);
+    }
+  };
+
+  const searchHomeCourses = useCallback(async (q: string) => {
+    setHomeCourseQuery(q);
+    if (q.length < 2) { setHomeCourseResults([]); return; }
+    setSearchingHomeCourse(true);
+    try {
+      const r = await api.courses.search(q);
+      setHomeCourseResults(r);
+    } finally { setSearchingHomeCourse(false); }
+  }, []);
+
+  const setHomeCourse = async (course: Course | null) => {
+    try {
+      await api.users.update({ homeCourseId: course?.course_id ?? null });
+      await refreshUser();
+      setHomeCourseModalVisible(false);
+      setHomeCourseQuery('');
+      setHomeCourseResults([]);
+    } catch (e: any) { Alert.alert('Error', e.message); }
+  };
+
   const handleNotifPress = (notif: any) => {
     setNotifVisible(false);
     if (notif.type === 'match_result' || notif.type === 'match_invite') {
@@ -186,6 +232,33 @@ export default function ProfileScreen() {
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
         </View>
       </View>
+
+      {/* Bio */}
+      <TouchableOpacity style={styles.editableCard} onPress={openBioModal}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.editableLabel}>BIO</Text>
+          <Text style={styles.editableValue}>
+            {(user as any)?.bio || 'Tap to add a short bio'}
+          </Text>
+        </View>
+        <Text style={styles.editChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Home Course */}
+      <TouchableOpacity style={styles.editableCard} onPress={() => setHomeCourseModalVisible(true)}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.editableLabel}>HOME COURSE</Text>
+          <Text style={styles.editableValue}>
+            {(user as any)?.home_course_name || 'Tap to set your home course'}
+          </Text>
+          {(user as any)?.home_course_city && (
+            <Text style={styles.editableSub}>
+              {[(user as any).home_course_city, (user as any).home_course_state].filter(Boolean).join(', ')}
+            </Text>
+          )}
+        </View>
+        <Text style={styles.editChev}>›</Text>
+      </TouchableOpacity>
 
       {/* ELO Progress */}
       <View style={styles.card}>
@@ -269,6 +342,94 @@ export default function ProfileScreen() {
           )}
         </View>
       </Modal>
+
+      {/* Bio Modal */}
+      <Modal
+        visible={bioModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setBioModalVisible(false)}
+      >
+        <View style={styles.notifContainer}>
+          <View style={styles.notifHeader}>
+            <TouchableOpacity onPress={() => setBioModalVisible(false)}>
+              <Text style={{ color: C.textMuted, fontSize: 15 }}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.notifTitle}>Edit Bio</Text>
+            <TouchableOpacity onPress={saveBio} disabled={savingBio} style={styles.notifClose}>
+              {savingBio
+                ? <ActivityIndicator color="#000" size="small" />
+                : <Text style={styles.notifCloseText}>Save</Text>}
+            </TouchableOpacity>
+          </View>
+          <View style={{ padding: 20 }}>
+            <Text style={{ color: C.textMuted, fontSize: 12, marginBottom: 8 }}>
+              {bioInput.length}/280
+            </Text>
+            <TextInput
+              style={styles.bioInput}
+              value={bioInput}
+              onChangeText={(t) => setBioInput(t.slice(0, 280))}
+              placeholder="Tell other golfers about yourself..."
+              placeholderTextColor={C.textMuted}
+              multiline
+              autoFocus
+              maxLength={280}
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* Home Course Modal */}
+      <Modal
+        visible={homeCourseModalVisible}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setHomeCourseModalVisible(false)}
+      >
+        <View style={styles.notifContainer}>
+          <View style={styles.notifHeader}>
+            <TouchableOpacity onPress={() => setHomeCourseModalVisible(false)}>
+              <Text style={{ color: C.textMuted, fontSize: 15 }}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.notifTitle}>Home Course</Text>
+            <View style={{ width: 60 }} />
+          </View>
+          <View style={{ padding: 20, paddingBottom: 0 }}>
+            <TextInput
+              style={styles.searchInputProf}
+              value={homeCourseQuery}
+              onChangeText={searchHomeCourses}
+              placeholder="Search course, club, city..."
+              placeholderTextColor={C.textMuted}
+              autoFocus
+              autoCorrect={false}
+            />
+            {(user as any)?.home_course_id && (
+              <TouchableOpacity
+                onPress={() => setHomeCourse(null)}
+                style={{ paddingVertical: 10, alignItems: 'center' }}
+              >
+                <Text style={{ color: C.red, fontSize: 13 }}>Clear current home course</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {searchingHomeCourse && <ActivityIndicator color={C.gold} style={{ marginTop: 16 }} />}
+          <FlatList
+            data={homeCourseResults}
+            keyExtractor={(c) => c.course_id}
+            contentContainerStyle={{ padding: 20 }}
+            renderItem={({ item }) => (
+              <TouchableOpacity style={styles.searchResRow} onPress={() => setHomeCourse(item)}>
+                <Text style={styles.searchResName}>{item.course_name}</Text>
+                <Text style={styles.searchResLoc}>
+                  {[item.city, item.state].filter(Boolean).join(', ')}
+                </Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -322,6 +483,33 @@ const styles = StyleSheet.create({
   rankLabel: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
 
   card: { backgroundColor: C.card, borderRadius: 16, padding: 18, marginBottom: 14, borderWidth: 1, borderColor: C.border, gap: 10 },
+
+  editableCard: {
+    backgroundColor: C.card, borderRadius: 12, padding: 14,
+    flexDirection: 'row', alignItems: 'center', marginBottom: 10,
+    borderWidth: 1, borderColor: C.border,
+  },
+  editableLabel: { color: C.gold, fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 4 },
+  editableValue: { color: C.text, fontSize: 14, fontWeight: '600' },
+  editableSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  editChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
+
+  bioInput: {
+    backgroundColor: C.card, color: C.text, borderRadius: 8,
+    padding: 14, fontSize: 15, borderWidth: 1, borderColor: C.border,
+    minHeight: 120, textAlignVertical: 'top',
+  },
+  searchInputProf: {
+    backgroundColor: C.card, color: C.text, borderRadius: 6,
+    paddingHorizontal: 16, paddingVertical: 13, fontSize: 15,
+    borderWidth: 1, borderColor: C.border,
+  },
+  searchResRow: {
+    backgroundColor: C.card, borderRadius: 8, padding: 14,
+    marginBottom: 8, borderWidth: 1, borderColor: C.border,
+  },
+  searchResName: { color: C.text, fontWeight: '700', fontSize: 15 },
+  searchResLoc: { color: C.gold, fontSize: 12, marginTop: 3 },
   cardRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   eloNum: { fontSize: 44, fontWeight: '900', color: C.gold },
   eloLabel: { fontSize: 14, color: C.textMuted },

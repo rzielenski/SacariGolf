@@ -1,0 +1,243 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
+  ActivityIndicator, RefreshControl,
+} from 'react-native';
+import { useLocalSearchParams, router } from 'expo-router';
+import { api, API_BASE } from '../../lib/api';
+import { C, F } from '../../lib/colors';
+
+function EloRank(elo: number): { label: string; color: string } {
+  if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
+  if (elo >= 1800) return { label: 'Platinum', color: '#c0c0d0' };
+  if (elo >= 1600) return { label: 'Gold', color: C.gold };
+  if (elo >= 1400) return { label: 'Silver', color: '#c0c0c0' };
+  return { label: 'Bronze', color: '#cd7f32' };
+}
+
+export default function UserProfileScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const [profile, setProfile] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    try {
+      setProfile(await api.users.get(id));
+    } catch { /* silent */ } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
+  if (!profile) {
+    return (
+      <View style={styles.centered}>
+        <TouchableOpacity onPress={() => router.back()} style={{ position: 'absolute', top: 60, left: 20 }}>
+          <Text style={{ color: C.gold }}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={{ color: C.textMuted }}>User not found</Text>
+      </View>
+    );
+  }
+
+  const rank = EloRank(profile.elo);
+  const winRate = profile.total_matches > 0 ? Math.round((profile.total_wins / profile.total_matches) * 100) : 0;
+  const joined = new Date(profile.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  return (
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={{ padding: 20, paddingTop: 60, paddingBottom: 40 }}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
+    >
+      <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+        <Text style={styles.backBtnText}>← Back</Text>
+      </TouchableOpacity>
+
+      {/* Header */}
+      <View style={styles.headerSection}>
+        <View style={[styles.avatar, { borderColor: rank.color }]}>
+          {profile.avatar_url ? (
+            <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
+          ) : (
+            <Text style={styles.avatarText}>{profile.username[0].toUpperCase()}</Text>
+          )}
+        </View>
+        <Text style={styles.username}>{profile.username}</Text>
+        <View style={[styles.rankBadge, { borderColor: rank.color }]}>
+          <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label} · {profile.elo} ELO</Text>
+        </View>
+      </View>
+
+      {/* Bio */}
+      {profile.bio ? (
+        <View style={styles.bioCard}>
+          <Text style={styles.bioText}>"{profile.bio}"</Text>
+        </View>
+      ) : null}
+
+      {/* Home course */}
+      {profile.home_course_id && (
+        <TouchableOpacity
+          style={styles.homeCourseCard}
+          onPress={() => router.push(`/course/${profile.home_course_id}` as any)}
+        >
+          <Text style={styles.homeCourseLabel}>HOME COURSE</Text>
+          <Text style={styles.homeCourseName}>{profile.home_course_name}</Text>
+          {(profile.home_course_city || profile.home_course_state) && (
+            <Text style={styles.homeCourseLoc}>
+              {[profile.home_course_city, profile.home_course_state].filter(Boolean).join(', ')}
+            </Text>
+          )}
+        </TouchableOpacity>
+      )}
+
+      {/* Stats */}
+      <View style={styles.statsGrid}>
+        <Stat label="Matches" value={profile.total_matches} />
+        <Stat label="Wins" value={profile.total_wins} />
+        <Stat label="Win Rate" value={`${winRate}%`} />
+      </View>
+
+      {/* Best round */}
+      {profile.best_round && (
+        <>
+          <Text style={styles.sectionTitle}>BEST ROUND</Text>
+          <TouchableOpacity
+            style={[styles.roundCard, { borderColor: C.gold }]}
+            onPress={() => profile.best_round.course_id && router.push(`/course/${profile.best_round.course_id}` as any)}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.roundCourseName}>{profile.best_round.course_name ?? 'Unknown course'}</Text>
+              <Text style={styles.roundMeta}>
+                {profile.best_round.teebox_name} · {profile.best_round.num_holes} holes · Par {profile.best_round.teebox_par}
+              </Text>
+              <Text style={styles.roundDate}>
+                {new Date(profile.best_round.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </Text>
+            </View>
+            <View style={styles.roundScoreBox}>
+              <Text style={[styles.roundScore, { color: C.gold }]}>{profile.best_round.total_score}</Text>
+              <Text style={[styles.roundToPar, { color: profile.best_round.to_par <= 0 ? C.green : C.red }]}>
+                {profile.best_round.to_par > 0 ? `+${profile.best_round.to_par}` : profile.best_round.to_par === 0 ? 'E' : profile.best_round.to_par}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </>
+      )}
+
+      {/* Recent rounds */}
+      <Text style={styles.sectionTitle}>RECENT ROUNDS</Text>
+      {profile.recent_rounds?.length === 0 ? (
+        <Text style={styles.empty}>No rounds played yet.</Text>
+      ) : (
+        profile.recent_rounds?.map((r: any) => (
+          <TouchableOpacity
+            key={r.round_id}
+            style={styles.roundCard}
+            onPress={() => r.course_id && router.push(`/course/${r.course_id}` as any)}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
+              <Text style={styles.roundMeta}>
+                {r.teebox_name ?? '—'} · {r.num_holes ?? r.hole_scores?.length ?? '?'} holes
+                {r.format === 'scramble' ? ' · Scramble' : ''}
+              </Text>
+              <Text style={styles.roundDate}>
+                {new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </Text>
+            </View>
+            <View style={styles.roundScoreBox}>
+              <Text style={styles.roundScore}>{r.total_score}</Text>
+              {r.teebox_par != null && (
+                <Text style={[styles.roundToPar, {
+                  color: r.total_score - r.teebox_par < 0 ? C.green :
+                         r.total_score - r.teebox_par > 0 ? C.red : C.text,
+                }]}>
+                  {r.total_score - r.teebox_par > 0 ? `+${r.total_score - r.teebox_par}` :
+                   r.total_score - r.teebox_par === 0 ? 'E' : r.total_score - r.teebox_par}
+                </Text>
+              )}
+            </View>
+          </TouchableOpacity>
+        ))
+      )}
+
+      <Text style={styles.joined}>Joined {joined}</Text>
+    </ScrollView>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <View style={styles.statBox}>
+      <Text style={styles.statValue}>{value}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: C.bg },
+  centered: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center' },
+  backBtn: { marginBottom: 8 },
+  backBtnText: { color: C.gold, fontSize: 16 },
+
+  headerSection: { alignItems: 'center', marginVertical: 12 },
+  avatar: {
+    width: 96, height: 96, borderRadius: 48, backgroundColor: C.card,
+    justifyContent: 'center', alignItems: 'center', borderWidth: 3, marginBottom: 12,
+    overflow: 'hidden',
+  },
+  avatarImage: { width: 96, height: 96, borderRadius: 48 },
+  avatarText: { fontSize: 40, color: C.gold, fontWeight: '900' },
+  username: { color: C.text, fontSize: 24, fontWeight: '900', marginBottom: 6 },
+  rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5 },
+  rankLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
+
+  bioCard: {
+    backgroundColor: C.card, borderRadius: 10, padding: 14,
+    marginBottom: 14, borderWidth: 1, borderColor: C.border,
+  },
+  bioText: { color: C.text, fontSize: 14, fontStyle: 'italic', lineHeight: 20 },
+
+  homeCourseCard: {
+    backgroundColor: C.card, borderRadius: 10, padding: 14,
+    marginBottom: 14, borderWidth: 1, borderColor: C.gold + '55',
+  },
+  homeCourseLabel: { color: C.gold, fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 4 },
+  homeCourseName: { color: C.text, fontSize: 16, fontWeight: '700' },
+  homeCourseLoc: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+
+  statsGrid: { flexDirection: 'row', gap: 10, marginBottom: 18 },
+  statBox: {
+    flex: 1, backgroundColor: C.card, borderRadius: 10, padding: 14,
+    alignItems: 'center', borderWidth: 1, borderColor: C.border,
+  },
+  statValue: { color: C.text, fontSize: 22, fontWeight: '900' },
+  statLabel: { color: C.textMuted, fontSize: 11, marginTop: 3 },
+
+  sectionTitle: {
+    color: C.textMuted, fontSize: 11, fontWeight: '800',
+    letterSpacing: 1.5, marginBottom: 8, marginTop: 14,
+  },
+  roundCard: {
+    backgroundColor: C.card, borderRadius: 8, padding: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginBottom: 8, borderWidth: 1, borderColor: C.border,
+  },
+  roundCourseName: { color: C.text, fontWeight: '700', fontSize: 14 },
+  roundMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
+  roundDate: { color: C.textDim, fontSize: 11, marginTop: 4 },
+  roundScoreBox: { alignItems: 'flex-end', minWidth: 50 },
+  roundScore: { color: C.text, fontFamily: F.serif, fontSize: 22, fontWeight: '700' },
+  roundToPar: { fontSize: 12, fontWeight: '700', marginTop: 1 },
+
+  empty: { color: C.textMuted, fontSize: 13, paddingVertical: 12 },
+  joined: { color: C.textDim, textAlign: 'center', fontSize: 12, marginTop: 24 },
+});

@@ -8,6 +8,11 @@ export interface User {
   avatar_url: string | null;
   created_at: string;
   handicap_index: number | null;
+  bio?: string | null;
+  home_course_id?: string | null;
+  home_course_name?: string | null;
+  home_course_city?: string | null;
+  home_course_state?: string | null;
 }
 
 export interface ChatMessage {

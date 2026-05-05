@@ -73,6 +73,7 @@ export default function RootLayout() {
         <Stack.Screen name="chat/[type]/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="leaderboard" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="user/[id]" options={{ animation: 'slide_from_right' }} />
       </Stack>
     </AuthProvider>
   );

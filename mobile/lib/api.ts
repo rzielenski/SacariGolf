@@ -49,7 +49,7 @@ export const api = {
 
   users: {
     me: () => request<any>('GET', '/users/me'),
-    update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string }) => request<any>('PATCH', '/users/me', body),
+    update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string; bio?: string | null; homeCourseId?: string | null }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<any[]>('GET', '/users/me/notifications'),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),

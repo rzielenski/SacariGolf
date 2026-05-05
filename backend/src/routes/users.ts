@@ -13,9 +13,12 @@ const router = Router();
 
 router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT user_id, username, email, elo, total_matches, total_wins, avatar_url, created_at,
-            handicap_index
-     FROM users WHERE user_id = $1`,
+    `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.avatar_url, u.created_at,
+            u.handicap_index, u.bio, u.home_course_id,
+            c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
+     FROM users u
+     LEFT JOIN courses c ON c.course_id = u.home_course_id
+     WHERE u.user_id = $1`,
     [req.userId]
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
@@ -23,7 +26,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -32,6 +35,13 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     const hi = parseFloat(handicapIndex);
     if (isNaN(hi) || hi < 0 || hi > 54) return res.status(400).json({ error: 'handicapIndex must be 0–54' });
     values.push(hi); updates.push(`handicap_index = $${values.length}`);
+  }
+  if (bio !== undefined) {
+    const trimmed = (bio ?? '').toString().slice(0, 280);
+    values.push(trimmed || null); updates.push(`bio = $${values.length}`);
+  }
+  if (homeCourseId !== undefined) {
+    values.push(homeCourseId || null); updates.push(`home_course_id = $${values.length}`);
   }
   if (username !== undefined) {
     if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
@@ -135,12 +145,54 @@ router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Resp
 
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT user_id, username, elo, total_matches, total_wins, avatar_url, created_at
-     FROM users WHERE user_id = $1`,
+    `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url, u.created_at,
+            u.bio, u.home_course_id,
+            c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
+     FROM users u
+     LEFT JOIN courses c ON c.course_id = u.home_course_id
+     WHERE u.user_id = $1`,
     [req.params.id]
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
-  return res.json(rows[0]);
+  const userInfo = rows[0];
+
+  // Recent completed rounds (last 5)
+  const { rows: recentRounds } = await pool.query(
+    `SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
+            t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
+            c.course_id, c.course_name,
+            m.format, m.match_type
+     FROM rounds r
+     JOIN matches m ON m.match_id = r.match_id
+     LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true
+     ORDER BY r.created_at DESC
+     LIMIT 5`,
+    [req.params.id]
+  );
+
+  // Best round (lowest score-to-par across all completed rounds)
+  const { rows: bestRows } = await pool.query(
+    `SELECT r.round_id, r.total_score, r.created_at,
+            t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
+            c.course_id, c.course_name,
+            (r.total_score - t.par) AS to_par
+     FROM rounds r
+     JOIN matches m ON m.match_id = r.match_id
+     LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND t.par IS NOT NULL
+     ORDER BY (r.total_score - t.par) ASC
+     LIMIT 1`,
+    [req.params.id]
+  );
+
+  return res.json({
+    ...userInfo,
+    recent_rounds: recentRounds,
+    best_round: bestRows[0] ?? null,
+  });
 }));
 
 router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {

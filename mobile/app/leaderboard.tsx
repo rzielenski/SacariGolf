@@ -87,7 +87,11 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
     rank === 3 ? '#a1673a' : C.textDim;
 
   return (
-    <View style={[styles.row, isMe && styles.rowMe]}>
+    <TouchableOpacity
+      style={[styles.row, isMe && styles.rowMe]}
+      onPress={() => router.push(`/user/${player.user_id}` as any)}
+      activeOpacity={0.7}
+    >
       <Text style={[styles.rank, { color: medalColor, fontFamily: rank <= 3 ? F.serif : undefined }]}>
         {rank <= 3 ? ['I', 'II', 'III'][rank - 1] : `#${rank}`}
       </Text>
@@ -109,7 +113,7 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
         <Text style={[styles.elo, { color: eloColor }]}>{player.elo}</Text>
         <Text style={styles.eloLabel}>ELO</Text>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 }
 

@@ -1,11 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator, RefreshControl, Modal,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
+
+function scoreColor(score: number, par: number) {
+  const d = score - par;
+  if (d <= -2) return '#4CAF50';
+  if (d === -1) return '#81C784';
+  if (d === 0) return C.text;
+  if (d === 1) return '#FF9800';
+  return '#F44336';
+}
 
 export default function CourseInfoScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -14,6 +23,7 @@ export default function CourseInfoScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lbTab, setLbTab] = useState<'stroke' | 'scramble'>('stroke');
+  const [scorecardEntry, setScorecardEntry] = useState<any | null>(null);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -128,7 +138,14 @@ export default function CourseInfoScreen() {
         </Text>
       ) : (
         displayLb.map((r, i) => (
-          <View key={i} style={styles.lbRow}>
+          <TouchableOpacity
+            key={r.round_id ?? i}
+            style={styles.lbRow}
+            onPress={() => router.push(`/user/${r.user_id}` as any)}
+            onLongPress={() => r.hole_scores?.length && setScorecardEntry(r)}
+            delayLongPress={300}
+            activeOpacity={0.7}
+          >
             <Text style={[styles.lbRank, { color: i === 0 ? C.gold : i === 1 ? '#b0bec5' : i === 2 ? '#a1673a' : C.textDim }]}>
               #{i + 1}
             </Text>
@@ -144,10 +161,105 @@ export default function CourseInfoScreen() {
                 {r.total_score - r.par > 0 ? `+${r.total_score - r.par}` : r.total_score - r.par === 0 ? 'E' : r.total_score - r.par}
               </Text>
             </View>
-          </View>
+          </TouchableOpacity>
         ))
       )}
+      {displayLb.length > 0 && <Text style={styles.tapHint}>Tap a row for profile · Hold for scorecard</Text>}
+
+      {/* Scorecard Modal */}
+      <Modal
+        visible={!!scorecardEntry}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setScorecardEntry(null)}
+      >
+        {scorecardEntry && (
+          <ScorecardModal
+            entry={scorecardEntry}
+            teebox={course.teeboxes?.find((t: any) => t.teebox_id === scorecardEntry.teebox_id)}
+            onClose={() => setScorecardEntry(null)}
+          />
+        )}
+      </Modal>
     </ScrollView>
+  );
+}
+
+function ScorecardModal({ entry, teebox, onClose }: { entry: any; teebox: any; onClose: () => void }) {
+  const scores: number[] = entry.hole_scores ?? [];
+  const holes = (teebox?.holes ?? []).slice().sort((a: any, b: any) => a.hole_num - b.hole_num).slice(0, scores.length);
+  const front = holes.slice(0, 9);
+  const back = holes.slice(9);
+  const frontScores = scores.slice(0, 9);
+  const backScores = scores.slice(9);
+  const frontPar = front.reduce((a: number, h: any) => a + h.par, 0);
+  const backPar = back.reduce((a: number, h: any) => a + h.par, 0);
+  const totalPar = frontPar + backPar;
+  const diff = entry.total_score - totalPar;
+
+  return (
+    <View style={styles.modalContainer}>
+      <View style={styles.modalHeader}>
+        <View>
+          <Text style={styles.modalTitle}>{entry.username}</Text>
+          <Text style={styles.modalSub}>{entry.teebox_name} · {new Date(entry.created_at).toLocaleDateString()}</Text>
+        </View>
+        <TouchableOpacity onPress={onClose} style={styles.modalDone}>
+          <Text style={styles.modalDoneText}>Done</Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+        <View style={styles.totalsCard}>
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>SCORE</Text>
+            <Text style={styles.totalValue}>{entry.total_score}</Text>
+          </View>
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>TO PAR</Text>
+            <Text style={[styles.totalValue, { color: diff < 0 ? C.green : diff > 0 ? C.red : C.text }]}>
+              {diff > 0 ? `+${diff}` : diff === 0 ? 'E' : diff}
+            </Text>
+          </View>
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>PAR</Text>
+            <Text style={[styles.totalValue, { color: C.textMuted }]}>{totalPar}</Text>
+          </View>
+        </View>
+
+        <ScorecardGrid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
+        {back.length > 0 && <ScorecardGrid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
+      </ScrollView>
+    </View>
+  );
+}
+
+function ScorecardGrid({ label, holes, scores, parTotal }: { label: string; holes: any[]; scores: number[]; parTotal: number }) {
+  const scoreTotal = scores.reduce((a, b) => a + b, 0);
+  return (
+    <View style={{ marginTop: 10 }}>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Hole</Text>
+        {holes.map((h) => <Text key={h.hole_id} style={styles.scNum}>{h.hole_num}</Text>)}
+        <Text style={styles.scTotal}>{label}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Par</Text>
+        {holes.map((h) => <Text key={h.hole_id} style={styles.scParCell}>{h.par}</Text>)}
+        <Text style={styles.scTotal}>{parTotal}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Score</Text>
+        {holes.map((h, i) => (
+          <Text key={h.hole_id} style={[styles.scScoreCell, { color: scoreColor(scores[i], h.par) }]}>
+            {scores[i] ?? '-'}
+          </Text>
+        ))}
+        <Text style={[styles.scTotal, { color: scoreTotal - parTotal < 0 ? C.green : scoreTotal - parTotal > 0 ? C.red : C.text }]}>
+          {scoreTotal || '-'}
+        </Text>
+      </View>
+    </View>
   );
 }
 
@@ -219,4 +331,31 @@ const styles = StyleSheet.create({
   lbPar: { color: C.textMuted, fontSize: 11, marginTop: 1 },
 
   empty: { color: C.textMuted, fontSize: 13, paddingHorizontal: 20, paddingVertical: 12 },
+  tapHint: { color: C.textDim, fontSize: 11, textAlign: 'center', paddingVertical: 12, paddingHorizontal: 20 },
+
+  modalContainer: { flex: 1, backgroundColor: C.bg },
+  modalHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
+    paddingTop: 20, paddingHorizontal: 20, paddingBottom: 16,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  modalTitle: { color: C.text, fontSize: 18, fontWeight: '900' },
+  modalSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  modalDone: { backgroundColor: C.gold, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 7 },
+  modalDoneText: { color: '#000', fontWeight: '800', fontSize: 14 },
+
+  totalsCard: {
+    flexDirection: 'row', backgroundColor: C.card, borderRadius: 10,
+    padding: 14, borderWidth: 1, borderColor: C.border, marginBottom: 6,
+  },
+  totalCell: { flex: 1, alignItems: 'center' },
+  totalLabel: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  totalValue: { color: C.text, fontFamily: F.serif, fontSize: 24, fontWeight: '700', marginTop: 4 },
+
+  scGrid: { flexDirection: 'row', alignItems: 'center', minHeight: 26 },
+  scLabel: { width: 40, color: C.textDim, fontSize: 10, fontWeight: '700' },
+  scNum: { flex: 1, color: C.textMuted, fontSize: 11, textAlign: 'center', fontWeight: '700' },
+  scParCell: { flex: 1, color: C.textMuted, fontSize: 11, textAlign: 'center' },
+  scScoreCell: { flex: 1, fontSize: 13, textAlign: 'center', fontWeight: '700' },
+  scTotal: { width: 40, color: C.gold, fontSize: 11, textAlign: 'center', fontWeight: '800' },
 });

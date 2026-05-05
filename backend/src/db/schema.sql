@@ -15,7 +15,9 @@ CREATE TABLE users (
   total_wins INTEGER NOT NULL DEFAULT 0,
   avatar_url TEXT,
   push_token TEXT,
-  handicap_index REAL
+  handicap_index REAL,
+  bio TEXT,
+  home_course_id UUID REFERENCES courses(course_id) ON DELETE SET NULL
 );
 
 -- Friends

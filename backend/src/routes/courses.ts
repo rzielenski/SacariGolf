@@ -42,9 +42,10 @@ router.get('/search', requireAuth, wrap(async (req: Request, res: Response) => {
 
 router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT r.total_score, r.created_at, array_length(r.hole_scores, 1) AS holes_played,
-            u.username, u.user_id,
-            t.name AS teebox_name, t.par, t.num_holes,
+    `SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
+            array_length(r.hole_scores, 1) AS holes_played,
+            u.username, u.user_id, u.avatar_url,
+            t.teebox_id, t.name AS teebox_name, t.par, t.num_holes,
             m.match_type, m.format
      FROM rounds r
      JOIN users u ON u.user_id = r.user_id
