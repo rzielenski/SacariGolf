@@ -182,7 +182,7 @@ export default function ProfileScreen() {
     }
   };
 
-  const searchHomeCourses = useCallback(async (q: string) => {
+  const searchHomeCourses = async (q: string) => {
     setHomeCourseQuery(q);
     if (q.length < 2) { setHomeCourseResults([]); return; }
     setSearchingHomeCourse(true);
@@ -190,7 +190,7 @@ export default function ProfileScreen() {
       const r = await api.courses.search(q);
       setHomeCourseResults(r);
     } finally { setSearchingHomeCourse(false); }
-  }, []);
+  };
 
   const setHomeCourse = async (course: Course | null) => {
     try {
