@@ -107,6 +107,7 @@ export default function PlayScreen() {
         teeboxId: teebox.teebox_id,
         clanId: selectedClanId ?? undefined,
         format: (matchType === 'duo' || matchType === 'squad') ? format : 'stroke',
+        numHoles,
       });
       if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
         Alert.alert(

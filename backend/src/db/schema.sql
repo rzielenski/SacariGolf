@@ -99,6 +99,7 @@ CREATE TABLE matches (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   match_type TEXT NOT NULL DEFAULT 'solo', -- solo | duo | squad | practice
   format TEXT NOT NULL DEFAULT 'stroke', -- stroke | scramble
+  num_holes SMALLINT NOT NULL DEFAULT 18,
   completed BOOLEAN NOT NULL DEFAULT FALSE,
   name TEXT,
   is_public BOOLEAN NOT NULL DEFAULT TRUE,

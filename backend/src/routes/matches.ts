@@ -25,9 +25,10 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 
 // Create match
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId, clanId, format } = req.body;
+  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles } = req.body;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
   const resolvedFormat = (matchType === 'duo' || matchType === 'squad') && format === 'scramble' ? 'scramble' : 'stroke';
+  const resolvedNumHoles = (numHoles === 9) ? 9 : 18;
 
   const client = await pool.connect();
   try {
@@ -46,9 +47,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     }
 
     const { rows } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice, format)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [matchType, name || null, isPractice || false, resolvedFormat]
+      `INSERT INTO matches (match_type, name, is_practice, format, num_holes)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles]
     );
     const match = rows[0];
 

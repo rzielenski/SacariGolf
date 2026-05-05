@@ -138,14 +138,16 @@ function FriendsTab() {
 
   const sendChallenge = async (friend: any, holes: string) => {
     try {
+      const numHoles = parseInt(holes, 10) as 9 | 18;
       const match = await api.matches.create({
         matchType: 'solo',
         name: `${holes}-hole challenge`,
+        numHoles,
       });
       await api.invites.send(match.match_id, friend.user_id);
-      Alert.alert('Challenge sent!', `${friend.username} has been invited to your match.`, [
-        { text: 'Go to Match', onPress: () => router.push(`/match/${match.match_id}` as any) },
-        { text: 'Stay' },
+      Alert.alert('Challenge sent!', `${friend.username} has been invited. Start your round now — they'll join when they accept.`, [
+        { text: 'Start My Round', onPress: () => router.push(`/match/scoring/${match.match_id}?holes=${holes}` as any) },
+        { text: 'Later' },
       ]);
     } catch (e: any) {
       Alert.alert('Error', e.message);
