@@ -171,7 +171,7 @@ export default function HomeScreen() {
 
       <View style={styles.footerRow}>
         <TouchableOpacity
-          onPress={() => Linking.openURL('mailto:rpzielenski@gmail.com?subject=Clash%20of%20Clubs%20Feature%20Suggestion')}
+          onPress={() => Linking.openURL('mailto:rpzielenski@gmail.com?subject=Sacari%20Golf%20Feature%20Suggestion')}
         >
           <Text style={styles.feedbackText}>suggest a feature</Text>
         </TouchableOpacity>

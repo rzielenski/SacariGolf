@@ -2,11 +2,13 @@ import React, { useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-  Animated, ScrollView, Keyboard,
+  Animated, ScrollView, Keyboard, Image,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
+
+const SACARI_LOGO = require('../../assets/sacari-logo.jpg');
 
 export default function LoginScreen() {
   const { login, register } = useAuth();
@@ -116,10 +118,7 @@ export default function LoginScreen() {
       >
         {/* Logo */}
         <View style={styles.logoBox}>
-          <View style={styles.logoMark}>
-            <Text style={styles.logoMarkText}>CoC</Text>
-          </View>
-          <Text style={styles.logoTitle}>Clash of Clubs</Text>
+          <Image source={SACARI_LOGO} style={styles.logoImage} resizeMode="contain" />
           <Text style={styles.logoSub}>Est. 2026</Text>
         </View>
 
@@ -205,13 +204,8 @@ export default function LoginScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   inner: { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 24, paddingVertical: 40, gap: 32 },
-  logoBox: { alignItems: 'center', gap: 8 },
-  logoMark: {
-    width: 72, height: 72, borderRadius: 6, borderWidth: 2, borderColor: C.gold,
-    justifyContent: 'center', alignItems: 'center',
-  },
-  logoMarkText: { fontFamily: F.serif, fontSize: 22, fontWeight: '700', color: C.gold, letterSpacing: 3 },
-  logoTitle: { fontFamily: F.serif, fontSize: 28, fontWeight: '700', color: C.text, letterSpacing: 2 },
+  logoBox: { alignItems: 'center', gap: 4 },
+  logoImage: { width: 220, height: 220 },
   logoSub: { fontSize: 10, color: C.textDim, letterSpacing: 4, textTransform: 'uppercase' },
 
   card: {

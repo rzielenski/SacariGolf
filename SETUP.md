@@ -1,4 +1,4 @@
-# Clash of Clubs — Setup Guide
+# Sacari Golf — Setup Guide
 
 ## Architecture
 - **mobile/** — Expo (React Native) iOS app

@@ -44,4 +44,4 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Clash of Clubs API running on :${PORT}`));
+app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));

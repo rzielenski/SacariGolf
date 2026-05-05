@@ -1,10 +1,10 @@
-# Privacy Policy — Clash of Clubs
+# Privacy Policy — Sacari Golf
 
-**Last updated: May 2, 2026**
+**Last updated: May 5, 2026**
 
 ## 1. Who we are
 
-Clash of Clubs ("the App") is operated by Richard Zielenski. Questions can be directed to rpzielenski@gmail.com.
+Sacari Golf ("the App") is operated by Richard Zielenski. Questions can be directed to rpzielenski@gmail.com.
 
 ## 2. What data we collect
 

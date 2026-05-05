@@ -1,4 +1,4 @@
--- Clash Of Clubs Database Schema
+-- Sacari Golf Database Schema
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 

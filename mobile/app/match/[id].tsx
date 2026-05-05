@@ -64,7 +64,7 @@ export default function MatchLobbyScreen() {
   };
 
   const handleShare = async () => {
-    await Share.share({ message: `Join my Clash of Clubs match! Match ID: ${id}` });
+    await Share.share({ message: `Join my Sacari Golf match! Match ID: ${id}` });
   };
 
   const openInvite = async () => {

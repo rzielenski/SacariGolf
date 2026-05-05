@@ -1,32 +1,32 @@
 {
   "expo": {
-    "name": "Clash of Clubs",
-    "slug": "clash-of-clubs",
+    "name": "Sacari Golf",
+    "slug": "sacari-golf",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icon.jpg",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
-    "scheme": "clashofclubs",
+    "scheme": "sacarigolf",
     "splash": {
-      "image": "./assets/icon.png",
+      "image": "./assets/sacari-logo.jpg",
       "resizeMode": "contain",
-      "backgroundColor": "#f0ece3"
+      "backgroundColor": "#08120f"
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.clashofclubs.app",
+      "bundleIdentifier": "com.sacarigolf.app",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Clash of Clubs uses your location to center the course map and measure shot distances.",
+        "NSLocationWhenInUseUsageDescription": "Sacari Golf uses your location to center the course map and measure shot distances.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#f0ece3"
+        "foregroundImage": "./assets/adaptive-icon.jpg",
+        "backgroundColor": "#08120f"
       },
-      "package": "com.clashofclubs.app",
+      "package": "com.sacarigolf.app",
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
@@ -38,7 +38,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Clash of Clubs uses your location to center the course map and measure shot distances."
+          "locationWhenInUsePermission": "Sacari Golf uses your location to center the course map and measure shot distances."
         }
       ],
       [

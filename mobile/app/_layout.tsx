@@ -65,7 +65,7 @@ export default function RootLayout() {
     <AuthProvider>
       <StatusBar style="light" />
       <AuthGuard />
-      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#091409' } }}>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#08120f' } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />

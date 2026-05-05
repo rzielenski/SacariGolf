@@ -1,4 +1,4 @@
-// Clash of Clubs — Match Simulation
+// Sacari Golf — Match Simulation
 // Tests solo and duo matches across multiple courses, logs all bugs found.
 
 const BASE = 'http://localhost:3000';
