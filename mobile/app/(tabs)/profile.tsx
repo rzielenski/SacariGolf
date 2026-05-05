@@ -616,7 +616,7 @@ export default function ProfileScreen() {
                       </Text>
                       {d.is_nine_hole && (
                         <View style={{ backgroundColor: C.gold + '33', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1 }}>
-                          <Text style={{ color: C.gold, fontSize: 9, fontWeight: '800' }}>9H ×2</Text>
+                          <Text style={{ color: C.gold, fontSize: 9, fontWeight: '800' }}>9H</Text>
                         </View>
                       )}
                     </View>

@@ -262,40 +262,30 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
     [req.params.id]
   );
 
-  // WHS differential calculation:
-  //  - 18-hole round on 18-hole teebox: standard formula
-  //  - 9-hole round on 9-hole teebox: standard formula on the 9-hole rating, then ×2 for an 18-hole equivalent
-  //  - 9-hole round on 18-hole teebox: prefer front/back 9 ratings (assume front 9 = first 9 holes scored).
-  //    Detect "back 9" by checking if hole_scores' first hole_num is 10+ (we only have totals here, so default front).
-  //    Fallback to ½ of the full-18 rating × 2 if 9-hole splits aren't on the teebox.
+  // Score differential = (113 / slope) × (gross − rating)
+  // For 9-hole rounds, use the 9-hole slope and 9-hole rating as-is.
+  // The doubling of slope and (score − rating) cancel out, so no extra ×2 is needed.
+  //  - 18-hole round on 18-hole teebox: full 18 rating + slope
+  //  - 9-hole round on 9-hole teebox:    teebox.course_rating + slope_rating ARE the 9-hole values
+  //  - 9-hole round on 18-hole teebox:   use the front-9 rating/slope columns (assumes front 9)
   const differentials = rounds.map((r) => {
     const isNineHoleRound = r.holes_played === 9;
     const isNineHoleTeebox = r.teebox_holes === 9;
 
     let rating: number;
     let slope: number;
-    let diff: number;
 
     if (isNineHoleRound && !isNineHoleTeebox) {
-      // 9-hole round on a 18-hole teebox — use the front-9 rating/slope if we have them
-      const useRating = r.front_course_rating ?? (r.course_rating / 2);
-      const useSlope = r.front_slope_rating ?? r.slope_rating;
-      rating = useRating;
-      slope = useSlope;
-      const nineDiff = (113 / slope) * (r.total_score - rating);
-      diff = nineDiff * 2; // convert 9-hole differential to 18-hole equivalent
-    } else if (isNineHoleTeebox) {
-      // 9-hole teebox — its course_rating IS already the 9-hole rating
-      rating = r.course_rating;
-      slope = r.slope_rating;
-      const nineDiff = (113 / slope) * (r.total_score - rating);
-      diff = nineDiff * 2;
+      // 9-hole round on an 18-hole teebox — prefer the dedicated front-9 ratings
+      rating = r.front_course_rating ?? (r.course_rating / 2);
+      slope = r.front_slope_rating ?? r.slope_rating;
     } else {
-      // Standard 18-hole round on 18-hole teebox
+      // 9-hole teebox OR full 18-hole round — the teebox's primary rating/slope already match
       rating = r.course_rating;
       slope = r.slope_rating;
-      diff = (113 / slope) * (r.total_score - rating);
     }
+
+    const diff = (113 / slope) * (r.total_score - rating);
 
     return {
       round_id: r.round_id,
@@ -307,7 +297,6 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
       course_rating_used: Math.round(rating * 10) / 10,
       slope_used: slope,
       differential: Math.round(diff * 10) / 10,
-      // The 9-hole differentials are already doubled to be 18-hole equivalents
       is_nine_hole: isNineHoleRound,
     };
   });
