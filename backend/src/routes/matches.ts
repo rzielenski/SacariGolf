@@ -117,10 +117,12 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     `SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
             u.username, u.elo, u.avatar_url,
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
-            t.course_id, t.num_holes
+            t.course_id, t.num_holes,
+            r.hole_scores
      FROM match_players mp
      JOIN users u ON u.user_id = mp.user_id
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
      WHERE mp.match_id = $1`,
     [req.params.id]
   );

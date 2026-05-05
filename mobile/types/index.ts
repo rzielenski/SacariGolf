@@ -89,6 +89,7 @@ export interface MatchPlayer {
   slope_rating: number | null;
   num_holes?: number;
   course_id?: string;
+  hole_scores?: number[] | null;
 }
 
 export interface MatchResult {
