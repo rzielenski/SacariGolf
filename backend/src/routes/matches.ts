@@ -532,4 +532,44 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
   }
 }));
 
+// Cancel / delete a match — only allowed if no player has submitted scores yet (no ELO penalty)
+router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Must be a participant
+    const { rows: playerRows } = await client.query(
+      `SELECT mp.user_id FROM match_players mp
+       WHERE mp.match_id = $1 AND mp.user_id = $2`,
+      [req.params.id, req.userId]
+    );
+    if (!playerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not in this match' });
+    }
+
+    // Reject if anyone has already submitted scores
+    const { rows: scoredRows } = await client.query(
+      `SELECT 1 FROM match_players WHERE match_id = $1 AND completed = true LIMIT 1`,
+      [req.params.id]
+    );
+    if (scoredRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Scores have already been submitted — use Forfeit instead.' });
+    }
+
+    // DELETE cascades to match_players, rounds, match_invites, match_results, messages
+    await client.query(`DELETE FROM matches WHERE match_id = $1`, [req.params.id]);
+
+    await client.query('COMMIT');
+    return res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
 export default router;

@@ -284,7 +284,7 @@ export default function ScoringScreen() {
     } catch (e: any) { Alert.alert('Error', e.message); } finally { setLoadingCourse(false); }
   };
 
-  // ── Leave / Forfeit ─────────────────────────────────────────────────────────
+  // ── Leave / Cancel / Forfeit ────────────────────────────────────────────────
 
   const saveAndLeave = useCallback(async () => {
     try {
@@ -292,6 +292,19 @@ export default function ScoringScreen() {
     } catch { /* best-effort */ }
     router.back();
   }, [scores, currentHole, SAVE_KEY]);
+
+  const doCancel = useCallback(async () => {
+    setForfeiting(true);
+    try {
+      await api.matches.cancel(id);
+      try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
+      router.replace('/(tabs)/' as any);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setForfeiting(false);
+    }
+  }, [id, SAVE_KEY]);
 
   const doForfeit = useCallback(async () => {
     setForfeiting(true);
@@ -308,32 +321,50 @@ export default function ScoringScreen() {
   }, [id, SAVE_KEY]);
 
   const handleLeave = useCallback(() => {
-    Alert.alert(
-      'Leave Round',
-      'Save your progress and come back later, or forfeit the match.',
-      [
-        { text: 'Keep Playing', style: 'cancel' },
-        {
-          text: 'Save & Leave',
-          onPress: saveAndLeave,
+    // "Cancel" (no ELO) is offered when the user is still in course selection
+    // OR has not advanced past hole 0 with no score changes — backend enforces
+    // the real rule (no player completed = safe to cancel).
+    const noScoringStarted = selectingCourse || currentHole === 0;
+
+    const buttons: any[] = [
+      { text: 'Keep Playing', style: 'cancel' },
+      { text: 'Save & Leave', onPress: saveAndLeave },
+    ];
+
+    if (noScoringStarted) {
+      buttons.push({
+        text: 'Cancel Match',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert(
+            'Cancel Match?',
+            'The match will be deleted. No ELO penalty for anyone.',
+            [
+              { text: 'Keep Match', style: 'cancel' },
+              { text: 'Cancel Match', style: 'destructive', onPress: doCancel },
+            ]
+          );
         },
-        {
-          text: 'Forfeit Match',
-          style: 'destructive',
-          onPress: () => {
-            Alert.alert(
-              'Forfeit?',
-              'You will take an ELO penalty. This cannot be undone.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
-              ]
-            );
-          },
+      });
+    } else {
+      buttons.push({
+        text: 'Forfeit Match',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert(
+            'Forfeit?',
+            'You will take an ELO penalty. This cannot be undone.',
+            [
+              { text: 'Keep Playing', style: 'cancel' },
+              { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
+            ]
+          );
         },
-      ]
-    );
-  }, [saveAndLeave, doForfeit]);
+      });
+    }
+
+    Alert.alert('Leave Round', 'What would you like to do?', buttons);
+  }, [saveAndLeave, doCancel, doForfeit, selectingCourse, currentHole]);
 
   // ── Scoring helpers ─────────────────────────────────────────────────────────
 

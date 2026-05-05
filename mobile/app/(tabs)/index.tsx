@@ -37,6 +37,26 @@ export default function HomeScreen() {
     }
   }, [refreshUser]);
 
+  const deleteMatch = useCallback(async (matchId: string) => {
+    try {
+      await api.matches.cancel(matchId);
+      setMatches((prev) => prev.filter((m) => m.match_id !== matchId));
+    } catch (e: any) {
+      Alert.alert('Could not delete', e.message);
+    }
+  }, []);
+
+  const confirmDeleteMatch = useCallback((match: Match) => {
+    Alert.alert(
+      'Delete Match',
+      'Remove this match? Only works if no scores have been submitted.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteMatch(match.match_id) },
+      ]
+    );
+  }, [deleteMatch]);
+
   useEffect(() => { load(); }, [load]);
 
   if (!user) return null;
@@ -137,7 +157,14 @@ export default function HomeScreen() {
           <Text style={styles.emptySubText}>Hit the fairway and play your first round!</Text>
         </View>
       ) : (
-        matches.map((m) => <MatchRow key={m.match_id} match={m} userId={user.user_id} />)
+        matches.map((m) => (
+          <MatchRow
+            key={m.match_id}
+            match={m}
+            userId={user.user_id}
+            onLongPress={!m.completed ? () => confirmDeleteMatch(m) : undefined}
+          />
+        ))
       )}
 
       <View style={styles.footerRow}>
@@ -221,7 +248,7 @@ export default function HomeScreen() {
   );
 }
 
-function MatchRow({ match, userId }: { match: Match; userId: string }) {
+function MatchRow({ match, userId, onLongPress }: { match: Match; userId: string; onLongPress?: () => void }) {
   const won = match.winner_side === match.my_side;
   const didPlay = match.completed && match.my_side != null;
   const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
@@ -231,6 +258,8 @@ function MatchRow({ match, userId }: { match: Match; userId: string }) {
     <TouchableOpacity
       style={styles.matchRow}
       onPress={() => router.push(`/match/${match.match_id}` as any)}
+      onLongPress={onLongPress}
+      delayLongPress={400}
     >
       <View style={styles.matchLeft}>
         <Text style={styles.matchType}>{typeLabel}</Text>

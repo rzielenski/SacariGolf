@@ -24,6 +24,11 @@ async function request<T>(
     headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) {
+    // Server returned HTML (e.g. 404 page or crash) — surface a clean message
+    throw new Error(`Server error (${res.status})`);
+  }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data as T;
@@ -88,6 +93,7 @@ export const api = {
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
+    cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
   },
 
   finds: {

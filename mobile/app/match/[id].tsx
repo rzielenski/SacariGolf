@@ -17,6 +17,7 @@ export default function MatchLobbyScreen() {
   const [inviteVisible, setInviteVisible] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -66,6 +67,31 @@ export default function MatchLobbyScreen() {
         setFriends(f);
       } catch { /* silent */ }
     }
+  };
+
+  const handleCancelMatch = () => {
+    Alert.alert(
+      'Cancel Match',
+      'This match will be deleted with no ELO penalty for anyone. Continue?',
+      [
+        { text: 'Keep Match', style: 'cancel' },
+        {
+          text: 'Delete Match',
+          style: 'destructive',
+          onPress: async () => {
+            setCancelling(true);
+            try {
+              await api.matches.cancel(id);
+              router.replace('/(tabs)/' as any);
+            } catch (e: any) {
+              Alert.alert('Error', e.message);
+            } finally {
+              setCancelling(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const sendInvite = async (friendId: string) => {
@@ -157,6 +183,19 @@ export default function MatchLobbyScreen() {
       >
         <Text style={styles.chatBtnText}>Match Chat</Text>
       </TouchableOpacity>
+
+      {/* Cancel Match — only when no player has submitted scores */}
+      {!isCompleted && !(match.players?.some((p) => p.completed)) && (
+        <TouchableOpacity
+          style={styles.cancelBtn}
+          onPress={handleCancelMatch}
+          disabled={cancelling}
+        >
+          {cancelling
+            ? <ActivityIndicator color={C.red} size="small" />
+            : <Text style={styles.cancelBtnText}>Cancel Match</Text>}
+        </TouchableOpacity>
+      )}
 
       {/* Invite Modal */}
       <Modal
@@ -291,6 +330,12 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
   },
   chatBtnText: { color: C.text, fontWeight: '700', fontSize: 14 },
+
+  cancelBtn: {
+    marginTop: 24, borderRadius: 6, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: C.red + '66',
+  },
+  cancelBtnText: { color: C.red, fontWeight: '700', fontSize: 14 },
 
   inviteBtn: {
     marginTop: 12, borderRadius: 6, paddingVertical: 14, alignItems: 'center',
