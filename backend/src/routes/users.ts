@@ -14,7 +14,8 @@ const router = Router();
 
 router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.avatar_url, u.created_at,
+    `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
+            u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u
@@ -146,7 +147,8 @@ router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Resp
 
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url, u.created_at,
+    `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
+            u.avatar_url, u.created_at,
             u.bio, u.home_course_id,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u

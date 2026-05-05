@@ -13,6 +13,7 @@ CREATE TABLE users (
   elo INTEGER NOT NULL DEFAULT 1200,
   total_matches INTEGER NOT NULL DEFAULT 0,
   total_wins INTEGER NOT NULL DEFAULT 0,
+  total_ties INTEGER NOT NULL DEFAULT 0,
   avatar_url TEXT,
   push_token TEXT,
   handicap_index REAL,

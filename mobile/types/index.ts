@@ -5,6 +5,7 @@ export interface User {
   elo: number;
   total_matches: number;
   total_wins: number;
+  total_ties?: number;
   avatar_url: string | null;
   created_at: string;
   handicap_index: number | null;
@@ -78,8 +79,9 @@ export interface Match {
   result?: MatchResult | null;
   my_side?: number;
   my_strokes?: number;
-  winner_side?: number;
+  winner_side?: number | null;
   delta_elo?: number;
+  my_delta_elo?: number | null;
 }
 
 export interface MatchPlayer {
@@ -99,10 +101,11 @@ export interface MatchPlayer {
 }
 
 export interface MatchResult {
-  winner_side: number;
+  winner_side: number | null;
   delta_elo: number;
   side1_score_differential: number;
   side2_score_differential: number;
+  details?: { tied?: boolean; side1DeltaSignedElo?: number; side2DeltaSignedElo?: number } & Record<string, unknown>;
 }
 
 export interface ClanMember {

@@ -251,10 +251,16 @@ export default function HomeScreen() {
 }
 
 function MatchRow({ match, userId, onLongPress }: { match: Match; userId: string; onLongPress?: () => void }) {
-  const won = match.winner_side === match.my_side;
+  const tied = match.completed && match.winner_side == null && match.my_strokes != null;
+  const won = !tied && match.winner_side === match.my_side;
   const didPlay = match.completed && match.my_side != null;
   const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
   const date = new Date(match.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+  // Pick label / colors / signed delta
+  const statusLabel = tied ? 'TIE' : (won ? 'WIN' : 'LOSS');
+  const statusColor = tied ? C.gold : (won ? C.green : C.red);
+  const myDelta = match.my_delta_elo ?? (won ? (match.delta_elo ?? 0) : -(match.delta_elo ?? 0));
 
   return (
     <TouchableOpacity
@@ -275,12 +281,12 @@ function MatchRow({ match, userId, onLongPress }: { match: Match; userId: string
           </View>
         ) : didPlay ? (
           <>
-            <View style={[styles.statusBadge, { backgroundColor: (won ? C.green : C.red) + '33' }]}>
-              <Text style={[styles.statusText, { color: won ? C.green : C.red }]}>{won ? 'WIN' : 'LOSS'}</Text>
+            <View style={[styles.statusBadge, { backgroundColor: statusColor + '33' }]}>
+              <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
             </View>
             {match.delta_elo != null && (
-              <Text style={[styles.eloDelta, { color: won ? C.green : C.red }]}>
-                {won ? '+' : '-'}{match.delta_elo} ELO
+              <Text style={[styles.eloDelta, { color: myDelta >= 0 ? C.green : C.red }]}>
+                {myDelta > 0 ? '+' : ''}{myDelta} ELO
               </Text>
             )}
           </>

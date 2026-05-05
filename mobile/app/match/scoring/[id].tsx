@@ -448,11 +448,15 @@ export default function ScoringScreen() {
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
       if (result.result) {
         const r = result.result;
-        const won = r.winnerSide === 1;
+        const tied = r.tied || r.winnerSide == null;
+        const myDelta = r.myDeltaElo ?? 0;
         const oppLine = r.autoMatched && r.opponentUsername ? `vs ${r.opponentUsername}` : '';
-        const eloLine = !match?.is_practice ? `ELO ${won ? '+' : ''}${won ? r.deltaElo : -r.deltaElo}` : 'Practice — no ELO';
+        const eloLine = !match?.is_practice
+          ? `ELO ${myDelta > 0 ? '+' : ''}${myDelta}`
+          : 'Practice — no ELO';
+        const title = tied ? 'Draw' : (myDelta > 0 ? 'Victory' : 'Defeat');
         Alert.alert(
-          won ? 'Victory' : 'Defeat',
+          title,
           [oppLine, `Score: ${result.totalScore}`, eloLine].filter(Boolean).join('\n'),
           [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
         );

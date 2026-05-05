@@ -343,7 +343,8 @@ export default function ProfileScreen() {
       <View style={styles.statsGrid}>
         <StatBox label="Matches" value={user.total_matches} />
         <StatBox label="Wins" value={user.total_wins} />
-        <StatBox label="Losses" value={user.total_matches - user.total_wins} />
+        <StatBox label="Losses" value={user.total_matches - user.total_wins - (user.total_ties ?? 0)} />
+        <StatBox label="Ties" value={user.total_ties ?? 0} />
         <StatBox label="Win Rate" value={`${winRate}%`} />
       </View>
 

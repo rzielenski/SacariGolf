@@ -131,22 +131,27 @@ export default function MatchLobbyScreen() {
       </View>
 
       {/* Result (if completed) */}
-      {isCompleted && match.result && (
-        <View style={[styles.resultCard, { borderColor: match.result.winner_side === myPlayer?.side ? C.green : C.red }]}>
-          <Text style={[styles.resultText, { color: match.result.winner_side === myPlayer?.side ? C.green : C.red }]}>
-            {match.result.winner_side === myPlayer?.side ? 'VICTORY' : 'DEFEAT'}
-          </Text>
-          {!isPractice && (
-            <Text style={styles.eloChange}>
-              {match.result.winner_side === myPlayer?.side ? '+' : '-'}{match.result.delta_elo} ELO
-            </Text>
-          )}
-          <View style={styles.diffRow}>
-            <Text style={styles.diffLabel}>Your differential: {(myPlayer?.side === 1 ? match.result.side1_score_differential : match.result.side2_score_differential)?.toFixed(1)}</Text>
-            <Text style={styles.diffLabel}>Opponent: {(myPlayer?.side === 1 ? match.result.side2_score_differential : match.result.side1_score_differential)?.toFixed(1)}</Text>
+      {isCompleted && match.result && (() => {
+        const tied = match.result.winner_side == null;
+        const won = !tied && match.result.winner_side === myPlayer?.side;
+        const myDelta = match.my_delta_elo ?? (won ? match.result.delta_elo : -(match.result.delta_elo ?? 0));
+        const color = tied ? C.gold : (won ? C.green : C.red);
+        const label = tied ? 'DRAW' : (won ? 'VICTORY' : 'DEFEAT');
+        return (
+          <View style={[styles.resultCard, { borderColor: color }]}>
+            <Text style={[styles.resultText, { color }]}>{label}</Text>
+            {!isPractice && (
+              <Text style={styles.eloChange}>
+                {myDelta > 0 ? '+' : ''}{myDelta} ELO
+              </Text>
+            )}
+            <View style={styles.diffRow}>
+              <Text style={styles.diffLabel}>Your differential: {(myPlayer?.side === 1 ? match.result.side1_score_differential : match.result.side2_score_differential)?.toFixed(1)}</Text>
+              <Text style={styles.diffLabel}>Opponent: {(myPlayer?.side === 1 ? match.result.side2_score_differential : match.result.side1_score_differential)?.toFixed(1)}</Text>
+            </View>
           </View>
-        </View>
-      )}
+        );
+      })()}
 
       {/* Players */}
       <Text style={styles.sectionTitle}>Players</Text>

@@ -132,14 +132,31 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     [req.params.id]
   );
 
-  return res.json({ ...matchRows[0], players, result: resultRows[0] || null });
+  // Pre-compute the requesting user's signed ELO delta so UIs don't have to
+  // figure out whether they were favored or not in a tie.
+  let my_delta_elo: number | null = null;
+  if (resultRows.length) {
+    const result = resultRows[0];
+    const me = players.find((p: any) => p.user_id === req.userId);
+    if (me) {
+      if (result.winner_side === null) {
+        // Tie — pull the signed delta from details
+        const key = me.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+        my_delta_elo = result.details?.[key] ?? 0;
+      } else {
+        my_delta_elo = result.winner_side === me.side ? result.delta_elo : -result.delta_elo;
+      }
+    }
+  }
+
+  return res.json({ ...matchRows[0], players, result: resultRows[0] || null, my_delta_elo });
 }));
 
 // List my matches
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.match_id, m.match_type, m.name, m.completed, m.created_at, m.is_practice,
-            mr.winner_side, mr.delta_elo,
+            mr.winner_side, mr.delta_elo, mr.details,
             mp_me.side AS my_side, mp_me.strokes AS my_strokes
      FROM matches m
      JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
@@ -147,7 +164,20 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
      ORDER BY m.created_at DESC LIMIT 50`,
     [req.userId]
   );
-  return res.json(rows);
+  // Compute signed my_delta_elo per row
+  const decorated = rows.map((r) => {
+    let my_delta_elo: number | null = null;
+    if (r.delta_elo != null && r.my_side != null) {
+      if (r.winner_side == null) {
+        const key = r.my_side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+        my_delta_elo = r.details?.[key] ?? 0;
+      } else {
+        my_delta_elo = r.winner_side === r.my_side ? r.delta_elo : -r.delta_elo;
+      }
+    }
+    return { ...r, my_delta_elo };
+  });
+  return res.json(decorated);
 }));
 
 // Join a match (opponent side)
@@ -310,20 +340,33 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const compareCount = Math.min(side1Players.length, side2Players.length);
       const side1Diff = getDiff(side1Players, compareCount);
       const side2Diff = getDiff(side2Players, compareCount);
-      const side1Wins = side1Diff <= side2Diff;
+
+      // Tie when the two differentials round to the same hundredth.
+      // Chess-style: actual score 0.5 for both sides. Higher-rated player loses ELO,
+      // lower-rated gains. delta = K × (0.5 − expected).
+      const isTie = Math.round(side1Diff * 100) === Math.round(side2Diff * 100);
+      const side1Wins = !isTie && side1Diff < side2Diff;
+
       const p1 = side1Players[0];
       const p2 = side2Players[0];
       const expA = expectedScore(p1.elo, p2.elo);
       const k = kFactor(p1.total_matches, p1.elo);
-      const deltaElo = Math.round(k * ((side1Wins ? 1 : 0) - expA));
+      const side1ActualScore = isTie ? 0.5 : (side1Wins ? 1 : 0);
+      const side1Delta = Math.round(k * (side1ActualScore - expA));
+      const side2Delta = -side1Delta;
 
       for (const p of [...side1Players, ...side2Players]) {
-        const won = (side1Players.includes(p)) === side1Wins;
-        const eloChange = side1Players.includes(p) ? deltaElo : -deltaElo;
+        const onSide1 = side1Players.includes(p);
+        const eloChange = onSide1 ? side1Delta : side2Delta;
+        const won = !isTie && onSide1 === side1Wins;
         await client.query(
-          `UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1,
-           total_wins = total_wins + $2 WHERE user_id = $3`,
-          [eloChange, won ? 1 : 0, p.user_id]
+          `UPDATE users
+           SET elo = GREATEST(100, elo + $1),
+               total_matches = total_matches + 1,
+               total_wins = total_wins + $2,
+               total_ties = total_ties + $3
+           WHERE user_id = $4`,
+          [eloChange, won ? 1 : 0, isTie ? 1 : 0, p.user_id]
         );
       }
 
@@ -332,15 +375,29 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
          side2_score_differential, delta_elo, details)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
-          matchId, matchType, side1Wins ? 1 : 2, side1Diff, side2Diff, Math.abs(deltaElo),
+          matchId,
+          matchType,
+          isTie ? null : (side1Wins ? 1 : 2),
+          side1Diff,
+          side2Diff,
+          Math.abs(side1Delta),
           JSON.stringify({
             side1Players: side1Players.map((p) => p.user_id),
             side2Players: side2Players.map((p) => p.user_id),
+            tied: isTie,
+            side1DeltaSignedElo: side1Delta,
+            side2DeltaSignedElo: side2Delta,
           }),
         ]
       );
       await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
-      return { winnerSide: side1Wins ? 1 : 2, deltaElo, side1Diff, side2Diff };
+      return {
+        winnerSide: isTie ? null : (side1Wins ? 1 : 2),
+        tied: isTie,
+        deltaElo: Math.abs(side1Delta),
+        side1Diff,
+        side2Diff,
+      };
     };
 
     if (allDone && !matchRows[0].is_practice && allPlayers.length >= 2) {
@@ -441,6 +498,30 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     } else if (allDone) {
       // Practice round — just complete it
       await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+    }
+
+    // Decorate the response with the submitter's signed ELO delta so the
+    // client doesn't have to figure out which side they were on.
+    if (result) {
+      const tied = result.tied || result.winnerSide === null;
+      const submitterIsSide1 = myeSide === 1;
+      const baseDelta = result.deltaElo ?? 0;
+      if (tied) {
+        // For ties, side1's signed delta is K*(0.5 - expA). The magnitude is
+        // result.deltaElo and the side that gained ELO is whoever was lower-rated.
+        // We can't reliably reconstruct sign without expA — but we tracked it in details.
+        // Simpler: pull from match_results we just inserted.
+        const { rows: mrRows } = await client.query(
+          `SELECT details FROM match_results WHERE match_id = $1`,
+          [req.params.id]
+        );
+        const details = mrRows[0]?.details;
+        const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+        result.myDeltaElo = details?.[key] ?? 0;
+      } else {
+        const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
+        result.myDeltaElo = won ? baseDelta : -baseDelta;
+      }
     }
 
     await client.query('COMMIT');
