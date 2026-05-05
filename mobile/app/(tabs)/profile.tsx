@@ -9,6 +9,7 @@ import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
 import type { Course } from '../../types';
+import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -47,6 +48,23 @@ export default function ProfileScreen() {
   const [searchingHomeCourse, setSearchingHomeCourse] = useState(false);
   const [recentRounds, setRecentRounds] = useState<any[]>([]);
   const [bestRound, setBestRound] = useState<any | null>(null);
+  const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+
+  const openScorecard = (round: any) => {
+    if (!user) return;
+    setScorecardEntry({
+      username: user.username,
+      user_id: user.user_id,
+      teebox_name: round.teebox_name,
+      hole_scores: round.hole_scores,
+      course_id: round.course_id,
+      course_name: round.course_name,
+      teebox_id: round.teebox_id,
+      total_score: round.total_score,
+      created_at: round.created_at,
+      teebox_par: round.teebox_par,
+    });
+  };
 
   // Load notification count badge — must be before any early return
   useEffect(() => {
@@ -301,7 +319,9 @@ export default function ProfileScreen() {
           <Text style={styles.profSectionTitle}>BEST ROUND</Text>
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.gold }]}
-            onPress={() => bestRound.course_id && router.push(`/course/${bestRound.course_id}` as any)}
+            onPress={() => bestRound.hole_scores?.length
+              ? openScorecard(bestRound)
+              : bestRound.course_id && router.push(`/course/${bestRound.course_id}` as any)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{bestRound.course_name ?? 'Unknown course'}</Text>
@@ -330,7 +350,9 @@ export default function ProfileScreen() {
             <TouchableOpacity
               key={r.round_id}
               style={styles.roundCard}
-              onPress={() => r.course_id && router.push(`/course/${r.course_id}` as any)}
+              onPress={() => r.hole_scores?.length
+                ? openScorecard(r)
+                : r.course_id && router.push(`/course/${r.course_id}` as any)}
             >
               <View style={{ flex: 1 }}>
                 <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
@@ -507,6 +529,13 @@ export default function ProfileScreen() {
           />
         </View>
       </Modal>
+
+      {/* Scorecard Modal */}
+      <ScorecardModal
+        visible={!!scorecardEntry}
+        entry={scorecardEntry}
+        onClose={() => setScorecardEntry(null)}
+      />
     </ScrollView>
   );
 }

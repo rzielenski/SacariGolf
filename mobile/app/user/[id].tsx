@@ -6,6 +6,7 @@ import {
 import { useLocalSearchParams, router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
+import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -20,6 +21,22 @@ export default function UserProfileScreen() {
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+
+  const openScorecard = (round: any) => {
+    setScorecardEntry({
+      username: profile?.username,
+      user_id: profile?.user_id,
+      teebox_name: round.teebox_name,
+      hole_scores: round.hole_scores,
+      course_id: round.course_id,
+      course_name: round.course_name,
+      teebox_id: round.teebox_id,
+      total_score: round.total_score,
+      created_at: round.created_at,
+      teebox_par: round.teebox_par,
+    });
+  };
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -110,7 +127,9 @@ export default function UserProfileScreen() {
           <Text style={styles.sectionTitle}>BEST ROUND</Text>
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.gold }]}
-            onPress={() => profile.best_round.course_id && router.push(`/course/${profile.best_round.course_id}` as any)}
+            onPress={() => profile.best_round.hole_scores?.length
+              ? openScorecard(profile.best_round)
+              : profile.best_round.course_id && router.push(`/course/${profile.best_round.course_id}` as any)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{profile.best_round.course_name ?? 'Unknown course'}</Text>
@@ -140,7 +159,9 @@ export default function UserProfileScreen() {
           <TouchableOpacity
             key={r.round_id}
             style={styles.roundCard}
-            onPress={() => r.course_id && router.push(`/course/${r.course_id}` as any)}
+            onPress={() => r.hole_scores?.length
+              ? openScorecard(r)
+              : r.course_id && router.push(`/course/${r.course_id}` as any)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
@@ -169,6 +190,12 @@ export default function UserProfileScreen() {
       )}
 
       <Text style={styles.joined}>Joined {joined}</Text>
+
+      <ScorecardModal
+        visible={!!scorecardEntry}
+        entry={scorecardEntry}
+        onClose={() => setScorecardEntry(null)}
+      />
     </ScrollView>
   );
 }

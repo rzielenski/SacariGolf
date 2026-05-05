@@ -9,6 +9,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
+import { ScorecardCard } from '../../components/Scorecard';
 
 export default function MatchLobbyScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -20,7 +21,6 @@ export default function MatchLobbyScreen() {
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
-  const [scorecardPlayer, setScorecardPlayer] = useState<MatchPlayer | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -155,11 +155,7 @@ export default function MatchLobbyScreen() {
           key={p.user_id}
           player={p}
           isMe={p.user_id === user?.user_id}
-          onPress={() => {
-            // If they've submitted scores, show their scorecard. Otherwise jump to their profile.
-            if (p.hole_scores?.length) setScorecardPlayer(p);
-            else router.push(`/user/${p.user_id}` as any);
-          }}
+          onPress={() => router.push(`/user/${p.user_id}` as any)}
         />
       ))}
 
@@ -198,9 +194,25 @@ export default function MatchLobbyScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Hint when scorecards are viewable */}
+      {/* Auto-rendered scorecards once the match is completed */}
       {isCompleted && match.players?.some((p) => p.hole_scores?.length) && (
-        <Text style={styles.scorecardHint}>Tap a player above to view their scorecard</Text>
+        <>
+          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>Scorecards</Text>
+          {match.players?.filter((p) => p.hole_scores?.length).map((p) => (
+            <ScorecardCard
+              key={p.user_id}
+              entry={{
+                username: p.username,
+                user_id: p.user_id,
+                teebox_name: p.teebox_name,
+                hole_scores: p.hole_scores,
+                course_id: p.course_id,
+                teebox_id: p.teebox_id,
+              }}
+              highlight={p.user_id === user?.user_id}
+            />
+          ))}
+        </>
       )}
 
       {/* Match Chat */}
@@ -273,137 +285,7 @@ export default function MatchLobbyScreen() {
         </View>
       </Modal>
 
-      {/* Scorecard Modal */}
-      <Modal
-        visible={!!scorecardPlayer}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setScorecardPlayer(null)}
-      >
-        {scorecardPlayer && (
-          <ScorecardModal
-            player={scorecardPlayer}
-            onClose={() => setScorecardPlayer(null)}
-            onViewProfile={() => {
-              setScorecardPlayer(null);
-              router.push(`/user/${scorecardPlayer.user_id}` as any);
-            }}
-          />
-        )}
-      </Modal>
     </ScrollView>
-  );
-}
-
-function scoreColor(score: number, par: number) {
-  const d = score - par;
-  if (d <= -2) return '#4CAF50';
-  if (d === -1) return '#81C784';
-  if (d === 0) return C.text;
-  if (d === 1) return '#FF9800';
-  return '#F44336';
-}
-
-function ScorecardModal({ player, onClose, onViewProfile }: { player: MatchPlayer; onClose: () => void; onViewProfile: () => void }) {
-  const [holes, setHoles] = useState<any[]>([]);
-
-  useEffect(() => {
-    if (!player.course_id || !player.teebox_id) return;
-    let active = true;
-    (async () => {
-      try {
-        const course = await api.courses.get(player.course_id!);
-        if (!active) return;
-        const tb = course.teeboxes?.find((t: any) => t.teebox_id === player.teebox_id);
-        if (tb?.holes) {
-          setHoles([...tb.holes].sort((a: any, b: any) => a.hole_num - b.hole_num));
-        }
-      } catch { /* fall back to placeholders */ }
-    })();
-    return () => { active = false; };
-  }, [player.course_id, player.teebox_id]);
-
-  const scores = player.hole_scores ?? [];
-  const playedHoles = holes.length >= scores.length
-    ? holes.slice(0, scores.length)
-    : scores.map((_, i) => ({ hole_id: `ph-${i}`, hole_num: i + 1, par: 4 }));
-  const front = playedHoles.slice(0, 9);
-  const back = playedHoles.slice(9);
-  const frontScores = scores.slice(0, 9);
-  const backScores = scores.slice(9);
-  const frontPar = front.reduce((a, h) => a + h.par, 0);
-  const backPar = back.reduce((a, h) => a + h.par, 0);
-  const totalPar = frontPar + backPar;
-  const totalScore = scores.reduce((a, b) => a + b, 0);
-  const diff = totalScore - totalPar;
-
-  return (
-    <View style={styles.modalContainer}>
-      <View style={styles.modalHeader}>
-        <View>
-          <Text style={styles.modalTitle}>{player.username}</Text>
-          <Text style={styles.modalSub}>{player.teebox_name ?? '—'} · Side {player.side}</Text>
-        </View>
-        <TouchableOpacity onPress={onClose}>
-          <Text style={styles.modalClose}>Done</Text>
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
-        <View style={styles.totalsCard}>
-          <View style={styles.totalCell}>
-            <Text style={styles.totalLabel}>SCORE</Text>
-            <Text style={styles.totalValue}>{totalScore}</Text>
-          </View>
-          <View style={styles.totalCell}>
-            <Text style={styles.totalLabel}>TO PAR</Text>
-            <Text style={[styles.totalValue, { color: diff < 0 ? C.green : diff > 0 ? C.red : C.text }]}>
-              {diff > 0 ? `+${diff}` : diff === 0 ? 'E' : diff}
-            </Text>
-          </View>
-          <View style={styles.totalCell}>
-            <Text style={styles.totalLabel}>PAR</Text>
-            <Text style={[styles.totalValue, { color: C.textMuted }]}>{totalPar}</Text>
-          </View>
-        </View>
-
-        <ScGrid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
-        {back.length > 0 && <ScGrid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
-
-        <TouchableOpacity style={styles.viewProfileBtn} onPress={onViewProfile}>
-          <Text style={styles.viewProfileBtnText}>View {player.username}'s Profile</Text>
-        </TouchableOpacity>
-      </ScrollView>
-    </View>
-  );
-}
-
-function ScGrid({ label, holes, scores, parTotal }: { label: string; holes: any[]; scores: number[]; parTotal: number }) {
-  const scoreTotal = scores.reduce((a, b) => a + b, 0);
-  return (
-    <View style={{ marginTop: 10 }}>
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Hole</Text>
-        {holes.map((h) => <Text key={h.hole_id} style={styles.scNum}>{h.hole_num}</Text>)}
-        <Text style={styles.scTotal}>{label}</Text>
-      </View>
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Par</Text>
-        {holes.map((h) => <Text key={h.hole_id} style={styles.scParCell}>{h.par}</Text>)}
-        <Text style={styles.scTotal}>{parTotal}</Text>
-      </View>
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Score</Text>
-        {holes.map((h, i) => (
-          <Text key={h.hole_id} style={[styles.scScoreCell, { color: scoreColor(scores[i], h.par) }]}>
-            {scores[i] ?? '-'}
-          </Text>
-        ))}
-        <Text style={[styles.scTotal, { color: scoreTotal - parTotal < 0 ? C.green : scoreTotal - parTotal > 0 ? C.red : C.text }]}>
-          {scoreTotal || '-'}
-        </Text>
-      </View>
-    </View>
   );
 }
 
