@@ -56,14 +56,14 @@ export default function UserProfileScreen() {
     api.users.handicap(id).then(setHandicap).catch(() => { });
   }, [id]);
 
-  // Poll the player's live in-progress round every 30s while the screen is open
+  // Poll the player's live in-progress round every 15s while the screen is open
   useEffect(() => {
     let cancelled = false;
     const fetchActive = () => api.users.activeRound(id)
       .then((data) => { if (!cancelled) setActiveRound(data); })
       .catch(() => { });
     fetchActive();
-    const t = setInterval(fetchActive, 30_000);
+    const t = setInterval(fetchActive, 15_000);
     return () => { cancelled = true; clearInterval(t); };
   }, [id]);
 
@@ -143,7 +143,7 @@ export default function UserProfileScreen() {
       </View>
 
       {/* Live round (in-progress) */}
-      {activeRound && activeRound.hole_scores?.length > 0 && (
+      {activeRound && (
         <>
           <View style={styles.liveBadgeRow}>
             <View style={styles.liveDot} />
@@ -151,6 +151,7 @@ export default function UserProfileScreen() {
           </View>
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.green }]}
+            disabled={!activeRound.hole_scores?.length}
             onPress={() => setScorecardEntry({
               username: profile.username,
               user_id: profile.user_id,
@@ -159,22 +160,33 @@ export default function UserProfileScreen() {
               course_id: activeRound.course_id,
               course_name: activeRound.course_name,
               teebox_id: activeRound.teebox_id,
-              total_score: activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0),
+              total_score: (activeRound.hole_scores ?? []).reduce((a: number, b: number) => a + b, 0),
               created_at: activeRound.round_started_at,
             })}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{activeRound.course_name ?? 'Unknown course'}</Text>
               <Text style={styles.roundMeta}>
-                {activeRound.teebox_name} · Hole {activeRound.hole_scores.length} of {activeRound.num_holes}
+                {activeRound.teebox_name ?? '—'}
+                {activeRound.hole_scores?.length
+                  ? ` · Hole ${activeRound.hole_scores.length} of ${activeRound.num_holes}`
+                  : ' · Just started'}
               </Text>
-              <Text style={styles.roundDate}>Tap to view live scorecard</Text>
+              <Text style={styles.roundDate}>
+                {activeRound.hole_scores?.length ? 'Tap to view live scorecard' : 'Waiting for first score…'}
+              </Text>
             </View>
             <View style={styles.roundScoreBox}>
-              <Text style={[styles.roundScore, { color: C.green }]}>
-                {activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0)}
-              </Text>
-              <Text style={[styles.roundToPar, { color: C.textMuted }]}>thru {activeRound.hole_scores.length}</Text>
+              {activeRound.hole_scores?.length ? (
+                <>
+                  <Text style={[styles.roundScore, { color: C.green }]}>
+                    {activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0)}
+                  </Text>
+                  <Text style={[styles.roundToPar, { color: C.textMuted }]}>thru {activeRound.hole_scores.length}</Text>
+                </>
+              ) : (
+                <ActivityIndicator color={C.green} size="small" />
+              )}
             </View>
           </TouchableOpacity>
         </>

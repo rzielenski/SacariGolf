@@ -204,6 +204,8 @@ router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =
 // Live in-progress round (if any). Returns null when:
 //   - the user has no in-progress match with a teebox set
 //   - the requesting viewer is in the same match (anti-cheat)
+// Returns the round info even if no hole_scores yet, so the friend's profile
+// can show "PLAYING NOW" right when they pick a teebox.
 router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT mp.match_id, mp.teebox_id,
@@ -224,7 +226,7 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
      LIMIT 1`,
     [req.params.id]
   );
-  if (!rows.length || !rows[0].hole_scores?.length) return res.json(null);
+  if (!rows.length) return res.json(null);
 
   const active = rows[0];
 
@@ -237,6 +239,8 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
     if (shareRows.length) return res.json(null);
   }
 
+  // Normalise empty arrays to [] so frontend can safely call .length on them
+  if (!active.hole_scores) active.hole_scores = [];
   return res.json(active);
 }));
 

@@ -99,20 +99,26 @@ export default function ScoringScreen() {
   const SAVE_KEY = `scores_${id}`;
 
   // ── Live progress upload (so friends can watch) ─────────────────────────────
-  // Sends scores to backend ~3s after the last edit so friends watching the
-  // user's profile see live updates without hammering the API on every tap.
-  // We also include teeboxId so the backend can persist it on match_players
-  // for matches where no teebox was set at creation (e.g. friend challenges).
+  // First update fires immediately when scoring starts (so the backend's
+  // active-round query has a row to find). Subsequent updates are debounced
+  // 2s after the last score change to avoid hammering the API.
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasReportedOnce = useRef(false);
   useEffect(() => {
     if (selectingCourse || holes.length === 0 || scores.length === 0 || !teebox) return;
-    if (progressTimer.current) clearTimeout(progressTimer.current);
-    progressTimer.current = setTimeout(() => {
+    const send = () => {
       api.matches.progress(id, {
-        holeScores: scores.slice(0, currentHole + 1),
+        holeScores: scores.slice(0, Math.max(currentHole + 1, 1)),
         teeboxId: teebox.teebox_id,
       }).catch(() => { });
-    }, 3000);
+    };
+    if (!hasReportedOnce.current) {
+      hasReportedOnce.current = true;
+      send();
+      return;
+    }
+    if (progressTimer.current) clearTimeout(progressTimer.current);
+    progressTimer.current = setTimeout(send, 2000);
     return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
   }, [scores, currentHole, selectingCourse, holes.length, id, teebox]);
 
