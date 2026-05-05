@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   RefreshControl, ActivityIndicator, Linking, Alert, TextInput, Modal,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { api } from '../../lib/api';
@@ -40,6 +41,7 @@ export default function HomeScreen() {
   const deleteMatch = useCallback(async (matchId: string) => {
     try {
       await api.matches.cancel(matchId);
+      try { await AsyncStorage.removeItem(`scores_${matchId}`); } catch { }
       setMatches((prev) => prev.filter((m) => m.match_id !== matchId));
     } catch (e: any) {
       Alert.alert('Could not delete', e.message);

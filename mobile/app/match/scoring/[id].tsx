@@ -104,11 +104,25 @@ export default function ScoringScreen() {
     try {
       const m = await api.matches.get(id);
       setMatch(m);
-      const myPlayer = m.players?.find((p: any) => p.teebox_id && p.course_id);
-      if (myPlayer) {
-        const courseDetails: Course = await api.courses.get(myPlayer.course_id);
+
+      // Read any saved local progress (scores + course/teebox the player previously chose)
+      let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string } | null = null;
+      try {
+        const raw = await AsyncStorage.getItem(SAVE_KEY);
+        if (raw) saved = JSON.parse(raw);
+      } catch { /* ignore */ }
+
+      // Resolve which course/teebox to load: server-side player data wins,
+      // but fall back to the locally-saved choice (challenge matches don't
+      // persist teebox to the match record until scores are submitted).
+      const playerWithTeebox = m.players?.find((p: any) => p.teebox_id && p.course_id);
+      const courseIdToLoad = playerWithTeebox?.course_id ?? saved?.courseId;
+      const teeboxIdToLoad = playerWithTeebox?.teebox_id ?? saved?.teeboxId;
+
+      if (courseIdToLoad && teeboxIdToLoad) {
+        const courseDetails: Course = await api.courses.get(courseIdToLoad);
         const tb: Teebox | undefined = courseDetails.teeboxes?.find(
-          (t) => t.teebox_id === myPlayer.teebox_id
+          (t) => t.teebox_id === teeboxIdToLoad
         );
         if (tb && tb.holes?.length > 0) {
           // Use the teebox's own num_holes as ground truth (fixes 9-hole matches
@@ -119,20 +133,8 @@ export default function ScoringScreen() {
           setCourse(courseDetails);
           setTeebox(tb);
           setHoles(sorted);
-          // Restore saved scores if coming back mid-round
-          try {
-            const saved = await AsyncStorage.getItem(SAVE_KEY);
-            if (saved) {
-              const parsed = JSON.parse(saved);
-              setScores(parsed.scores ?? sorted.map((h) => h.par));
-              setCurrentHole(parsed.currentHole ?? 0);
-              await AsyncStorage.removeItem(SAVE_KEY);
-            } else {
-              setScores(sorted.map((h) => h.par));
-            }
-          } catch {
-            setScores(sorted.map((h) => h.par));
-          }
+          setScores(saved?.scores ?? sorted.map((h) => h.par));
+          setCurrentHole(saved?.currentHole ?? 0);
           setSelectingCourse(false);
         }
       }
@@ -288,10 +290,18 @@ export default function ScoringScreen() {
 
   const saveAndLeave = useCallback(async () => {
     try {
-      await AsyncStorage.setItem(SAVE_KEY, JSON.stringify({ scores, currentHole }));
+      await AsyncStorage.setItem(
+        SAVE_KEY,
+        JSON.stringify({
+          scores,
+          currentHole,
+          teeboxId: teebox?.teebox_id,
+          courseId: course?.course_id,
+        })
+      );
     } catch { /* best-effort */ }
     router.back();
-  }, [scores, currentHole, SAVE_KEY]);
+  }, [scores, currentHole, teebox, course, SAVE_KEY]);
 
   const doCancel = useCallback(async () => {
     setForfeiting(true);

@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, Alert, Share, Modal, FlatList,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -18,11 +19,17 @@ export default function MatchLobbyScreen() {
   const [friends, setFriends] = useState<any[]>([]);
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [hasSavedProgress, setHasSavedProgress] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const data = await api.matches.get(id);
       setMatch(data);
+      // Check for locally-saved in-progress round
+      try {
+        const saved = await AsyncStorage.getItem(`scores_${id}`);
+        setHasSavedProgress(!!saved);
+      } catch { /* ignore */ }
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {
@@ -82,6 +89,7 @@ export default function MatchLobbyScreen() {
             setCancelling(true);
             try {
               await api.matches.cancel(id);
+              try { await AsyncStorage.removeItem(`scores_${id}`); } catch { }
               router.replace('/(tabs)/' as any);
             } catch (e: any) {
               Alert.alert('Error', e.message);
@@ -162,10 +170,12 @@ export default function MatchLobbyScreen() {
         </View>
       )}
 
-      {/* Start scoring */}
+      {/* Start scoring (or continue if there's saved progress) */}
       {!isCompleted && myPlayer && !myPlayer.completed && (
         <TouchableOpacity style={styles.startBtn} onPress={handleStartScoring}>
-          <Text style={styles.startBtnText}>⛳ Start Scoring</Text>
+          <Text style={styles.startBtnText}>
+            {hasSavedProgress ? '▶ Continue Match' : '⛳ Start Scoring'}
+          </Text>
         </TouchableOpacity>
       )}
 
