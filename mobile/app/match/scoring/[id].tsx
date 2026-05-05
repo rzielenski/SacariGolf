@@ -58,7 +58,8 @@ function scoreColor(score: number, par: number) {
 
 export default function ScoringScreen() {
   const { id, holes: holesParam } = useLocalSearchParams<{ id: string; holes?: string }>();
-  const numHoles = holesParam ? parseInt(holesParam, 10) : 18;
+  // numHoles is a state so it can be corrected after loading the match's existing teebox
+  const [numHoles, setNumHoles] = useState<number>(holesParam ? parseInt(holesParam, 10) : 18);
 
   // Match / course data
   const [match, setMatch] = useState<any>(null);
@@ -110,7 +111,11 @@ export default function ScoringScreen() {
           (t) => t.teebox_id === myPlayer.teebox_id
         );
         if (tb && tb.holes?.length > 0) {
-          const sorted = [...tb.holes].sort((a, b) => a.hole_num - b.hole_num).slice(0, numHoles);
+          // Use the teebox's own num_holes as ground truth (fixes 9-hole matches
+          // opened via the match lobby which may not have ?holes= in the URL).
+          const effectiveHoles = tb.num_holes ?? numHoles;
+          if (effectiveHoles !== numHoles) setNumHoles(effectiveHoles);
+          const sorted = [...tb.holes].sort((a, b) => a.hole_num - b.hole_num).slice(0, effectiveHoles);
           setCourse(courseDetails);
           setTeebox(tb);
           setHoles(sorted);

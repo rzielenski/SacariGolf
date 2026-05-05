@@ -86,6 +86,8 @@ export interface MatchPlayer {
   teebox_name: string | null;
   course_rating: number | null;
   slope_rating: number | null;
+  num_holes?: number;
+  course_id?: string;
 }
 
 export interface MatchResult {

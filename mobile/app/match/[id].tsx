@@ -50,7 +50,10 @@ export default function MatchLobbyScreen() {
   const isPractice = match.is_practice;
 
   const handleStartScoring = () => {
-    router.push(`/match/scoring/${id}` as any);
+    // Infer hole count from any player who already has a teebox set.
+    // The match creator always has one set at creation time (from play.tsx).
+    const holeCount = match.players?.find((p) => p.num_holes)?.num_holes ?? 18;
+    router.push(`/match/scoring/${id}?holes=${holeCount}` as any);
   };
 
   const handleShare = async () => {
