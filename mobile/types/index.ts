@@ -63,6 +63,7 @@ export interface Hole {
 export interface Match {
   match_id: string;
   match_type: 'solo' | 'duo' | 'squad' | 'practice';
+  format: 'stroke' | 'scramble';
   name: string | null;
   completed: boolean;
   is_practice: boolean;

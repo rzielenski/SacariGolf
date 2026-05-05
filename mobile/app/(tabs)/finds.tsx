@@ -16,7 +16,20 @@ type Tab = 'vote' | 'leaderboard' | 'mine';
 export default function FindRankerScreen() {
   const [tab, setTab] = useState<Tab>('vote');
   const [selectedFind, setSelectedFind] = useState<any>(null);
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
+
+  // Don't render any API-calling child until auth is confirmed
+  if (authLoading) {
+    return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
+  }
+  if (!user) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyTitle}>Not logged in</Text>
+        <Text style={styles.emptySub}>Please log in to view finds.</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -137,6 +150,9 @@ function VoteTab() {
       setPair(p);
     } catch (e: any) {
       if (e.message === 'not_enough') {
+        setPair([]);
+      } else if (e.message === 'Missing token' || e.message === 'Invalid token') {
+        // Token issue — silently show empty state; AuthGuard will redirect if truly logged out
         setPair([]);
       } else {
         Alert.alert('Error', e.message);

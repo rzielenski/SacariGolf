@@ -451,4 +451,84 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
   }
 }));
 
+// Forfeit a match (counts as a loss with ELO penalty)
+router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: playerRows } = await client.query(
+      `SELECT mp.side, m.completed, m.is_practice, m.match_type
+       FROM match_players mp JOIN matches m ON m.match_id = mp.match_id
+       WHERE mp.match_id = $1 AND mp.user_id = $2 FOR UPDATE`,
+      [req.params.id, req.userId]
+    );
+    if (!playerRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not in this match' });
+    }
+    if (playerRows[0].completed) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Match already completed' });
+    }
+    const mySide: number = playerRows[0].side;
+    const isPractice: boolean = playerRows[0].is_practice;
+
+    const { rows: allPlayers } = await client.query(
+      `SELECT mp.user_id, mp.side, u.elo, u.total_matches
+       FROM match_players mp JOIN users u ON u.user_id = mp.user_id
+       WHERE mp.match_id = $1`,
+      [req.params.id]
+    );
+    const mySidePlayers = allPlayers.filter((p) => p.side === mySide);
+    const otherSidePlayers = allPlayers.filter((p) => p.side !== mySide);
+
+    if (otherSidePlayers.length === 0 || isPractice) {
+      // No real opponent — just abandon
+      await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+      await client.query('COMMIT');
+      return res.json({ success: true, forfeited: false });
+    }
+
+    // ELO calculation — forfeit = full loss
+    const p1 = mySidePlayers[0];
+    const p2 = otherSidePlayers[0];
+    const expA = expectedScore(p1.elo, p2.elo);
+    const k = kFactor(p1.total_matches, p1.elo);
+    const deltaElo = Math.round(k * (0 - expA)); // negative for forfeiter
+
+    for (const p of mySidePlayers) {
+      await client.query(
+        `UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1 WHERE user_id = $2`,
+        [deltaElo, p.user_id]
+      );
+    }
+    for (const p of otherSidePlayers) {
+      await client.query(
+        `UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1, total_wins = total_wins + 1 WHERE user_id = $2`,
+        [-deltaElo, p.user_id]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO match_results (match_id, match_type, winner_side, delta_elo, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        req.params.id, playerRows[0].match_type,
+        mySide === 1 ? 2 : 1,
+        Math.abs(deltaElo),
+        JSON.stringify({ forfeit: true, forfeitUserId: req.userId }),
+      ]
+    );
+    await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+
+    await client.query('COMMIT');
+    return res.json({ success: true, forfeited: true, deltaElo });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
 export default router;

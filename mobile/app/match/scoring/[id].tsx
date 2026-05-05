@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../../lib/api';
 import { C, F } from '../../../lib/colors';
@@ -68,6 +69,7 @@ export default function ScoringScreen() {
   const [currentHole, setCurrentHole] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
 
   // Course selection
@@ -93,6 +95,8 @@ export default function ScoringScreen() {
   const [panelExpanded, setPanelExpanded] = useState(false);
   const panelAnim = useRef(new Animated.Value(COLLAPSED_H)).current;
 
+  const SAVE_KEY = `scores_${id}`;
+
   // ── Data loading ────────────────────────────────────────────────────────────
 
   const load = useCallback(async () => {
@@ -110,7 +114,20 @@ export default function ScoringScreen() {
           setCourse(courseDetails);
           setTeebox(tb);
           setHoles(sorted);
-          setScores(sorted.map((h) => h.par));
+          // Restore saved scores if coming back mid-round
+          try {
+            const saved = await AsyncStorage.getItem(SAVE_KEY);
+            if (saved) {
+              const parsed = JSON.parse(saved);
+              setScores(parsed.scores ?? sorted.map((h) => h.par));
+              setCurrentHole(parsed.currentHole ?? 0);
+              await AsyncStorage.removeItem(SAVE_KEY);
+            } else {
+              setScores(sorted.map((h) => h.par));
+            }
+          } catch {
+            setScores(sorted.map((h) => h.par));
+          }
           setSelectingCourse(false);
         }
       }
@@ -150,7 +167,11 @@ export default function ScoringScreen() {
       if (status !== 'granted') return;
       setLocGranted(true);
 
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // maximumAge: 0 forces a fresh GPS fix (prevents stale cached position bug)
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+        maximumAge: 0,
+      } as any);
       if (!active) return;
       const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       const cLat = course?.latitude ?? 0;
@@ -234,9 +255,16 @@ export default function ScoringScreen() {
   }, []);
 
   const selectTeebox = (t: Teebox, c: Course) => {
+    const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, numHoles);
+    if (h.length === 0) {
+      Alert.alert(
+        'No Hole Data',
+        'This tee box doesn\'t have hole-by-hole data. Try a different tee or course.',
+      );
+      return;
+    }
     setTeebox(t);
     setCourse(c);
-    const h = [...t.holes].sort((a, b) => a.hole_num - b.hole_num).slice(0, numHoles);
     setHoles(h);
     setScores(h.map((hole) => hole.par));
     setSelectingCourse(false);
@@ -250,6 +278,57 @@ export default function ScoringScreen() {
       setFullCourse(details);
     } catch (e: any) { Alert.alert('Error', e.message); } finally { setLoadingCourse(false); }
   };
+
+  // ── Leave / Forfeit ─────────────────────────────────────────────────────────
+
+  const saveAndLeave = useCallback(async () => {
+    try {
+      await AsyncStorage.setItem(SAVE_KEY, JSON.stringify({ scores, currentHole }));
+    } catch { /* best-effort */ }
+    router.back();
+  }, [scores, currentHole, SAVE_KEY]);
+
+  const doForfeit = useCallback(async () => {
+    setForfeiting(true);
+    try {
+      await api.matches.forfeit(id);
+      // Clear any saved progress
+      try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
+      router.replace(`/match/${id}` as any);
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setForfeiting(false);
+    }
+  }, [id, SAVE_KEY]);
+
+  const handleLeave = useCallback(() => {
+    Alert.alert(
+      'Leave Round',
+      'Save your progress and come back later, or forfeit the match.',
+      [
+        { text: 'Keep Playing', style: 'cancel' },
+        {
+          text: 'Save & Leave',
+          onPress: saveAndLeave,
+        },
+        {
+          text: 'Forfeit Match',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              'Forfeit?',
+              'You will take an ELO penalty. This cannot be undone.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
+              ]
+            );
+          },
+        },
+      ]
+    );
+  }, [saveAndLeave, doForfeit]);
 
   // ── Scoring helpers ─────────────────────────────────────────────────────────
 
@@ -291,6 +370,8 @@ export default function ScoringScreen() {
         courseId: course?.course_id,
         teeboxId: teebox?.teebox_id,
       });
+      // Clear saved progress on successful submit
+      try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
       if (result.result) {
         const r = result.result;
         const won = r.winnerSide === 1;
@@ -366,11 +447,23 @@ export default function ScoringScreen() {
               <TouchableOpacity onPress={() => setFullCourse(null)} style={{ marginBottom: 8, paddingHorizontal: 20 }}>
                 <Text style={{ color: C.gold }}>← Choose different course</Text>
               </TouchableOpacity>
+              {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).length === 0 && (
+                <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
+                  No tee boxes available for {numHoles} holes at this course.
+                </Text>
+              )}
               {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).map((t) => (
-                <TouchableOpacity key={t.teebox_id} style={styles.teeboxCard} onPress={() => selectTeebox(t, fullCourse)}>
+                <TouchableOpacity
+                  key={t.teebox_id}
+                  style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
+                  onPress={() => selectTeebox(t, fullCourse)}
+                >
                   <View style={{ flex: 1 }}>
                     <Text style={styles.teeboxName}>{t.name} Tees</Text>
-                    <Text style={styles.teeboxMeta}>{t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds</Text>
+                    <Text style={styles.teeboxMeta}>
+                      {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
+                      {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
+                    </Text>
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text style={styles.rating}>Rating {t.course_rating}</Text>
@@ -408,7 +501,6 @@ export default function ScoringScreen() {
 
   const cLat = course?.latitude ?? 0;
   const cLng = course?.longitude ?? 0;
-  const hasCoords = !!cLat && !!cLng;
   const initialRegion: Region = {
     latitude: userCoord && onCourse ? userCoord.latitude : (cLat || 37.5),
     longitude: userCoord && onCourse ? userCoord.longitude : (cLng || -100),
@@ -458,32 +550,22 @@ export default function ScoringScreen() {
         )}
       </MapView>
 
-      {/* ── Leave button (top-left, below status bar) ── */}
-      <TouchableOpacity
-        style={styles.leaveBtn}
-        onPress={() => {
-          Alert.alert(
-            'Leave Round?',
-            'Your scores for this round will be lost.',
-            [
-              { text: 'Stay', style: 'cancel' },
-              { text: 'Leave', style: 'destructive', onPress: () => router.back() },
-            ]
-          );
-        }}
-      >
-        <Text style={styles.leaveBtnText}>← Leave</Text>
-      </TouchableOpacity>
-
       {/* ── Top bar (floats over map) ── */}
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.topBarBack}>
-          <Text style={styles.topBarBackText}>✕</Text>
+        {/* Leave button — replaces the old ✕ + separate leaveBtn */}
+        <TouchableOpacity onPress={handleLeave} style={styles.topBarLeave} disabled={forfeiting}>
+          {forfeiting
+            ? <ActivityIndicator color={C.textMuted} size="small" />
+            : <Text style={styles.topBarLeaveText}>⋮</Text>}
         </TouchableOpacity>
-        <View style={styles.topBarCenter}>
+        <TouchableOpacity
+          style={styles.topBarCenter}
+          onPress={() => course && router.push(`/course/${course.course_id}` as any)}
+          activeOpacity={0.7}
+        >
           <Text style={styles.courseName2} numberOfLines={1}>{course?.course_name}</Text>
           <Text style={styles.teeboxName2}>{teebox?.name} · {holes.length} holes</Text>
-        </View>
+        </TouchableOpacity>
         <View style={styles.topBarRight}>
           <Text style={[styles.scoreToPar, { color: scoreParColor }]}>
             {scoreToPar === 0 ? 'E' : scoreToPar > 0 ? `+${scoreToPar}` : `${scoreToPar}`}
@@ -529,14 +611,11 @@ export default function ScoringScreen() {
 
       {/* ── Score panel (collapsible, anchored at bottom) ── */}
       <Animated.View style={[styles.panel, { height: panelAnim }]}>
-        {/* Handle / collapsed row — always visible, tap to toggle */}
-        {/* When collapsed: tap OR drag up to open. When expanded: drag down to close. */}
         <View style={styles.panelHandle} {...panResponder.panHandlers}>
           <TouchableOpacity onPress={() => snapPanel(!panelExpanded)} activeOpacity={0.6}>
             <View style={styles.handleBar} />
           </TouchableOpacity>
           <View style={styles.collapsedRow}>
-            {/* Prev */}
             <TouchableOpacity
               style={[styles.miniNavBtn, currentHole === 0 && styles.miniNavBtnDisabled]}
               onPress={(e) => { e.stopPropagation?.(); goToHole(-1); }}
@@ -545,7 +624,6 @@ export default function ScoringScreen() {
               <Text style={styles.miniNavText}>←</Text>
             </TouchableOpacity>
 
-            {/* Hole summary */}
             <View style={styles.holeSummary}>
               <Text style={styles.holeSummaryHole}>
                 Hole {hole.hole_num}
@@ -557,7 +635,6 @@ export default function ScoringScreen() {
               </View>
             </View>
 
-            {/* Next / Submit */}
             {isLastHole ? (
               <TouchableOpacity
                 style={styles.miniSubmitBtn}
@@ -579,15 +656,12 @@ export default function ScoringScreen() {
           </View>
         </View>
 
-        {/* Expanded content */}
         {panelExpanded && (
           <View style={styles.expandedContent}>
-            {/* HCP badge */}
             {hole.handicap != null && (
               <Text style={styles.hcapLine}>Handicap {hole.handicap}</Text>
             )}
 
-            {/* ± score buttons */}
             <View style={styles.scoreRow}>
               <TouchableOpacity style={styles.scoreBtn} onPress={() => adjustScore(-1)}>
                 <Text style={styles.scoreBtnText}>−</Text>
@@ -600,7 +674,6 @@ export default function ScoringScreen() {
               </TouchableOpacity>
             </View>
 
-            {/* Quick-tap numbers */}
             <View style={styles.quickScoreRow}>
               {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
                 <TouchableOpacity
@@ -613,7 +686,6 @@ export default function ScoringScreen() {
               ))}
             </View>
 
-            {/* Nav row */}
             <View style={styles.navRow}>
               <TouchableOpacity
                 style={[styles.navBtn, currentHole === 0 && styles.navBtnDisabled]}
@@ -744,30 +816,27 @@ const styles = StyleSheet.create({
   courseName: { color: C.text, fontWeight: '700', fontSize: 15 },
   courseLocation: { color: C.gold, fontSize: 12, marginTop: 3 },
   teeboxCard: { backgroundColor: C.cardAlt, borderRadius: 6, padding: 16, marginHorizontal: 20, marginBottom: 8, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.border },
+  teeboxCardDisabled: { opacity: 0.45 },
   teeboxName: { color: C.text, fontWeight: '700', fontSize: 15 },
   teeboxMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
   rating: { color: C.gold, fontWeight: '700', fontSize: 12 },
   slope: { color: C.textMuted, fontSize: 12 },
 
-  // Leave button
-  leaveBtn: {
-    position: 'absolute', top: 56, left: 12, zIndex: 20,
-    backgroundColor: C.bg + 'ee', borderRadius: 6,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderWidth: 1, borderColor: C.border,
-  },
-  leaveBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 12 },
-
-  // Top bar (floating over map)
+  // Top bar (floating over map) — no separate leave button anymore
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center',
-    paddingTop: 56, paddingBottom: 12, paddingHorizontal: 16,
+    paddingTop: 56, paddingBottom: 12, paddingHorizontal: 12,
     backgroundColor: C.bg + 'dd',
     borderBottomWidth: 1, borderBottomColor: C.border + '88',
+    gap: 8,
   },
-  topBarBack: { marginRight: 10 },
-  topBarBackText: { color: C.text, fontSize: 18, fontWeight: '300' },
+  topBarLeave: {
+    width: 36, height: 36, borderRadius: 6, backgroundColor: C.card + 'cc',
+    justifyContent: 'center', alignItems: 'center',
+    borderWidth: 1, borderColor: C.border,
+  },
+  topBarLeaveText: { color: C.textMuted, fontSize: 20, fontWeight: '700', lineHeight: 22 },
   topBarCenter: { flex: 1 },
   courseName2: { color: C.text, fontWeight: '700', fontSize: 13 },
   teeboxName2: { color: C.textMuted, fontSize: 10 },

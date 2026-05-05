@@ -45,6 +45,8 @@ export const api = {
   users: {
     me: () => request<any>('GET', '/users/me'),
     update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string }) => request<any>('PATCH', '/users/me', body),
+    uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
+    notifications: () => request<any[]>('GET', '/users/me/notifications'),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
@@ -76,6 +78,7 @@ export const api = {
     search: (q: string) => request<any[]>('GET', `/courses/search?q=${encodeURIComponent(q)}`),
     nearby: (lat: number, lng: number) => request<any[]>('GET', `/courses/nearby?lat=${lat}&lng=${lng}`),
     get: (id: string) => request<any>('GET', `/courses/${id}`),
+    leaderboard: (id: string) => request<any[]>('GET', `/courses/${id}/leaderboard`),
   },
 
   matches: {
@@ -84,6 +87,7 @@ export const api = {
     create: (body: { matchType: string; isPractice?: boolean; teeboxId?: string; clanId?: string; name?: string; format?: string }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
+    forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
   },
 
   finds: {

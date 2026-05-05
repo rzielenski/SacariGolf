@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS match_invites (
   from_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
   to_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'pending',
+  expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '24 hours',
   UNIQUE (match_id, to_user_id)
 );
 

@@ -30,7 +30,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const me = await api.users.me();
           setUser(me);
         } catch {
+          // Token invalid/expired — clear fully so AuthGuard redirects to login
           await AsyncStorage.removeItem('coc_token');
+          setToken(null);
+          setUser(null);
         }
       }
       setLoading(false);

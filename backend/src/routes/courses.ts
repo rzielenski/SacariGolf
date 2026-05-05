@@ -40,6 +40,24 @@ router.get('/search', requireAuth, wrap(async (req: Request, res: Response) => {
   return res.json(rows);
 }));
 
+router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT r.total_score, r.created_at, array_length(r.hole_scores, 1) AS holes_played,
+            u.username, u.user_id,
+            t.name AS teebox_name, t.par, t.num_holes,
+            m.match_type, m.format
+     FROM rounds r
+     JOIN users u ON u.user_id = r.user_id
+     JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     JOIN matches m ON m.match_id = r.match_id
+     WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND m.is_practice = false
+     ORDER BY r.total_score ASC
+     LIMIT 50`,
+    [req.params.id]
+  );
+  return res.json(rows);
+}));
+
 router.get('/:id', requireAuth, wrap(async (req: Request, res: Response) => {
   const { rows: courseRows } = await pool.query(
     `SELECT course_id, course_name, club_name, address, city, state, country, latitude, longitude

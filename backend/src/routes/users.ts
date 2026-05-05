@@ -1,8 +1,13 @@
 import { Router, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+
+const AVATARS_DIR = '/app/uploads/avatars';
+if (!fs.existsSync(AVATARS_DIR)) fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
 const router = Router();
 
@@ -141,6 +146,71 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   await pool.query(`DELETE FROM users WHERE user_id = $1`, [req.userId]);
   return res.json({ success: true });
+}));
+
+// Avatar upload
+router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { imageBase64, mimeType } = req.body;
+  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+  const ext = mimeType === 'image/png' ? 'png' : 'jpg';
+  const filename = `avatar_${req.userId}.${ext}`;
+  const filepath = path.join(AVATARS_DIR, filename);
+  fs.writeFileSync(filepath, Buffer.from(imageBase64, 'base64'));
+  const avatarUrl = `/uploads/avatars/${filename}`;
+  await pool.query(`UPDATE users SET avatar_url = $1 WHERE user_id = $2`, [avatarUrl, req.userId]);
+  return res.json({ avatar_url: avatarUrl });
+}));
+
+// Notifications feed
+router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const notes: any[] = [];
+
+  // Pending friend requests
+  const { rows: frs } = await pool.query(
+    `SELECT u.user_id, u.username, f.created_at FROM friends f
+     JOIN users u ON u.user_id = f.user_id
+     WHERE f.friend_id = $1 AND f.status = 'pending' ORDER BY f.created_at DESC LIMIT 10`,
+    [req.userId]
+  );
+  for (const r of frs) notes.push({ type: 'friend_request', title: 'Friend Request', body: `${r.username} sent you a friend request`, data: { userId: r.user_id }, created_at: r.created_at });
+
+  // Pending match invites
+  const { rows: mis } = await pool.query(
+    `SELECT mi.invite_id, mi.match_id, mi.created_at, u.username AS from_name, m.match_type
+     FROM match_invites mi JOIN users u ON u.user_id = mi.from_user_id JOIN matches m ON m.match_id = mi.match_id
+     WHERE mi.to_user_id = $1 AND mi.status = 'pending'
+     AND (mi.expires_at IS NULL OR mi.expires_at > NOW()) ORDER BY mi.created_at DESC LIMIT 10`,
+    [req.userId]
+  );
+  for (const r of mis) notes.push({ type: 'match_invite', title: 'Match Invite', body: `${r.from_name} invited you to a ${r.match_type} match`, data: { matchId: r.match_id, inviteId: r.invite_id }, created_at: r.created_at });
+
+  // Pending clan invites (if clan_invites table exists)
+  try {
+    const { rows: cis } = await pool.query(
+      `SELECT ci.invite_id, ci.clan_id, ci.created_at, u.username AS from_name, c.name AS clan_name
+       FROM clan_invites ci JOIN users u ON u.user_id = ci.from_user_id JOIN clans c ON c.clan_id = ci.clan_id
+       WHERE ci.to_user_id = $1 AND ci.status = 'pending' ORDER BY ci.created_at DESC LIMIT 10`,
+      [req.userId]
+    );
+    for (const r of cis) notes.push({ type: 'clan_invite', title: 'Clan Invite', body: `${r.from_name} invited you to join ${r.clan_name}`, data: { clanId: r.clan_id, inviteId: r.invite_id }, created_at: r.created_at });
+  } catch { /* table may not exist yet */ }
+
+  // Recent match results (last 48h)
+  const { rows: mrs } = await pool.query(
+    `SELECT mr.match_id, mr.winner_side, mr.delta_elo, mr.created_at, m.match_type, mp.side AS my_side
+     FROM match_results mr JOIN matches m ON m.match_id = mr.match_id
+     JOIN match_players mp ON mp.match_id = m.match_id AND mp.user_id = $1
+     WHERE mr.created_at > NOW() - INTERVAL '48 hours' AND m.is_practice = false
+     ORDER BY mr.created_at DESC LIMIT 10`,
+    [req.userId]
+  );
+  for (const r of mrs) {
+    const won = r.winner_side === r.my_side;
+    notes.push({ type: 'match_result', title: won ? 'Victory!' : 'Defeat', body: won ? `You won your ${r.match_type} match (+${r.delta_elo} ELO)` : `You lost your ${r.match_type} match (-${r.delta_elo} ELO)`, data: { matchId: r.match_id }, created_at: r.created_at, won });
+  }
+
+  notes.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  return res.json(notes);
 }));
 
 export default router;
