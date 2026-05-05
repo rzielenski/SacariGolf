@@ -98,7 +98,7 @@ export const api = {
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
-    progress: (id: string, body: { holeScores: number[] }) => request<any>('POST', `/matches/${id}/progress`, body),
+    progress: (id: string, body: { holeScores: number[]; teeboxId?: string }) => request<any>('POST', `/matches/${id}/progress`, body),
   },
 
   finds: {

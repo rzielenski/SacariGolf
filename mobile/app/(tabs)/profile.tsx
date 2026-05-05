@@ -610,11 +610,18 @@ export default function ProfileScreen() {
               hcapDifferentials.map((d) => (
                 <View key={d.round_id} style={styles.hcapRow}>
                   <View style={{ flex: 1 }}>
-                    <Text style={{ color: C.text, fontWeight: '700', fontSize: 13 }}>
-                      {d.course_name ?? 'Unknown'}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Text style={{ color: C.text, fontWeight: '700', fontSize: 13 }}>
+                        {d.course_name ?? 'Unknown'}
+                      </Text>
+                      {d.is_nine_hole && (
+                        <View style={{ backgroundColor: C.gold + '33', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1 }}>
+                          <Text style={{ color: C.gold, fontSize: 9, fontWeight: '800' }}>9H ×2</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={{ color: C.textMuted, fontSize: 11 }}>
-                      {d.teebox_name} · {d.holes_played} holes · {new Date(d.created_at).toLocaleDateString()}
+                      {d.teebox_name} · {d.holes_played} holes · CR {d.course_rating_used} / SL {d.slope_used} · {new Date(d.created_at).toLocaleDateString()}
                     </Text>
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>

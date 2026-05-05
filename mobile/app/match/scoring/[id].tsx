@@ -101,15 +101,20 @@ export default function ScoringScreen() {
   // ── Live progress upload (so friends can watch) ─────────────────────────────
   // Sends scores to backend ~3s after the last edit so friends watching the
   // user's profile see live updates without hammering the API on every tap.
+  // We also include teeboxId so the backend can persist it on match_players
+  // for matches where no teebox was set at creation (e.g. friend challenges).
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (selectingCourse || holes.length === 0 || scores.length === 0) return;
+    if (selectingCourse || holes.length === 0 || scores.length === 0 || !teebox) return;
     if (progressTimer.current) clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(() => {
-      api.matches.progress(id, { holeScores: scores.slice(0, currentHole + 1) }).catch(() => { });
+      api.matches.progress(id, {
+        holeScores: scores.slice(0, currentHole + 1),
+        teeboxId: teebox.teebox_id,
+      }).catch(() => { });
     }, 3000);
     return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
-  }, [scores, currentHole, selectingCourse, holes.length, id]);
+  }, [scores, currentHole, selectingCourse, holes.length, id, teebox]);
 
   // ── Data loading ────────────────────────────────────────────────────────────
 

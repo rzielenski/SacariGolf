@@ -87,14 +87,21 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
 
   const panResponder = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 8,
+      // Claim the responder for any touch — this Modal has nothing scrollable
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderMove: (_, { dy }) => {
         translateY.setValue(dy);
         opacity.setValue(1 - Math.min(Math.abs(dy) / 400, 0.6));
       },
       onPanResponderRelease: (_, { dy, vy }) => {
-        if (Math.abs(dy) > 120 || Math.abs(vy) > 0.8) {
+        if (Math.abs(dy) > 100 || Math.abs(vy) > 0.6) {
           dismiss(dy >= 0 ? 1 : -1);
+        } else if (Math.abs(dy) < 6) {
+          // Treat near-zero movement as a tap → dismiss
+          dismiss(1);
         } else {
           Animated.parallel([
             Animated.spring(translateY, { toValue: 0, useNativeDriver: true, friction: 8 }),
@@ -102,6 +109,7 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
           ]).start();
         }
       },
+      onPanResponderTerminationRequest: () => false,
     })
   ).current;
 
@@ -111,16 +119,28 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
         style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', opacity }}
         {...panResponder.panHandlers}
       >
-        <Animated.View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', transform: [{ translateY }] }}>
-          <TouchableOpacity style={{ position: 'absolute', top: 56, right: 20, zIndex: 10 }} onPress={onClose}>
+        <Animated.View
+          pointerEvents="box-none"
+          style={{ flex: 1, justifyContent: 'center', alignItems: 'center', transform: [{ translateY }] }}
+        >
+          {/* Close button stays tappable above the pan layer */}
+          <TouchableOpacity
+            style={{ position: 'absolute', top: 56, right: 20, zIndex: 10, padding: 12 }}
+            onPress={onClose}
+          >
             <Text style={{ color: '#fff', fontSize: 28, fontWeight: '300' }}>✕</Text>
           </TouchableOpacity>
           {find && (
             <>
-              <Image source={{ uri: `${API_BASE}${find.photo_url}` }} style={{ width: '100%', height: '70%' }} resizeMode="contain" />
-              {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }}>{find.description}</Text> : null}
-              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }}>by {find.username}  ·  {find.elo} ELO</Text>
-              <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }}>Swipe up or down to dismiss</Text>
+              <Image
+                source={{ uri: `${API_BASE}${find.photo_url}` }}
+                style={{ width: '100%', height: '70%' }}
+                resizeMode="contain"
+                pointerEvents="none"
+              />
+              {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }} pointerEvents="none">{find.description}</Text> : null}
+              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {find.username}  ·  {find.elo} ELO</Text>
+              <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }} pointerEvents="none">Swipe or tap anywhere to dismiss</Text>
             </>
           )}
         </Animated.View>

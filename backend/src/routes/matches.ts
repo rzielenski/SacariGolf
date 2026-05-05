@@ -536,11 +536,31 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
 
 // Save in-progress hole scores so friends (not in this match) can watch live.
 // Stores partial scores on the rounds row without marking it complete.
+// Optionally accepts teeboxId/courseId so a player who just picked their teebox
+// in the scoring screen gets it persisted on match_players too (needed for
+// challenge matches where no teebox was set at match creation).
 router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeScores } = req.body;
+  const { holeScores, teeboxId } = req.body;
   if (!Array.isArray(holeScores)) return res.status(400).json({ error: 'holeScores required' });
 
-  // Look up player's teebox/course on this match
+  // Don't accept progress for already-finished matches
+  const { rows: matchRows } = await pool.query(
+    `SELECT completed FROM matches WHERE match_id = $1`,
+    [req.params.id]
+  );
+  if (!matchRows.length) return res.status(404).json({ error: 'Match not found' });
+  if (matchRows[0]?.completed) return res.json({ success: true, ignored: 'completed' });
+
+  // If client passed a teeboxId, persist it on match_players when not already set
+  if (teeboxId) {
+    await pool.query(
+      `UPDATE match_players SET teebox_id = COALESCE(teebox_id, $1)
+       WHERE match_id = $2 AND user_id = $3`,
+      [teeboxId, req.params.id, req.userId]
+    );
+  }
+
+  // Resolve teebox + course from match_players (now that we may have just set it)
   const { rows: pRows } = await pool.query(
     `SELECT mp.teebox_id, t.course_id FROM match_players mp
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
@@ -549,20 +569,13 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
   );
   if (!pRows.length) return res.status(404).json({ error: 'Not in this match' });
 
-  // Don't accept progress for already-finished matches
-  const { rows: matchRows } = await pool.query(
-    `SELECT completed FROM matches WHERE match_id = $1`,
-    [req.params.id]
-  );
-  if (matchRows[0]?.completed) return res.json({ success: true, ignored: 'completed' });
-
   await pool.query(
     `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores)
      VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (match_id, user_id)
      DO UPDATE SET hole_scores = $5,
-                   course_id = EXCLUDED.course_id,
-                   teebox_id = EXCLUDED.teebox_id`,
+                   course_id = COALESCE(rounds.course_id, EXCLUDED.course_id),
+                   teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
     [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores]
   );
   return res.json({ success: true });
