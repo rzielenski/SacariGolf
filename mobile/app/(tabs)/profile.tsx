@@ -45,12 +45,25 @@ export default function ProfileScreen() {
   const [homeCourseQuery, setHomeCourseQuery] = useState('');
   const [homeCourseResults, setHomeCourseResults] = useState<Course[]>([]);
   const [searchingHomeCourse, setSearchingHomeCourse] = useState(false);
+  const [recentRounds, setRecentRounds] = useState<any[]>([]);
+  const [bestRound, setBestRound] = useState<any | null>(null);
 
   // Load notification count badge — must be before any early return
   useEffect(() => {
     if (!user) return;
     api.users.notifications()
       .then((notes) => setNotifCount(notes.length))
+      .catch(() => { });
+  }, [user?.user_id]);
+
+  // Load recent rounds + best round (rich profile data)
+  useEffect(() => {
+    if (!user) return;
+    api.users.get(user.user_id)
+      .then((data) => {
+        setRecentRounds(data.recent_rounds ?? []);
+        setBestRound(data.best_round ?? null);
+      })
       .catch(() => { });
   }, [user?.user_id]);
 
@@ -282,6 +295,70 @@ export default function ProfileScreen() {
         <StatBox label="Win Rate" value={`${winRate}%`} />
       </View>
 
+      {/* Best Round */}
+      {bestRound && (
+        <>
+          <Text style={styles.profSectionTitle}>BEST ROUND</Text>
+          <TouchableOpacity
+            style={[styles.roundCard, { borderColor: C.gold }]}
+            onPress={() => bestRound.course_id && router.push(`/course/${bestRound.course_id}` as any)}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.roundCourseName}>{bestRound.course_name ?? 'Unknown course'}</Text>
+              <Text style={styles.roundMeta}>
+                {bestRound.teebox_name} · {bestRound.num_holes} holes · Par {bestRound.teebox_par}
+              </Text>
+              <Text style={styles.roundDate}>
+                {new Date(bestRound.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </Text>
+            </View>
+            <View style={styles.roundScoreBox}>
+              <Text style={[styles.roundScore, { color: C.gold }]}>{bestRound.total_score}</Text>
+              <Text style={[styles.roundToPar, { color: bestRound.to_par <= 0 ? C.green : C.red }]}>
+                {bestRound.to_par > 0 ? `+${bestRound.to_par}` : bestRound.to_par === 0 ? 'E' : bestRound.to_par}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        </>
+      )}
+
+      {/* Recent Rounds */}
+      {recentRounds.length > 0 && (
+        <>
+          <Text style={styles.profSectionTitle}>RECENT ROUNDS</Text>
+          {recentRounds.map((r: any) => (
+            <TouchableOpacity
+              key={r.round_id}
+              style={styles.roundCard}
+              onPress={() => r.course_id && router.push(`/course/${r.course_id}` as any)}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
+                <Text style={styles.roundMeta}>
+                  {r.teebox_name ?? '—'} · {r.num_holes ?? r.hole_scores?.length ?? '?'} holes
+                  {r.format === 'scramble' ? ' · Scramble' : ''}
+                </Text>
+                <Text style={styles.roundDate}>
+                  {new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                </Text>
+              </View>
+              <View style={styles.roundScoreBox}>
+                <Text style={styles.roundScore}>{r.total_score}</Text>
+                {r.teebox_par != null && (
+                  <Text style={[styles.roundToPar, {
+                    color: r.total_score - r.teebox_par < 0 ? C.green :
+                           r.total_score - r.teebox_par > 0 ? C.red : C.text,
+                  }]}>
+                    {r.total_score - r.teebox_par > 0 ? `+${r.total_score - r.teebox_par}` :
+                     r.total_score - r.teebox_par === 0 ? 'E' : r.total_score - r.teebox_par}
+                  </Text>
+                )}
+              </View>
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
+
       {/* Joined */}
       <Text style={styles.joinedText}>
         Joined {new Date(user.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
@@ -510,6 +587,22 @@ const styles = StyleSheet.create({
   },
   searchResName: { color: C.text, fontWeight: '700', fontSize: 15 },
   searchResLoc: { color: C.gold, fontSize: 12, marginTop: 3 },
+
+  profSectionTitle: {
+    color: C.textMuted, fontSize: 11, fontWeight: '800',
+    letterSpacing: 1.5, marginBottom: 8, marginTop: 16,
+  },
+  roundCard: {
+    backgroundColor: C.card, borderRadius: 8, padding: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginBottom: 8, borderWidth: 1, borderColor: C.border,
+  },
+  roundCourseName: { color: C.text, fontWeight: '700', fontSize: 14 },
+  roundMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
+  roundDate: { color: C.textDim, fontSize: 11, marginTop: 4 },
+  roundScoreBox: { alignItems: 'flex-end', minWidth: 50 },
+  roundScore: { color: C.text, fontFamily: F.serif, fontSize: 22, fontWeight: '700' },
+  roundToPar: { fontSize: 12, fontWeight: '700', marginTop: 1 },
   cardRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   eloNum: { fontSize: 44, fontWeight: '900', color: C.gold },
   eloLabel: { fontSize: 14, color: C.textMuted },

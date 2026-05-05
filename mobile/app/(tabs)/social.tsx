@@ -267,7 +267,12 @@ function FriendsTab() {
         <>
           <Text style={styles.sectionTitle}>Friends ({friends.length})</Text>
           {friends.map((u) => (
-            <View key={u.user_id} style={styles.userRow}>
+            <TouchableOpacity
+              key={u.user_id}
+              style={styles.userRow}
+              onPress={() => router.push(`/user/${u.user_id}` as any)}
+              activeOpacity={0.7}
+            >
               <View style={styles.userAvatar}>
                 <Text style={styles.avatarText}>{u.username[0].toUpperCase()}</Text>
               </View>
@@ -287,7 +292,7 @@ function FriendsTab() {
               >
                 <Text style={[styles.addBtnText, { color: C.textMuted }]}>Message</Text>
               </TouchableOpacity>
-            </View>
+            </TouchableOpacity>
           ))}
         </>
       )}

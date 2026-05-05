@@ -20,7 +20,7 @@ export default function MatchLobbyScreen() {
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
-  const [holeData, setHoleData] = useState<any[]>([]); // holes from one teebox for par display
+  const [scorecardPlayer, setScorecardPlayer] = useState<MatchPlayer | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -31,20 +31,6 @@ export default function MatchLobbyScreen() {
         const saved = await AsyncStorage.getItem(`scores_${id}`);
         setHasSavedProgress(!!saved);
       } catch { /* ignore */ }
-
-      // If match is completed, fetch course holes for par values (used in scorecards)
-      if (data.completed) {
-        const playerWithCourse = data.players?.find((p: any) => p.course_id && p.teebox_id);
-        if (playerWithCourse) {
-          try {
-            const course = await api.courses.get(playerWithCourse.course_id);
-            const tb = course.teeboxes?.find((t: any) => t.teebox_id === playerWithCourse.teebox_id);
-            if (tb?.holes) {
-              setHoleData([...tb.holes].sort((a: any, b: any) => a.hole_num - b.hole_num));
-            }
-          } catch { /* ignore */ }
-        }
-      }
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {
@@ -164,7 +150,18 @@ export default function MatchLobbyScreen() {
 
       {/* Players */}
       <Text style={styles.sectionTitle}>Players</Text>
-      {match.players?.map((p) => <PlayerCard key={p.user_id} player={p} isMe={p.user_id === user?.user_id} />)}
+      {match.players?.map((p) => (
+        <PlayerCard
+          key={p.user_id}
+          player={p}
+          isMe={p.user_id === user?.user_id}
+          onPress={() => {
+            // If they've submitted scores, show their scorecard. Otherwise jump to their profile.
+            if (p.hole_scores?.length) setScorecardPlayer(p);
+            else router.push(`/user/${p.user_id}` as any);
+          }}
+        />
+      ))}
 
       {/* Duo: waiting for teammate/opponent to join via ID */}
       {!isCompleted && match.match_type === 'duo' && (match.players?.length ?? 0) < 2 && !myPlayer?.completed && (
@@ -201,19 +198,9 @@ export default function MatchLobbyScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Scorecards (when match is completed) */}
-      {isCompleted && holeData.length > 0 && match.players?.some((p) => p.hole_scores?.length) && (
-        <>
-          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>Scorecards</Text>
-          {match.players?.filter((p) => p.hole_scores?.length).map((p) => (
-            <ScorecardView
-              key={p.user_id}
-              player={p}
-              holes={holeData}
-              isMe={p.user_id === user?.user_id}
-            />
-          ))}
-        </>
+      {/* Hint when scorecards are viewable */}
+      {isCompleted && match.players?.some((p) => p.hole_scores?.length) && (
+        <Text style={styles.scorecardHint}>Tap a player above to view their scorecard</Text>
       )}
 
       {/* Match Chat */}
@@ -285,6 +272,25 @@ export default function MatchLobbyScreen() {
           )}
         </View>
       </Modal>
+
+      {/* Scorecard Modal */}
+      <Modal
+        visible={!!scorecardPlayer}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setScorecardPlayer(null)}
+      >
+        {scorecardPlayer && (
+          <ScorecardModal
+            player={scorecardPlayer}
+            onClose={() => setScorecardPlayer(null)}
+            onViewProfile={() => {
+              setScorecardPlayer(null);
+              router.push(`/user/${scorecardPlayer.user_id}` as any);
+            }}
+          />
+        )}
+      </Modal>
     </ScrollView>
   );
 }
@@ -298,91 +304,116 @@ function scoreColor(score: number, par: number) {
   return '#F44336';
 }
 
-function ScorecardView({ player, holes, isMe }: { player: MatchPlayer; holes: any[]; isMe: boolean }) {
+function ScorecardModal({ player, onClose, onViewProfile }: { player: MatchPlayer; onClose: () => void; onViewProfile: () => void }) {
+  const [holes, setHoles] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!player.course_id || !player.teebox_id) return;
+    let active = true;
+    (async () => {
+      try {
+        const course = await api.courses.get(player.course_id!);
+        if (!active) return;
+        const tb = course.teeboxes?.find((t: any) => t.teebox_id === player.teebox_id);
+        if (tb?.holes) {
+          setHoles([...tb.holes].sort((a: any, b: any) => a.hole_num - b.hole_num));
+        }
+      } catch { /* fall back to placeholders */ }
+    })();
+    return () => { active = false; };
+  }, [player.course_id, player.teebox_id]);
+
   const scores = player.hole_scores ?? [];
-  const playedHoles = holes.slice(0, scores.length);
+  const playedHoles = holes.length >= scores.length
+    ? holes.slice(0, scores.length)
+    : scores.map((_, i) => ({ hole_id: `ph-${i}`, hole_num: i + 1, par: 4 }));
   const front = playedHoles.slice(0, 9);
   const back = playedHoles.slice(9);
   const frontScores = scores.slice(0, 9);
   const backScores = scores.slice(9);
   const frontPar = front.reduce((a, h) => a + h.par, 0);
   const backPar = back.reduce((a, h) => a + h.par, 0);
-  const frontScore = frontScores.reduce((a, b) => a + b, 0);
-  const backScore = backScores.reduce((a, b) => a + b, 0);
   const totalPar = frontPar + backPar;
-  const totalScore = frontScore + backScore;
+  const totalScore = scores.reduce((a, b) => a + b, 0);
   const diff = totalScore - totalPar;
 
   return (
-    <View style={[styles.scorecardCard, isMe && { borderColor: C.gold }]}>
-      <View style={styles.scorecardHeader}>
-        <Text style={styles.scorecardName}>
-          {player.username} {isMe && <Text style={{ color: C.gold }}>(You)</Text>}
-        </Text>
-        <Text style={styles.scorecardTotal}>
-          {totalScore} <Text style={{ color: C.textMuted, fontSize: 12 }}>
-            ({diff === 0 ? 'E' : diff > 0 ? `+${diff}` : diff})
-          </Text>
-        </Text>
-      </View>
-      <Text style={styles.scorecardSub}>{player.teebox_name} tees · Par {totalPar}</Text>
-
-      {/* Front 9 */}
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Hole</Text>
-        {front.map((h) => <Text key={h.hole_id} style={styles.scNum}>{h.hole_num}</Text>)}
-        <Text style={styles.scTotal}>OUT</Text>
-      </View>
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Par</Text>
-        {front.map((h) => <Text key={h.hole_id} style={styles.scParCell}>{h.par}</Text>)}
-        <Text style={styles.scTotal}>{frontPar}</Text>
-      </View>
-      <View style={styles.scGrid}>
-        <Text style={styles.scLabel}>Score</Text>
-        {front.map((h, i) => (
-          <Text key={h.hole_id} style={[styles.scScoreCell, { color: scoreColor(frontScores[i], h.par) }]}>
-            {frontScores[i] ?? '-'}
-          </Text>
-        ))}
-        <Text style={[styles.scTotal, { color: frontScore - frontPar < 0 ? C.green : frontScore - frontPar > 0 ? C.red : C.text }]}>
-          {frontScore || '-'}
-        </Text>
+    <View style={styles.modalContainer}>
+      <View style={styles.modalHeader}>
+        <View>
+          <Text style={styles.modalTitle}>{player.username}</Text>
+          <Text style={styles.modalSub}>{player.teebox_name ?? '—'} · Side {player.side}</Text>
+        </View>
+        <TouchableOpacity onPress={onClose}>
+          <Text style={styles.modalClose}>Done</Text>
+        </TouchableOpacity>
       </View>
 
-      {/* Back 9 */}
-      {back.length > 0 && (
-        <>
-          <View style={[styles.scGrid, { marginTop: 8 }]}>
-            <Text style={styles.scLabel}>Hole</Text>
-            {back.map((h) => <Text key={h.hole_id} style={styles.scNum}>{h.hole_num}</Text>)}
-            <Text style={styles.scTotal}>IN</Text>
+      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+        <View style={styles.totalsCard}>
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>SCORE</Text>
+            <Text style={styles.totalValue}>{totalScore}</Text>
           </View>
-          <View style={styles.scGrid}>
-            <Text style={styles.scLabel}>Par</Text>
-            {back.map((h) => <Text key={h.hole_id} style={styles.scParCell}>{h.par}</Text>)}
-            <Text style={styles.scTotal}>{backPar}</Text>
-          </View>
-          <View style={styles.scGrid}>
-            <Text style={styles.scLabel}>Score</Text>
-            {back.map((h, i) => (
-              <Text key={h.hole_id} style={[styles.scScoreCell, { color: scoreColor(backScores[i], h.par) }]}>
-                {backScores[i] ?? '-'}
-              </Text>
-            ))}
-            <Text style={[styles.scTotal, { color: backScore - backPar < 0 ? C.green : backScore - backPar > 0 ? C.red : C.text }]}>
-              {backScore || '-'}
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>TO PAR</Text>
+            <Text style={[styles.totalValue, { color: diff < 0 ? C.green : diff > 0 ? C.red : C.text }]}>
+              {diff > 0 ? `+${diff}` : diff === 0 ? 'E' : diff}
             </Text>
           </View>
-        </>
-      )}
+          <View style={styles.totalCell}>
+            <Text style={styles.totalLabel}>PAR</Text>
+            <Text style={[styles.totalValue, { color: C.textMuted }]}>{totalPar}</Text>
+          </View>
+        </View>
+
+        <ScGrid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
+        {back.length > 0 && <ScGrid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
+
+        <TouchableOpacity style={styles.viewProfileBtn} onPress={onViewProfile}>
+          <Text style={styles.viewProfileBtnText}>View {player.username}'s Profile</Text>
+        </TouchableOpacity>
+      </ScrollView>
     </View>
   );
 }
 
-function PlayerCard({ player, isMe }: { player: MatchPlayer; isMe: boolean }) {
+function ScGrid({ label, holes, scores, parTotal }: { label: string; holes: any[]; scores: number[]; parTotal: number }) {
+  const scoreTotal = scores.reduce((a, b) => a + b, 0);
   return (
-    <View style={[styles.playerCard, isMe && { borderColor: C.gold }]}>
+    <View style={{ marginTop: 10 }}>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Hole</Text>
+        {holes.map((h) => <Text key={h.hole_id} style={styles.scNum}>{h.hole_num}</Text>)}
+        <Text style={styles.scTotal}>{label}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Par</Text>
+        {holes.map((h) => <Text key={h.hole_id} style={styles.scParCell}>{h.par}</Text>)}
+        <Text style={styles.scTotal}>{parTotal}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Score</Text>
+        {holes.map((h, i) => (
+          <Text key={h.hole_id} style={[styles.scScoreCell, { color: scoreColor(scores[i], h.par) }]}>
+            {scores[i] ?? '-'}
+          </Text>
+        ))}
+        <Text style={[styles.scTotal, { color: scoreTotal - parTotal < 0 ? C.green : scoreTotal - parTotal > 0 ? C.red : C.text }]}>
+          {scoreTotal || '-'}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function PlayerCard({ player, isMe, onPress }: { player: MatchPlayer; isMe: boolean; onPress: () => void }) {
+  return (
+    <TouchableOpacity
+      style={[styles.playerCard, isMe && { borderColor: C.gold }]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
       <View style={styles.playerAvatar}>
         <Text style={styles.playerAvatarText}>{player.username[0].toUpperCase()}</Text>
       </View>
@@ -405,7 +436,7 @@ function PlayerCard({ player, isMe }: { player: MatchPlayer; isMe: boolean }) {
           <Text style={[styles.statusDot, { color: C.textDim }]}>○</Text>
         )}
       </View>
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -433,16 +464,6 @@ const styles = StyleSheet.create({
 
   sectionTitle: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 },
 
-  scorecardCard: {
-    backgroundColor: C.card, borderRadius: 10, padding: 12,
-    marginBottom: 10, borderWidth: 1, borderColor: C.border,
-  },
-  scorecardHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline',
-  },
-  scorecardName: { color: C.text, fontWeight: '800', fontSize: 14 },
-  scorecardTotal: { color: C.text, fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
-  scorecardSub: { color: C.textMuted, fontSize: 11, marginBottom: 8 },
   scGrid: { flexDirection: 'row', alignItems: 'center', minHeight: 22 },
   scLabel: { width: 38, color: C.textDim, fontSize: 10, fontWeight: '700' },
   scNum: { flex: 1, color: C.textMuted, fontSize: 11, textAlign: 'center', fontWeight: '700' },
@@ -498,7 +519,24 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: C.border,
   },
   modalTitle: { color: C.text, fontSize: 18, fontWeight: '900' },
+  modalSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   modalClose: { color: C.gold, fontSize: 15, fontWeight: '700' },
+
+  scorecardHint: { color: C.textDim, fontSize: 11, textAlign: 'center', marginTop: 6, fontStyle: 'italic' },
+
+  totalsCard: {
+    flexDirection: 'row', backgroundColor: C.card, borderRadius: 10,
+    padding: 14, borderWidth: 1, borderColor: C.border, marginBottom: 6,
+  },
+  totalCell: { flex: 1, alignItems: 'center' },
+  totalLabel: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  totalValue: { color: C.text, fontFamily: F.serif, fontSize: 24, fontWeight: '700', marginTop: 4 },
+
+  viewProfileBtn: {
+    marginTop: 24, borderRadius: 8, paddingVertical: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '22',
+  },
+  viewProfileBtnText: { color: C.gold, fontWeight: '700', fontSize: 14 },
 
   friendRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
