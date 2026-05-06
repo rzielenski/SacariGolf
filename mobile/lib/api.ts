@@ -53,6 +53,7 @@ export const api = {
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<{ notifications: any[]; unread_count: number }>('GET', '/users/me/notifications'),
     perks: () => request<{ perk_id: string; perk_type: string; earned_at: string }[]>('GET', '/users/me/perks'),
+    courseRecords: (id: string) => request<{ course_id: string; course_name: string; teebox_name: string; total_score: number; created_at: string }[]>('GET', `/users/${id}/course-records`),
     markNotificationsSeen: () => request<any>('POST', '/users/me/notifications/seen', {}),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
@@ -62,7 +63,7 @@ export const api = {
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
     sendRequest: (friendId: string) => request<any>('POST', '/users/me/friends/request', { friendId }),
     acceptRequest: (friendId: string) => request<any>('POST', '/users/me/friends/accept', { friendId }),
-    leaderboard: () => request<any[]>('GET', '/users/leaderboard'),
+    leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
   },
 
@@ -120,6 +121,19 @@ export const api = {
     mine: () => request<{ finds: any[]; avgElo: number | null }>('GET', '/finds/mine'),
     delete: (id: string) => request<any>('DELETE', `/finds/${id}`),
     report: (id: string, reason: string) => request<any>('POST', `/finds/${id}/report`, { reason }),
+  },
+
+  rounds: {
+    social: (roundId: string) => request<{
+      reactions: { reaction: string; count: number; mine: boolean }[];
+      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean }[];
+    }>('GET', `/rounds/${roundId}/social`),
+    toggleReaction: (roundId: string, reaction: string) =>
+      request<{ added: boolean }>('POST', `/rounds/${roundId}/reactions`, { reaction }),
+    addComment: (roundId: string, body: string) =>
+      request<{ success: true; comment_id: string; created_at: string }>('POST', `/rounds/${roundId}/comments`, { body }),
+    deleteComment: (roundId: string, commentId: string) =>
+      request<any>('DELETE', `/rounds/${roundId}/comments/${commentId}`),
   },
 
   dm: {

@@ -1,8 +1,17 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal } from 'react-native';
+import React, { useEffect, useState, useCallback } from 'react';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert } from 'react-native';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { ShotMapModal } from './ShotMap';
+
+const REACTION_OPTIONS = [
+  { id: 'fire', label: 'FIRE' },
+  { id: 'pure', label: 'PURE' },
+  { id: 'goat', label: 'GOAT' },
+  { id: 'clutch', label: 'CLUTCH' },
+  { id: 'respect', label: 'RESPECT' },
+  { id: 'oof', label: 'OOF' },
+];
 
 export type ScorecardEntry = {
   username?: string;
@@ -16,6 +25,7 @@ export type ScorecardEntry = {
   created_at?: string;
   teebox_par?: number | null; // optional fallback total par
   match_id?: string | null;   // when set, enables shot-map viewing
+  round_id?: string | null;   // when set, enables comments / reactions
 };
 
 function scoreColor(score: number, par: number) {
@@ -185,6 +195,64 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
   const parForHole = (holeNum: number) =>
     allHoles.find((h: any) => h.hole_num === holeNum)?.par ?? null;
 
+  // Reactions + comments — only enabled when a round_id is supplied
+  const [reactions, setReactions] = useState<{ reaction: string; count: number; mine: boolean }[]>([]);
+  const [comments, setComments] = useState<{ comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean }[]>([]);
+  const [commentDraft, setCommentDraft] = useState('');
+  const [posting, setPosting] = useState(false);
+
+  const loadSocial = useCallback(() => {
+    if (!entry.round_id) return;
+    api.rounds.social(entry.round_id)
+      .then((d) => { setReactions(d.reactions); setComments(d.comments); })
+      .catch(() => { });
+  }, [entry.round_id]);
+
+  useEffect(() => { loadSocial(); }, [loadSocial]);
+
+  const toggleReaction = async (id: string) => {
+    if (!entry.round_id) return;
+    // Optimistic update
+    setReactions((prev) => {
+      const found = prev.find((r) => r.reaction === id);
+      if (found) {
+        const newCount = found.count + (found.mine ? -1 : 1);
+        const next = newCount <= 0 && found.mine
+          ? prev.filter((r) => r.reaction !== id)
+          : prev.map((r) => r.reaction === id ? { ...r, count: newCount, mine: !r.mine } : r);
+        return next;
+      }
+      return [...prev, { reaction: id, count: 1, mine: true }];
+    });
+    try { await api.rounds.toggleReaction(entry.round_id, id); }
+    catch { loadSocial(); /* revert via refetch */ }
+  };
+
+  const submitComment = async () => {
+    const text = commentDraft.trim();
+    if (!text || !entry.round_id) return;
+    setPosting(true);
+    try {
+      await api.rounds.addComment(entry.round_id, text);
+      setCommentDraft('');
+      loadSocial();
+    } catch (e: any) { Alert.alert('Error', e.message); }
+    finally { setPosting(false); }
+  };
+
+  const deleteComment = (commentId: string) => {
+    Alert.alert('Delete comment', 'Remove this comment?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive', onPress: async () => {
+          if (!entry.round_id) return;
+          try { await api.rounds.deleteComment(entry.round_id, commentId); loadSocial(); }
+          catch (e: any) { Alert.alert('Error', e.message); }
+        }
+      }
+    ]);
+  };
+
   return (
     <View style={s.modalContainer}>
       <View style={s.modalHeader}>
@@ -236,6 +304,67 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
                 <Text style={s.shotsRowChev}>›</Text>
               </TouchableOpacity>
             ))}
+          </>
+        )}
+
+        {/* Reactions + comments — only shown when this scorecard has a round_id */}
+        {entry.round_id && (
+          <>
+            <Text style={s.shotsTitle}>REACTIONS</Text>
+            <View style={s.reactionRow}>
+              {REACTION_OPTIONS.map((opt) => {
+                const r = reactions.find((rx) => rx.reaction === opt.id);
+                const count = r?.count ?? 0;
+                const mine = r?.mine ?? false;
+                return (
+                  <TouchableOpacity
+                    key={opt.id}
+                    style={[s.reactionBtn, mine && s.reactionBtnActive]}
+                    onPress={() => toggleReaction(opt.id)}
+                  >
+                    <Text style={[s.reactionLabel, mine && { color: C.gold }]}>{opt.label}</Text>
+                    {count > 0 && <Text style={[s.reactionCount, mine && { color: C.gold }]}>{count}</Text>}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={s.shotsTitle}>COMMENTS</Text>
+            {comments.length === 0 ? (
+              <Text style={s.emptyComment}>Be the first to comment.</Text>
+            ) : comments.map((c) => (
+              <View key={c.comment_id} style={s.commentRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.commentAuthor}>{c.username}</Text>
+                  <Text style={s.commentBody}>{c.body}</Text>
+                  <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
+                </View>
+                {c.mine && (
+                  <TouchableOpacity onPress={() => deleteComment(c.comment_id)}>
+                    <Text style={s.commentDelete}>Delete</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ))}
+
+            <View style={s.commentInputRow}>
+              <TextInput
+                style={s.commentInput}
+                value={commentDraft}
+                onChangeText={(t) => setCommentDraft(t.slice(0, 280))}
+                placeholder="Write a comment..."
+                placeholderTextColor={C.textMuted}
+                multiline
+                maxLength={280}
+              />
+              <TouchableOpacity
+                style={[s.commentSendBtn, (!commentDraft.trim() || posting) && { opacity: 0.4 }]}
+                onPress={submitComment}
+                disabled={!commentDraft.trim() || posting}
+              >
+                <Text style={s.commentSendText}>{posting ? '...' : 'Post'}</Text>
+              </TouchableOpacity>
+            </View>
           </>
         )}
 
@@ -313,4 +442,37 @@ const s = StyleSheet.create({
   shotsRowHole: { color: C.text, fontWeight: '800', fontSize: 14, minWidth: 60 },
   shotsRowMeta: { color: C.textMuted, fontSize: 12, flex: 1 },
   shotsRowChev: { color: C.gold, fontSize: 22, fontWeight: '300' },
+
+  reactionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  reactionBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  reactionBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
+  reactionLabel: { color: C.textMuted, fontWeight: '800', fontSize: 11, letterSpacing: 0.8, fontFamily: F.serif },
+  reactionCount: { color: C.textMuted, fontWeight: '800', fontSize: 11 },
+
+  emptyComment: { color: C.textDim, fontStyle: 'italic', fontSize: 12, paddingVertical: 8 },
+  commentRow: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 12,
+    backgroundColor: C.card, borderRadius: 8, padding: 12,
+    marginBottom: 6, borderWidth: 1, borderColor: C.border,
+  },
+  commentAuthor: { color: C.gold, fontWeight: '800', fontSize: 12 },
+  commentBody: { color: C.text, fontSize: 13, marginTop: 3, lineHeight: 18 },
+  commentTime: { color: C.textDim, fontSize: 10, marginTop: 4 },
+  commentDelete: { color: C.red, fontSize: 11, fontWeight: '700' },
+  commentInputRow: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 6, marginTop: 6,
+  },
+  commentInput: {
+    flex: 1, backgroundColor: C.card, color: C.text, borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, maxHeight: 120,
+    borderWidth: 1, borderColor: C.border, minHeight: 40,
+  },
+  commentSendBtn: {
+    backgroundColor: C.gold, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
+  },
+  commentSendText: { color: '#000', fontWeight: '800', fontSize: 13 },
 });

@@ -8,6 +8,7 @@ import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
+import { LiveSpectatorModal } from '../../components/LiveSpectator';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -25,6 +26,8 @@ export default function UserProfileScreen() {
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
   const [activeRound, setActiveRound] = useState<any | null>(null);
+  const [courseRecords, setCourseRecords] = useState<any[]>([]);
+  const [spectating, setSpectating] = useState(false);
 
   const openScorecard = (round: any) => {
     setScorecardEntry({
@@ -39,6 +42,7 @@ export default function UserProfileScreen() {
       created_at: round.created_at,
       teebox_par: round.teebox_par,
       match_id: round.match_id,
+      round_id: round.round_id,
     });
   };
 
@@ -56,6 +60,10 @@ export default function UserProfileScreen() {
 
   useEffect(() => {
     api.users.handicap(id).then(setHandicap).catch(() => { });
+  }, [id]);
+
+  useEffect(() => {
+    api.users.courseRecords(id).then(setCourseRecords).catch(() => { });
   }, [id]);
 
   // Poll the player's live in-progress round every 15s while the screen is open
@@ -142,7 +150,31 @@ export default function UserProfileScreen() {
           label="Handicap"
           value={handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
         />
+        <Stat label="Course Records" value={courseRecords.length} />
       </View>
+
+      {/* Course records detail */}
+      {courseRecords.length > 0 && (
+        <>
+          <OrnamentTitle title="Course Records" />
+          {courseRecords.map((cr: any) => (
+            <TouchableOpacity
+              key={cr.course_id}
+              style={[styles.roundCard, { borderColor: C.gold }]}
+              onPress={() => router.push(`/course/${cr.course_id}` as any)}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roundCourseName}>{cr.course_name}</Text>
+                <Text style={styles.roundMeta}>{cr.teebox_name} tees · {new Date(cr.created_at).toLocaleDateString()}</Text>
+              </View>
+              <View style={styles.roundScoreBox}>
+                <Text style={[styles.roundScore, { color: C.gold }]}>{cr.total_score}</Text>
+                <Text style={[styles.roundToPar, { color: C.gold }]}>RECORD</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
 
       {/* Live round (in-progress) */}
       {activeRound && (
@@ -153,18 +185,7 @@ export default function UserProfileScreen() {
           </View>
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.green }]}
-            disabled={!activeRound.hole_scores?.length}
-            onPress={() => setScorecardEntry({
-              username: profile.username,
-              user_id: profile.user_id,
-              teebox_name: activeRound.teebox_name,
-              hole_scores: activeRound.hole_scores,
-              course_id: activeRound.course_id,
-              course_name: activeRound.course_name,
-              teebox_id: activeRound.teebox_id,
-              total_score: (activeRound.hole_scores ?? []).reduce((a: number, b: number) => a + b, 0),
-              created_at: activeRound.round_started_at,
-            })}
+            onPress={() => setSpectating(true)}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{activeRound.course_name ?? 'Unknown course'}</Text>
@@ -175,7 +196,7 @@ export default function UserProfileScreen() {
                   : ' · Just started'}
               </Text>
               <Text style={styles.roundDate}>
-                {activeRound.hole_scores?.length ? 'Tap to view live scorecard' : 'Waiting for first score…'}
+                Tap to spectate live
               </Text>
             </View>
             <View style={styles.roundScoreBox}>
@@ -268,6 +289,13 @@ export default function UserProfileScreen() {
         visible={!!scorecardEntry}
         entry={scorecardEntry}
         onClose={() => setScorecardEntry(null)}
+      />
+
+      <LiveSpectatorModal
+        visible={spectating}
+        userId={profile?.user_id}
+        username={profile?.username}
+        onClose={() => setSpectating(false)}
       />
     </ScrollView>
   );

@@ -12,6 +12,7 @@ import findsRouter from './routes/finds';
 import messagesRouter from './routes/messages';
 import invitesRouter from './routes/invites';
 import dmRouter from './routes/dm';
+import roundsRouter from './routes/rounds';
 
 const app = express();
 app.use(cors());
@@ -32,6 +33,7 @@ app.use('/finds', findsRouter);
 app.use('/messages', messagesRouter);
 app.use('/invites', invitesRouter);
 app.use('/dm', dmRouter);
+app.use('/rounds', roundsRouter);
 
 // Catch unhandled errors so the server doesn't crash
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

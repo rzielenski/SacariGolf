@@ -132,7 +132,7 @@ export default function CourseInfoScreen() {
         displayLb.map((r, i) => (
           <TouchableOpacity
             key={r.round_id ?? i}
-            style={styles.lbRow}
+            style={[styles.lbRow, i === 0 && lbTab === 'stroke' && { borderColor: C.gold }]}
             onPress={() => r.hole_scores?.length
               ? setScorecardEntry({ ...r, course_id: course.course_id, course_name: course.course_name })
               : router.push(`/user/${r.user_id}` as any)
@@ -145,7 +145,14 @@ export default function CourseInfoScreen() {
               #{i + 1}
             </Text>
             <View style={{ flex: 1 }}>
-              <Text style={styles.lbUser}>{r.username}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={styles.lbUser}>{r.username}</Text>
+                {i === 0 && lbTab === 'stroke' && (
+                  <View style={styles.recordBadge}>
+                    <Text style={styles.recordBadgeText}>RECORD</Text>
+                  </View>
+                )}
+              </View>
               <Text style={styles.lbMeta}>
                 {r.teebox_name} · {r.holes_played ?? r.num_holes} holes · {new Date(r.created_at).toLocaleDateString()}
               </Text>
@@ -244,6 +251,8 @@ const styles = StyleSheet.create({
 
   empty: { color: C.textMuted, fontSize: 13, paddingHorizontal: 20, paddingVertical: 12 },
   tapHint: { color: C.textDim, fontSize: 11, textAlign: 'center', paddingVertical: 12, paddingHorizontal: 20 },
+  recordBadge: { backgroundColor: C.gold + '33', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1, borderWidth: 1, borderColor: C.gold },
+  recordBadgeText: { color: C.gold, fontWeight: '900', fontSize: 9, letterSpacing: 1 },
 
   modalContainer: { flex: 1, backgroundColor: C.bg },
   modalHeader: {

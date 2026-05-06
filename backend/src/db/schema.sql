@@ -229,6 +229,26 @@ CREATE TABLE IF NOT EXISTS shot_tracks (
 );
 CREATE INDEX IF NOT EXISTS shot_tracks_match_user_idx ON shot_tracks(match_id, user_id);
 
+-- Round reactions — text-only (no emoji glyphs in storage). Limited set of types.
+CREATE TABLE IF NOT EXISTS round_reactions (
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  round_id UUID NOT NULL REFERENCES rounds(round_id) ON DELETE CASCADE,
+  reaction TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, round_id, reaction)
+);
+CREATE INDEX IF NOT EXISTS round_reactions_round_idx ON round_reactions(round_id);
+
+-- Round comments — short text per user, on a completed round
+CREATE TABLE IF NOT EXISTS round_comments (
+  comment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  round_id UUID NOT NULL REFERENCES rounds(round_id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS round_comments_round_idx ON round_comments(round_id, created_at);
+
 -- Find reports (moderation)
 CREATE TABLE IF NOT EXISTS find_reports (
   report_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -101,6 +101,7 @@ export interface MatchPlayer {
   course_name?: string;
   teebox_id?: string;
   hole_scores?: number[] | null;
+  round_id?: string;
 }
 
 export interface MatchResult {

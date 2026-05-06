@@ -1,0 +1,91 @@
+import { Router, Response } from 'express';
+import pool from '../db/pool';
+import { requireAuth, AuthRequest } from '../middleware/auth';
+import { wrap } from '../utils/asyncHandler';
+
+const router = Router();
+
+// Allowed reaction tokens (text labels — no emoji glyphs).
+// Adding more here is the only place to extend the set.
+const REACTIONS = new Set(['fire', 'pure', 'respect', 'oof', 'goat', 'clutch']);
+
+// GET reactions + comments for a round
+//   Returns { reactions: [{ reaction, count, mine }], comments: [{ comment_id, user_id, username, body, created_at, mine }] }
+router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: rxRows } = await pool.query(
+    `SELECT reaction, COUNT(*)::int AS count,
+            BOOL_OR(user_id = $2) AS mine
+     FROM round_reactions
+     WHERE round_id = $1
+     GROUP BY reaction
+     ORDER BY count DESC, reaction`,
+    [req.params.roundId, req.userId]
+  );
+  const { rows: cmRows } = await pool.query(
+    `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at,
+            (c.user_id = $2) AS mine
+     FROM round_comments c
+     JOIN users u ON u.user_id = c.user_id
+     WHERE c.round_id = $1
+     ORDER BY c.created_at ASC`,
+    [req.params.roundId, req.userId]
+  );
+  return res.json({ reactions: rxRows, comments: cmRows });
+}));
+
+// Toggle a reaction on a round (add if absent, remove if present)
+//   body: { reaction: 'fire' }
+router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const reaction = (req.body?.reaction ?? '').toString().toLowerCase().trim();
+  if (!REACTIONS.has(reaction)) return res.status(400).json({ error: 'invalid reaction' });
+
+  // Verify round exists
+  const { rows } = await pool.query(`SELECT 1 FROM rounds WHERE round_id = $1`, [req.params.roundId]);
+  if (!rows.length) return res.status(404).json({ error: 'round not found' });
+
+  const { rows: existing } = await pool.query(
+    `SELECT 1 FROM round_reactions WHERE user_id = $1 AND round_id = $2 AND reaction = $3`,
+    [req.userId, req.params.roundId, reaction]
+  );
+  if (existing.length) {
+    await pool.query(
+      `DELETE FROM round_reactions WHERE user_id = $1 AND round_id = $2 AND reaction = $3`,
+      [req.userId, req.params.roundId, reaction]
+    );
+    return res.json({ added: false });
+  }
+  await pool.query(
+    `INSERT INTO round_reactions (user_id, round_id, reaction) VALUES ($1, $2, $3)`,
+    [req.userId, req.params.roundId, reaction]
+  );
+  return res.json({ added: true });
+}));
+
+// Post a comment
+//   body: { body: 'nice round' }
+router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
+  if (!body) return res.status(400).json({ error: 'body required' });
+
+  const { rows: rd } = await pool.query(`SELECT 1 FROM rounds WHERE round_id = $1`, [req.params.roundId]);
+  if (!rd.length) return res.status(404).json({ error: 'round not found' });
+
+  const { rows } = await pool.query(
+    `INSERT INTO round_comments (user_id, round_id, body)
+     VALUES ($1, $2, $3) RETURNING comment_id, created_at`,
+    [req.userId, req.params.roundId, body]
+  );
+  return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
+}));
+
+// Delete a comment (only your own)
+router.delete('/:roundId/comments/:commentId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rowCount } = await pool.query(
+    `DELETE FROM round_comments WHERE comment_id = $1 AND user_id = $2`,
+    [req.params.commentId, req.userId]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'not found or not yours' });
+  return res.json({ success: true });
+}));
+
+export default router;

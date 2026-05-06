@@ -137,6 +137,31 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
+// Course records — the courses where this user holds the lowest score on
+// any teebox. Returns one row per course where they're rank #1.
+router.get('/:id/course-records', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `WITH ranked AS (
+       SELECT t.course_id, c.course_name, t.name AS teebox_name, r.user_id,
+              r.total_score, r.created_at,
+              ROW_NUMBER() OVER (PARTITION BY t.course_id ORDER BY r.total_score ASC, r.created_at ASC) AS rk
+       FROM rounds r
+       JOIN matches m ON m.match_id = r.match_id
+       JOIN teeboxes t ON t.teebox_id = r.teebox_id
+       JOIN courses c ON c.course_id = t.course_id
+       WHERE r.total_score IS NOT NULL
+         AND m.completed = true
+         AND m.is_practice = false
+     )
+     SELECT course_id, course_name, teebox_name, total_score, created_at
+     FROM ranked
+     WHERE rk = 1 AND user_id = $1
+     ORDER BY total_score ASC`,
+    [req.params.id]
+  );
+  return res.json(rows);
+}));
+
 // Active (unused) perks for the requesting user
 router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
@@ -149,7 +174,27 @@ router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response
   return res.json(rows);
 }));
 
-router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
+router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const friendsOnly = req.query.friends === '1' || req.query.friends === 'true';
+  if (friendsOnly) {
+    // Self + accepted friends, ranked by ELO. Friend rows are stored as a
+    // single direction with status='accepted' (the original requester being
+    // user_id, friend_id either side depending on who initiated).
+    const { rows } = await pool.query(
+      `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
+       FROM users u
+       WHERE u.user_id = $1
+          OR u.user_id IN (
+            SELECT CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+            FROM friends f
+            WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
+          )
+       ORDER BY u.elo DESC
+       LIMIT 100`,
+      [req.userId]
+    );
+    return res.json(rows);
+  }
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, total_matches, total_wins, avatar_url
      FROM users ORDER BY elo DESC LIMIT 100`

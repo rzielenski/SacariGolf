@@ -137,7 +137,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
             t.course_id, t.num_holes,
             c.course_name,
-            r.hole_scores
+            r.round_id, r.hole_scores
      FROM match_players mp
      JOIN users u ON u.user_id = mp.user_id
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id

@@ -68,6 +68,7 @@ export default function ProfileScreen() {
       created_at: round.created_at,
       teebox_par: round.teebox_par,
       match_id: round.match_id,
+      round_id: round.round_id,
     });
   };
 

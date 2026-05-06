@@ -21,16 +21,17 @@ export default function LeaderboardScreen() {
   const [players, setPlayers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [scope, setScope] = useState<'global' | 'friends'>('global');
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
-      setPlayers(await api.users.leaderboard());
+      setPlayers(await api.users.leaderboard(scope === 'friends'));
     } catch { /* silent */ } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -47,6 +48,20 @@ export default function LeaderboardScreen() {
           {myRank > 0 && <Text style={styles.subtitle}>You are #{myRank}</Text>}
         </View>
         <View style={{ width: 60 }} />
+      </View>
+
+      <View style={styles.scopeRow}>
+        {(['global', 'friends'] as const).map((s) => (
+          <TouchableOpacity
+            key={s}
+            style={[styles.scopeBtn, scope === s && styles.scopeBtnActive]}
+            onPress={() => { setScope(s); setLoading(true); }}
+          >
+            <Text style={[styles.scopeBtnText, scope === s && styles.scopeBtnTextActive]}>
+              {s === 'global' ? 'Global' : 'Friends'}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
       {loading ? (
@@ -158,4 +173,13 @@ const styles = StyleSheet.create({
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   emptyText: { color: C.textMuted, fontSize: 15 },
+
+  scopeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 },
+  scopeBtn: {
+    flex: 1, paddingVertical: 9, borderRadius: 6, alignItems: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  scopeBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
+  scopeBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 13 },
+  scopeBtnTextActive: { color: C.gold },
 });

@@ -234,6 +234,7 @@ export default function MatchLobbyScreen() {
               course_name: p.course_name ?? null,
               teebox_id: p.teebox_id,
               match_id: id,
+              round_id: p.round_id,
             };
             return (
               <ScorecardCard
