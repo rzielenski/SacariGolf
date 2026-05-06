@@ -98,7 +98,9 @@ export default function ScoringScreen() {
   const [panelExpanded, setPanelExpanded] = useState(false);
   const panelAnim = useRef(new Animated.Value(COLLAPSED_H)).current;
 
-  const SAVE_KEY = `scores_${id}`;
+  // Namespace saved progress by user so logging into a different account on
+  // the same device doesn't pick up the previous user's in-progress round.
+  const SAVE_KEY = `scores_${user?.user_id ?? 'anon'}_${id}`;
 
   // ── Live progress upload (so friends can watch) ─────────────────────────────
   // First update fires immediately when scoring starts (so the backend's

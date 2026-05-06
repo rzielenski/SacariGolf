@@ -42,7 +42,7 @@ export default function HomeScreen() {
   const deleteMatch = useCallback(async (matchId: string) => {
     try {
       await api.matches.cancel(matchId);
-      try { await AsyncStorage.removeItem(`scores_${matchId}`); } catch { }
+      try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${matchId}`); } catch { }
       setMatches((prev) => prev.filter((m) => m.match_id !== matchId));
     } catch (e: any) {
       Alert.alert('Could not delete', e.message);

@@ -27,17 +27,23 @@ export default function MatchLobbyScreen() {
     try {
       const data = await api.matches.get(id);
       setMatch(data);
-      // Check for locally-saved in-progress round
+      // Check for locally-saved in-progress round (per-user key so accounts
+      // on the same device don't see each other's saved progress).
+      // Also confirm against the server: if THIS user already submitted scores
+      // OR has a teebox set, there's no point showing "Continue Match" — they'd
+      // just be re-entering scoring on data the server already has.
       try {
-        const saved = await AsyncStorage.getItem(`scores_${id}`);
-        setHasSavedProgress(!!saved);
+        const saved = await AsyncStorage.getItem(`scores_${user?.user_id ?? 'anon'}_${id}`);
+        const me = data.players?.find((p: any) => p.user_id === user?.user_id);
+        const hasServerProgress = !!(me?.teebox_id) || (me?.hole_scores?.length ?? 0) > 0;
+        setHasSavedProgress(!!saved || hasServerProgress);
       } catch { /* ignore */ }
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, user?.user_id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -91,7 +97,7 @@ export default function MatchLobbyScreen() {
             setCancelling(true);
             try {
               await api.matches.cancel(id);
-              try { await AsyncStorage.removeItem(`scores_${id}`); } catch { }
+              try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${id}`); } catch { }
               router.replace('/(tabs)/' as any);
             } catch (e: any) {
               Alert.alert('Error', e.message);
