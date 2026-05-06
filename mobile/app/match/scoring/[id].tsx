@@ -391,7 +391,17 @@ export default function ScoringScreen() {
     }
     const point = { lat: userCoord.latitude, lng: userCoord.longitude };
     setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
-    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng).catch(() => { });
+    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng)
+      .catch((e: any) => {
+        // Roll back local override so the user can retry rather than silently
+        // believing the pin was saved.
+        setPinByHole((prev) => {
+          const next = { ...prev };
+          delete next[currentHoleObj.hole_id];
+          return next;
+        });
+        Alert.alert('Could not save pin', e?.message ?? 'Try again.');
+      });
   };
 
   const pickCourse = async (c: Course) => {

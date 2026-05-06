@@ -17,7 +17,8 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id,
-            c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
+            c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
+            c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
      LEFT JOIN courses c ON c.course_id = u.home_course_id
      WHERE u.user_id = $1`,

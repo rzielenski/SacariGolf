@@ -185,6 +185,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
      FROM matches m
      JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
      LEFT JOIN match_results mr ON mr.match_id = m.match_id
+     WHERE m.superseded_by_match_id IS NULL
      ORDER BY m.created_at DESC LIMIT 50`,
     [req.userId]
   );
@@ -289,6 +290,21 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     const myeSide: number = matchRows[0].side;
     const resolvedTeeboxId = teeboxId || matchRows[0].player_teebox;
 
+    // Validate hole count against teebox capacity to keep ELO math consistent.
+    // (Otherwise a client could submit 18 scores against a 9-hole teebox and
+    // diff18() would produce a hybrid result.)
+    if (resolvedTeeboxId) {
+      const { rows: teeRows } = await client.query(
+        `SELECT num_holes FROM teeboxes WHERE teebox_id = $1`,
+        [resolvedTeeboxId]
+      );
+      const cap = teeRows[0]?.num_holes;
+      if (cap && holeScores.length > cap) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Cannot submit ${holeScores.length} holes on a ${cap}-hole tee box` });
+      }
+    }
+
     // Scramble: validate equal team sizes before accepting first submission
     if (matchFormat === 'scramble') {
       const { rows: sideCountRows } = await client.query(
@@ -364,12 +380,25 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       }
     }
 
-    // Scramble: mark ALL teammates on the same side as done with the same score
+    // Scramble: mark ALL teammates on the same side as done with the same score,
+    // AND copy the submitter's rounds row to each so resolveElo's COALESCE on
+    // hole_scores.length doesn't fall back to 18 for their teammates.
     if (matchFormat === 'scramble') {
       await client.query(
         `UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
          WHERE match_id = $3 AND side = $4 AND user_id != $5`,
         [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]
+      );
+      // Mirror the submitter's rounds row to each teammate so holes_played
+      // (derived from array_length(hole_scores, 1)) stays consistent.
+      await client.query(
+        `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
+         SELECT $1, mp.user_id, $2, $3, $4, $5, $6
+         FROM match_players mp
+         WHERE mp.match_id = $1 AND mp.side = $7 AND mp.user_id != $8
+         ON CONFLICT (match_id, user_id)
+         DO UPDATE SET hole_scores = EXCLUDED.hole_scores, total_score = EXCLUDED.total_score, teebox_id = EXCLUDED.teebox_id`,
+        [req.params.id, courseId || null, resolvedTeeboxId || null, holeScores, totalScore, matchRows[0].match_type, myeSide, req.userId]
       );
     }
 
@@ -411,10 +440,12 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const side1Diff = getDiff(side1Players, compareCount);
       const side2Diff = getDiff(side2Players, compareCount);
 
-      // Tie when the two differentials round to the same hundredth.
-      // Chess-style: actual score 0.5 for both sides. Higher-rated player loses ELO,
-      // lower-rated gains. delta = K × (0.5 − expected).
-      const isTie = Math.round(side1Diff * 100) === Math.round(side2Diff * 100);
+      // Tie when the two differentials are within 0.05 of each other (about
+      // 1/20 of a stroke). Wider than the float-precision threshold so it
+      // catches genuine near-ties, narrower than 1 full stroke equivalent.
+      // Chess-style: actual score 0.5 for both sides. Higher-rated player
+      // loses ELO, lower-rated gains. delta = K × (0.5 − expected).
+      const isTie = Math.abs(side1Diff - side2Diff) < 0.05;
       const side1Wins = !isTie && side1Diff < side2Diff;
 
       const p1 = side1Players[0];
@@ -428,29 +459,39 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       // Track per-player perk applications to surface in the response
       const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
 
+      // Batch-fetch unused perks for everyone in this match. CRITICAL: exclude
+      // perks earned on THIS match — they're for the player's *next* match.
+      const allPlayerIds = [...side1Players, ...side2Players].map((p) => p.user_id);
+      const { rows: perkRows } = await client.query(
+        `SELECT DISTINCT ON (user_id) user_id, perk_id
+         FROM user_perks
+         WHERE user_id = ANY($1)
+           AND consumed_at IS NULL
+           AND (earned_match_id IS NULL OR earned_match_id != $2)
+         ORDER BY user_id, earned_at ASC`,
+        [allPlayerIds, matchId]
+      );
+      const perkByUser = new Map<string, string>(
+        perkRows.map((r: any) => [r.user_id, r.perk_id])
+      );
+
       for (const p of [...side1Players, ...side2Players]) {
         const onSide1 = side1Players.includes(p);
         const baseChange = onSide1 ? side1Delta : side2Delta;
         const won = !isTie && onSide1 === side1Wins;
 
         // Check for an unused 'lucky_round' perk and apply it.
-        // - Loss → set ELO change to 0 (loss prevention)
-        // - Win  → double the ELO gain
-        // - Tie loss (favored side losing rating) → also zeroed
+        // - Loss  → set ELO change to 0 (loss prevention)
+        // - Win   → double the ELO gain
+        // - 0 ELO → don't consume (no benefit; nothing to absorb or double)
         let eloChange = baseChange;
-        const { rows: perkRows } = await client.query(
-          `SELECT perk_id FROM user_perks
-           WHERE user_id = $1 AND consumed_at IS NULL
-           ORDER BY earned_at ASC LIMIT 1`,
-          [p.user_id]
-        );
-        if (perkRows.length) {
+        const perkId = perkByUser.get(p.user_id);
+        if (perkId && baseChange !== 0) {
           if (eloChange < 0) eloChange = 0;
-          else if (eloChange > 0) eloChange = eloChange * 2;
-          // (eloChange === 0: no effect; we still consume the perk so it doesn't accumulate forever)
+          else eloChange = eloChange * 2;
           await client.query(
             `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
-            [perkRows[0].perk_id, matchId]
+            [perkId, matchId]
           );
           perkApplications.push({ user_id: p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
         }
@@ -568,6 +609,18 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           [req.params.id, opp.user_id, opp.teebox_id, opp.strokes]
         );
 
+        // Copy the opponent's round (from their original match) into THIS match
+        // so the allPlayers query in resolveElo gets correct holes_played for them.
+        // Without this, the LEFT JOIN to rounds returns null and COALESCE defaults
+        // to 18 — wrong for 9-hole opponents.
+        await client.query(
+          `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
+           SELECT $1, user_id, course_id, teebox_id, hole_scores, total_score, round_type
+           FROM rounds WHERE match_id = $2 AND user_id = $3
+           ON CONFLICT (match_id, user_id) DO NOTHING`,
+          [req.params.id, opp.opp_match_id, opp.user_id]
+        );
+
         // No special-case normalization needed — diff18() inside resolveElo
         // already converts each player's score to an 18-hole equivalent so a
         // 9-hole player vs an 18-hole player compares fairly.
@@ -576,8 +629,14 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         result.autoMatched = true;
         result.crossFormat = isCrossFormat;
         result.opponentUsername = opp.username;
-        // Close opponent's pending match so it doesn't re-enter the pool
-        await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [opp.opp_match_id]);
+        // Close opponent's pending match AND mark it superseded by the current
+        // match. The matches-list endpoint filters out superseded rows so the
+        // opponent's match list doesn't show a phantom TIE — they see this
+        // match instead, where they're listed as side 2 with the real result.
+        await client.query(
+          `UPDATE matches SET completed = true, superseded_by_match_id = $2 WHERE match_id = $1`,
+          [opp.opp_match_id, req.params.id]
+        );
       }
       // No candidate → stay pending (match.completed stays false, scores are recorded)
 
@@ -671,16 +730,53 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
     const k = kFactor(p1.total_matches, p1.elo);
     const deltaElo = Math.round(k * (0 - expA)); // negative for forfeiter
 
+    // Pull unused 'lucky_round' perks for everyone in this match (excluding any
+    // earned on this match — those are reserved for their next ranked match).
+    const allForfeitPlayerIds = [...mySidePlayers, ...otherSidePlayers].map((p) => p.user_id);
+    const { rows: forfeitPerkRows } = await client.query(
+      `SELECT DISTINCT ON (user_id) user_id, perk_id
+       FROM user_perks
+       WHERE user_id = ANY($1)
+         AND consumed_at IS NULL
+         AND (earned_match_id IS NULL OR earned_match_id != $2)
+       ORDER BY user_id, earned_at ASC`,
+      [allForfeitPlayerIds, req.params.id]
+    );
+    const forfeitPerkByUser = new Map<string, string>(
+      forfeitPerkRows.map((r: any) => [r.user_id, r.perk_id])
+    );
+    const forfeitPerkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
+
     for (const p of mySidePlayers) {
+      let change = deltaElo; // negative for forfeiter
+      const perkId = forfeitPerkByUser.get(p.user_id);
+      if (perkId && change < 0) {
+        await client.query(
+          `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+          [perkId, req.params.id]
+        );
+        forfeitPerkApplications.push({ user_id: p.user_id, original: change, adjusted: 0, type: 'lucky_round' });
+        change = 0;
+      }
       await client.query(
         `UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1 WHERE user_id = $2`,
-        [deltaElo, p.user_id]
+        [change, p.user_id]
       );
     }
     for (const p of otherSidePlayers) {
+      let change = -deltaElo; // positive for opponents
+      const perkId = forfeitPerkByUser.get(p.user_id);
+      if (perkId && change > 0) {
+        await client.query(
+          `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+          [perkId, req.params.id]
+        );
+        forfeitPerkApplications.push({ user_id: p.user_id, original: change, adjusted: change * 2, type: 'lucky_round' });
+        change = change * 2;
+      }
       await client.query(
         `UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1, total_wins = total_wins + 1 WHERE user_id = $2`,
-        [-deltaElo, p.user_id]
+        [change, p.user_id]
       );
     }
 
@@ -691,7 +787,13 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
         req.params.id, playerRows[0].match_type,
         mySide === 1 ? 2 : 1,
         Math.abs(deltaElo),
-        JSON.stringify({ forfeit: true, forfeitUserId: req.userId }),
+        JSON.stringify({
+          forfeit: true,
+          forfeitUserId: req.userId,
+          side1DeltaSignedElo: mySide === 1 ? deltaElo : -deltaElo,
+          side2DeltaSignedElo: mySide === 1 ? -deltaElo : deltaElo,
+          perks: forfeitPerkApplications,
+        }),
       ]
     );
     await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
@@ -755,6 +857,14 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
 
 // Notify friends that the user has started a round. Idempotent — only fires once per match.
 router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Verify caller is in the match BEFORE we flip the bit, otherwise a
+  // non-member could grief the notification by calling this first.
+  const { rows: playerRows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!playerRows.length) return res.json({ success: true, sent: false });
+
   // Atomic flip: only the first caller for this match gets a row back
   const { rows: flipped } = await pool.query(
     `UPDATE matches SET started_notified = true
@@ -763,13 +873,6 @@ router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Resp
     [req.params.id]
   );
   if (!flipped.length) return res.json({ success: true, sent: false });
-
-  // Verify caller is in the match
-  const { rows: playerRows } = await pool.query(
-    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
-    [req.params.id, req.userId]
-  );
-  if (!playerRows.length) return res.json({ success: true, sent: false });
 
   // Course name (from any player's teebox), starter username
   const { rows: meRows } = await pool.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
@@ -784,11 +887,14 @@ router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Resp
   );
   const courseName = courseRows[0]?.course_name ?? 'a course';
 
-  // Friends with push tokens
+  // Friends with push tokens — bidirectional (the friends table stores one
+  // row per friendship; the friend can be on either side of user_id/friend_id).
   const { rows: friends } = await pool.query(
-    `SELECT u.push_token FROM friends f
-     JOIN users u ON u.user_id = f.friend_id
-     WHERE f.user_id = $1 AND f.status = 'accepted' AND u.push_token IS NOT NULL`,
+    `SELECT DISTINCT u.push_token FROM friends f
+     JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+     WHERE (f.user_id = $1 OR f.friend_id = $1)
+       AND f.status = 'accepted'
+       AND u.push_token IS NOT NULL`,
     [req.userId]
   );
   const tokens = friends.map((f) => f.push_token).filter(Boolean);
@@ -816,12 +922,18 @@ router.post('/:id/pin', requireAuth, wrap(async (req: AuthRequest, res: Response
     return res.status(400).json({ error: 'invalid coords' });
   }
 
-  // Verify the user is in this match
+  // Verify the user is in this match AND the hole belongs to their teebox.
+  // Without the join you could earn contribution credits for any hole on any
+  // course just by knowing its hole_id.
   const { rows: pRows } = await pool.query(
-    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
-    [req.params.id, req.userId]
+    `SELECT 1 FROM match_players mp
+     JOIN holes h ON h.teebox_id = mp.teebox_id
+     WHERE mp.match_id = $1 AND mp.user_id = $2 AND h.hole_id = $3`,
+    [req.params.id, req.userId, holeId]
   );
-  if (!pRows.length) return res.status(404).json({ error: 'Not in match' });
+  if (!pRows.length) {
+    return res.status(404).json({ error: 'Not in match or hole not on your teebox' });
+  }
 
   // First contributor wins — only set the pin if it's currently null.
   // We DO record the contribution credit either way.

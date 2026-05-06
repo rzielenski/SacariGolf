@@ -112,7 +112,11 @@ CREATE TABLE matches (
   name TEXT,
   is_public BOOLEAN NOT NULL DEFAULT TRUE,
   is_practice BOOLEAN NOT NULL DEFAULT FALSE,
-  started_notified BOOLEAN NOT NULL DEFAULT FALSE
+  started_notified BOOLEAN NOT NULL DEFAULT FALSE,
+  -- When a solo match gets absorbed into another via the auto-match pool, the
+  -- original "waiting" match points at the new match here. GET /matches filters
+  -- these out so the player only sees one row per real match.
+  superseded_by_match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL
 );
 
 -- Match Players (each user/clan slot in a match)

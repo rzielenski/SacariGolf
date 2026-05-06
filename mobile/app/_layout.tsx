@@ -6,6 +6,7 @@ import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -57,7 +58,15 @@ function AuthGuard() {
     })();
   }, [user?.user_id]);
 
-  return null;
+  // Pre-warm map tiles for the user's home course so the next round there
+  // loads instantly even on a flaky connection.
+  return (
+    <HomeCoursePreloader
+      courseId={user?.home_course_id ?? null}
+      lat={user?.home_course_lat ?? null}
+      lng={user?.home_course_lng ?? null}
+    />
+  );
 }
 
 export default function RootLayout() {

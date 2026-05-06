@@ -14,6 +14,8 @@ export interface User {
   home_course_name?: string | null;
   home_course_city?: string | null;
   home_course_state?: string | null;
+  home_course_lat?: number | null;
+  home_course_lng?: number | null;
 }
 
 export interface ChatMessage {

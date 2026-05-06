@@ -407,13 +407,6 @@ const styles = StyleSheet.create({
 
   sectionTitle: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 10 },
 
-  scGrid: { flexDirection: 'row', alignItems: 'center', minHeight: 22 },
-  scLabel: { width: 38, color: C.textDim, fontSize: 10, fontWeight: '700' },
-  scNum: { flex: 1, color: C.textMuted, fontSize: 11, textAlign: 'center', fontWeight: '700' },
-  scParCell: { flex: 1, color: C.textMuted, fontSize: 11, textAlign: 'center' },
-  scScoreCell: { flex: 1, fontSize: 12, textAlign: 'center', fontWeight: '700' },
-  scTotal: { width: 36, color: C.gold, fontSize: 11, textAlign: 'center', fontWeight: '800' },
-
   playerCard: {
     backgroundColor: C.card, borderRadius: 14, padding: 14,
     flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8,
@@ -464,22 +457,6 @@ const styles = StyleSheet.create({
   modalTitle: { color: C.text, fontSize: 18, fontWeight: '900' },
   modalSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   modalClose: { color: C.gold, fontSize: 15, fontWeight: '700' },
-
-  scorecardHint: { color: C.textDim, fontSize: 11, textAlign: 'center', marginTop: 6, fontStyle: 'italic' },
-
-  totalsCard: {
-    flexDirection: 'row', backgroundColor: C.card, borderRadius: 10,
-    padding: 14, borderWidth: 1, borderColor: C.border, marginBottom: 6,
-  },
-  totalCell: { flex: 1, alignItems: 'center' },
-  totalLabel: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  totalValue: { color: C.text, fontFamily: F.serif, fontSize: 24, fontWeight: '700', marginTop: 4 },
-
-  viewProfileBtn: {
-    marginTop: 24, borderRadius: 8, paddingVertical: 14, alignItems: 'center',
-    borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '22',
-  },
-  viewProfileBtnText: { color: C.gold, fontWeight: '700', fontSize: 14 },
 
   friendRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,

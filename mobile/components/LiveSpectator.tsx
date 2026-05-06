@@ -35,7 +35,6 @@ export function LiveSpectatorModal({
   const [active, setActive] = useState<any | null>(null);
   const [shots, setShots] = useState<Shot[]>([]);
   const [loading, setLoading] = useState(false);
-  const [tick, setTick] = useState(0);
 
   // Poll active round every 10s while the modal is visible
   useEffect(() => {
@@ -50,7 +49,6 @@ export function LiveSpectatorModal({
         if (a?.match_id) {
           const tracks = await api.matches.listShotTracks(a.match_id, userId);
           if (cancelled) return;
-          // Current hole = how many holes they've recorded scores for (rounded up)
           const playedSoFar = a.hole_scores?.length ?? 0;
           const curHoleNum = Math.max(1, playedSoFar);
           const row = tracks.find((t) => t.hole_num === curHoleNum);
@@ -62,9 +60,9 @@ export function LiveSpectatorModal({
       finally { if (!cancelled) setLoading(false); }
     };
     fetchLive();
-    const t = setInterval(() => { setTick((x) => x + 1); fetchLive(); }, 10_000);
+    const t = setInterval(fetchLive, 10_000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [visible, userId, tick === -1 ? Math.random() : 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visible, userId]);
 
   // Compute initial map region from shots
   const region: Region | undefined = shots.length > 0
