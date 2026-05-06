@@ -13,6 +13,9 @@ import messagesRouter from './routes/messages';
 import invitesRouter from './routes/invites';
 import dmRouter from './routes/dm';
 import roundsRouter from './routes/rounds';
+import premiumRouter from './routes/premium';
+import weatherRouter from './routes/weather';
+import { runMigrations } from './db/migrate';
 
 const app = express();
 app.use(cors());
@@ -34,6 +37,8 @@ app.use('/messages', messagesRouter);
 app.use('/invites', invitesRouter);
 app.use('/dm', dmRouter);
 app.use('/rounds', roundsRouter);
+app.use('/premium', premiumRouter);
+app.use('/weather', weatherRouter);
 
 // Catch unhandled errors so the server doesn't crash
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -46,4 +51,8 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
+runMigrations()
+  .catch((e) => console.error('Migration runner crashed (continuing anyway):', e))
+  .finally(() => {
+    app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
+  });

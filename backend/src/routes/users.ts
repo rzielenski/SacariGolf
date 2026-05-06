@@ -5,6 +5,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { aggregateSG, Shot, Lie } from '../utils/sg';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -17,6 +18,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
+            u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -256,11 +258,18 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
         if (fwHit) fwHits += 1;
       }
 
-      // 4-category SG — needs putts, chips AND gir tracked.
-      // SG_OTT is the residual so all four sum to (par − strokes).
+      // 4-category basic SG — needs putts, chips AND gir tracked.
+      // Baselines (Shotscope-style simplified):
+      //   • Putting baseline = 2 if the player reached the green (GIR), else 1.
+      //     If the player chipped on, they're effectively in 1-putt territory, so
+      //     2-putting a chip = 0 SG (par for that recovery), 1-putt = +1, 3-putt = −1.
+      //   • Around-Green baseline = 1 chip (when chips > 0).
+      //   • Approach baseline = GIR (gir = 0 SG, missed green = −1).
+      //   • Off-the-Tee = residual so the four sum to (par − strokes).
       if (putts !== null && chips !== null && gir !== null) {
         sgHoles += 1;
-        const putt = 2 - putts;
+        const puttBaseline = chips > 0 ? 1 : 2;
+        const putt = puttBaseline - putts;
         const around = chips > 0 ? (1 - chips) : 0;
         const approach = gir ? 0 : -1;
         const tee = (par - strokes) - putt - around - approach;
@@ -302,6 +311,269 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
           total:        round((sgTotal       / sgHoles) * (holesPlayed / roundsCount)),
         }
       : null,
+  });
+}));
+
+/**
+ * Per-club stats — aggregates every tracked shot the user has tagged with a
+ * `club` field across all of their matches. Returns:
+ *   • Per-club counts and median/avg distance (in yards)
+ *   • Per-club dispersion points: shots in a normalised 2D frame where the
+ *     median shot points "up". The (lateral, longitudinal) deltas show miss
+ *     pattern. The mobile heatmap screen renders these directly.
+ *
+ * Distance comes from haversine between consecutive shots within a hole.
+ * Tee shots → next-shot location; final shot before holing out is dropped
+ * (no end-point to measure to without the pin coordinates).
+ */
+router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT st.shots
+       FROM shot_tracks st
+       JOIN match_players mp ON mp.match_id = st.match_id AND mp.user_id = st.user_id
+      WHERE st.user_id = $1
+      ORDER BY st.updated_at DESC
+      LIMIT 200`,
+    [req.params.id]
+  );
+
+  // Per-club bucket: collect every shot's (distance_m, bearing_rad) pair,
+  // plus the raw start/end so we can normalise.
+  type ShotVec = { dist_m: number; bearing: number };
+  const byClub = new Map<string, ShotVec[]>();
+
+  // Haversine — meters between two lat/lng points
+  const R = 6371000;
+  const toRad = (d: number) => d * Math.PI / 180;
+  function haversine(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+  // Initial bearing in radians, 0 = north, clockwise
+  function bearing(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const y = Math.sin(dLng) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+    return Math.atan2(y, x);
+  }
+
+  for (const row of rows) {
+    const shots: any[] = Array.isArray(row.shots) ? row.shots : [];
+    for (let i = 0; i < shots.length - 1; i++) {
+      const cur = shots[i];
+      const nxt = shots[i + 1];
+      if (typeof cur?.lat !== 'number' || typeof nxt?.lat !== 'number') continue;
+      if (typeof cur.club !== 'string') continue; // untagged → skip
+      const dist_m = haversine(cur, nxt);
+      if (dist_m < 1 || dist_m > 500) continue; // sanity: drop GPS noise / impossibly long
+      const b = bearing(cur, nxt);
+      const arr = byClub.get(cur.club) ?? [];
+      arr.push({ dist_m, bearing: b });
+      byClub.set(cur.club, arr);
+    }
+  }
+
+  // Build per-club summary + dispersion points
+  const M_TO_YDS = 1.0936;
+  const median = (arr: number[]) => {
+    if (!arr.length) return 0;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const m = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+  };
+
+  const clubs: any[] = [];
+  for (const [club, vecs] of byClub.entries()) {
+    if (vecs.length < 2) {
+      // Not enough samples to call a "median direction"; still report distance.
+      const yds = vecs.map(v => v.dist_m * M_TO_YDS);
+      clubs.push({
+        club,
+        shots: vecs.length,
+        avg_yds:    Math.round(yds.reduce((a, b) => a + b, 0) / yds.length),
+        median_yds: Math.round(median(yds)),
+        // Dispersion needs ≥2 samples to define a frame.
+        dispersion: [],
+      });
+      continue;
+    }
+    // Median bearing — circular median. Crude but fine: rotate so shot 0
+    // points "north" (using its bearing as reference), then take the median
+    // of the angular offsets, then add back. This avoids the wrap-around at
+    // ±π for typical sub-180° spreads.
+    const refB = vecs[0].bearing;
+    const offsets = vecs.map(v => {
+      let o = v.bearing - refB;
+      while (o > Math.PI) o -= 2 * Math.PI;
+      while (o < -Math.PI) o += 2 * Math.PI;
+      return o;
+    });
+    const medB = refB + median(offsets);
+
+    const yds = vecs.map(v => v.dist_m * M_TO_YDS);
+    const medYds = median(yds);
+
+    // Dispersion frame: forward axis = median bearing.
+    // For each shot, project (dx_m, dy_m) onto the median frame:
+    //   forward  =  dist * cos(bearing − medB)
+    //   lateral  =  dist * sin(bearing − medB)   (positive = right of target line)
+    // Then offsets relative to median distance: longitudinal = forward − medDist
+    const dispersion = vecs.map(v => {
+      let off = v.bearing - medB;
+      while (off > Math.PI) off -= 2 * Math.PI;
+      while (off < -Math.PI) off += 2 * Math.PI;
+      const fwd_m  = v.dist_m * Math.cos(off);
+      const lat_m  = v.dist_m * Math.sin(off);
+      const fwd_yds = fwd_m * M_TO_YDS;
+      const lat_yds = lat_m * M_TO_YDS;
+      return {
+        // Round to whole yards for compactness
+        lateral_yds: Math.round(lat_yds),
+        long_yds:    Math.round(fwd_yds - medYds), // signed: + = long, − = short
+        dist_yds:    Math.round(fwd_yds),
+      };
+    });
+
+    clubs.push({
+      club,
+      shots: vecs.length,
+      avg_yds:    Math.round(yds.reduce((a, b) => a + b, 0) / yds.length),
+      median_yds: Math.round(medYds),
+      dispersion,
+    });
+  }
+
+  // Stable order: longest median distance first (driver → wedges → putter)
+  clubs.sort((a, b) => (b.median_yds || 0) - (a.median_yds || 0));
+  return res.json({ clubs });
+}));
+
+/**
+ * Advanced strokes-gained — the real Mark Broadie / Shotscope model.
+ * Requires shot-tracking data with at least lie tags + pin coordinates.
+ *
+ * For each tracked hole we walk the shot list. Each shot's start lie/distance
+ * comes from the player's tag (or sane defaults: shot 0 = 'tee', else
+ * 'fairway'). End lie/distance comes from the next shot's tag and position.
+ * Final shot ends at the pin (end_dist = 0 if the player holed out per the
+ * scorecard).
+ *
+ * Returns null if too little data is available; clients should fall back to
+ * the basic /stats endpoint in that case.
+ */
+router.get('/:id/sg-advanced', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT st.match_id, st.hole_num, st.shots,
+            r.hole_scores, r.teebox_id,
+            (SELECT json_agg(json_build_object('hole_num', h.hole_num, 'par', h.par,
+                                                'pin_lat', h.pin_lat, 'pin_lng', h.pin_lng))
+               FROM holes h WHERE h.teebox_id = r.teebox_id) AS holes
+       FROM shot_tracks st
+       JOIN rounds r ON r.match_id = st.match_id AND r.user_id = st.user_id
+      WHERE st.user_id = $1
+      ORDER BY st.updated_at DESC
+      LIMIT 200`,
+    [req.params.id]
+  );
+
+  if (!rows.length) return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
+
+  const R = 6371000;
+  const toRad = (d: number) => d * Math.PI / 180;
+  const haversineYds = (a: any, b: any) => {
+    if (a?.lat == null || b?.lat == null) return null;
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return (2 * R * Math.asin(Math.sqrt(h))) * 1.0936;
+  };
+
+  const allShots: Shot[] = [];
+  const holeIdsSeen = new Set<string>();
+  const matchIdsSeen = new Set<string>();
+
+  for (const row of rows) {
+    const shots: any[] = Array.isArray(row.shots) ? row.shots : [];
+    const holes: any[] = Array.isArray(row.holes) ? row.holes : [];
+    const holeMeta = holes.find((h: any) => h.hole_num === row.hole_num);
+    if (!holeMeta || holeMeta.pin_lat == null || holeMeta.pin_lng == null) continue;
+    if (shots.length < 2) continue;
+
+    const par = holeMeta.par ?? 4;
+    const pin = { lat: holeMeta.pin_lat, lng: holeMeta.pin_lng };
+    const holed = (Array.isArray(row.hole_scores) ? row.hole_scores[row.hole_num - 1] : null) ?? null;
+
+    for (let i = 0; i < shots.length; i++) {
+      const cur = shots[i];
+      const nxt = shots[i + 1];
+      const isLast = i === shots.length - 1;
+
+      // Start lie: prefer player tag, else infer from position.
+      const startLie: Lie = (cur?.lie as Lie) ?? (i === 0 ? 'tee' : 'fairway');
+      const startDist = haversineYds(cur, pin);
+      if (startDist == null) continue;
+
+      let endLie: Lie;
+      let endDist: number;
+
+      if (isLast) {
+        // Final tracked shot: assume holed out if scorecard agrees with shot count
+        // (i.e. shots.length === holed). Otherwise end at last GPS point.
+        if (typeof holed === 'number' && shots.length === holed) {
+          endLie = 'green';
+          endDist = 0;
+        } else {
+          endLie = (cur?.lie as Lie) ?? 'green';
+          // estimate end distance from the GPS itself: if very close to pin, assume holed
+          const d = haversineYds(cur, pin) ?? 0;
+          endDist = d < 3 ? 0 : d;
+        }
+      } else {
+        endLie = (nxt?.lie as Lie) ?? (haversineYds(nxt, pin)! < 30 ? 'green' : 'fairway');
+        endDist = haversineYds(nxt, pin) ?? 0;
+      }
+
+      allShots.push({
+        start_lie: startLie,
+        start_dist_yds: Math.round(startDist),
+        end_lie: endLie,
+        end_dist_yds: Math.round(endDist),
+        par,
+        is_tee_shot: i === 0,
+      });
+    }
+
+    holeIdsSeen.add(`${row.match_id}:${row.hole_num}`);
+    matchIdsSeen.add(row.match_id);
+  }
+
+  if (!allShots.length) {
+    return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
+  }
+
+  const totals = aggregateSG(allShots);
+  const holesUsed = holeIdsSeen.size;
+  const roundsUsed = matchIdsSeen.size;
+  const round = (n: number) => Math.round(n * 100) / 100;
+
+  // Per-round = total SG × (18 / holes_used). Crude but interpretable.
+  const norm = holesUsed > 0 ? 18 / holesUsed : 0;
+  return res.json({
+    shots_used: totals.shots_used,
+    holes_used: holesUsed,
+    rounds_used: roundsUsed,
+    sg_per_round: {
+      off_tee:      round(totals.off_tee      * norm),
+      approach:     round(totals.approach     * norm),
+      around_green: round(totals.around_green * norm),
+      putting:      round(totals.putting      * norm),
+      total:        round(totals.total        * norm),
+    },
   });
 }));
 

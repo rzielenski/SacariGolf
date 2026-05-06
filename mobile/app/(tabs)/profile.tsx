@@ -8,6 +8,7 @@ import { useAuth } from '../../lib/auth';
 import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
+import { isPremium } from '../../lib/premium';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
@@ -73,6 +74,15 @@ export default function ProfileScreen() {
       round_id: round.round_id,
     });
   };
+
+  // Refresh cached user object on mount — pulls latest is_premium / verification
+  // state without forcing a re-login. Only runs when we have a logged-in user.
+  useEffect(() => {
+    if (!user) return;
+    refreshUser?.().catch(() => { });
+  // Run once per mount; we don't want this looping on every user change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load notification count badge — must be before any early return
   useEffect(() => {
@@ -289,6 +299,11 @@ export default function ProfileScreen() {
         </TouchableOpacity>
         <View style={styles.usernameRow}>
           <Text style={styles.username}>{user.username}</Text>
+          {isPremium(user as any) && (
+            <View style={styles.premiumPill}>
+              <Text style={styles.premiumPillText}>👑 PREMIUM</Text>
+            </View>
+          )}
           <TouchableOpacity onPress={changeUsername} style={styles.editUsernameBtn}>
             <Text style={styles.editUsernameBtnText}>Edit</Text>
           </TouchableOpacity>
@@ -374,6 +389,18 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.statsBtnLabel}>VIEW STATS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
+      {/* Premium upgrade entry point */}
+      <TouchableOpacity
+        style={styles.premiumBtn}
+        onPress={() => router.push('/premium' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.premiumBtnLabel}>
+          {isPremium(user as any) ? '👑 PREMIUM · MANAGE' : '👑 GO PREMIUM'}
+        </Text>
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
@@ -760,6 +787,18 @@ const styles = StyleSheet.create({
   },
   statsBtnLabel: { color: C.gold, fontWeight: '800', fontSize: 13, letterSpacing: 0.6 },
   statsBtnArrow: { color: C.gold, fontSize: 22 },
+  premiumBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.gold,
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 6,
+    marginTop: 0, marginBottom: 16,
+  },
+  premiumBtnLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 0.8 },
+  premiumPill: {
+    backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold,
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 3,
+  },
+  premiumPillText: { color: C.gold, fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
 
   bellBtn: {
     position: 'absolute', top: 60, right: 20, zIndex: 10,

@@ -258,8 +258,14 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
 }));
 
 // Sanitise a hole_stats array — same length as scores, each entry has
-// putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null). Bad input
+// putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null) plus the
+// optional advanced fields fairwayMiss / greenMiss / puttDistances. Bad input
 // is silently dropped rather than failing the whole submission.
+const FAIRWAY_MISS_VALUES = new Set(['left', 'right']);
+const GREEN_MISS_VALUES = new Set(['left', 'right', 'short', 'long']);
+// Snap stops for putt-distance entry, in feet. Anything else is dropped.
+const PUTT_DIST_STOPS = new Set([3, 6, 10, 15, 20, 30, 40, 50]);
+
 function cleanHoleStats(input: any, expectedLength: number): any[] {
   if (!Array.isArray(input)) return [];
   return input.slice(0, expectedLength).map((h: any) => {
@@ -269,6 +275,21 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
     if (typeof h.chips === 'number' && h.chips >= 0 && h.chips <= 10) cleaned.chips = Math.floor(h.chips);
     if (typeof h.gir === 'boolean') cleaned.gir = h.gir;
     if (typeof h.fairwayHit === 'boolean') cleaned.fairwayHit = h.fairwayHit;
+    if (typeof h.fairwayMiss === 'string' && FAIRWAY_MISS_VALUES.has(h.fairwayMiss)) {
+      cleaned.fairwayMiss = h.fairwayMiss;
+    }
+    if (typeof h.greenMiss === 'string' && GREEN_MISS_VALUES.has(h.greenMiss)) {
+      cleaned.greenMiss = h.greenMiss;
+    }
+    if (Array.isArray(h.puttDistances)) {
+      // Cap at the player's putt count when known, else 10. Drop non-stop values.
+      const max = typeof cleaned.putts === 'number' ? cleaned.putts : 10;
+      const dists = h.puttDistances
+        .slice(0, max)
+        .map((d: any) => Number(d))
+        .filter((d: number) => Number.isFinite(d) && PUTT_DIST_STOPS.has(d));
+      if (dists.length) cleaned.puttDistances = dists;
+    }
     return cleaned;
   });
 }
@@ -995,8 +1016,19 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   const shots = req.body?.shots;
   if (!Array.isArray(shots)) return res.status(400).json({ error: 'shots array required' });
 
+  // Allowed clubs and lies — keep these short, lower-cased identifiers.
+  // Front-end labels can be richer; here we just whitelist values to avoid
+  // free-text growing organically.
+  const ALLOWED_CLUBS = new Set([
+    'driver', '3w', '5w', '7w', 'hybrid',
+    '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
+    'pw', 'gw', 'sw', 'lw', 'putter',
+  ]);
+  const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
+
   // Validate shape — clamp to reasonable values; reject anything obviously bogus.
-  // Elevation is optional (older clients won't send it) but persisted when present.
+  // Elevation, club, and lie are optional (older clients won't send them) but
+  // persisted when present.
   const clean = shots
     .filter((s: any) => typeof s?.lat === 'number' && typeof s?.lng === 'number'
       && Math.abs(s.lat) <= 90 && Math.abs(s.lng) <= 180)
@@ -1005,6 +1037,12 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
       const out: any = { lat: s.lat, lng: s.lng };
       if (typeof s.elevation_m === 'number' && s.elevation_m > -500 && s.elevation_m < 9000) {
         out.elevation_m = s.elevation_m;
+      }
+      if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+        out.club = s.club.toLowerCase();
+      }
+      if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
+        out.lie = s.lie.toLowerCase();
       }
       return out;
     });

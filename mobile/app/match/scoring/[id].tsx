@@ -10,6 +10,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
+import { isPremium } from '../../../lib/premium';
+import { adjustDistance, windComponents, metersToFeet } from '../../../lib/weatherAdjust';
 import { C, F } from '../../../lib/colors';
 import { Hole, Teebox, Course } from '../../../types';
 
@@ -119,14 +121,58 @@ export default function ScoringScreen() {
   // course, not the index into our `holes` array). elevation_m is the device's
   // GPS altitude at the moment the shot was tracked — captured so we can
   // crowdsource pin elevation data and offer slope-adjusted distances.
-  type ShotPoint = { lat: number; lng: number; elevation_m?: number };
+  // `club` and `lie` are optional and feed per-club stats / heatmap. Tracking
+  // a club is opt-in: a player can record shots without ever picking one.
+  type ShotPoint = { lat: number; lng: number; elevation_m?: number; club?: string; lie?: string };
   const [shotsByHole, setShotsByHole] = useState<Record<number, ShotPoint[]>>({});
+  // Pre-selected club for the next shot, persisted across taps. Cleared on hole change.
+  const [pendingClub, setPendingClub] = useState<string | null>(null);
+  const [clubPickerVisible, setClubPickerVisible] = useState(false);
+  // Advanced detail entry modal — miss directions + per-putt distance sliders
+  const [advancedVisible, setAdvancedVisible] = useState(false);
+
+  // Weather conditions — fetched once per round (course location-based) and
+  // refreshed every 15 min while playing. Drives the premium "plays-like"
+  // distance adjustment.
+  type WeatherData = {
+    temperature_f: number | null;
+    wind_speed_mph: number | null;
+    wind_from_bearing: number | null;
+    rain: 'none' | 'light' | 'heavy';
+    elevation_ft: number | null;
+  };
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [weatherSheetVisible, setWeatherSheetVisible] = useState(false);
+  const userIsPremium = isPremium(user as any);
 
   // Per-hole stat tracking — putts, chips, fairway hit. Indexed by the hole
   // INDEX in our holes array (not hole_num) so we can submit it as a parallel
   // array alongside scores. Tracking is opt-in: untouched holes stay empty.
-  type HoleStat = { putts?: number; chips?: number; gir?: boolean | null; fairwayHit?: boolean | null };
+  type HoleStat = {
+    putts?: number;
+    chips?: number;
+    gir?: boolean | null;
+    fairwayHit?: boolean | null;
+    // Advanced entry — direction of miss when fairway/green wasn't hit.
+    fairwayMiss?: 'left' | 'right' | null;
+    greenMiss?: 'left' | 'right' | 'short' | 'long' | null;
+    // One distance entry per putt taken (in feet). Length should match `putts`.
+    // Allowed stops: 3, 6, 10, 15, 20, 30, 40, 50.
+    puttDistances?: number[];
+  };
   const [holeStats, setHoleStats] = useState<HoleStat[]>([]);
+  // Per-hole record of which fields the user manually set. Auto-derivation
+  // from tracked shots will only overwrite fields NOT in this set, so user
+  // taps always win.
+  const [manualFields, setManualFields] = useState<Record<number, Set<string>>>({});
+  const markManual = (holeIdx: number, ...fields: string[]) => {
+    setManualFields((prev) => {
+      const cur = prev[holeIdx] ?? new Set<string>();
+      const next = new Set(cur);
+      for (const f of fields) next.add(f);
+      return { ...prev, [holeIdx]: next };
+    });
+  };
 
   // Course selection
   const [selectingCourse, setSelectingCourse] = useState(true);
@@ -412,7 +458,84 @@ export default function ScoringScreen() {
       const cur = prev[currentHoleNum] ?? [];
       const point: ShotPoint = { lat: userCoord.latitude, lng: userCoord.longitude };
       if (typeof userCoord.altitude === 'number') point.elevation_m = userCoord.altitude;
+      // Tag with the currently-selected club so the per-club aggregator can
+      // bucket this shot. Optional — skipped if user never picked one.
+      if (pendingClub) point.club = pendingClub;
       const next = [...cur, point];
+      persistShots(currentHoleNum, next);
+      return { ...prev, [currentHoleNum]: next };
+    });
+  };
+
+  // Keep the ref pointed at the current closure so the watch listener (which
+  // we register once) always operates on fresh state.
+  // ── Weather fetching ───────────────────────────────────────────────────
+  // Fetches once we have a GPS lock, then refreshes every 15 min. Available
+  // to all users (raw chip), but auto-adjustment math is premium-gated.
+  useEffect(() => {
+    if (!userCoord) return;
+    let cancelled = false;
+    const load = () => {
+      api.weather.current(userCoord.latitude, userCoord.longitude)
+        .then(d => { if (!cancelled) setWeather(d); })
+        .catch(() => { /* silent — weather is non-essential */ });
+    };
+    load();
+    const id = setInterval(load, 15 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+    // Only re-key on coarse position change to avoid spamming the upstream.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userCoord ? Math.round(userCoord.latitude * 100) : null,
+      userCoord ? Math.round(userCoord.longitude * 100) : null]);
+
+  // ── Auto-fill hole stats from tracked shots ────────────────────────────
+  // Whenever the current hole's shot list changes, derive fairwayHit/Miss,
+  // gir/greenMiss, putts, chips from GPS + pin. Only applies to fields the
+  // user hasn't manually set (tracked in `manualFields[currentHole]`).
+  useEffect(() => {
+    if (currentHoleNum == null) return;
+    const hole = holes[currentHole];
+    if (!hole) return;
+    const shots = currentShots;
+    if (shots.length === 0) return;
+    const inferred = inferHoleStatsFromShots(shots, {
+      par: hole.par,
+      pin_lat: hole.pin_lat,
+      pin_lng: hole.pin_lng,
+    });
+    if (Object.keys(inferred).length === 0) return;
+
+    const manual = manualFields[currentHole] ?? new Set<string>();
+    setHoleStats((prev) => {
+      const next = [...prev];
+      const cur = next[currentHole] ?? {};
+      const merged: any = { ...cur };
+      let changed = false;
+      for (const [k, v] of Object.entries(inferred)) {
+        if (manual.has(k)) continue;          // user-owned → don't touch
+        if ((merged as any)[k] === v) continue; // already up to date
+        merged[k] = v;
+        changed = true;
+      }
+      if (!changed) return prev;
+      next[currentHole] = merged;
+      return next;
+    });
+    // currentShots is a new array each render so include only its length / last
+    // coordinates as deps to avoid infinite loops.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentHole, currentShots.length, currentShots[currentShots.length - 1]?.lat, currentShots[currentShots.length - 1]?.lng]);
+
+  // Set/replace the club tag on the most-recent shot of the current hole.
+  const setLastShotClub = (club: string | null) => {
+    if (currentHoleNum == null) return;
+    setPendingClub(club);
+    setShotsByHole((prev) => {
+      const cur = prev[currentHoleNum] ?? [];
+      if (!cur.length) return prev; // no shot yet — pendingClub will tag the next one
+      const last = { ...cur[cur.length - 1] };
+      if (club) last.club = club; else delete last.club;
+      const next = [...cur.slice(0, -1), last];
       persistShots(currentHoleNum, next);
       return { ...prev, [currentHoleNum]: next };
     });
@@ -464,6 +587,41 @@ export default function ScoringScreen() {
     const adj = Math.round(elevDiffM * 1.09);  // yards of correction
     if (Math.abs(adj) < 2) return null;        // too small to surface
     return { adj, playsLike: yardsToPin + adj, uphill: adj > 0 };
+  })();
+
+  // Weather-adjusted plays-like distance — premium feature. Layers altitude,
+  // temperature, wind, and rain on top of the slope-adjusted yardage.
+  const weatherAdjustment = (() => {
+    if (!userIsPremium || !weather || yardsToPin == null) return null;
+    const baseYds = (slopeAdjustment?.playsLike ?? yardsToPin); // start from slope-adjusted
+    if (weather.temperature_f == null) return null;             // need the basics
+
+    // Derive shot bearing (player → pin) for wind decomposition.
+    let along = 0;
+    if (knownPin && userCoord && weather.wind_speed_mph && weather.wind_from_bearing != null) {
+      const lat1 = userCoord.latitude * Math.PI / 180;
+      const lat2 = knownPin.lat * Math.PI / 180;
+      const dLng = (knownPin.lng - userCoord.longitude) * Math.PI / 180;
+      const y = Math.sin(dLng) * Math.cos(lat2);
+      const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+      const shotBearingDeg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+      const comps = windComponents(weather.wind_speed_mph, weather.wind_from_bearing, shotBearingDeg);
+      along = comps.along_mph;
+    }
+
+    // Use measured GPS altitude as a fallback if upstream elevation is missing.
+    const altFt = weather.elevation_ft
+      ?? (typeof userCoord?.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
+
+    const adj = adjustDistance(baseYds, {
+      altitudeFt:   altFt,
+      temperatureF: weather.temperature_f,
+      windAlongMph: along,
+      rain:         weather.rain,
+    });
+    const effective = Math.round(baseYds + (-adj.effective_delta_yds));
+    if (Math.abs(effective - baseYds) < 2) return null;
+    return { effective, breakdown: adj, windAlong: along };
   })();
 
   const markPin = () => {
@@ -604,11 +762,13 @@ export default function ScoringScreen() {
     const next = currentHole + dir;
     if (next < 0 || next >= holes.length) return;
     setCurrentHole(next);
+    setPendingClub(null); // reset club tag between holes
   };
 
   const jumpToHole = (index: number) => {
     setScorecardVisible(false);
     setCurrentHole(index);
+    setPendingClub(null);
   };
 
   const handleSubmit = () => {
@@ -953,6 +1113,76 @@ export default function ScoringScreen() {
         )}
       </TouchableOpacity>
 
+      {/* ── Club tag chip — opens picker. Lives just under TRACK SHOT. ── */}
+      <TouchableOpacity
+        style={styles.clubChip}
+        onPress={() => setClubPickerVisible(true)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.clubChipLabel}>CLUB</Text>
+        <Text style={styles.clubChipVal}>
+          {currentShots[currentShots.length - 1]?.club?.toUpperCase()
+            ?? pendingClub?.toUpperCase()
+            ?? '—'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Club picker modal */}
+      <Modal
+        visible={clubPickerVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setClubPickerVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.clubPickerBackdrop}
+          activeOpacity={1}
+          onPress={() => setClubPickerVisible(false)}
+        >
+          <View style={styles.clubPickerSheet}>
+            <Text style={styles.clubPickerTitle}>Tag Club</Text>
+            <Text style={styles.clubPickerSub}>
+              {currentShots.length === 0
+                ? 'Pre-select a club for your next tracked shot'
+                : `Tagging shot #${currentShots.length}`}
+            </Text>
+            <View style={styles.clubGrid}>
+              {(['driver','3w','5w','7w','hybrid','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const).map(c => {
+                const active = (currentShots[currentShots.length - 1]?.club ?? pendingClub) === c;
+                return (
+                  <TouchableOpacity
+                    key={c}
+                    style={[styles.clubBtn, active && styles.clubBtnActive]}
+                    onPress={() => { setLastShotClub(c); setClubPickerVisible(false); }}
+                  >
+                    <Text style={[styles.clubBtnText, active && { color: C.bg }]}>{c.toUpperCase()}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <TouchableOpacity style={styles.clubClearBtn} onPress={() => { setLastShotClub(null); setClubPickerVisible(false); }}>
+              <Text style={styles.clubClearText}>Clear tag</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Advanced entry modal — fairway/green miss directions + per-putt distances */}
+      <AdvancedEntryModal
+        visible={advancedVisible}
+        onClose={() => setAdvancedVisible(false)}
+        holePar={holes[currentHole]?.par ?? 4}
+        stat={holeStats[currentHole]}
+        onChange={(patch) => {
+          markManual(currentHole, ...Object.keys(patch));
+          setHoleStats((prev) => {
+            const next = [...prev];
+            next[currentHole] = { ...(next[currentHole] ?? {}), ...patch };
+            return next;
+          });
+        }}
+      />
+
       {/* ── Pin distance / Mark Pin button (right side, below track shot) ── */}
       {yardsToPin != null ? (
         <View style={styles.pinDistChip}>
@@ -961,6 +1191,11 @@ export default function ScoringScreen() {
           {slopeAdjustment && (
             <Text style={styles.pinDistPlaysLike}>
               plays {slopeAdjustment.playsLike}  ({slopeAdjustment.uphill ? '+' : ''}{slopeAdjustment.adj})
+            </Text>
+          )}
+          {weatherAdjustment && (
+            <Text style={styles.pinDistWeather}>
+              wx {weatherAdjustment.effective}  ({weatherAdjustment.effective > yardsToPin ? '+' : ''}{weatherAdjustment.effective - yardsToPin})
             </Text>
           )}
         </View>
@@ -974,6 +1209,100 @@ export default function ScoringScreen() {
           <Text style={styles.markPinHint}>Stand on the green</Text>
         </TouchableOpacity>
       )}
+
+      {/* ── Weather chip ── */}
+      {weather && (
+        <TouchableOpacity
+          style={styles.weatherChip}
+          onPress={() => setWeatherSheetVisible(true)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.weatherChipMain}>
+            {weather.temperature_f != null ? `${weather.temperature_f}°` : '—'}
+            {' · '}
+            {weather.wind_speed_mph != null ? `${weather.wind_speed_mph}mph` : '—'}
+          </Text>
+          <Text style={styles.weatherChipSub}>
+            {weather.rain === 'heavy' ? '🌧️ heavy'
+             : weather.rain === 'light' ? '🌦️ light'
+             : weather.elevation_ft ? `${weather.elevation_ft}ft elev` : 'clear'}
+          </Text>
+          {!userIsPremium && (
+            <View style={styles.weatherPremPill}>
+              <Text style={styles.weatherPremText}>👑 Premium</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      )}
+
+      {/* Weather details sheet */}
+      <Modal
+        visible={weatherSheetVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setWeatherSheetVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.advBackdrop}
+          activeOpacity={1}
+          onPress={() => setWeatherSheetVisible(false)}
+        >
+          <TouchableOpacity activeOpacity={1} onPress={() => { /* swallow */ }}>
+            <View style={styles.advSheet}>
+              <Text style={styles.advTitle}>Conditions</Text>
+              {weather && (
+                <>
+                  <View style={styles.wxGrid}>
+                    <WxStat label="TEMP"   value={weather.temperature_f != null ? `${weather.temperature_f}°F` : '—'} />
+                    <WxStat label="WIND"   value={weather.wind_speed_mph != null ? `${weather.wind_speed_mph} mph` : '—'} />
+                    <WxStat label="RAIN"   value={weather.rain.toUpperCase()} />
+                    <WxStat label="ELEV"   value={weather.elevation_ft != null ? `${weather.elevation_ft} ft` : '—'} />
+                  </View>
+                  {userIsPremium && weatherAdjustment && yardsToPin != null ? (
+                    <>
+                      <Text style={styles.advSection}>PLAYS-LIKE BREAKDOWN</Text>
+                      <Text style={styles.wxBaseLine}>
+                        Base distance: {yardsToPin} yds
+                      </Text>
+                      <WxRow label="Altitude"     yds={weatherAdjustment.breakdown.altitude_yds} />
+                      <WxRow label="Temperature"  yds={weatherAdjustment.breakdown.temperature_yds} />
+                      <WxRow label="Wind"         yds={weatherAdjustment.breakdown.wind_yds} extra={
+                        weatherAdjustment.windAlong > 0
+                          ? `${Math.round(weatherAdjustment.windAlong)} mph tailwind`
+                          : weatherAdjustment.windAlong < 0
+                            ? `${Math.round(-weatherAdjustment.windAlong)} mph headwind`
+                            : 'crosswind only'
+                      } />
+                      <WxRow label="Rain"         yds={weatherAdjustment.breakdown.rain_yds} />
+                      <View style={styles.totalDivider2} />
+                      <View style={styles.wxTotalRow}>
+                        <Text style={styles.wxTotalLabel}>PLAYS LIKE</Text>
+                        <Text style={styles.wxTotalVal}>{weatherAdjustment.effective} yds</Text>
+                      </View>
+                    </>
+                  ) : !userIsPremium ? (
+                    <View style={styles.wxLockBox}>
+                      <Text style={styles.wxLockTitle}>👑 Premium feature</Text>
+                      <Text style={styles.wxLockBody}>
+                        Auto-adjusted plays-like distances using altitude, temperature, wind, and rain.
+                      </Text>
+                      <TouchableOpacity
+                        style={styles.wxLockBtn}
+                        onPress={() => { setWeatherSheetVisible(false); router.push('/premium' as any); }}
+                      >
+                        <Text style={styles.wxLockBtnText}>SEE PLANS</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+                </>
+              )}
+              <TouchableOpacity style={styles.advCloseBtn} onPress={() => setWeatherSheetVisible(false)}>
+                <Text style={styles.advCloseText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       {/* ── Measure distance banner ── */}
       {measureDist !== null && (
@@ -1062,87 +1391,36 @@ export default function ScoringScreen() {
               ))}
             </View>
 
-            {/* Per-hole stats — putts, chips, fairway hit. All optional. */}
-            <View style={styles.statsRow}>
-              <StatStepper
-                label="Putts"
-                value={holeStats[currentHole]?.putts ?? null}
-                onChange={(v) => setHoleStats((prev) => {
-                  const next = [...prev];
-                  next[currentHole] = { ...(next[currentHole] ?? {}), putts: v };
-                  return next;
-                })}
-              />
-              <StatStepper
-                label="Chips"
-                value={holeStats[currentHole]?.chips ?? null}
-                onChange={(v) => setHoleStats((prev) => {
-                  const next = [...prev];
-                  next[currentHole] = { ...(next[currentHole] ?? {}), chips: v };
-                  return next;
-                })}
-              />
-              {hole.par >= 4 && (
-                <TouchableOpacity
-                  style={[
-                    styles.fwBtn,
-                    holeStats[currentHole]?.fairwayHit === true && styles.fwBtnHit,
-                    holeStats[currentHole]?.fairwayHit === false && styles.fwBtnMiss,
-                  ]}
-                  onPress={() => setHoleStats((prev) => {
-                    const next = [...prev];
-                    const cur = next[currentHole]?.fairwayHit;
-                    // Cycle through: null → true (hit) → false (miss) → null
-                    const nextVal: boolean | null | undefined =
-                      cur === undefined || cur === null ? true
-                      : cur === true ? false
-                      : null;
-                    next[currentHole] = { ...(next[currentHole] ?? {}), fairwayHit: nextVal as any };
-                    return next;
-                  })}
-                >
-                  <Text style={styles.fwLabel}>FAIRWAY</Text>
-                  <Text style={[
-                    styles.fwValue,
-                    holeStats[currentHole]?.fairwayHit === true && { color: C.green },
-                    holeStats[currentHole]?.fairwayHit === false && { color: C.red },
-                  ]}>
-                    {holeStats[currentHole]?.fairwayHit === true ? 'HIT'
-                     : holeStats[currentHole]?.fairwayHit === false ? 'MISS'
-                     : '—'}
+            {/* Single DETAILS button — opens the full hole-detail modal where
+                putts, chips, fairway, GIR, and putt distances all live. */}
+            <TouchableOpacity
+              style={styles.detailBtn}
+              onPress={() => setAdvancedVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.detailBtnLabel}>HOLE DETAILS</Text>
+              {(() => {
+                const hs = holeStats[currentHole];
+                const manual = manualFields[currentHole] ?? new Set<string>();
+                const bits: string[] = [];
+                if (hs?.putts != null) bits.push(`${hs.putts} putt${hs.putts === 1 ? '' : 's'}`);
+                if (hs?.chips != null && hs.chips > 0) bits.push(`${hs.chips} chip${hs.chips === 1 ? '' : 's'}`);
+                if (hs?.fairwayHit === true) bits.push('FW hit');
+                if (hs?.fairwayHit === false) bits.push(`FW ${hs.fairwayMiss ?? 'miss'}`);
+                if (hs?.gir === true) bits.push('GIR');
+                if (hs?.gir === false) bits.push(`grn ${hs.greenMiss ?? 'miss'}`);
+                const hasAuto = ['fairwayHit','fairwayMiss','gir','greenMiss','putts','chips']
+                  .some(k => (hs as any)?.[k] !== undefined && !manual.has(k));
+                if (!bits.length) {
+                  return <Text style={styles.detailBtnHint}>tap to enter putts, chips, FW, GIR…</Text>;
+                }
+                return (
+                  <Text style={styles.detailBtnSummary}>
+                    {hasAuto && '⚡ '}{bits.join(' · ')}
                   </Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                style={[
-                  styles.fwBtn,
-                  holeStats[currentHole]?.gir === true && styles.fwBtnHit,
-                  holeStats[currentHole]?.gir === false && styles.fwBtnMiss,
-                ]}
-                onPress={() => setHoleStats((prev) => {
-                  const next = [...prev];
-                  const cur = next[currentHole]?.gir;
-                  // Cycle through: null → true (GIR) → false (miss) → null
-                  const nextVal: boolean | null | undefined =
-                    cur === undefined || cur === null ? true
-                    : cur === true ? false
-                    : null;
-                  next[currentHole] = { ...(next[currentHole] ?? {}), gir: nextVal as any };
-                  return next;
-                })}
-              >
-                <Text style={styles.fwLabel}>GIR</Text>
-                <Text style={[
-                  styles.fwValue,
-                  holeStats[currentHole]?.gir === true && { color: C.green },
-                  holeStats[currentHole]?.gir === false && { color: C.red },
-                ]}>
-                  {holeStats[currentHole]?.gir === true ? 'YES'
-                   : holeStats[currentHole]?.gir === false ? 'NO'
-                   : '—'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+                );
+              })()}
+            </TouchableOpacity>
 
             <View style={styles.navRow}>
               <TouchableOpacity
@@ -1323,6 +1601,37 @@ const styles = StyleSheet.create({
   trackShotLabel: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 1.2 },
   trackShotCount: { color: C.text, fontWeight: '700', fontSize: 12, marginTop: 3 },
   trackShotHint: { color: C.textDim, fontSize: 9, marginTop: 2 },
+
+  clubChip: {
+    position: 'absolute', left: 12, top: 140,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 6, borderWidth: 1, borderColor: '#a8a8b0',
+    paddingHorizontal: 10, paddingVertical: 6, alignItems: 'center',
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+    elevation: 5, minWidth: 86,
+  },
+  clubChipLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  clubChipVal: { color: C.text, fontWeight: '900', fontSize: 13, marginTop: 2 },
+
+  clubPickerBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end',
+  },
+  clubPickerSheet: {
+    backgroundColor: C.card, borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    padding: 20, paddingBottom: 36,
+    borderTopWidth: 1, borderColor: C.gold + '88',
+  },
+  clubPickerTitle: { color: C.gold, fontFamily: F.serif, fontSize: 20, fontWeight: '900', textAlign: 'center' },
+  clubPickerSub: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 4, marginBottom: 14 },
+  clubGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 6 },
+  clubBtn: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg, minWidth: 64,
+  },
+  clubBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
+  clubBtnText: { color: C.text, fontWeight: '800', fontSize: 12, textAlign: 'center', letterSpacing: 0.6 },
+  clubClearBtn: { marginTop: 14, alignSelf: 'center', padding: 8 },
+  clubClearText: { color: C.textMuted, fontSize: 12 },
   shotDot: {
     width: 22, height: 22, borderRadius: 11,
     justifyContent: 'center', alignItems: 'center',
@@ -1333,7 +1642,7 @@ const styles = StyleSheet.create({
 
   // Pin distance + Mark Pin
   pinDistChip: {
-    position: 'absolute', right: 12, top: 222,
+    position: 'absolute', right: 12, top: 218,
     backgroundColor: C.green + 'ee',
     borderRadius: 8, borderWidth: 1, borderColor: '#fff',
     paddingHorizontal: 12, paddingVertical: 8, alignItems: 'center', minWidth: 86,
@@ -1341,8 +1650,65 @@ const styles = StyleSheet.create({
   pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
   pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 10, marginTop: 2, opacity: 0.9 },
+  pinDistWeather: { color: C.gold, fontWeight: '800', fontSize: 10, marginTop: 1 },
+
+  // Weather chip — sits below the pin distance / mark pin button on the right
+  weatherChip: {
+    position: 'absolute', right: 12, top: 296,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 6, borderWidth: 1, borderColor: C.gold + '88',
+    paddingHorizontal: 10, paddingVertical: 6, minWidth: 86, alignItems: 'center',
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+    elevation: 5,
+  },
+  weatherChipMain: { color: C.text, fontWeight: '900', fontSize: 12 },
+  weatherChipSub: { color: C.textMuted, fontSize: 9, marginTop: 1 },
+  weatherPremPill: {
+    marginTop: 3, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3,
+    backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold,
+  },
+  weatherPremText: { color: C.gold, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+
+  // Weather details sheet
+  wxGrid: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  wxStatBox: {
+    flex: 1, paddingVertical: 12, alignItems: 'center',
+    backgroundColor: C.bg, borderRadius: 6, borderWidth: 1, borderColor: C.border,
+  },
+  wxStatLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  wxStatVal: { color: C.text, fontFamily: F.serif, fontSize: 16, fontWeight: '900', marginTop: 4 },
+  wxBaseLine: { color: C.textMuted, fontSize: 11, marginBottom: 6 },
+  wxLineRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 8, paddingHorizontal: 12,
+    backgroundColor: C.bg, borderRadius: 6, borderWidth: 1, borderColor: C.border,
+    marginBottom: 6,
+  },
+  wxLineLabel: { color: C.text, fontSize: 13, fontWeight: '700' },
+  wxLineYds: { fontFamily: F.serif, fontSize: 14, fontWeight: '900' },
+  wxLineExtra: { color: C.textMuted, fontSize: 9, marginTop: 1 },
+  totalDivider2: { height: 1, backgroundColor: C.gold + '44', marginVertical: 8 },
+  wxTotalRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 12, paddingHorizontal: 12,
+    backgroundColor: C.gold + '22', borderRadius: 6, borderWidth: 1, borderColor: C.gold,
+  },
+  wxTotalLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 0.8 },
+  wxTotalVal: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900' },
+
+  wxLockBox: {
+    marginTop: 16, padding: 16, borderRadius: 8,
+    borderWidth: 1, borderColor: C.gold + '88', backgroundColor: C.bg, alignItems: 'center',
+  },
+  wxLockTitle: { color: C.gold, fontWeight: '900', fontSize: 14 },
+  wxLockBody: { color: C.text, fontSize: 12, lineHeight: 16, textAlign: 'center', marginTop: 8 },
+  wxLockBtn: {
+    marginTop: 12, paddingHorizontal: 20, paddingVertical: 10,
+    backgroundColor: C.gold, borderRadius: 6,
+  },
+  wxLockBtnText: { color: C.bg, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
   markPinBtn: {
-    position: 'absolute', right: 12, top: 222,
+    position: 'absolute', right: 12, top: 218,
     backgroundColor: C.bg + 'ee',
     borderRadius: 8, borderWidth: 1, borderColor: C.green,
     paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center', minWidth: 86,
@@ -1433,18 +1799,6 @@ const styles = StyleSheet.create({
   scoreNum: { fontFamily: F.serif, fontSize: 64, fontWeight: '700', color: C.text, lineHeight: 72 },
 
   quickScoreRow: { flexDirection: 'row', gap: 5, justifyContent: 'center', marginBottom: 12 },
-  statsRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    gap: 8, marginBottom: 12, paddingVertical: 4,
-  },
-  fwBtn: {
-    flex: 1, alignItems: 'center', gap: 4, paddingVertical: 4,
-    borderRadius: 4, borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
-  },
-  fwBtnHit: { borderColor: C.green },
-  fwBtnMiss: { borderColor: C.red },
-  fwLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
-  fwValue: { color: C.text, fontSize: 14, fontWeight: '800' },
   quickBtn: {
     width: 34, height: 34, borderRadius: 4, backgroundColor: C.card,
     justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.border,
@@ -1504,4 +1858,449 @@ const styles = StyleSheet.create({
   totalRow: { backgroundColor: C.cardAlt, marginTop: 2 },
 
   tapHint: { color: C.textDim, fontSize: 12, textAlign: 'center', marginTop: 16 },
+
+  // ── Single DETAILS button on the score panel ────────────────────────────
+  detailBtn: {
+    marginTop: 10, paddingVertical: 12, paddingHorizontal: 14,
+    borderRadius: 8, borderWidth: 1, borderColor: C.gold,
+    backgroundColor: C.card, alignItems: 'center',
+  },
+  detailBtnLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.2 },
+  detailBtnHint: { color: C.textMuted, fontSize: 10, marginTop: 4, fontStyle: 'italic' },
+  detailBtnSummary: { color: C.text, fontSize: 11, marginTop: 4, textAlign: 'center' },
+
+  // Row holding the Putts/Chips steppers inside the detail modal
+  advCountsRow: { flexDirection: 'row', gap: 10, marginBottom: 4 },
+
+  // ── Advanced entry modal ────────────────────────────────────────────────
+  advBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
+  advSheet: {
+    backgroundColor: C.card, borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    padding: 20, paddingBottom: 36, maxHeight: '85%',
+    borderTopWidth: 1, borderColor: C.gold + '88',
+  },
+  advTitle: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900', textAlign: 'center' },
+  advSection: { color: C.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 1.2, marginTop: 18, marginBottom: 8 },
+
+  // Direction button (LEFT / FAIRWAY / RIGHT and the green compass rose)
+  dirRow: { flexDirection: 'row', gap: 6 },
+  dirBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg, alignItems: 'center',
+  },
+  dirBtnActive: { borderColor: C.gold, backgroundColor: C.gold },
+  dirBtnText: { color: C.text, fontWeight: '800', fontSize: 12, letterSpacing: 0.6 },
+  dirBtnTextActive: { color: C.bg },
+
+  // Compass rose for green miss
+  greenRose: { alignItems: 'center', marginTop: 4 },
+  greenRoseRow: { flexDirection: 'row', justifyContent: 'center', gap: 6, marginVertical: 4 },
+  greenCenter: {
+    width: 80, paddingVertical: 12, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg, alignItems: 'center',
+  },
+  greenSide: {
+    width: 80, paddingVertical: 12, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg, alignItems: 'center',
+  },
+
+  // Per-putt slider
+  putRow: { marginTop: 10 },
+  putHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  putLabel: { color: C.text, fontSize: 13, fontWeight: '700' },
+  putVal: { color: C.gold, fontFamily: F.serif, fontSize: 16, fontWeight: '900' },
+
+  // SnapSlider primitive
+  snapWrap: { paddingVertical: 12 },
+  snapTrack: {
+    height: 4, backgroundColor: C.border, borderRadius: 2,
+    flexDirection: 'row', alignItems: 'center', position: 'relative',
+  },
+  snapFill: { position: 'absolute', left: 0, top: 0, height: 4, backgroundColor: C.gold, borderRadius: 2 },
+  snapStop: {
+    width: 8, height: 8, borderRadius: 4, backgroundColor: C.cardAlt,
+    borderWidth: 1, borderColor: C.border, position: 'absolute',
+  },
+  snapStopActive: { backgroundColor: C.gold, borderColor: C.gold },
+  snapThumb: {
+    position: 'absolute', width: 22, height: 22, borderRadius: 11,
+    backgroundColor: C.gold, borderWidth: 2, borderColor: C.bg,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+  },
+  snapStopLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 18, paddingHorizontal: 2 },
+  snapStopLabel: { color: C.textMuted, fontSize: 10 },
+  snapStopLabelActive: { color: C.gold, fontWeight: '900' },
+
+  advCloseBtn: { marginTop: 20, alignSelf: 'center', padding: 10 },
+  advCloseText: { color: C.gold, fontSize: 14, fontWeight: '700' },
 });
+
+// ── Geometry helpers (shared with derivation) ─────────────────────────────
+const EARTH_R_M = 6371000;
+const _toRad = (d: number) => d * Math.PI / 180;
+function haversineYds(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const dLat = _toRad(b.lat - a.lat);
+  const dLng = _toRad(b.lng - a.lng);
+  const lat1 = _toRad(a.lat), lat2 = _toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return (2 * EARTH_R_M * Math.asin(Math.sqrt(h))) * 1.0936;
+}
+function bearingRad(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const lat1 = _toRad(a.lat), lat2 = _toRad(b.lat);
+  const dLng = _toRad(b.lng - a.lng);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return Math.atan2(y, x);
+}
+
+/**
+ * Infer per-hole stat fields (fairwayHit/Miss, gir/greenMiss, putts, chips)
+ * from a sequence of tracked shot GPS points + the hole's pin location.
+ *
+ * Conventions:
+ *   • `shots[i]` is the GPS where shot i+1 was struck FROM. So `shots[0]` is
+ *     the tee box; `shots[1]` is where the tee shot landed; `shots[2]` is
+ *     where shot 2 landed; etc. The ball ending in the cup is implicit.
+ *   • "GIR" = the player's `par − 2` shot landed on the green (within ~12 yds).
+ *   • Fairway concept only applies to par 4+.
+ *   • Green miss direction uses the tee→pin centerline as the reference axis.
+ *     Right of line = positive lateral; long = past the pin along the axis.
+ *
+ * Returns only the fields it can confidently derive; everything else stays
+ * undefined so the caller can leave manual values intact.
+ */
+function inferHoleStatsFromShots(
+  shots: { lat: number; lng: number }[],
+  hole: { par: number; pin_lat?: number | null; pin_lng?: number | null },
+): {
+  fairwayHit?: boolean;
+  fairwayMiss?: 'left' | 'right' | null;
+  gir?: boolean;
+  greenMiss?: 'left' | 'right' | 'short' | 'long' | null;
+  putts?: number;
+  chips?: number;
+} {
+  if (!hole.pin_lat || !hole.pin_lng || shots.length === 0) return {};
+  const pin = { lat: hole.pin_lat, lng: hole.pin_lng };
+  const tee = shots[0];
+  const centerB = bearingRad(tee, pin);
+  const teeToPinYds = haversineYds(tee, pin);
+
+  // Project a point onto the tee→pin axis: returns { lateral, longitudinal }
+  // both in yards. Lateral positive = right of line. Longitudinal = forward.
+  const project = (p: { lat: number; lng: number }) => {
+    const d = haversineYds(tee, p);
+    const b = bearingRad(tee, p);
+    let off = b - centerB;
+    while (off > Math.PI) off -= 2 * Math.PI;
+    while (off < -Math.PI) off += 2 * Math.PI;
+    return { lateral: d * Math.sin(off), longitudinal: d * Math.cos(off) };
+  };
+
+  const GREEN_RADIUS_YDS = 12;     // ~36 ft — typical green effective radius
+  const FAIRWAY_HALF_YDS = 25;     // ~30-yd-wide fairway; ±25 yds = forgiving
+
+  const out: ReturnType<typeof inferHoleStatsFromShots> = {};
+
+  // Fairway hit (par 4+, needs the tee shot to have landed somewhere)
+  if (hole.par >= 4 && shots.length >= 2) {
+    const teeShotLanding = shots[1];
+    const { lateral } = project(teeShotLanding);
+    if (Math.abs(lateral) <= FAIRWAY_HALF_YDS) {
+      out.fairwayHit = true;
+      out.fairwayMiss = null;
+    } else {
+      out.fairwayHit = false;
+      out.fairwayMiss = lateral > 0 ? 'right' : 'left';
+    }
+  }
+
+  // GIR: did the player's `par − 2` shot land on the green?
+  // shots[par - 2] is where that shot ENDED (= where the next shot was hit from).
+  const girLandingIdx = hole.par - 2;
+  if (girLandingIdx >= 1 && shots.length > girLandingIdx) {
+    const girLanding = shots[girLandingIdx];
+    const distToPin = haversineYds(girLanding, pin);
+    if (distToPin <= GREEN_RADIUS_YDS) {
+      out.gir = true;
+      out.greenMiss = null;
+    } else {
+      out.gir = false;
+      const { lateral, longitudinal } = project(girLanding);
+      // Decide whether the dominant miss is lateral or distance.
+      const distMiss = longitudinal - teeToPinYds; // + = long, − = short
+      if (Math.abs(lateral) > Math.abs(distMiss)) {
+        out.greenMiss = lateral > 0 ? 'right' : 'left';
+      } else {
+        out.greenMiss = distMiss > 0 ? 'long' : 'short';
+      }
+    }
+  } else if (girLandingIdx >= 1 && shots.length === girLandingIdx) {
+    // Player only recorded enough shots to reach the green-attempt position
+    // (e.g. par 4 with 2 tracked shots). No landing position = ambiguous.
+    // Skip auto-fill.
+  }
+
+  // Putts and chips — count shots whose start position implies the lie type.
+  // "On green" is within ~GREEN_RADIUS_YDS of pin; chips are the band 12–30 yds.
+  let putts = 0, chips = 0;
+  for (let i = 1; i < shots.length; i++) {
+    // shots[i] is the start position of shot (i+1). To check "did shot i+1
+    // come from on/near the green", measure shots[i]'s distance to pin.
+    const dist = haversineYds(shots[i], pin);
+    if (dist <= GREEN_RADIUS_YDS) putts += 1;
+    else if (dist <= 30) chips += 1;
+  }
+  if (shots.length > 1) {
+    out.putts = putts;
+    out.chips = chips;
+  }
+
+  return out;
+}
+
+// ── Weather details sheet helpers ────────────────────────────────────────
+function WxStat({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.wxStatBox}>
+      <Text style={styles.wxStatLabel}>{label}</Text>
+      <Text style={styles.wxStatVal}>{value}</Text>
+    </View>
+  );
+}
+function WxRow({ label, yds, extra }: { label: string; yds: number; extra?: string }) {
+  const rounded = Math.round(yds);
+  if (Math.abs(rounded) < 1 && !extra) return null;
+  const sign = rounded > 0 ? '+' : '';
+  const color = rounded > 0 ? C.green : rounded < 0 ? C.red : C.text;
+  return (
+    <View style={styles.wxLineRow}>
+      <Text style={styles.wxLineLabel}>{label}</Text>
+      <View style={{ alignItems: 'flex-end' }}>
+        <Text style={[styles.wxLineYds, { color }]}>{sign}{rounded} yds</Text>
+        {extra && <Text style={styles.wxLineExtra}>{extra}</Text>}
+      </View>
+    </View>
+  );
+}
+
+// ── Advanced entry modal ──────────────────────────────────────────────────
+// Lets the player record the direction of fairway and green misses, plus the
+// distance of each individual putt. All optional; informs strokes-gained.
+
+const PUTT_STOPS = [3, 6, 10, 15, 20, 30, 40, 50] as const;
+
+function AdvancedEntryModal({
+  visible, onClose, holePar, stat, onChange,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  holePar: number;
+  stat: any | undefined;
+  onChange: (patch: Record<string, any>) => void;
+}) {
+  const fwMiss = stat?.fairwayMiss ?? null;
+  const fwHit  = stat?.fairwayHit ?? null;
+  const grMiss = stat?.greenMiss ?? null;
+  const gir    = stat?.gir ?? null;
+  const putts  = stat?.putts ?? 0;
+  const dists: number[] = stat?.puttDistances ?? [];
+
+  // Set the i-th putt distance, padding with default 10ft for any earlier
+  // putts the player hasn't dialed in yet.
+  const setPuttDist = (i: number, d: number) => {
+    const next = [...dists];
+    while (next.length <= i) next.push(10);
+    next[i] = d;
+    // Trim to current putt count so we don't store stale entries.
+    onChange({ puttDistances: next.slice(0, putts) });
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <TouchableOpacity style={styles.advBackdrop} activeOpacity={1} onPress={onClose}>
+        <TouchableOpacity activeOpacity={1} onPress={() => { /* swallow */ }}>
+          <ScrollView style={styles.advSheet} contentContainerStyle={{ paddingBottom: 40 }}>
+            <Text style={styles.advTitle}>Hole Detail</Text>
+
+            {/* Putts + Chips counts — basic numbers */}
+            <Text style={styles.advSection}>SHOT COUNTS</Text>
+            <View style={styles.advCountsRow}>
+              <StatStepper
+                label="Putts"
+                value={stat?.putts ?? null}
+                onChange={(v) => onChange({ putts: v })}
+              />
+              <StatStepper
+                label="Chips"
+                value={stat?.chips ?? null}
+                onChange={(v) => onChange({ chips: v })}
+              />
+            </View>
+
+            {/* Fairway miss — only relevant on par 4+ */}
+            {holePar >= 4 && (
+              <>
+                <Text style={styles.advSection}>FAIRWAY</Text>
+                <View style={styles.dirRow}>
+                  <TouchableOpacity
+                    style={[styles.dirBtn, fwHit === false && fwMiss === 'left' && styles.dirBtnActive]}
+                    onPress={() => onChange({ fairwayHit: false, fairwayMiss: 'left' })}
+                  >
+                    <Text style={[styles.dirBtnText, fwHit === false && fwMiss === 'left' && styles.dirBtnTextActive]}>← LEFT</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.dirBtn, fwHit === true && styles.dirBtnActive]}
+                    onPress={() => onChange({ fairwayHit: true, fairwayMiss: null })}
+                  >
+                    <Text style={[styles.dirBtnText, fwHit === true && styles.dirBtnTextActive]}>FAIRWAY</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.dirBtn, fwHit === false && fwMiss === 'right' && styles.dirBtnActive]}
+                    onPress={() => onChange({ fairwayHit: false, fairwayMiss: 'right' })}
+                  >
+                    <Text style={[styles.dirBtnText, fwHit === false && fwMiss === 'right' && styles.dirBtnTextActive]}>RIGHT →</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+
+            {/* Green miss — compass rose */}
+            <Text style={styles.advSection}>GREEN</Text>
+            <View style={styles.greenRose}>
+              {/* LONG */}
+              <TouchableOpacity
+                style={[styles.greenSide, gir === false && grMiss === 'long' && styles.dirBtnActive]}
+                onPress={() => onChange({ gir: false, greenMiss: 'long' })}
+              >
+                <Text style={[styles.dirBtnText, gir === false && grMiss === 'long' && styles.dirBtnTextActive]}>↑ LONG</Text>
+              </TouchableOpacity>
+              {/* LEFT — HIT — RIGHT */}
+              <View style={styles.greenRoseRow}>
+                <TouchableOpacity
+                  style={[styles.greenSide, gir === false && grMiss === 'left' && styles.dirBtnActive]}
+                  onPress={() => onChange({ gir: false, greenMiss: 'left' })}
+                >
+                  <Text style={[styles.dirBtnText, gir === false && grMiss === 'left' && styles.dirBtnTextActive]}>← LEFT</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.greenCenter, gir === true && styles.dirBtnActive]}
+                  onPress={() => onChange({ gir: true, greenMiss: null })}
+                >
+                  <Text style={[styles.dirBtnText, gir === true && styles.dirBtnTextActive]}>GREEN</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.greenSide, gir === false && grMiss === 'right' && styles.dirBtnActive]}
+                  onPress={() => onChange({ gir: false, greenMiss: 'right' })}
+                >
+                  <Text style={[styles.dirBtnText, gir === false && grMiss === 'right' && styles.dirBtnTextActive]}>RIGHT →</Text>
+                </TouchableOpacity>
+              </View>
+              {/* SHORT */}
+              <TouchableOpacity
+                style={[styles.greenSide, gir === false && grMiss === 'short' && styles.dirBtnActive]}
+                onPress={() => onChange({ gir: false, greenMiss: 'short' })}
+              >
+                <Text style={[styles.dirBtnText, gir === false && grMiss === 'short' && styles.dirBtnTextActive]}>↓ SHORT</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Per-putt distance sliders — one per putt entered on the basic screen */}
+            <Text style={styles.advSection}>
+              PUTT DISTANCES {putts === 0 ? '(set Putts on the basic screen first)' : `· ${putts} putt${putts === 1 ? '' : 's'}`}
+            </Text>
+            {Array.from({ length: putts }).map((_, i) => (
+              <View key={i} style={styles.putRow}>
+                <View style={styles.putHeader}>
+                  <Text style={styles.putLabel}>Putt #{i + 1}</Text>
+                  <Text style={styles.putVal}>
+                    {(dists[i] ?? 10) === 50 ? '50+ ft' : `${dists[i] ?? 10} ft`}
+                  </Text>
+                </View>
+                <SnapSlider
+                  stops={[...PUTT_STOPS]}
+                  value={dists[i] ?? 10}
+                  onChange={(v) => setPuttDist(i, v)}
+                />
+              </View>
+            ))}
+
+            <TouchableOpacity style={styles.advCloseBtn} onPress={onClose}>
+              <Text style={styles.advCloseText}>Done</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+// Touch-driven slider that snaps to a fixed list of stops. No native deps —
+// uses a simple onLayout + PanResponder pattern. Stops are evenly spaced
+// visually even though their underlying values are non-uniform (3,6,10,…).
+function SnapSlider({
+  stops, value, onChange,
+}: {
+  stops: number[];
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  const [trackWidth, setTrackWidth] = useState(0);
+  const idx = Math.max(0, stops.indexOf(value));
+  const segCount = stops.length - 1;
+  const fracForIdx = (i: number) => (segCount === 0 ? 0 : i / segCount);
+
+  const fromX = (x: number) => {
+    if (trackWidth <= 0) return stops[0];
+    const frac = Math.max(0, Math.min(1, x / trackWidth));
+    const closestIdx = Math.round(frac * segCount);
+    return stops[Math.max(0, Math.min(stops.length - 1, closestIdx))];
+  };
+
+  const responder = PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e) => {
+      const v = fromX(e.nativeEvent.locationX);
+      if (v !== value) onChange(v);
+    },
+    onPanResponderMove: (e) => {
+      const v = fromX(e.nativeEvent.locationX);
+      if (v !== value) onChange(v);
+    },
+  });
+
+  return (
+    <View style={styles.snapWrap} {...responder.panHandlers}>
+      <View
+        style={styles.snapTrack}
+        onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+      >
+        <View style={[styles.snapFill, { width: `${fracForIdx(idx) * 100}%` }]} />
+        {stops.map((s, i) => (
+          <View
+            key={s}
+            style={[
+              styles.snapStop,
+              { left: `${fracForIdx(i) * 100}%`, marginLeft: -4, top: -2 },
+              i <= idx && styles.snapStopActive,
+            ]}
+          />
+        ))}
+        {trackWidth > 0 && (
+          <View style={[
+            styles.snapThumb,
+            { left: fracForIdx(idx) * trackWidth - 11, top: -9 },
+          ]} />
+        )}
+      </View>
+      <View style={styles.snapStopLabels}>
+        {stops.map((s, i) => (
+          <Text key={s} style={[styles.snapStopLabel, i === idx && styles.snapStopLabelActive]}>
+            {s === 50 ? '50+' : s}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+}

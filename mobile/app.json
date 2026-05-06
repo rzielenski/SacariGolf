@@ -11,7 +11,7 @@
     "splash": {
       "image": "./assets/sacari-logo.jpg",
       "resizeMode": "contain",
-      "backgroundColor": "#06080a"
+      "backgroundColor": "#000000"
     },
     "ios": {
       "supportsTablet": false,
@@ -25,7 +25,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.jpg",
-        "backgroundColor": "#06080a"
+        "backgroundColor": "#000000"
       },
       "package": "com.sacari.app",
       "versionCode": 1,

@@ -106,6 +106,21 @@ export const api = {
       sg_holes: number;
       sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number } | null;
     }>('GET', `/users/${id}/stats`),
+    sgAdvanced: (id: string) => request<{
+      shots_used: number;
+      holes_used: number;
+      rounds_used: number;
+      sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number } | null;
+    }>('GET', `/users/${id}/sg-advanced`),
+    clubStats: (id: string) => request<{
+      clubs: {
+        club: string;
+        shots: number;
+        avg_yds: number;
+        median_yds: number;
+        dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+      }[];
+    }>('GET', `/users/${id}/club-stats`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
@@ -113,6 +128,30 @@ export const api = {
     acceptRequest: (friendId: string) => request<any>('POST', '/users/me/friends/accept', { friendId }),
     leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
+  },
+
+  weather: {
+    current: (lat: number, lng: number) => request<{
+      temperature_f: number | null;
+      humidity_pct: number | null;
+      wind_speed_mph: number | null;
+      wind_from_bearing: number | null;
+      precipitation_in: number;
+      rain: 'none' | 'light' | 'heavy';
+      elevation_ft: number | null;
+      observed_at: string | null;
+      cached: boolean;
+    }>('GET', `/weather?lat=${lat}&lng=${lng}`),
+  },
+
+  premium: {
+    catalog: () => request<{
+      features: { id: string; name: string; blurb: string }[];
+      plans: { id: string; name: string; price_cents: number; period: string; savings_pct?: number }[];
+    }>('GET', '/premium/catalog'),
+    redeem: (code: string) => request<{
+      success: boolean; plan: string; premium_until: string | null; label: string;
+    }>('POST', '/premium/redeem', { code }),
   },
 
   messages: {
@@ -151,7 +190,7 @@ export const api = {
     }) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
-    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number; elevation_m?: number }[]) =>
+    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number; elevation_m?: number; club?: string; lie?: string }[]) =>
       request<any>('PUT', `/matches/${id}/shots/${holeNum}`, { shots }),
     contributePin: (id: string, holeId: string, lat: number, lng: number, elevationM?: number | null) =>
       request<any>('POST', `/matches/${id}/pin`, { holeId, lat, lng, elevationM }),

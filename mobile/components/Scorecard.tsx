@@ -18,6 +18,9 @@ export type HoleStat = {
   chips?: number;
   gir?: boolean | null;
   fairwayHit?: boolean | null;
+  fairwayMiss?: 'left' | 'right' | null;
+  greenMiss?: 'left' | 'right' | 'short' | 'long' | null;
+  puttDistances?: number[];
 };
 
 export type ScorecardEntry = {
@@ -37,7 +40,7 @@ export type ScorecardEntry = {
 };
 
 /** Compute 4-category strokes-gained totals and the per-hole sample size. */
-export function computeRoundSG(
+function computeRoundSG(
   scores: number[],
   stats: HoleStat[] | null | undefined,
   holes: { par: number }[],
@@ -54,7 +57,10 @@ export function computeRoundSG(
     const chips = typeof h.chips === 'number' ? h.chips : null;
     const gir = typeof h.gir === 'boolean' ? h.gir : null;
     if (putts === null || chips === null || gir === null) continue;
-    const putt = 2 - putts;
+    // Putting baseline: 1 if player chipped on (already "near" green), else 2.
+    // Mirrors backend basic-SG model in users.ts.
+    const puttBaseline = chips > 0 ? 1 : 2;
+    const putt = puttBaseline - putts;
     const around = chips > 0 ? 1 - chips : 0;
     const appr = gir ? 0 : -1;
     const tee = (par - strokes) - putt - around - appr;
@@ -70,7 +76,7 @@ export function computeRoundSG(
 }
 
 /** Inline strokes-gained summary row — renders nothing if no SG-eligible holes. */
-export function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] }) {
+function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] }) {
   const sg = computeRoundSG(entry.hole_scores ?? [], entry.hole_stats ?? null, holes);
   if (!sg) return null;
   const fmt = (n: number) => (n > 0 ? `+${n.toFixed(1)}` : n.toFixed(1));

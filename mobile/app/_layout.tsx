@@ -74,7 +74,7 @@ export default function RootLayout() {
     <AuthProvider>
       <StatusBar style="light" />
       <AuthGuard />
-      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#06080a' } }}>
+      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />
@@ -84,6 +84,8 @@ export default function RootLayout() {
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="user/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="stats" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="premium" options={{ animation: 'slide_from_bottom', headerShown: true, presentation: 'modal' }} />
+        <Stack.Screen name="club-heatmap" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
     </AuthProvider>

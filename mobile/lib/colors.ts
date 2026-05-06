@@ -10,23 +10,32 @@ import { Platform } from 'react-native';
 // };
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Sacari Golf — dark forest green, antique silver, black.
-// `gold` keeps its key name throughout the codebase but its value is now silver.
+// Sacari Golf — pure black, warm gothic gold, polished silver.
+// Pulled from the SacariSquare crest: black background, gold gothic lettering
+// + sword pommel, silver blade. `gold` and `goldLight` are the warm-gold accent
+// pair; `text` and `textMuted` are silver tones used for body copy.
 export const C = {
-  bg:        '#06080a',  // black with a touch of green
-  surface:   '#0b100d',  // very dark forest
-  card:      '#11171a',  // dark slate-green
-  cardAlt:   '#1a2127',  // lifted slate
-  border:    '#2a3530',  // slate-silver border
-  gold:      '#bdb9aa',  // antique silver (replaces tarnished brass)
-  goldLight: '#dcd9c8',  // bright silver highlight
-  text:      '#e6e3d8',  // off-white silver
-  textMuted: '#8c8e85',  // ash silver-grey
-  textDim:   '#4a4d48',  // crypt slate
-  green:     '#7aab78',  // visible sage — used for WIN / JOIN / Playing Now
-  red:       '#b03434',  // brighter crimson — used for LOSS / forfeit / danger
-  blue:      '#7a96b8',  // muted steel blue — used for IN PROGRESS / info
+  bg:        '#000000',  // pure black — matches the icon background
+  surface:   '#080808',  // near-black surface
+  card:      '#0e0e10',  // raised card on black
+  cardAlt:   '#16161a',  // lifted card
+  border:    '#2a241a',  // warm dark gold-bronze edge
+  gold:      '#d4a93f',  // rich antique gold (matches SACARI lettering)
+  goldLight: '#f0c95a',  // brighter gold highlight
+  text:      '#e8e6dc',  // bright polished silver — body text
+  textMuted: '#9a978a',  // tarnished silver-grey
+  textDim:   '#4a4740',  // deep silver shadow
+  green:     '#7aab78',  // sage — WIN / JOIN / Playing Now
+  red:       '#b03434',  // crimson — LOSS / danger
+  blue:      '#7a96b8',  // steel blue — IN PROGRESS / info
 };
+
+// Silver accent — exposed alongside `gold` for places that want the cool
+// counterpoint to gold (sword-blade highlights, secondary chrome). Most of the
+// app already uses `text` (which is silver) so this is mainly for borders
+// and rule lines that want explicit silver vs gold contrast.
+export const SILVER = '#c8c5b8';
+export const SILVER_DIM = '#7a786d';
 
 // Old-book serif for headings; keep mono for code/IDs.
 export const F = {

@@ -28,7 +28,15 @@ CREATE TABLE users (
   -- successful POST /auth/verify-email; the code/expiry get cleared then.
   email_verified BOOLEAN NOT NULL DEFAULT FALSE,
   email_verify_code_hash TEXT,
-  email_verify_expires_at TIMESTAMPTZ
+  email_verify_expires_at TIMESTAMPTZ,
+  -- Premium tier scaffolding. No payment processor wired up yet — flip
+  -- `is_premium` manually for testing, or set `premium_until` to gate access
+  -- by expiry. Once Stripe / IAP is integrated the webhook handler should
+  -- update both fields. See backend/src/routes/premium.ts.
+  is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+  premium_since TIMESTAMPTZ,
+  premium_until TIMESTAMPTZ,
+  premium_plan TEXT  -- e.g. 'monthly' | 'yearly' | 'lifetime'
 );
 
 -- Friends

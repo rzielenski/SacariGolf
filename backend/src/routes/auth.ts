@@ -139,7 +139,8 @@ router.post('/login', async (req: Request, res: Response) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT user_id, username, email, password_hash, elo, total_matches, total_wins, avatar_url, created_at
+      `SELECT user_id, username, email, password_hash, elo, total_matches, total_wins, avatar_url, created_at,
+              is_premium, premium_since, premium_until, premium_plan
        FROM users WHERE email = $1`,
       [e]
     );

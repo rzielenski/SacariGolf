@@ -17,6 +17,11 @@ export interface User {
   home_course_state?: string | null;
   home_course_lat?: number | null;
   home_course_lng?: number | null;
+  // Premium tier — populated by /users/me. Mirrors the columns on `users`.
+  is_premium?: boolean;
+  premium_since?: string | null;
+  premium_until?: string | null;
+  premium_plan?: string | null;
 }
 
 export interface ChatMessage {
