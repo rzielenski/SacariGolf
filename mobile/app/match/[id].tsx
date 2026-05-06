@@ -230,6 +230,7 @@ export default function MatchLobbyScreen() {
               user_id: p.user_id,
               teebox_name: p.teebox_name,
               hole_scores: p.hole_scores,
+              hole_stats: (p as any).hole_stats,
               course_id: p.course_id,
               course_name: p.course_name ?? null,
               teebox_id: p.teebox_id,

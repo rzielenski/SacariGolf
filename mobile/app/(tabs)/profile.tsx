@@ -62,6 +62,7 @@ export default function ProfileScreen() {
       user_id: user.user_id,
       teebox_name: round.teebox_name,
       hole_scores: round.hole_scores,
+      hole_stats: round.hole_stats,
       course_id: round.course_id,
       course_name: round.course_name,
       teebox_id: round.teebox_id,
@@ -246,9 +247,17 @@ export default function ProfileScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Bell */}
-      <TouchableOpacity style={styles.bellBtn} onPress={openNotifications}>
-        <Text style={styles.bellIcon}>NOTICES</Text>
+      {/* Bell — old gothic, cracked */}
+      <TouchableOpacity style={styles.bellBtn} onPress={openNotifications} activeOpacity={0.7}>
+        <View style={styles.bellWrap}>
+          <Text style={styles.bellGlyph}>🔔</Text>
+          {/* Jagged crack — three short segments offset to look fractured */}
+          <View style={[styles.crackSeg, { top: 10, left: 17, width: 6, transform: [{ rotate: '70deg' }] }]} />
+          <View style={[styles.crackSeg, { top: 15, left: 14, width: 7, transform: [{ rotate: '110deg' }] }]} />
+          <View style={[styles.crackSeg, { top: 21, left: 17, width: 5, transform: [{ rotate: '75deg' }] }]} />
+          {/* Chipped rim notch */}
+          <View style={styles.chipNotch} />
+        </View>
         {notifCount > 0 && (
           <View style={styles.bellBadge}>
             <Text style={styles.bellBadgeText}>{notifCount > 9 ? '9+' : notifCount}</Text>
@@ -357,6 +366,16 @@ export default function ProfileScreen() {
         <StatBox label="Ties" value={user.total_ties ?? 0} />
         <StatBox label="Win Rate" value={`${winRate}%`} />
       </View>
+
+      {/* Full stats screen entry point — handicap, SG, normalized averages */}
+      <TouchableOpacity
+        style={styles.statsBtn}
+        onPress={() => router.push('/stats' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.statsBtnLabel}>VIEW FULL STATS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
 
       {/* Aggregated round stats — only shown once user has any tracked data */}
       {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
@@ -733,14 +752,36 @@ function StatBox({ label, value }: { label: string; value: string | number }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   content: { padding: 20, paddingTop: 60, paddingBottom: 40 },
+  statsBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.gold + '88',
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 6, marginTop: 12,
+  },
+  statsBtnLabel: { color: C.gold, fontWeight: '800', fontSize: 13, letterSpacing: 0.6 },
+  statsBtnArrow: { color: C.gold, fontSize: 22 },
 
   bellBtn: {
     position: 'absolute', top: 60, right: 20, zIndex: 10,
-    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 4,
+    width: 44, height: 44, borderRadius: 22,
     borderWidth: 1, borderColor: C.gold + '88',
+    backgroundColor: C.card,
     justifyContent: 'center', alignItems: 'center',
   },
-  bellIcon: { fontSize: 10, color: C.gold, fontWeight: '800', letterSpacing: 1.5, fontFamily: F.serif },
+  bellWrap: { width: 32, height: 32, justifyContent: 'center', alignItems: 'center' },
+  bellGlyph: {
+    fontSize: 22, color: C.gold,
+    // Aged, slightly desaturated tone via subtle shadow
+    textShadowColor: '#000', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2,
+  },
+  crackSeg: {
+    position: 'absolute', height: 1.5, backgroundColor: '#1a0a08',
+    borderRadius: 0.5,
+  },
+  chipNotch: {
+    position: 'absolute', bottom: 4, left: 8, width: 4, height: 3,
+    backgroundColor: C.bg, borderTopLeftRadius: 2, borderTopRightRadius: 2,
+    transform: [{ rotate: '12deg' }],
+  },
   bellBadge: {
     position: 'absolute', top: 0, right: 0,
     backgroundColor: C.red, borderRadius: 8,

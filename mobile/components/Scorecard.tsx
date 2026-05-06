@@ -13,11 +13,19 @@ const REACTION_OPTIONS = [
   { id: 'oof', label: 'OOF' },
 ];
 
+export type HoleStat = {
+  putts?: number;
+  chips?: number;
+  gir?: boolean | null;
+  fairwayHit?: boolean | null;
+};
+
 export type ScorecardEntry = {
   username?: string;
   user_id?: string;
   teebox_name?: string | null;
   hole_scores?: number[] | null;
+  hole_stats?: HoleStat[] | null;
   course_id?: string | null;
   course_name?: string | null;
   teebox_id?: string | null;
@@ -27,6 +35,59 @@ export type ScorecardEntry = {
   match_id?: string | null;   // when set, enables shot-map viewing
   round_id?: string | null;   // when set, enables comments / reactions
 };
+
+/** Compute 4-category strokes-gained totals and the per-hole sample size. */
+export function computeRoundSG(
+  scores: number[],
+  stats: HoleStat[] | null | undefined,
+  holes: { par: number }[],
+) {
+  let off_tee = 0, approach = 0, around_green = 0, putting = 0, total = 0;
+  let sgHoles = 0;
+  if (!stats || !stats.length) return null;
+  for (let i = 0; i < scores.length; i++) {
+    const par = holes[i]?.par;
+    const strokes = scores[i];
+    const h = stats[i];
+    if (!h || par == null || !strokes) continue;
+    const putts = typeof h.putts === 'number' ? h.putts : null;
+    const chips = typeof h.chips === 'number' ? h.chips : null;
+    const gir = typeof h.gir === 'boolean' ? h.gir : null;
+    if (putts === null || chips === null || gir === null) continue;
+    const putt = 2 - putts;
+    const around = chips > 0 ? 1 - chips : 0;
+    const appr = gir ? 0 : -1;
+    const tee = (par - strokes) - putt - around - appr;
+    putting += putt;
+    around_green += around;
+    approach += appr;
+    off_tee += tee;
+    total += (par - strokes);
+    sgHoles += 1;
+  }
+  if (sgHoles === 0) return null;
+  return { off_tee, approach, around_green, putting, total, sgHoles };
+}
+
+/** Inline strokes-gained summary row — renders nothing if no SG-eligible holes. */
+export function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] }) {
+  const sg = computeRoundSG(entry.hole_scores ?? [], entry.hole_stats ?? null, holes);
+  if (!sg) return null;
+  const fmt = (n: number) => (n > 0 ? `+${n.toFixed(1)}` : n.toFixed(1));
+  const color = (n: number) => (n > 0.05 ? C.green : n < -0.05 ? C.red : C.text);
+  return (
+    <View style={s.sgWrap}>
+      <Text style={s.sgHeader}>STROKES GAINED  ·  {sg.sgHoles} hole{sg.sgHoles === 1 ? '' : 's'} tracked</Text>
+      <View style={s.sgRow}>
+        <View style={s.sgCell}><Text style={s.sgLabel}>Off-Tee</Text><Text style={[s.sgVal, { color: color(sg.off_tee) }]}>{fmt(sg.off_tee)}</Text></View>
+        <View style={s.sgCell}><Text style={s.sgLabel}>Approach</Text><Text style={[s.sgVal, { color: color(sg.approach) }]}>{fmt(sg.approach)}</Text></View>
+        <View style={s.sgCell}><Text style={s.sgLabel}>Around</Text><Text style={[s.sgVal, { color: color(sg.around_green) }]}>{fmt(sg.around_green)}</Text></View>
+        <View style={s.sgCell}><Text style={s.sgLabel}>Putt</Text><Text style={[s.sgVal, { color: color(sg.putting) }]}>{fmt(sg.putting)}</Text></View>
+        <View style={s.sgCell}><Text style={s.sgLabel}>Total</Text><Text style={[s.sgVal, { color: color(sg.total), fontWeight: '800' }]}>{fmt(sg.total)}</Text></View>
+      </View>
+    </View>
+  );
+}
 
 function scoreColor(score: number, par: number) {
   const d = score - par;
@@ -127,6 +188,7 @@ export function ScorecardCard({ entry, highlight, onPress }: {
       )}
       <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
       {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
+      <RoundSGSummary entry={entry} holes={[...front, ...back]} />
     </>
   );
 
@@ -288,6 +350,7 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
 
         <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
         {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
+        <RoundSGSummary entry={entry} holes={[...front, ...back]} />
 
         {/* Shot maps — holes the player tracked GPS shots on */}
         {trackedHoles.length > 0 && (
@@ -397,6 +460,12 @@ const s = StyleSheet.create({
   cardName: { color: C.text, fontWeight: '800', fontSize: 14 },
   cardTotal: { color: C.text, fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
   cardSub: { color: C.textMuted, fontSize: 11, marginBottom: 8 },
+  sgWrap: { marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: C.border },
+  sgHeader: { color: C.textMuted, fontSize: 10, fontWeight: '700', letterSpacing: 0.6, marginBottom: 4 },
+  sgRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  sgCell: { flex: 1, alignItems: 'center' },
+  sgLabel: { color: C.textMuted, fontSize: 10 },
+  sgVal: { color: C.text, fontFamily: F.serif, fontSize: 14, marginTop: 2 },
 
   scGrid: { flexDirection: 'row', alignItems: 'center', minHeight: 22 },
   scLabel: { width: 40, color: C.textDim, fontSize: 10, fontWeight: '700' },
