@@ -154,6 +154,140 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
+// Aggregated tee-to-green / short-game / putting stats from a player's
+// completed rounds. Computes simplified strokes-gained relative to a "scratch
+// baseline" where a hole = (par − 2) tee-to-green strokes + 2 putts:
+//   SG_putting        = 2 − putts
+//   SG_short_game     = −chips                (each chip is a stroke spent because the green was missed)
+//   SG_tee_to_green   = (par − 2) − (strokes − putts − chips)
+//   SG_total          = par − strokes
+// Holes without recorded stats are excluded from the SG average so old rounds
+// don't dilute new tracking.
+router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT r.round_id, r.created_at, r.hole_scores, r.hole_stats, r.total_score,
+            t.par AS teebox_par, t.num_holes AS teebox_holes,
+            ARRAY(
+              SELECT h.par FROM holes h
+              WHERE h.teebox_id = r.teebox_id
+              ORDER BY h.hole_num ASC
+            ) AS hole_pars
+     FROM rounds r
+     JOIN matches m ON m.match_id = r.match_id
+     LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND m.is_practice = false
+     ORDER BY r.created_at DESC
+     LIMIT 50`,
+    [req.params.id]
+  );
+
+  // Aggregators
+  let roundsCount = 0;
+  let holesPlayed = 0;
+  let totalStrokes = 0;
+  let totalPutts = 0;
+  let totalChips = 0;
+  let girCount = 0;
+  let girEligible = 0;       // holes where chips/putts were tracked
+  let fwHits = 0;
+  let fwEligible = 0;        // par-4-and-up holes where the player tracked fairwayHit
+  let threePuttCount = 0;
+  let upAndDownCount = 0;    // chips ≥ 1 and putts == 1 → saved par from off green
+  let upAndDownChances = 0;  // any hole with chips ≥ 1 and putts tracked
+
+  // SG aggregators (only over holes that have full stats)
+  let sgHoles = 0;
+  let sgPutting = 0;
+  let sgShortGame = 0;
+  let sgTeeToGreen = 0;
+  let sgTotal = 0;
+
+  for (const r of rows) {
+    if (!Array.isArray(r.hole_scores) || r.hole_scores.length === 0) continue;
+    roundsCount += 1;
+    const stats: any[] = Array.isArray(r.hole_stats) ? r.hole_stats : [];
+    const pars: number[] = Array.isArray(r.hole_pars) ? r.hole_pars : [];
+
+    for (let i = 0; i < r.hole_scores.length; i++) {
+      const strokes = r.hole_scores[i];
+      const par = pars[i] ?? 4;
+      holesPlayed += 1;
+      totalStrokes += strokes;
+
+      const s = stats[i] ?? {};
+      const putts = typeof s.putts === 'number' ? s.putts : null;
+      const chips = typeof s.chips === 'number' ? s.chips : null;
+      const fwHit = typeof s.fairwayHit === 'boolean' ? s.fairwayHit : null;
+
+      if (putts !== null) {
+        totalPutts += putts;
+        if (putts >= 3) threePuttCount += 1;
+      }
+      if (chips !== null) totalChips += chips;
+
+      // GIR derived: chips === 0 means we reached the green in regulation.
+      if (chips !== null) {
+        girEligible += 1;
+        if (chips === 0) girCount += 1;
+      }
+
+      // Up-and-downs
+      if (chips !== null && putts !== null && chips >= 1) {
+        upAndDownChances += 1;
+        if (putts === 1) upAndDownCount += 1;
+      }
+
+      // Fairway hits — par ≥ 4 only and only if user tracked it
+      if (par >= 4 && fwHit !== null) {
+        fwEligible += 1;
+        if (fwHit) fwHits += 1;
+      }
+
+      // Strokes gained — needs both putts and chips to be tracked
+      if (putts !== null && chips !== null) {
+        sgHoles += 1;
+        const putt = 2 - putts;
+        const short = -chips;
+        const tee = (par - 2) - (strokes - putts - chips);
+        sgPutting += putt;
+        sgShortGame += short;
+        sgTeeToGreen += tee;
+        sgTotal += (par - strokes);
+      }
+    }
+  }
+
+  const round = (n: number, places = 2) => Math.round(n * Math.pow(10, places)) / Math.pow(10, places);
+
+  return res.json({
+    rounds_count: roundsCount,
+    holes_played: holesPlayed,
+    avg_strokes_per_hole: holesPlayed ? round(totalStrokes / holesPlayed) : null,
+    fw_hit_pct: fwEligible ? round((fwHits / fwEligible) * 100, 1) : null,
+    fw_hits: fwHits,
+    fw_eligible: fwEligible,
+    gir_pct: girEligible ? round((girCount / girEligible) * 100, 1) : null,
+    gir_count: girCount,
+    gir_eligible: girEligible,
+    avg_putts_per_hole: girEligible ? round(totalPutts / girEligible) : null,
+    avg_putts_per_round: roundsCount && girEligible ? round((totalPutts / girEligible) * (holesPlayed / roundsCount), 1) : null,
+    avg_chips_per_round: roundsCount && girEligible ? round((totalChips / girEligible) * (holesPlayed / roundsCount), 1) : null,
+    three_putt_count: threePuttCount,
+    up_and_down_pct: upAndDownChances ? round((upAndDownCount / upAndDownChances) * 100, 1) : null,
+    up_and_downs: upAndDownCount,
+    up_and_down_chances: upAndDownChances,
+    sg_holes: sgHoles,
+    sg_per_round: sgHoles && roundsCount
+      ? {
+          putting:     round((sgPutting     / sgHoles) * (holesPlayed / roundsCount)),
+          short_game:  round((sgShortGame   / sgHoles) * (holesPlayed / roundsCount)),
+          tee_to_green:round((sgTeeToGreen  / sgHoles) * (holesPlayed / roundsCount)),
+          total:       round((sgTotal       / sgHoles) * (holesPlayed / roundsCount)),
+        }
+      : null,
+  });
+}));
+
 // Course records — the courses where this user holds the lowest score on
 // any teebox. Returns one row per course where they're rank #1.
 router.get('/:id/course-records', requireAuth, wrap(async (req: AuthRequest, res: Response) => {

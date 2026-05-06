@@ -92,6 +92,20 @@ export const api = {
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
     handicap: (id: string) => request<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number; differentials: any[] }>('GET', `/users/${id}/handicap`),
+    stats: (id: string) => request<{
+      rounds_count: number;
+      holes_played: number;
+      avg_strokes_per_hole: number | null;
+      fw_hit_pct: number | null; fw_hits: number; fw_eligible: number;
+      gir_pct: number | null; gir_count: number; gir_eligible: number;
+      avg_putts_per_hole: number | null;
+      avg_putts_per_round: number | null;
+      avg_chips_per_round: number | null;
+      three_putt_count: number;
+      up_and_down_pct: number | null; up_and_downs: number; up_and_down_chances: number;
+      sg_holes: number;
+      sg_per_round: { putting: number; short_game: number; tee_to_green: number; total: number } | null;
+    }>('GET', `/users/${id}/stats`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
@@ -130,7 +144,11 @@ export const api = {
     get: (id: string) => request<any>('GET', `/matches/${id}`),
     create: (body: { matchType: string; isPractice?: boolean; teeboxId?: string; clanId?: string; name?: string; format?: string; numHoles?: number }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
-    submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
+    submitScores: (id: string, body: {
+      holeScores: number[];
+      holeStats?: ({ putts?: number; chips?: number; fairwayHit?: boolean | null } | null)[];
+      courseId?: string; teeboxId?: string;
+    }) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
     saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number; elevation_m?: number }[]) =>
@@ -142,7 +160,11 @@ export const api = {
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`
       ),
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
-    progress: (id: string, body: { holeScores: number[]; teeboxId?: string }) => request<any>('POST', `/matches/${id}/progress`, body),
+    progress: (id: string, body: {
+      holeScores: number[];
+      holeStats?: ({ putts?: number; chips?: number; fairwayHit?: boolean | null } | null)[];
+      teeboxId?: string;
+    }) => request<any>('POST', `/matches/${id}/progress`, body),
   },
 
   finds: {

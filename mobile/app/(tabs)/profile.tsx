@@ -49,6 +49,7 @@ export default function ProfileScreen() {
   const [searchingHomeCourse, setSearchingHomeCourse] = useState(false);
   const [recentRounds, setRecentRounds] = useState<any[]>([]);
   const [bestRound, setBestRound] = useState<any | null>(null);
+  const [stats, setStats] = useState<any | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
   const [hcapModalVisible, setHcapModalVisible] = useState(false);
@@ -89,6 +90,12 @@ export default function ProfileScreen() {
         setBestRound(data.best_round ?? null);
       })
       .catch(() => { });
+  }, [user?.user_id]);
+
+  // Aggregated GIR / FW% / putts / strokes-gained from completed rounds
+  useEffect(() => {
+    if (!user) return;
+    api.users.stats(user.user_id).then(setStats).catch(() => { });
   }, [user?.user_id]);
 
   // Load calculated handicap
@@ -350,6 +357,49 @@ export default function ProfileScreen() {
         <StatBox label="Ties" value={user.total_ties ?? 0} />
         <StatBox label="Win Rate" value={`${winRate}%`} />
       </View>
+
+      {/* Aggregated round stats — only shown once user has any tracked data */}
+      {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
+        <>
+          <OrnamentTitle title="Performance" />
+          <View style={styles.perfGrid}>
+            <StatBox
+              label="GIR"
+              value={stats.gir_pct != null ? `${stats.gir_pct}%` : '—'}
+            />
+            <StatBox
+              label="Fairways"
+              value={stats.fw_pct != null ? `${stats.fw_pct}%` : (stats.fw_hit_pct != null ? `${stats.fw_hit_pct}%` : '—')}
+            />
+            <StatBox
+              label="Putts/Round"
+              value={stats.avg_putts_per_round != null ? stats.avg_putts_per_round.toFixed(1) : '—'}
+            />
+            <StatBox
+              label="Up-and-Down"
+              value={stats.up_and_down_pct != null ? `${stats.up_and_down_pct}%` : '—'}
+            />
+            <StatBox label="3-putts" value={stats.three_putt_count ?? 0} />
+            <StatBox
+              label="Avg/Hole"
+              value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'}
+            />
+          </View>
+
+          {/* Strokes gained — needs at least one hole with both putts and chips tracked */}
+          {stats.sg_per_round && stats.sg_holes > 0 && (
+            <>
+              <Text style={styles.sgSubtitle}>STROKES GAINED PER ROUND  ·  positive = better than scratch baseline</Text>
+              <View style={styles.sgRow}>
+                <SGCell label="Tee→Green" value={stats.sg_per_round.tee_to_green} />
+                <SGCell label="Short" value={stats.sg_per_round.short_game} />
+                <SGCell label="Putt" value={stats.sg_per_round.putting} />
+                <SGCell label="Total" value={stats.sg_per_round.total} highlight />
+              </View>
+            </>
+          )}
+        </>
+      )}
 
       {/* Best Round */}
       {bestRound && (
@@ -646,6 +696,30 @@ export default function ProfileScreen() {
   );
 }
 
+function SGCell({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
+  // Format with explicit sign + 1 decimal. Color reflects sign: green = saving
+  // strokes vs scratch baseline, red = losing them.
+  const sign = value > 0 ? '+' : '';
+  const color = value > 0 ? C.green : value < 0 ? C.red : C.textMuted;
+  return (
+    <View style={[
+      stylesSG.cell,
+      highlight && { borderColor: C.gold },
+    ]}>
+      <Text style={stylesSG.label}>{label.toUpperCase()}</Text>
+      <Text style={[stylesSG.value, { color }]}>{sign}{value.toFixed(1)}</Text>
+    </View>
+  );
+}
+const stylesSG = StyleSheet.create({
+  cell: {
+    flex: 1, paddingVertical: 10, alignItems: 'center',
+    backgroundColor: C.card, borderRadius: 6, borderWidth: 1, borderColor: C.border,
+  },
+  label: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  value: { fontSize: 18, fontWeight: '900', marginTop: 2, fontFamily: F.serif },
+});
+
 function StatBox({ label, value }: { label: string; value: string | number }) {
   return (
     <View style={styles.statBox}>
@@ -756,6 +830,9 @@ const styles = StyleSheet.create({
   progressText: { color: C.textMuted, fontSize: 11, marginTop: 4 },
 
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 },
+  perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },
+  sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginTop: 4, marginBottom: 6 },
+  sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 14,
     padding: 16, alignItems: 'center', borderWidth: 1, borderColor: C.border,

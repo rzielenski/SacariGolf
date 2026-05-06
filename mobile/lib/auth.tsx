@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import { api } from './api';
+import { api, setSessionInvalidHandler } from './api';
 import { User } from '../types';
 
 interface AuthContextType {
@@ -39,6 +39,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       setLoading(false);
     })();
+  }, []);
+
+  // Wire up the api layer so any backend 401 ("Missing token" / "Invalid
+  // token") triggers a clean local logout instead of leaving the user in a
+  // half-authenticated state where every subsequent call also fails.
+  useEffect(() => {
+    setSessionInvalidHandler(() => {
+      AsyncStorage.removeItem('coc_token').catch(() => { });
+      setToken(null);
+      setUser(null);
+      router.replace('/(auth)/login');
+    });
+    return () => setSessionInvalidHandler(null);
   }, []);
 
   const login = async (email: string, password: string) => {

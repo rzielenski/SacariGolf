@@ -58,6 +58,43 @@ function scoreColor(score: number, par: number) {
   return '#F44336';
 }
 
+// ── Small stepper for per-hole stats (putts / chips) ───────────────────────
+function StatStepper({ label, value, onChange }: {
+  label: string;
+  value: number | null;
+  onChange: (n: number) => void;
+}) {
+  const display = value == null ? '—' : String(value);
+  const inc = () => onChange(Math.min(10, (value ?? 0) + 1));
+  const dec = () => onChange(Math.max(0, (value ?? 0) - 1));
+  return (
+    <View style={stepperStyles.wrap}>
+      <Text style={stepperStyles.label}>{label.toUpperCase()}</Text>
+      <View style={stepperStyles.row}>
+        <TouchableOpacity style={stepperStyles.btn} onPress={dec}>
+          <Text style={stepperStyles.btnText}>−</Text>
+        </TouchableOpacity>
+        <Text style={stepperStyles.value}>{display}</Text>
+        <TouchableOpacity style={stepperStyles.btn} onPress={inc}>
+          <Text style={stepperStyles.btnText}>+</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+const stepperStyles = StyleSheet.create({
+  wrap: { flex: 1, alignItems: 'center', gap: 4 },
+  label: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  btn: {
+    width: 28, height: 28, borderRadius: 4,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  btnText: { color: C.text, fontSize: 18, fontWeight: '700', lineHeight: 20 },
+  value: { color: C.text, fontSize: 16, fontWeight: '800', minWidth: 18, textAlign: 'center' },
+});
+
 // ── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ScoringScreen() {
@@ -84,6 +121,12 @@ export default function ScoringScreen() {
   // crowdsource pin elevation data and offer slope-adjusted distances.
   type ShotPoint = { lat: number; lng: number; elevation_m?: number };
   const [shotsByHole, setShotsByHole] = useState<Record<number, ShotPoint[]>>({});
+
+  // Per-hole stat tracking — putts, chips, fairway hit. Indexed by the hole
+  // INDEX in our holes array (not hole_num) so we can submit it as a parallel
+  // array alongside scores. Tracking is opt-in: untouched holes stay empty.
+  type HoleStat = { putts?: number; chips?: number; fairwayHit?: boolean | null };
+  const [holeStats, setHoleStats] = useState<HoleStat[]>([]);
 
   // Course selection
   const [selectingCourse, setSelectingCourse] = useState(true);
@@ -126,6 +169,7 @@ export default function ScoringScreen() {
     const send = () => {
       api.matches.progress(id, {
         holeScores: scores.slice(0, Math.max(currentHole + 1, 1)),
+        holeStats: holeStats.slice(0, Math.max(currentHole + 1, 1)),
         teeboxId: teebox.teebox_id,
       }).catch(() => { });
     };
@@ -137,7 +181,7 @@ export default function ScoringScreen() {
     if (progressTimer.current) clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(send, 2000);
     return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
-  }, [scores, currentHole, selectingCourse, holes.length, id, teebox]);
+  }, [scores, holeStats, currentHole, selectingCourse, holes.length, id, teebox]);
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -147,7 +191,7 @@ export default function ScoringScreen() {
       setMatch(m);
 
       // Read any saved local progress (scores + course/teebox the player previously chose)
-      let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string } | null = null;
+      let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
       try {
         const raw = await AsyncStorage.getItem(SAVE_KEY);
         if (raw) saved = JSON.parse(raw);
@@ -176,6 +220,11 @@ export default function ScoringScreen() {
           setTeebox(tb);
           setHoles(sorted);
           setScores(saved?.scores ?? sorted.map((h) => h.par));
+          setHoleStats(
+            saved?.holeStats && Array.isArray(saved.holeStats)
+              ? saved.holeStats
+              : sorted.map(() => ({}))
+          );
           setCurrentHole(saved?.currentHole ?? 0);
           setSelectingCourse(false);
           // Notify friends a round has started (idempotent — backend only fires once)
@@ -338,6 +387,7 @@ export default function ScoringScreen() {
     setCourse(c);
     setHoles(h);
     setScores(h.map((hole) => hole.par));
+    setHoleStats(h.map(() => ({})));
     setSelectingCourse(false);
     setCurrentHole(0);
     // Notify friends a round has started (idempotent — backend only fires once)
@@ -453,6 +503,7 @@ export default function ScoringScreen() {
         SAVE_KEY,
         JSON.stringify({
           scores,
+          holeStats,
           currentHole,
           teeboxId: teebox?.teebox_id,
           courseId: course?.course_id,
@@ -460,7 +511,7 @@ export default function ScoringScreen() {
       );
     } catch { /* best-effort */ }
     router.back();
-  }, [scores, currentHole, teebox, course, SAVE_KEY]);
+  }, [scores, holeStats, currentHole, teebox, course, SAVE_KEY]);
 
   const doCancel = useCallback(async () => {
     setForfeiting(true);
@@ -576,6 +627,7 @@ export default function ScoringScreen() {
     try {
       const result = await api.matches.submitScores(id, {
         holeScores: scores,
+        holeStats,
         courseId: course?.course_id,
         teeboxId: teebox?.teebox_id,
       });
@@ -1010,6 +1062,59 @@ export default function ScoringScreen() {
               ))}
             </View>
 
+            {/* Per-hole stats — putts, chips, fairway hit. All optional. */}
+            <View style={styles.statsRow}>
+              <StatStepper
+                label="Putts"
+                value={holeStats[currentHole]?.putts ?? null}
+                onChange={(v) => setHoleStats((prev) => {
+                  const next = [...prev];
+                  next[currentHole] = { ...(next[currentHole] ?? {}), putts: v };
+                  return next;
+                })}
+              />
+              <StatStepper
+                label="Chips"
+                value={holeStats[currentHole]?.chips ?? null}
+                onChange={(v) => setHoleStats((prev) => {
+                  const next = [...prev];
+                  next[currentHole] = { ...(next[currentHole] ?? {}), chips: v };
+                  return next;
+                })}
+              />
+              {hole.par >= 4 && (
+                <TouchableOpacity
+                  style={[
+                    styles.fwBtn,
+                    holeStats[currentHole]?.fairwayHit === true && styles.fwBtnHit,
+                    holeStats[currentHole]?.fairwayHit === false && styles.fwBtnMiss,
+                  ]}
+                  onPress={() => setHoleStats((prev) => {
+                    const next = [...prev];
+                    const cur = next[currentHole]?.fairwayHit;
+                    // Cycle through: null → true (hit) → false (miss) → null
+                    const nextVal: boolean | null | undefined =
+                      cur === undefined || cur === null ? true
+                      : cur === true ? false
+                      : null;
+                    next[currentHole] = { ...(next[currentHole] ?? {}), fairwayHit: nextVal as any };
+                    return next;
+                  })}
+                >
+                  <Text style={styles.fwLabel}>FAIRWAY</Text>
+                  <Text style={[
+                    styles.fwValue,
+                    holeStats[currentHole]?.fairwayHit === true && { color: C.green },
+                    holeStats[currentHole]?.fairwayHit === false && { color: C.red },
+                  ]}>
+                    {holeStats[currentHole]?.fairwayHit === true ? 'HIT'
+                     : holeStats[currentHole]?.fairwayHit === false ? 'MISS'
+                     : '—'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
             <View style={styles.navRow}>
               <TouchableOpacity
                 style={[styles.navBtn, currentHole === 0 && styles.navBtnDisabled]}
@@ -1299,6 +1404,18 @@ const styles = StyleSheet.create({
   scoreNum: { fontFamily: F.serif, fontSize: 64, fontWeight: '700', color: C.text, lineHeight: 72 },
 
   quickScoreRow: { flexDirection: 'row', gap: 5, justifyContent: 'center', marginBottom: 12 },
+  statsRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    gap: 8, marginBottom: 12, paddingVertical: 4,
+  },
+  fwBtn: {
+    flex: 1, alignItems: 'center', gap: 4, paddingVertical: 4,
+    borderRadius: 4, borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+  },
+  fwBtnHit: { borderColor: C.green },
+  fwBtnMiss: { borderColor: C.red },
+  fwLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  fwValue: { color: C.text, fontSize: 14, fontWeight: '800' },
   quickBtn: {
     width: 34, height: 34, borderRadius: 4, backgroundColor: C.card,
     justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.border,

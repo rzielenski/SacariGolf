@@ -257,12 +257,28 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
   }
 }));
 
+// Sanitise a hole_stats array — same length as scores, each entry has
+// putts (0–10), chips (0–10), fairwayHit (bool|null). Bad input is silently
+// dropped rather than failing the whole submission.
+function cleanHoleStats(input: any, expectedLength: number): any[] {
+  if (!Array.isArray(input)) return [];
+  return input.slice(0, expectedLength).map((h: any) => {
+    if (h == null || typeof h !== 'object') return {};
+    const cleaned: any = {};
+    if (typeof h.putts === 'number' && h.putts >= 0 && h.putts <= 10) cleaned.putts = Math.floor(h.putts);
+    if (typeof h.chips === 'number' && h.chips >= 0 && h.chips <= 10) cleaned.chips = Math.floor(h.chips);
+    if (typeof h.fairwayHit === 'boolean') cleaned.fairwayHit = h.fairwayHit;
+    return cleaned;
+  });
+}
+
 // Submit scores for a round
 router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeScores, courseId, teeboxId } = req.body;
+  const { holeScores, holeStats, courseId, teeboxId } = req.body;
   if (!Array.isArray(holeScores) || holeScores.length === 0) {
     return res.status(400).json({ error: 'holeScores array required' });
   }
+  const cleanStats = cleanHoleStats(holeStats, holeScores.length);
 
   const totalScore = (holeScores as number[]).reduce((a, b) => a + b, 0);
   const client = await pool.connect();
@@ -323,11 +339,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
     // Upsert round (only for the submitting player; scramble teammates share the same final score)
     await client.query(
-      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (match_id, user_id)
-       DO UPDATE SET hole_scores = $5, total_score = $6, teebox_id = $4`,
-      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, totalScore, matchRows[0].match_type]
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4`,
+      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type]
     );
 
     // Update match_players for the submitting player
@@ -390,15 +406,16 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]
       );
       // Mirror the submitter's rounds row to each teammate so holes_played
-      // (derived from array_length(hole_scores, 1)) stays consistent.
+      // (derived from array_length(hole_scores, 1)) stays consistent. Also
+      // propagate hole_stats so derived stats (GIR, FW%, putts, SG) match.
       await client.query(
-        `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
-         SELECT $1, mp.user_id, $2, $3, $4, $5, $6
+        `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type)
+         SELECT $1, mp.user_id, $2, $3, $4, $5, $6, $7
          FROM match_players mp
-         WHERE mp.match_id = $1 AND mp.side = $7 AND mp.user_id != $8
+         WHERE mp.match_id = $1 AND mp.side = $8 AND mp.user_id != $9
          ON CONFLICT (match_id, user_id)
-         DO UPDATE SET hole_scores = EXCLUDED.hole_scores, total_score = EXCLUDED.total_score, teebox_id = EXCLUDED.teebox_id`,
-        [req.params.id, courseId || null, resolvedTeeboxId || null, holeScores, totalScore, matchRows[0].match_type, myeSide, req.userId]
+         DO UPDATE SET hole_scores = EXCLUDED.hole_scores, hole_stats = EXCLUDED.hole_stats, total_score = EXCLUDED.total_score, teebox_id = EXCLUDED.teebox_id`,
+        [req.params.id, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, myeSide, req.userId]
       );
     }
 
@@ -814,8 +831,9 @@ router.post('/:id/forfeit', requireAuth, wrap(async (req: AuthRequest, res: Resp
 // in the scoring screen gets it persisted on match_players too (needed for
 // challenge matches where no teebox was set at match creation).
 router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeScores, teeboxId } = req.body;
+  const { holeScores, holeStats, teeboxId } = req.body;
   if (!Array.isArray(holeScores)) return res.status(400).json({ error: 'holeScores required' });
+  const cleanStats = cleanHoleStats(holeStats, holeScores.length);
 
   // Don't accept progress for already-finished matches
   const { rows: matchRows } = await pool.query(
@@ -844,13 +862,14 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
   if (!pRows.length) return res.status(404).json({ error: 'Not in this match' });
 
   await pool.query(
-    `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (match_id, user_id)
      DO UPDATE SET hole_scores = $5,
+                   hole_stats = $6,
                    course_id = COALESCE(rounds.course_id, EXCLUDED.course_id),
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
-    [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores]
+    [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]
   );
   return res.json({ success: true });
 }));
