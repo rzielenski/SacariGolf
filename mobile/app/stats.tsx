@@ -71,12 +71,13 @@ export default function StatsScreen() {
           </View>
 
           {/* Strokes-gained breakdown */}
+          <View style={{ height: 12 }} />
           <OrnamentTitle title="Strokes Gained" align="center" />
           {stats?.sg_per_round && stats.sg_holes > 0 ? (
             <>
               <Text style={s.subtitle}>Per round (normalized to 18 holes) · positive = gaining vs scratch</Text>
               <Text style={s.sample}>{stats.sg_holes} hole{stats.sg_holes === 1 ? '' : 's'} tracked across {stats.rounds_count} round{stats.rounds_count === 1 ? '' : 's'}</Text>
-              <View style={{ marginTop: 12 }}>
+              <View style={{ marginTop: 18 }}>
                 <SGRow label="Off-the-Tee"  value={stats.sg_per_round.off_tee} />
                 <SGRow label="Approach"     value={stats.sg_per_round.approach} />
                 <SGRow label="Around-Green" value={stats.sg_per_round.around_green} />
@@ -93,6 +94,7 @@ export default function StatsScreen() {
           )}
 
           {/* Other accumulated stats */}
+          <View style={{ height: 20 }} />
           <OrnamentTitle title="On-Course" align="center" />
           <View style={s.statGrid}>
             <Stat label="GIR" value={stats?.gir_pct != null ? `${stats.gir_pct}%` : '—'} sub={stats?.gir_eligible ? `${stats.gir_count} of ${stats.gir_eligible}` : undefined} />
@@ -145,12 +147,12 @@ function Stat({ label, value, sub }: { label: string; value: string | number; su
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
-  content: { padding: 20, paddingBottom: 60 },
-  subtitle: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 6 },
-  sample: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginTop: 2, fontStyle: 'italic' },
-  empty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 12, paddingHorizontal: 20, lineHeight: 18 },
+  content: { padding: 20, paddingBottom: 80 },
+  subtitle: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 10 },
+  sample: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginTop: 4, fontStyle: 'italic' },
+  empty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 20, paddingHorizontal: 20, lineHeight: 18 },
 
-  summaryRow: { flexDirection: 'row', gap: 10, marginTop: 8 },
+  summaryRow: { flexDirection: 'row', gap: 10, marginTop: 12, marginBottom: 24 },
   summaryBox: {
     flex: 1, backgroundColor: C.card, borderWidth: 1, borderColor: C.gold + '66',
     borderRadius: 8, padding: 14, alignItems: 'center',
@@ -161,19 +163,19 @@ const s = StyleSheet.create({
 
   sgRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingVertical: 10, paddingHorizontal: 14,
+    paddingVertical: 14, paddingHorizontal: 16,
     backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
-    borderRadius: 6, marginBottom: 6,
+    borderRadius: 6, marginBottom: 8,
   },
-  sgLabel: { color: C.text, fontSize: 14, fontWeight: '600' },
-  sgVal: { fontFamily: F.serif, fontSize: 18, fontWeight: '700' },
-  totalDivider: { height: 1, backgroundColor: C.gold + '44', marginVertical: 8 },
+  sgLabel: { color: C.text, fontSize: 15, fontWeight: '600' },
+  sgVal: { fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
+  totalDivider: { height: 1, backgroundColor: C.gold + '44', marginVertical: 12 },
 
-  statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 18, marginBottom: 16 },
   statBox: {
-    width: '31%', minHeight: 76, backgroundColor: C.card, borderRadius: 6,
+    width: '31%', minHeight: 88, backgroundColor: C.card, borderRadius: 6,
     borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 10, paddingHorizontal: 4,
+    paddingVertical: 14, paddingHorizontal: 4,
   },
   statValue: { color: C.text, fontSize: 18, fontFamily: F.serif, fontWeight: '800' },
   statLabel: { color: C.textMuted, fontSize: 10, marginTop: 2, fontWeight: '700', letterSpacing: 0.6 },

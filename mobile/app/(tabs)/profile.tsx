@@ -373,7 +373,7 @@ export default function ProfileScreen() {
         onPress={() => router.push('/stats' as any)}
         activeOpacity={0.7}
       >
-        <Text style={styles.statsBtnLabel}>VIEW FULL STATS</Text>
+        <Text style={styles.statsBtnLabel}>VIEW STATS</Text>
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
@@ -755,7 +755,8 @@ const styles = StyleSheet.create({
   statsBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: C.card, borderWidth: 1, borderColor: C.gold + '88',
-    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 6, marginTop: 12,
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 6,
+    marginTop: 4, marginBottom: 12,
   },
   statsBtnLabel: { color: C.gold, fontWeight: '800', fontSize: 13, letterSpacing: 0.6 },
   statsBtnArrow: { color: C.gold, fontSize: 22 },

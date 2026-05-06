@@ -185,7 +185,7 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
      LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
-     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND m.is_practice = false
+     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.is_practice = false
      ORDER BY r.created_at DESC
      LIMIT 50`,
     [req.params.id]

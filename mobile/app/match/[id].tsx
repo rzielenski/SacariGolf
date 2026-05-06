@@ -219,8 +219,9 @@ export default function MatchLobbyScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Auto-rendered scorecards once the match is completed */}
-      {isCompleted && match.players?.some((p) => p.hole_scores?.length) && (
+      {/* Auto-rendered scorecards — appear as soon as any player submits scores,
+          so per-round strokes-gained shows up without waiting on opponents. */}
+      {match.players?.some((p) => p.hole_scores?.length) && (
         <>
           <Divider style={{ marginTop: 24 }} />
           <OrnamentTitle title="Scorecards" align="center" />
