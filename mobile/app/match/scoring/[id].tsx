@@ -77,6 +77,11 @@ export default function ScoringScreen() {
 
   // Course selection
   const [selectingCourse, setSelectingCourse] = useState(true);
+  // Player's chosen round length (9 or 18). Defaults to the match's intended
+  // length but each player can override here. Capped by the teebox they pick.
+  const [chosenRoundHoles, setChosenRoundHoles] = useState<9 | 18>(
+    holesParam && parseInt(holesParam, 10) === 9 ? 9 : 18
+  );
   const [courseQuery, setCourseQuery] = useState('');
   const [courseResults, setCourseResults] = useState<Course[]>([]);
   const [nearbyCourses, setNearbyCourses] = useState<Course[]>([]);
@@ -293,10 +298,11 @@ export default function ScoringScreen() {
   }, []);
 
   const selectTeebox = (t: Teebox, c: Course) => {
-    // Each player chooses their own teebox — play the full hole count it offers.
+    // Each player chooses their own teebox AND round length.
+    // Effective hole count = min(teebox capacity, what they chose, available data).
     // diff18() on the backend normalises 9-hole rounds to 18-hole equivalents
     // so different teeboxes (and different hole counts) compare fairly.
-    const playableHoles = Math.min(t.num_holes, (t.holes ?? []).length);
+    const playableHoles = Math.min(t.num_holes, chosenRoundHoles, (t.holes ?? []).length);
     const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, playableHoles);
     if (h.length === 0) {
       Alert.alert(
@@ -535,30 +541,55 @@ export default function ScoringScreen() {
               <TouchableOpacity onPress={() => setFullCourse(null)} style={{ marginBottom: 8, paddingHorizontal: 20 }}>
                 <Text style={{ color: C.gold }}>← Choose different course</Text>
               </TouchableOpacity>
+
+              {/* Round length toggle — capped by teebox the player picks */}
+              <Text style={styles.holesLabel}>Round length</Text>
+              <View style={styles.holesRow}>
+                {([9, 18] as const).map((n) => (
+                  <TouchableOpacity
+                    key={n}
+                    style={[styles.holesBtn, chosenRoundHoles === n && styles.holesBtnActive]}
+                    onPress={() => setChosenRoundHoles(n)}
+                  >
+                    <Text style={[styles.holesBtnText, chosenRoundHoles === n && { color: C.gold }]}>
+                      {n} holes
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
               {(fullCourse.teeboxes ?? []).length === 0 && (
                 <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
                   No tee boxes available at this course.
                 </Text>
               )}
-              {(fullCourse.teeboxes ?? []).map((t) => (
-                <TouchableOpacity
-                  key={t.teebox_id}
-                  style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
-                  onPress={() => selectTeebox(t, fullCourse)}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.teeboxName}>{t.name} Tees</Text>
-                    <Text style={styles.teeboxMeta}>
-                      {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
-                      {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
-                    </Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={styles.rating}>Rating {t.course_rating}</Text>
-                    <Text style={styles.slope}>Slope {t.slope_rating}</Text>
-                  </View>
-                </TouchableOpacity>
-              ))}
+              {(fullCourse.teeboxes ?? []).map((t) => {
+                const willPlay = Math.min(t.num_holes, chosenRoundHoles);
+                return (
+                  <TouchableOpacity
+                    key={t.teebox_id}
+                    style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
+                    onPress={() => selectTeebox(t, fullCourse)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.teeboxName}>{t.name} Tees</Text>
+                      <Text style={styles.teeboxMeta}>
+                        {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
+                        {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
+                      </Text>
+                      {willPlay !== t.num_holes && (t.holes ?? []).length > 0 && (
+                        <Text style={[styles.teeboxMeta, { color: C.gold, marginTop: 2 }]}>
+                          You'll play {willPlay} holes
+                        </Text>
+                      )}
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.rating}>Rating {t.course_rating}</Text>
+                      <Text style={styles.slope}>Slope {t.slope_rating}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
             </>
           )}
         </ScrollView>
@@ -905,6 +936,11 @@ const styles = StyleSheet.create({
   courseLocation: { color: C.gold, fontSize: 12, marginTop: 3 },
   teeboxCard: { backgroundColor: C.cardAlt, borderRadius: 6, padding: 16, marginHorizontal: 20, marginBottom: 8, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.border },
   teeboxCardDisabled: { opacity: 0.45 },
+  holesLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginTop: 8, marginBottom: 6, paddingHorizontal: 20 },
+  holesRow: { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginBottom: 14 },
+  holesBtn: { flex: 1, paddingVertical: 10, borderRadius: 6, alignItems: 'center', backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
+  holesBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
+  holesBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 13 },
   teeboxName: { color: C.text, fontWeight: '700', fontSize: 15 },
   teeboxMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
   rating: { color: C.gold, fontWeight: '700', fontSize: 12 },
