@@ -720,6 +720,57 @@ router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Resp
   return res.json({ success: true, sent: true, recipientCount: tokens.length });
 }));
 
+// PUT a player's shot track for a single hole. Replaces the full array.
+//   body: { shots: Array<{ lat: number, lng: number }> }
+router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const holeNum = parseInt(req.params.holeNum, 10);
+  if (isNaN(holeNum) || holeNum < 1 || holeNum > 36) {
+    return res.status(400).json({ error: 'invalid holeNum' });
+  }
+  const shots = req.body?.shots;
+  if (!Array.isArray(shots)) return res.status(400).json({ error: 'shots array required' });
+
+  // Validate shape — clamp to reasonable values; reject anything obviously bogus
+  const clean = shots
+    .filter((s: any) => typeof s?.lat === 'number' && typeof s?.lng === 'number'
+      && Math.abs(s.lat) <= 90 && Math.abs(s.lng) <= 180)
+    .slice(0, 30) // hard cap shots per hole
+    .map((s: any) => ({ lat: s.lat, lng: s.lng }));
+
+  // Verify membership
+  const { rows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Not in match' });
+
+  await pool.query(
+    `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
+     ON CONFLICT (match_id, user_id, hole_num)
+     DO UPDATE SET shots = EXCLUDED.shots, updated_at = NOW()`,
+    [req.params.id, req.userId, holeNum, JSON.stringify(clean)]
+  );
+  return res.json({ success: true, count: clean.length });
+}));
+
+// GET shot tracks for a match — optionally filter by user.
+//   query: ?user=<userId> to restrict to one player
+// Returns rows: [{ user_id, hole_num, shots: [{lat,lng}, ...] }, ...]
+router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const userFilter = req.query.user as string | undefined;
+  const params: any[] = [req.params.id];
+  let where = `WHERE match_id = $1`;
+  if (userFilter) { params.push(userFilter); where += ` AND user_id = $2`; }
+
+  const { rows } = await pool.query(
+    `SELECT user_id, hole_num, shots FROM shot_tracks ${where}
+     ORDER BY user_id, hole_num`,
+    params
+  );
+  return res.json(rows);
+}));
+
 // Cancel / delete a match — only allowed if no player has submitted scores yet (no ELO penalty)
 router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const client = await pool.connect();

@@ -18,6 +18,9 @@ const COLLAPSED_H = 92;
 const EXPANDED_H = 348;
 const ON_COURSE_METRES = 3 * 1609.34;
 
+// Per-shot color palette — each successive shot on a hole renders in the next color.
+const SHOT_COLORS = ['#4a9eff', '#9c2128', '#7aab78', '#bdb9aa', '#c89a45', '#a672b8', '#d4794a'];
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function distMetres(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -75,13 +78,16 @@ export default function ScoringScreen() {
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
 
+  // Per-hole shot tracking. Keyed by hole_num (the actual hole number on the
+  // course, not the index into our `holes` array).
+  type ShotPoint = { lat: number; lng: number };
+  const [shotsByHole, setShotsByHole] = useState<Record<number, ShotPoint[]>>({});
+
   // Course selection
   const [selectingCourse, setSelectingCourse] = useState(true);
-  // Player's chosen round length (9 or 18). Defaults to the match's intended
-  // length but each player can override here. Capped by the teebox they pick.
-  const [chosenRoundHoles, setChosenRoundHoles] = useState<9 | 18>(
-    holesParam && parseInt(holesParam, 10) === 9 ? 9 : 18
-  );
+  // Round length the player chose for this round. Null until they pick;
+  // forces a step between course-pick and teebox-pick (matches play.tsx flow).
+  const [chosenRoundHoles, setChosenRoundHoles] = useState<9 | 18 | null>(null);
   const [courseQuery, setCourseQuery] = useState('');
   const [courseResults, setCourseResults] = useState<Course[]>([]);
   const [nearbyCourses, setNearbyCourses] = useState<Course[]>([]);
@@ -172,6 +178,12 @@ export default function ScoringScreen() {
           setSelectingCourse(false);
           // Notify friends a round has started (idempotent — backend only fires once)
           api.matches.started(id).catch(() => { });
+          // Hydrate any previously-saved shot tracks for this round
+          api.matches.listShotTracks(id, user?.user_id).then((rows) => {
+            const byHole: Record<number, ShotPoint[]> = {};
+            for (const r of rows) byHole[r.hole_num] = r.shots ?? [];
+            setShotsByHole(byHole);
+          }).catch(() => { });
         }
       }
     } catch (e: any) {
@@ -299,10 +311,10 @@ export default function ScoringScreen() {
 
   const selectTeebox = (t: Teebox, c: Course) => {
     // Each player chooses their own teebox AND round length.
-    // Effective hole count = min(teebox capacity, what they chose, available data).
     // diff18() on the backend normalises 9-hole rounds to 18-hole equivalents
     // so different teeboxes (and different hole counts) compare fairly.
-    const playableHoles = Math.min(t.num_holes, chosenRoundHoles, (t.holes ?? []).length);
+    const want = chosenRoundHoles ?? 18;
+    const playableHoles = Math.min(t.num_holes, want, (t.holes ?? []).length);
     const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, playableHoles);
     if (h.length === 0) {
       Alert.alert(
@@ -320,6 +332,39 @@ export default function ScoringScreen() {
     setCurrentHole(0);
     // Notify friends a round has started (idempotent — backend only fires once)
     api.matches.started(id).catch(() => { });
+  };
+
+  // ── Shot tracking ───────────────────────────────────────────────────────────
+
+  const currentHoleNum = holes[currentHole]?.hole_num;
+  const currentShots = currentHoleNum != null ? (shotsByHole[currentHoleNum] ?? []) : [];
+
+  const persistShots = (holeNum: number, next: ShotPoint[]) => {
+    api.matches.saveShotTrack(id, holeNum, next).catch(() => { /* best-effort */ });
+  };
+
+  const recordShot = () => {
+    if (!userCoord || currentHoleNum == null) {
+      Alert.alert('No GPS', 'Wait for a GPS lock before tracking shots.');
+      return;
+    }
+    setShotsByHole((prev) => {
+      const cur = prev[currentHoleNum] ?? [];
+      const next = [...cur, { lat: userCoord.latitude, lng: userCoord.longitude }];
+      persistShots(currentHoleNum, next);
+      return { ...prev, [currentHoleNum]: next };
+    });
+  };
+
+  const undoShot = () => {
+    if (currentHoleNum == null) return;
+    setShotsByHole((prev) => {
+      const cur = prev[currentHoleNum] ?? [];
+      if (!cur.length) return prev;
+      const next = cur.slice(0, -1);
+      persistShots(currentHoleNum, next);
+      return { ...prev, [currentHoleNum]: next };
+    });
   };
 
   const pickCourse = async (c: Course) => {
@@ -463,23 +508,15 @@ export default function ScoringScreen() {
       // Clear saved progress on successful submit
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
       if (result.result) {
-        const r = result.result;
-        const tied = r.tied || r.winnerSide == null;
-        const myDelta = r.myDeltaElo ?? 0;
-        const oppLine = r.autoMatched && r.opponentUsername ? `vs ${r.opponentUsername}` : '';
-        const eloLine = !match?.is_practice
-          ? `ELO ${myDelta > 0 ? '+' : ''}${myDelta}`
-          : 'Practice — no ELO';
-        const title = tied ? 'Draw' : (myDelta > 0 ? 'Victory' : 'Defeat');
-        Alert.alert(
-          title,
-          [oppLine, `Score: ${result.totalScore}`, eloLine].filter(Boolean).join('\n'),
-          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
-        );
+        // Match fully resolved — go straight to the post-match page where
+        // the win/loss/draw card is rendered from authoritative server data.
+        router.replace(`/match/${id}` as any);
       } else {
+        // No opponent yet (solo waiting for matchmaking, or duo/squad waiting
+        // on teammates to submit). Brief confirmation, then back to lobby.
         Alert.alert(
           'Round Submitted',
-          'Finding your opponent — check back soon to see your result.',
+          'Waiting for the other side to finish — check back soon.',
           [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
         );
       }
@@ -538,58 +575,64 @@ export default function ScoringScreen() {
             <>
               <Text style={styles.sectionTitle}>{fullCourse.course_name}</Text>
               <Text style={styles.subtitle}>{[fullCourse.city, fullCourse.state].filter(Boolean).join(', ')}</Text>
-              <TouchableOpacity onPress={() => setFullCourse(null)} style={{ marginBottom: 8, paddingHorizontal: 20 }}>
+              <TouchableOpacity
+                onPress={() => { setFullCourse(null); setChosenRoundHoles(null); }}
+                style={{ marginBottom: 8, paddingHorizontal: 20 }}
+              >
                 <Text style={{ color: C.gold }}>← Choose different course</Text>
               </TouchableOpacity>
 
-              {/* Round length toggle — capped by teebox the player picks */}
-              <Text style={styles.holesLabel}>Round length</Text>
-              <View style={styles.holesRow}>
-                {([9, 18] as const).map((n) => (
+              {/* Step: pick round length (9 or 18) */}
+              {chosenRoundHoles == null ? (
+                <>
+                  <Text style={styles.holesLabel}>How many holes?</Text>
+                  <View style={styles.holesRow}>
+                    {([9, 18] as const).map((n) => (
+                      <TouchableOpacity
+                        key={n}
+                        style={styles.holesBtn}
+                        onPress={() => setChosenRoundHoles(n)}
+                      >
+                        <Text style={styles.holesBtnText}>{n} Holes</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              ) : (
+                <>
+                  {/* Step: pick teebox (only those long enough for the chosen length) */}
                   <TouchableOpacity
-                    key={n}
-                    style={[styles.holesBtn, chosenRoundHoles === n && styles.holesBtnActive]}
-                    onPress={() => setChosenRoundHoles(n)}
+                    onPress={() => setChosenRoundHoles(null)}
+                    style={{ marginBottom: 8, paddingHorizontal: 20 }}
                   >
-                    <Text style={[styles.holesBtnText, chosenRoundHoles === n && { color: C.gold }]}>
-                      {n} holes
+                    <Text style={{ color: C.gold }}>← Change round length ({chosenRoundHoles})</Text>
+                  </TouchableOpacity>
+                  {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= chosenRoundHoles).length === 0 && (
+                    <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
+                      No tee boxes for {chosenRoundHoles} holes at this course.
                     </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {(fullCourse.teeboxes ?? []).length === 0 && (
-                <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
-                  No tee boxes available at this course.
-                </Text>
-              )}
-              {(fullCourse.teeboxes ?? []).map((t) => {
-                const willPlay = Math.min(t.num_holes, chosenRoundHoles);
-                return (
-                  <TouchableOpacity
-                    key={t.teebox_id}
-                    style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
-                    onPress={() => selectTeebox(t, fullCourse)}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.teeboxName}>{t.name} Tees</Text>
-                      <Text style={styles.teeboxMeta}>
-                        {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
-                        {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
-                      </Text>
-                      {willPlay !== t.num_holes && (t.holes ?? []).length > 0 && (
-                        <Text style={[styles.teeboxMeta, { color: C.gold, marginTop: 2 }]}>
-                          You'll play {willPlay} holes
+                  )}
+                  {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= chosenRoundHoles).map((t) => (
+                    <TouchableOpacity
+                      key={t.teebox_id}
+                      style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
+                      onPress={() => selectTeebox(t, fullCourse)}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.teeboxName}>{t.name} Tees</Text>
+                        <Text style={styles.teeboxMeta}>
+                          {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
+                          {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
                         </Text>
-                      )}
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                      <Text style={styles.rating}>Rating {t.course_rating}</Text>
-                      <Text style={styles.slope}>Slope {t.slope_rating}</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+                      </View>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={styles.rating}>Rating {t.course_rating}</Text>
+                        <Text style={styles.slope}>Slope {t.slope_rating}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </>
+              )}
             </>
           )}
         </ScrollView>
@@ -667,6 +710,34 @@ export default function ScoringScreen() {
             )}
           </>
         )}
+
+        {/* Shot track for the current hole — each shot a different color line */}
+        {currentShots.map((sh, i) => {
+          if (i === 0) return null;
+          const prev = currentShots[i - 1];
+          return (
+            <Polyline
+              key={`shot-line-${i}`}
+              coordinates={[
+                { latitude: prev.lat, longitude: prev.lng },
+                { latitude: sh.lat, longitude: sh.lng },
+              ]}
+              strokeColor={SHOT_COLORS[(i - 1) % SHOT_COLORS.length]}
+              strokeWidth={3}
+            />
+          );
+        })}
+        {currentShots.map((sh, i) => (
+          <Marker
+            key={`shot-${i}`}
+            coordinate={{ latitude: sh.lat, longitude: sh.lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <View style={[styles.shotDot, { backgroundColor: SHOT_COLORS[i % SHOT_COLORS.length] }]}>
+              <Text style={styles.shotDotText}>{i + 1}</Text>
+            </View>
+          </Marker>
+        ))}
       </MapView>
 
       {/* ── Top bar (floats over map) ── */}
@@ -717,6 +788,23 @@ export default function ScoringScreen() {
           )}
         </View>
       </View>
+
+      {/* ── Track-shot button (floats over the map, right side) ── */}
+      <TouchableOpacity
+        style={styles.trackShotBtn}
+        onPress={recordShot}
+        onLongPress={undoShot}
+        delayLongPress={500}
+        disabled={!userCoord}
+      >
+        <Text style={styles.trackShotLabel}>TRACK SHOT</Text>
+        <Text style={styles.trackShotCount}>
+          {currentShots.length === 0 ? 'Tap to begin' : `Shot ${currentShots.length + 1}`}
+        </Text>
+        {currentShots.length > 0 && (
+          <Text style={styles.trackShotHint}>Hold to undo</Text>
+        )}
+      </TouchableOpacity>
 
       {/* ── Measure distance banner ── */}
       {measureDist !== null && (
@@ -938,9 +1026,8 @@ const styles = StyleSheet.create({
   teeboxCardDisabled: { opacity: 0.45 },
   holesLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginTop: 8, marginBottom: 6, paddingHorizontal: 20 },
   holesRow: { flexDirection: 'row', gap: 10, marginHorizontal: 20, marginBottom: 14 },
-  holesBtn: { flex: 1, paddingVertical: 10, borderRadius: 6, alignItems: 'center', backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
-  holesBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
-  holesBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 13 },
+  holesBtn: { flex: 1, paddingVertical: 14, borderRadius: 6, alignItems: 'center', backgroundColor: C.card, borderWidth: 1, borderColor: C.border },
+  holesBtnText: { color: C.text, fontWeight: '700', fontSize: 14 },
   teeboxName: { color: C.text, fontWeight: '700', fontSize: 15 },
   teeboxMeta: { color: C.textMuted, fontSize: 12, marginTop: 3 },
   rating: { color: C.gold, fontWeight: '700', fontSize: 12 },
@@ -972,6 +1059,26 @@ const styles = StyleSheet.create({
   },
   topBarBtnActive: { borderColor: C.gold },
   topBarBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 11 },
+
+  // Shot tracking
+  trackShotBtn: {
+    position: 'absolute', right: 12, top: 140,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 8, borderWidth: 1, borderColor: C.gold,
+    paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center',
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
+    elevation: 6, minWidth: 86,
+  },
+  trackShotLabel: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 1.2 },
+  trackShotCount: { color: C.text, fontWeight: '700', fontSize: 12, marginTop: 3 },
+  trackShotHint: { color: C.textDim, fontSize: 9, marginTop: 2 },
+  shotDot: {
+    width: 22, height: 22, borderRadius: 11,
+    justifyContent: 'center', alignItems: 'center',
+    borderWidth: 2, borderColor: '#fff',
+    shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
+  },
+  shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
 
   // Measure pin
   pinOuter: {

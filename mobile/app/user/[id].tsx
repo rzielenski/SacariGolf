@@ -38,6 +38,7 @@ export default function UserProfileScreen() {
       total_score: round.total_score,
       created_at: round.created_at,
       teebox_par: round.teebox_par,
+      match_id: round.match_id,
     });
   };
 

@@ -161,7 +161,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 
   // Recent completed rounds (last 5)
   const { rows: recentRounds } = await pool.query(
-    `SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
+    `SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
             m.format, m.match_type
@@ -177,7 +177,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 
   // Best round (lowest score-to-par across all completed rounds)
   const { rows: bestRows } = await pool.query(
-    `SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
+    `SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
             (r.total_score - t.par) AS to_par

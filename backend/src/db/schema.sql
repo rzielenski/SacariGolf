@@ -190,6 +190,17 @@ CREATE TABLE IF NOT EXISTS match_invites (
   UNIQUE (match_id, to_user_id)
 );
 
+-- Shot tracks — per (match, user, hole) — array of {lat, lng} GPS points
+CREATE TABLE IF NOT EXISTS shot_tracks (
+  match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  hole_num SMALLINT NOT NULL,
+  shots JSONB NOT NULL DEFAULT '[]',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (match_id, user_id, hole_num)
+);
+CREATE INDEX IF NOT EXISTS shot_tracks_match_user_idx ON shot_tracks(match_id, user_id);
+
 -- Find reports (moderation)
 CREATE TABLE IF NOT EXISTS find_reports (
   report_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

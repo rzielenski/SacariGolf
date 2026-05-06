@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal } from 'react-native';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
+import { ShotMapModal } from './ShotMap';
 
 export type ScorecardEntry = {
   username?: string;
@@ -14,6 +15,7 @@ export type ScorecardEntry = {
   total_score?: number;
   created_at?: string;
   teebox_par?: number | null; // optional fallback total par
+  match_id?: string | null;   // when set, enables shot-map viewing
 };
 
 function scoreColor(score: number, par: number) {
@@ -91,13 +93,17 @@ function Grid({ label, holes, scores, parTotal }: { label: string; holes: any[];
 }
 
 /** Inline compact scorecard — used to auto-render below match players. */
-export function ScorecardCard({ entry, highlight }: { entry: ScorecardEntry; highlight?: boolean }) {
+export function ScorecardCard({ entry, highlight, onPress }: {
+  entry: ScorecardEntry;
+  highlight?: boolean;
+  onPress?: () => void;
+}) {
   const holes = useTeeboxHoles(entry.course_id, entry.teebox_id);
   const { front, back, frontScores, backScores, frontPar, backPar, totalPar, totalScore } = buildGridData(entry, holes);
   const diff = totalScore - totalPar;
 
-  return (
-    <View style={[s.card, highlight && { borderColor: C.gold }]}>
+  const Inner = (
+    <>
       <View style={s.cardHeader}>
         <Text style={s.cardName}>{entry.username}</Text>
         <Text style={s.cardTotal}>
@@ -111,8 +117,17 @@ export function ScorecardCard({ entry, highlight }: { entry: ScorecardEntry; hig
       )}
       <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
       {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
-    </View>
+    </>
   );
+
+  if (onPress) {
+    return (
+      <TouchableOpacity activeOpacity={0.7} style={[s.card, highlight && { borderColor: C.gold }]} onPress={onPress}>
+        {Inner}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={[s.card, highlight && { borderColor: C.gold }]}>{Inner}</View>;
 }
 
 /** Full-screen scorecard modal — used from leaderboard, profile rounds, etc. */
@@ -144,6 +159,31 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
 }) {
   const { front, back, frontScores, backScores, frontPar, backPar, totalPar, totalScore } = buildGridData(entry, holes);
   const diff = totalScore - totalPar;
+
+  // Pull shot tracks for this player on this match so we can list which holes
+  // have a recorded track and let the user tap into the shot map.
+  const [trackedHoles, setTrackedHoles] = useState<{ hole_num: number; count: number }[]>([]);
+  const [shotHole, setShotHole] = useState<number | null>(null);
+  useEffect(() => {
+    if (!entry.match_id || !entry.user_id) { setTrackedHoles([]); return; }
+    let cancelled = false;
+    api.matches.listShotTracks(entry.match_id, entry.user_id)
+      .then((rows) => {
+        if (cancelled) return;
+        setTrackedHoles(
+          rows
+            .filter((r) => (r.shots?.length ?? 0) > 0)
+            .map((r) => ({ hole_num: r.hole_num, count: r.shots.length }))
+            .sort((a, b) => a.hole_num - b.hole_num)
+        );
+      })
+      .catch(() => { });
+    return () => { cancelled = true; };
+  }, [entry.match_id, entry.user_id]);
+
+  const allHoles = [...front, ...back];
+  const parForHole = (holeNum: number) =>
+    allHoles.find((h: any) => h.hole_num === holeNum)?.par ?? null;
 
   return (
     <View style={s.modalContainer}>
@@ -181,11 +221,39 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
         <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
         {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
 
+        {/* Shot maps — holes the player tracked GPS shots on */}
+        {trackedHoles.length > 0 && (
+          <>
+            <Text style={s.shotsTitle}>SHOT MAPS</Text>
+            {trackedHoles.map((th) => (
+              <TouchableOpacity
+                key={th.hole_num}
+                style={s.shotsRow}
+                onPress={() => setShotHole(th.hole_num)}
+              >
+                <Text style={s.shotsRowHole}>Hole {th.hole_num}</Text>
+                <Text style={s.shotsRowMeta}>{th.count} {th.count === 1 ? 'shot' : 'shots'} tracked</Text>
+                <Text style={s.shotsRowChev}>›</Text>
+              </TouchableOpacity>
+            ))}
+          </>
+        )}
+
         {onViewProfile && entry.user_id && (
           <TouchableOpacity style={s.viewProfileBtn} onPress={onViewProfile}>
             <Text style={s.viewProfileBtnText}>View Profile</Text>
           </TouchableOpacity>
         )}
+
+        <ShotMapModal
+          visible={shotHole != null}
+          matchId={entry.match_id}
+          userId={entry.user_id}
+          username={entry.username}
+          holeNum={shotHole}
+          par={shotHole != null ? parForHole(shotHole) : null}
+          onClose={() => setShotHole(null)}
+        />
       </ScrollView>
     </View>
   );
@@ -232,4 +300,17 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '22',
   },
   viewProfileBtnText: { color: C.gold, fontWeight: '700', fontSize: 14 },
+
+  shotsTitle: {
+    color: C.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 1.5,
+    marginTop: 24, marginBottom: 8, fontFamily: F.serif,
+  },
+  shotsRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.card, borderRadius: 8, padding: 12,
+    marginBottom: 6, borderWidth: 1, borderColor: C.border,
+  },
+  shotsRowHole: { color: C.text, fontWeight: '800', fontSize: 14, minWidth: 60 },
+  shotsRowMeta: { color: C.textMuted, fontSize: 12, flex: 1 },
+  shotsRowChev: { color: C.gold, fontSize: 22, fontWeight: '300' },
 });

@@ -9,7 +9,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
-import { ScorecardCard } from '../../components/Scorecard';
+import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 
 export default function MatchLobbyScreen() {
@@ -22,6 +22,7 @@ export default function MatchLobbyScreen() {
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
+  const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -213,20 +214,26 @@ export default function MatchLobbyScreen() {
         <>
           <Divider style={{ marginTop: 24 }} />
           <OrnamentTitle title="Scorecards" align="center" />
-          {match.players?.filter((p) => p.hole_scores?.length).map((p) => (
-            <ScorecardCard
-              key={p.user_id}
-              entry={{
-                username: p.username,
-                user_id: p.user_id,
-                teebox_name: p.teebox_name,
-                hole_scores: p.hole_scores,
-                course_id: p.course_id,
-                teebox_id: p.teebox_id,
-              }}
-              highlight={p.user_id === user?.user_id}
-            />
-          ))}
+          {match.players?.filter((p) => p.hole_scores?.length).map((p) => {
+            const entry: ScorecardEntry = {
+              username: p.username,
+              user_id: p.user_id,
+              teebox_name: p.teebox_name,
+              hole_scores: p.hole_scores,
+              course_id: p.course_id,
+              course_name: p.course_name ?? null,
+              teebox_id: p.teebox_id,
+              match_id: id,
+            };
+            return (
+              <ScorecardCard
+                key={p.user_id}
+                entry={entry}
+                highlight={p.user_id === user?.user_id}
+                onPress={() => setScorecardEntry(entry)}
+              />
+            );
+          })}
         </>
       )}
 
@@ -300,6 +307,17 @@ export default function MatchLobbyScreen() {
         </View>
       </Modal>
 
+      {/* Per-player scorecard modal — also lists tracked shot maps for this match */}
+      <ScorecardModal
+        visible={!!scorecardEntry}
+        entry={scorecardEntry}
+        onClose={() => setScorecardEntry(null)}
+        onViewProfile={() => {
+          const userId = scorecardEntry?.user_id;
+          setScorecardEntry(null);
+          if (userId) router.push(`/user/${userId}` as any);
+        }}
+      />
     </ScrollView>
   );
 }

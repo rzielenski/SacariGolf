@@ -97,6 +97,12 @@ export const api = {
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
+    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number }[]) =>
+      request<any>('PUT', `/matches/${id}/shots/${holeNum}`, { shots }),
+    listShotTracks: (id: string, userId?: string) =>
+      request<{ user_id: string; hole_num: number; shots: { lat: number; lng: number }[] }[]>(
+        'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`
+      ),
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
     progress: (id: string, body: { holeScores: number[]; teeboxId?: string }) => request<any>('POST', `/matches/${id}/progress`, body),
   },

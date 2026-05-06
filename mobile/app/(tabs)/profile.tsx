@@ -67,6 +67,7 @@ export default function ProfileScreen() {
       total_score: round.total_score,
       created_at: round.created_at,
       teebox_par: round.teebox_par,
+      match_id: round.match_id,
     });
   };
 
@@ -128,7 +129,14 @@ export default function ProfileScreen() {
   const handleLogout = () => {
     Alert.alert('Log out', 'Are you sure?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Log out', style: 'destructive', onPress: logout },
+      {
+        text: 'Log out',
+        style: 'destructive',
+        onPress: async () => {
+          await logout();
+          router.replace('/(auth)/login');
+        },
+      },
     ]);
   };
 
