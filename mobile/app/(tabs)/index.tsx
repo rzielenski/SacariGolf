@@ -223,7 +223,7 @@ export default function HomeScreen() {
         <Text style={styles.footerDot}>·</Text>
         <TouchableOpacity onPress={() => Alert.alert('Sign Out', 'Sign out of your account?', [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Sign Out', onPress: async () => { await logout(); router.replace('/(auth)/login'); } },
+          { text: 'Sign Out', onPress: logout },
         ])}>
           <Text style={styles.feedbackText}>sign out</Text>
         </TouchableOpacity>

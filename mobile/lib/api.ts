@@ -8,6 +8,19 @@ async function getToken(): Promise<string | null> {
   return AsyncStorage.getItem('coc_token');
 }
 
+// Sentinel error so callers can distinguish "no token at all / session ended"
+// from a real server error and silently bail rather than alerting the user.
+export class NotAuthenticatedError extends Error {
+  constructor(message = 'Not signed in') { super(message); this.name = 'NotAuthenticatedError'; }
+}
+
+// AuthProvider registers a callback so api.ts can ask it to clear state when
+// the backend rejects our token. Avoids a circular import.
+let onSessionInvalid: (() => void) | null = null;
+export function setSessionInvalidHandler(fn: (() => void) | null) {
+  onSessionInvalid = fn;
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -17,7 +30,12 @@ async function request<T>(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (auth) {
     const token = await getToken();
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (!token) {
+      // Fail fast client-side rather than firing an unauthenticated request
+      // that the server will reject with a confusing "Missing token" error.
+      throw new NotAuthenticatedError();
+    }
+    headers['Authorization'] = `Bearer ${token}`;
   }
   const res = await fetch(`${API_BASE}${path}`, {
     method,
@@ -30,7 +48,15 @@ async function request<T>(
     throw new Error(`Server error (${res.status})`);
   }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) {
+    // Backend says our token is bad → trigger global logout so AuthGuard
+    // routes to login. Throw NotAuthenticated so callers can bail quietly.
+    if (res.status === 401 && (data?.error === 'Missing token' || data?.error === 'Invalid token')) {
+      if (onSessionInvalid) onSessionInvalid();
+      throw new NotAuthenticatedError(data.error);
+    }
+    throw new Error(data.error || 'Request failed');
+  }
   return data as T;
 }
 

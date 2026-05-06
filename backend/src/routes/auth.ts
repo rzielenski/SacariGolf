@@ -87,24 +87,34 @@ router.post('/register', async (req: Request, res: Response) => {
        RETURNING user_id, username, email, elo, total_matches, total_wins, created_at, email_verified`,
       [u, e, hash, verifyHash]
     );
-    // Best-effort send. We don't fail the registration if email send fails;
-    // the user can request another from inside the app.
-    sendEmail({
-      to: e,
-      subject: 'Verify your Sacari account',
-      text:
-        `Welcome to Sacari!\n\n` +
-        `Your verification code is: ${verifyCode}\n\n` +
-        `Enter it inside the app to confirm your email. The code expires in 24 hours.\n\n` +
-        `If you didn't sign up, you can ignore this email.\n\n— Sacari`,
-      html:
-        `<p>Welcome to Sacari!</p>` +
-        `<p>Your verification code is:</p>` +
-        `<p style="font-size:28px;font-weight:bold;letter-spacing:6px;font-family:monospace">${verifyCode}</p>` +
-        `<p>Enter it inside the app to confirm your email. The code expires in 24 hours.</p>` +
-        `<p>If you didn't sign up, you can ignore this email.</p>` +
-        `<p>— Sacari</p>`,
-    }).catch(() => { /* best-effort */ });
+    // Await the send so any failure shows up in Railway logs and the response
+    // doesn't return before the email is actually queued. Capped at 8s so a
+    // hung Resend call can't stall the registration response indefinitely.
+    const emailResult = await Promise.race([
+      sendEmail({
+        to: e,
+        subject: 'Verify your Sacari account',
+        text:
+          `Welcome to Sacari!\n\n` +
+          `Your verification code is: ${verifyCode}\n\n` +
+          `Enter it inside the app to confirm your email. The code expires in 24 hours.\n\n` +
+          `If you didn't sign up, you can ignore this email.\n\n— Sacari`,
+        html:
+          `<p>Welcome to Sacari!</p>` +
+          `<p>Your verification code is:</p>` +
+          `<p style="font-size:28px;font-weight:bold;letter-spacing:6px;font-family:monospace">${verifyCode}</p>` +
+          `<p>Enter it inside the app to confirm your email. The code expires in 24 hours.</p>` +
+          `<p>If you didn't sign up, you can ignore this email.</p>` +
+          `<p>— Sacari</p>`,
+      }),
+      new Promise<{ ok: false; error: string }>((resolve) =>
+        setTimeout(() => resolve({ ok: false, error: 'email_send_timeout' }), 8000)
+      ),
+    ]);
+    if (!emailResult.ok) {
+      // eslint-disable-next-line no-console
+      console.error('[register] verification email send failed:', emailResult.error);
+    }
     return res.status(201).json({ token: makeToken(rows[0].user_id), user: rows[0] });
   } catch (err: any) {
     if (err.code === '23505') return res.status(409).json({ error: 'Username or email already taken' });

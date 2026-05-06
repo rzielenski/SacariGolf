@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { router } from 'expo-router';
 import { api } from './api';
 import { User } from '../types';
 
@@ -55,13 +56,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    // Navigate FIRST while we're still legitimately on a screen that has the
+    // logout button — otherwise the calling screen's `if (!user) return null`
+    // can render an empty frame and the redirect from AuthGuard sometimes
+    // doesn't fire on the first tap (Alert dismissal + state propagation race).
+    router.replace('/(auth)/login');
     await AsyncStorage.removeItem('coc_token');
     setToken(null);
     setUser(null);
   };
 
   const deleteAccount = async () => {
-    await api.users.deleteAccount();
+    // Try the server delete, but never let a network/auth error trap the user
+    // in a half-logged-out state. We always end on the login screen with
+    // local state cleared.
+    try {
+      await api.users.deleteAccount();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('deleteAccount: server call failed', err);
+    }
+    router.replace('/(auth)/login');
     await AsyncStorage.removeItem('coc_token');
     setToken(null);
     setUser(null);
