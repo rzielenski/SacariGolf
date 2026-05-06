@@ -367,6 +367,33 @@ export default function ScoringScreen() {
     });
   };
 
+  // ── Pin (center of green) — community-contributed location & distance ──────
+
+  // Local override for pins set during this round (so the UI updates immediately
+  // even though the holes API response is cached in our state).
+  const [pinByHole, setPinByHole] = useState<Record<string, { lat: number; lng: number }>>({});
+  const currentHoleObj = holes[currentHole];
+  const knownPin = currentHoleObj
+    ? (pinByHole[currentHoleObj.hole_id] ??
+       (currentHoleObj.pin_lat != null && currentHoleObj.pin_lng != null
+         ? { lat: currentHoleObj.pin_lat, lng: currentHoleObj.pin_lng }
+         : null))
+    : null;
+
+  const yardsToPin = (knownPin && userCoord)
+    ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
+    : null;
+
+  const markPin = () => {
+    if (!userCoord || !currentHoleObj) {
+      Alert.alert('No GPS', 'Wait for a GPS lock before marking the pin.');
+      return;
+    }
+    const point = { lat: userCoord.latitude, lng: userCoord.longitude };
+    setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
+    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng).catch(() => { });
+  };
+
   const pickCourse = async (c: Course) => {
     setLoadingCourse(true);
     try {
@@ -507,16 +534,24 @@ export default function ScoringScreen() {
       });
       // Clear saved progress on successful submit
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
-      if (result.result) {
+      const perkEarned = result?.result?.perkAwarded === 'lucky_round';
+      if (result.result && !result.result.perkAwarded) {
         // Match fully resolved — go straight to the post-match page where
         // the win/loss/draw card is rendered from authoritative server data.
         router.replace(`/match/${id}` as any);
-      } else {
-        // No opponent yet (solo waiting for matchmaking, or duo/squad waiting
-        // on teammates to submit). Brief confirmation, then back to lobby.
+      } else if (result.result && perkEarned) {
         Alert.alert(
-          'Round Submitted',
-          'Waiting for the other side to finish — check back soon.',
+          'Lucky Round Earned',
+          'You marked the pin on enough holes to earn a Lucky Round perk! It will double your win or prevent a loss on your next ranked match.',
+          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
+        );
+      } else {
+        const msg = perkEarned
+          ? 'Round submitted! You also earned a Lucky Round perk for marking the pin on enough holes.'
+          : 'Waiting for the other side to finish — check back soon.';
+        Alert.alert(
+          perkEarned ? 'Lucky Round Earned' : 'Round Submitted',
+          msg,
           [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
         );
       }
@@ -711,6 +746,19 @@ export default function ScoringScreen() {
           </>
         )}
 
+        {/* Pin marker (center of green) for the current hole */}
+        {knownPin && (
+          <Marker
+            coordinate={{ latitude: knownPin.lat, longitude: knownPin.lng }}
+            anchor={{ x: 0.5, y: 1 }}
+          >
+            <View style={styles.pinMarker}>
+              <View style={styles.pinMarkerHead} />
+              <View style={styles.pinMarkerStaff} />
+            </View>
+          </Marker>
+        )}
+
         {/* Shot track for the current hole — each shot a different color line */}
         {currentShots.map((sh, i) => {
           if (i === 0) return null;
@@ -805,6 +853,23 @@ export default function ScoringScreen() {
           <Text style={styles.trackShotHint}>Hold to undo</Text>
         )}
       </TouchableOpacity>
+
+      {/* ── Pin distance / Mark Pin button (right side, below track shot) ── */}
+      {yardsToPin != null ? (
+        <View style={styles.pinDistChip}>
+          <Text style={styles.pinDistLabel}>TO PIN</Text>
+          <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
+        </View>
+      ) : (
+        <TouchableOpacity
+          style={styles.markPinBtn}
+          onPress={markPin}
+          disabled={!userCoord}
+        >
+          <Text style={styles.markPinLabel}>MARK PIN</Text>
+          <Text style={styles.markPinHint}>Stand on the green</Text>
+        </TouchableOpacity>
+      )}
 
       {/* ── Measure distance banner ── */}
       {measureDist !== null && (
@@ -1079,6 +1144,35 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
   },
   shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
+
+  // Pin distance + Mark Pin
+  pinDistChip: {
+    position: 'absolute', right: 12, top: 222,
+    backgroundColor: C.green + 'ee',
+    borderRadius: 8, borderWidth: 1, borderColor: '#fff',
+    paddingHorizontal: 12, paddingVertical: 8, alignItems: 'center', minWidth: 86,
+  },
+  pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
+  pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
+  markPinBtn: {
+    position: 'absolute', right: 12, top: 222,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 8, borderWidth: 1, borderColor: C.green,
+    paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center', minWidth: 86,
+  },
+  markPinLabel: { color: C.green, fontWeight: '800', fontSize: 10, letterSpacing: 1.2 },
+  markPinHint: { color: C.textDim, fontSize: 9, marginTop: 2 },
+
+  // Pin marker on the map (small red flag)
+  pinMarker: { width: 18, height: 24, alignItems: 'center' },
+  pinMarkerHead: {
+    width: 12, height: 8, backgroundColor: C.red,
+    borderRadius: 1, borderWidth: 1, borderColor: '#fff',
+  },
+  pinMarkerStaff: {
+    width: 1.5, height: 16, backgroundColor: '#fff',
+    marginTop: -1,
+  },
 
   // Measure pin
   pinOuter: {

@@ -94,6 +94,10 @@ CREATE TABLE holes (
   par SMALLINT NOT NULL,
   yardage INTEGER,
   handicap SMALLINT,
+  pin_lat REAL,             -- center of green (community-contributed)
+  pin_lng REAL,
+  pin_set_at TIMESTAMPTZ,
+  pin_set_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
   UNIQUE (teebox_id, hole_num)
 );
 
@@ -189,6 +193,30 @@ CREATE TABLE IF NOT EXISTS match_invites (
   expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '24 hours',
   UNIQUE (match_id, to_user_id)
 );
+
+-- Pin contributions — track when a user contributed pin data while playing
+-- so we can reward them with a perk if they did so on the majority of holes.
+CREATE TABLE IF NOT EXISTS pin_contributions (
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+  hole_id UUID NOT NULL REFERENCES holes(hole_id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, match_id, hole_id)
+);
+CREATE INDEX IF NOT EXISTS pin_contrib_user_match_idx ON pin_contributions(user_id, match_id);
+
+-- User perks — earned by contributing pin data, auto-consumed on next ranked match.
+-- 'lucky_round' protects from a loss AND doubles a win (whichever applies).
+CREATE TABLE IF NOT EXISTS user_perks (
+  perk_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  perk_type TEXT NOT NULL DEFAULT 'lucky_round',
+  earned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  earned_match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL,
+  consumed_at TIMESTAMPTZ,
+  consumed_match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS user_perks_unused_idx ON user_perks(user_id) WHERE consumed_at IS NULL;
 
 -- Shot tracks — per (match, user, hole) — array of {lat, lng} GPS points
 CREATE TABLE IF NOT EXISTS shot_tracks (

@@ -145,12 +145,22 @@ export default function MatchLobbyScreen() {
         const myDelta = match.my_delta_elo ?? (won ? match.result.delta_elo : -(match.result.delta_elo ?? 0));
         const color = tied ? C.gold : (won ? C.green : C.red);
         const label = tied ? 'DRAW' : (won ? 'VICTORY' : 'DEFEAT');
+        const myPerk: any = (match as any).my_perk;
         return (
           <View style={[styles.resultCard, { borderColor: color }]}>
             <Text style={[styles.resultText, { color }]}>{label}</Text>
             {!isPractice && (
               <Text style={styles.eloChange}>
                 {myDelta > 0 ? '+' : ''}{myDelta} ELO
+              </Text>
+            )}
+            {myPerk && (
+              <Text style={styles.perkAppliedLine}>
+                Lucky Round perk applied — {myPerk.original < 0
+                  ? `loss of ${Math.abs(myPerk.original)} ELO prevented`
+                  : myPerk.original > 0
+                    ? `${myPerk.original} ELO doubled to ${myPerk.adjusted}`
+                    : 'perk consumed'}
               </Text>
             )}
             <View style={styles.diffRow}>
@@ -387,6 +397,10 @@ const styles = StyleSheet.create({
   },
   resultText: { fontFamily: F.serif, fontSize: 26, fontWeight: '700', letterSpacing: 3 },
   eloChange: { fontSize: 20, fontWeight: '800', color: C.gold, marginTop: 4 },
+  perkAppliedLine: {
+    color: C.gold, fontSize: 11, marginTop: 6, textAlign: 'center',
+    fontWeight: '700', letterSpacing: 0.3,
+  },
   diffRow: { flexDirection: 'row', gap: 16, marginTop: 10 },
   diffLabel: { color: C.textMuted, fontSize: 12 },
 

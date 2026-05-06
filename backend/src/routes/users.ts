@@ -137,6 +137,18 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
+// Active (unused) perks for the requesting user
+router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT perk_id, perk_type, earned_at, earned_match_id
+     FROM user_perks
+     WHERE user_id = $1 AND consumed_at IS NULL
+     ORDER BY earned_at ASC`,
+    [req.userId]
+  );
+  return res.json(rows);
+}));
+
 router.get('/leaderboard', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, total_matches, total_wins, avatar_url

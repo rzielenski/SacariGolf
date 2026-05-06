@@ -28,6 +28,7 @@ export default function HomeScreen() {
   const eloTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [handicapModal, setHandicapModal] = useState(false);
   const [handicapInput, setHandicapInput] = useState('');
+  const [perkCount, setPerkCount] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -37,6 +38,8 @@ export default function HomeScreen() {
       setLoading(false);
       setRefreshing(false);
     }
+    // Lightweight: also fetch active perks for the banner. Failures are silent.
+    api.users.perks().then((rows) => setPerkCount(rows.length)).catch(() => { });
   }, [refreshUser]);
 
   const deleteMatch = useCallback(async (matchId: string) => {
@@ -119,6 +122,18 @@ export default function HomeScreen() {
           <Text style={styles.eloStatLabel}>Win Rate</Text>
         </View>
       </View>
+
+      {/* Lucky Round perk banner — applies automatically to next ranked match */}
+      {perkCount > 0 && (
+        <View style={styles.perkBanner}>
+          <Text style={styles.perkBannerLabel}>LUCKY ROUND</Text>
+          <Text style={styles.perkBannerMsg}>
+            {perkCount > 1
+              ? `${perkCount} perks active — each one doubles a win or prevents a loss on your next ranked matches`
+              : 'Active for your next ranked match — doubles a win or prevents a loss'}
+          </Text>
+        </View>
+      )}
 
       {/* Handicap row */}
       <TouchableOpacity style={styles.handicapRow} onPress={() => { setHandicapInput(user.handicap_index?.toString() ?? ''); setHandicapModal(true); }}>
@@ -379,6 +394,12 @@ const styles = StyleSheet.create({
     backgroundColor: C.card, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 12,
     borderWidth: 1, borderColor: C.border, marginBottom: 16,
   },
+  perkBanner: {
+    backgroundColor: C.gold + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
+    borderWidth: 1, borderColor: C.gold, marginBottom: 14,
+  },
+  perkBannerLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
+  perkBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
   handicapLabel: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
   handicapValue: { color: C.gold, fontSize: 15, fontWeight: '800', fontFamily: F.serif },
 

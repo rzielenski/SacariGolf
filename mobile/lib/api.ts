@@ -52,6 +52,7 @@ export const api = {
     update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string; bio?: string | null; homeCourseId?: string | null }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<{ notifications: any[]; unread_count: number }>('GET', '/users/me/notifications'),
+    perks: () => request<{ perk_id: string; perk_type: string; earned_at: string }[]>('GET', '/users/me/perks'),
     markNotificationsSeen: () => request<any>('POST', '/users/me/notifications/seen', {}),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
     get: (id: string) => request<any>('GET', `/users/${id}`),
@@ -99,6 +100,8 @@ export const api = {
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
     saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number }[]) =>
       request<any>('PUT', `/matches/${id}/shots/${holeNum}`, { shots }),
+    contributePin: (id: string, holeId: string, lat: number, lng: number) =>
+      request<any>('POST', `/matches/${id}/pin`, { holeId, lat, lng }),
     listShotTracks: (id: string, userId?: string) =>
       request<{ user_id: string; hole_num: number; shots: { lat: number; lng: number }[] }[]>(
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`

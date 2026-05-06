@@ -64,6 +64,8 @@ export interface Hole {
   par: number;
   yardage: number | null;
   handicap: number | null;
+  pin_lat?: number | null;
+  pin_lng?: number | null;
 }
 
 export interface Match {

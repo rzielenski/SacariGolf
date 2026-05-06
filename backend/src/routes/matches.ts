@@ -153,23 +153,27 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   );
 
   // Pre-compute the requesting user's signed ELO delta so UIs don't have to
-  // figure out whether they were favored or not in a tie.
+  // figure out whether they were favored or not in a tie. Honor perk overrides.
   let my_delta_elo: number | null = null;
+  let my_perk: any = null;
   if (resultRows.length) {
     const result = resultRows[0];
     const me = players.find((p: any) => p.user_id === req.userId);
     if (me) {
       if (result.winner_side === null) {
-        // Tie — pull the signed delta from details
         const key = me.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
         my_delta_elo = result.details?.[key] ?? 0;
       } else {
         my_delta_elo = result.winner_side === me.side ? result.delta_elo : -result.delta_elo;
       }
+      // Apply perk override if I consumed one on this match
+      const perks = result.details?.perks ?? [];
+      my_perk = perks.find((pa: any) => pa.user_id === req.userId) ?? null;
+      if (my_perk) my_delta_elo = my_perk.adjusted;
     }
   }
 
-  return res.json({ ...matchRows[0], players, result: resultRows[0] || null, my_delta_elo });
+  return res.json({ ...matchRows[0], players, result: resultRows[0] || null, my_delta_elo, my_perk });
 }));
 
 // List my matches
@@ -184,7 +188,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
      ORDER BY m.created_at DESC LIMIT 50`,
     [req.userId]
   );
-  // Compute signed my_delta_elo per row
+  // Compute signed my_delta_elo per row, honoring perks.
   const decorated = rows.map((r) => {
     let my_delta_elo: number | null = null;
     if (r.delta_elo != null && r.my_side != null) {
@@ -194,6 +198,9 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       } else {
         my_delta_elo = r.winner_side === r.my_side ? r.delta_elo : -r.delta_elo;
       }
+      const perks = r.details?.perks ?? [];
+      const myPerk = perks.find((pa: any) => pa.user_id === req.userId);
+      if (myPerk) my_delta_elo = myPerk.adjusted;
     }
     return { ...r, my_delta_elo };
   });
@@ -314,6 +321,33 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
 
+    // Pin-contribution reward: if this player pinned the majority of holes
+    // they played in this round, grant a 'lucky_round' perk for next match.
+    let perkAwarded = false;
+    if (!matchRows[0].is_practice && Array.isArray(holeScores) && holeScores.length > 0) {
+      const { rows: contribRows } = await client.query(
+        `SELECT COUNT(*)::int AS n FROM pin_contributions
+         WHERE user_id = $1 AND match_id = $2`,
+        [req.userId, req.params.id]
+      );
+      const contribCount = contribRows[0]?.n ?? 0;
+      if (contribCount * 2 > holeScores.length) {
+        // Avoid double-awarding for the same match (e.g. duo match where one
+        // player submits, perk granted, then the other teammate submits again)
+        const { rows: alreadyRows } = await client.query(
+          `SELECT 1 FROM user_perks WHERE user_id = $1 AND earned_match_id = $2`,
+          [req.userId, req.params.id]
+        );
+        if (!alreadyRows.length) {
+          await client.query(
+            `INSERT INTO user_perks (user_id, perk_type, earned_match_id) VALUES ($1, 'lucky_round', $2)`,
+            [req.userId, req.params.id]
+          );
+          perkAwarded = true;
+        }
+      }
+    }
+
     // Scramble: mark ALL teammates on the same side as done with the same score
     if (matchFormat === 'scramble') {
       await client.query(
@@ -375,10 +409,36 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const side1Delta = Math.round(k * (side1ActualScore - expA));
       const side2Delta = -side1Delta;
 
+      // Track per-player perk applications to surface in the response
+      const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
+
       for (const p of [...side1Players, ...side2Players]) {
         const onSide1 = side1Players.includes(p);
-        const eloChange = onSide1 ? side1Delta : side2Delta;
+        const baseChange = onSide1 ? side1Delta : side2Delta;
         const won = !isTie && onSide1 === side1Wins;
+
+        // Check for an unused 'lucky_round' perk and apply it.
+        // - Loss → set ELO change to 0 (loss prevention)
+        // - Win  → double the ELO gain
+        // - Tie loss (favored side losing rating) → also zeroed
+        let eloChange = baseChange;
+        const { rows: perkRows } = await client.query(
+          `SELECT perk_id FROM user_perks
+           WHERE user_id = $1 AND consumed_at IS NULL
+           ORDER BY earned_at ASC LIMIT 1`,
+          [p.user_id]
+        );
+        if (perkRows.length) {
+          if (eloChange < 0) eloChange = 0;
+          else if (eloChange > 0) eloChange = eloChange * 2;
+          // (eloChange === 0: no effect; we still consume the perk so it doesn't accumulate forever)
+          await client.query(
+            `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+            [perkRows[0].perk_id, matchId]
+          );
+          perkApplications.push({ user_id: p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+        }
+
         await client.query(
           `UPDATE users
            SET elo = GREATEST(100, elo + $1),
@@ -407,6 +467,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
             tied: isTie,
             side1DeltaSignedElo: side1Delta,
             side2DeltaSignedElo: side2Delta,
+            perks: perkApplications, // [{ user_id, original, adjusted, type }]
           }),
         ]
       );
@@ -417,6 +478,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         deltaElo: Math.abs(side1Delta),
         side1Diff,
         side2Diff,
+        perks: perkApplications,
       };
     };
 
@@ -515,10 +577,6 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const submitterIsSide1 = myeSide === 1;
       const baseDelta = result.deltaElo ?? 0;
       if (tied) {
-        // For ties, side1's signed delta is K*(0.5 - expA). The magnitude is
-        // result.deltaElo and the side that gained ELO is whoever was lower-rated.
-        // We can't reliably reconstruct sign without expA — but we tracked it in details.
-        // Simpler: pull from match_results we just inserted.
         const { rows: mrRows } = await client.query(
           `SELECT details FROM match_results WHERE match_id = $1`,
           [req.params.id]
@@ -530,6 +588,15 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
         result.myDeltaElo = won ? baseDelta : -baseDelta;
       }
+      // Override with per-player perk-adjusted delta if the submitter consumed a perk
+      const myPerk = (result.perks ?? []).find((pa: any) => pa.user_id === req.userId);
+      if (myPerk) result.myDeltaElo = myPerk.adjusted;
+    }
+
+    // Surface whether THIS submission earned the user a fresh perk
+    if (perkAwarded) {
+      if (!result) result = {} as any;
+      result.perkAwarded = 'lucky_round';
     }
 
     await client.query('COMMIT');
@@ -718,6 +785,43 @@ router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Resp
     );
   }
   return res.json({ success: true, sent: true, recipientCount: tokens.length });
+}));
+
+// POST a pin location for a hole during a round.
+//   body: { holeId: UUID, lat: number, lng: number }
+// Updates the hole's pin coords iff they're not already set (first contributor wins).
+// Records a contribution credit so we can reward the user for pinning ≥50% of holes.
+router.post('/:id/pin', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { holeId, lat, lng } = req.body ?? {};
+  if (typeof holeId !== 'string' || typeof lat !== 'number' || typeof lng !== 'number') {
+    return res.status(400).json({ error: 'holeId, lat, lng required' });
+  }
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'invalid coords' });
+  }
+
+  // Verify the user is in this match
+  const { rows: pRows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!pRows.length) return res.status(404).json({ error: 'Not in match' });
+
+  // First contributor wins — only set the pin if it's currently null.
+  // We DO record the contribution credit either way.
+  await pool.query(
+    `UPDATE holes
+     SET pin_lat = $2, pin_lng = $3, pin_set_at = NOW(), pin_set_by = $4
+     WHERE hole_id = $1 AND pin_lat IS NULL`,
+    [holeId, lat, lng, req.userId]
+  );
+  await pool.query(
+    `INSERT INTO pin_contributions (user_id, match_id, hole_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT DO NOTHING`,
+    [req.userId, req.params.id, holeId]
+  );
+  return res.json({ success: true });
 }));
 
 // PUT a player's shot track for a single hole. Replaces the full array.
