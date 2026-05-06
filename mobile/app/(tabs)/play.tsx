@@ -9,6 +9,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Course, Teebox } from '../../types';
+import { Divider } from '../../components/Flourish';
 
 type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
 type Format = 'stroke' | 'scramble';
@@ -140,6 +141,7 @@ export default function PlayScreen() {
       <View style={styles.container}>
         <Text style={styles.title}>Start a Round</Text>
         <Text style={styles.subtitle}>Choose your match type</Text>
+        <Divider style={{ marginTop: -8, marginBottom: 8 }} />
 
         {(['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity

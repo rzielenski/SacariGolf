@@ -11,7 +11,7 @@
     "splash": {
       "image": "./assets/sacari-logo.jpg",
       "resizeMode": "contain",
-      "backgroundColor": "#08120f"
+      "backgroundColor": "#06080a"
     },
     "ios": {
       "supportsTablet": false,
@@ -24,7 +24,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.jpg",
-        "backgroundColor": "#08120f"
+        "backgroundColor": "#06080a"
       },
       "package": "com.sacarigolf.app",
       "permissions": [

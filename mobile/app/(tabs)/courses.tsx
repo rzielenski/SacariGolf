@@ -8,6 +8,7 @@ import { router } from 'expo-router';
 import { api } from '../../lib/api';
 import { C } from '../../lib/colors';
 import { Course } from '../../types';
+import { Divider } from '../../components/Flourish';
 
 export default function CoursesScreen() {
   const [query, setQuery] = useState('');
@@ -50,6 +51,7 @@ export default function CoursesScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Courses</Text>
       <Text style={styles.subtitle}>Browse courses, see leaderboards & tee info</Text>
+      <Divider style={{ marginTop: -4, marginBottom: 8 }} />
 
       <TextInput
         style={styles.searchInput}

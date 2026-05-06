@@ -10,28 +10,25 @@ import { Platform } from 'react-native';
 // };
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Sacari Golf — palette pulled directly from the cover art:
-//   • deep teal-black backdrop (cloak / outer frame)
-//   • bone parchment for text (cream center of the poster)
-//   • tarnished brass for primary accent (corner ornaments)
-//   • blood crimson for danger / loss (splatter)
+// Sacari Golf — dark forest green, antique silver, black.
+// `gold` keeps its key name throughout the codebase but its value is now silver.
 export const C = {
-  bg:        '#08120f',  // near-black with teal undertone
-  surface:   '#0e1f1c',  // crypt teal
-  card:      '#142b27',  // cloak shadow
-  cardAlt:   '#1c3833',  // lifted cloak
-  border:    '#2c4f47',  // muted teal patina
-  gold:      '#a07a2a',  // tarnished brass (matches corner ornaments)
-  goldLight: '#c89a45',  // warm brass highlight
-  text:      '#ece1c4',  // bone parchment (logo's cream center)
-  textMuted: '#9aa39a',  // ash sage
-  textDim:   '#4f6058',  // deep teal grey
-  green:     '#2e5046',  // hooded cloak teal-green
-  red:       '#9c2128',  // blood crimson (poster splatter)
-  blue:      '#2e4960',  // deep ink (used sparingly)
+  bg:        '#06080a',  // black with a touch of green
+  surface:   '#0b100d',  // very dark forest
+  card:      '#11171a',  // dark slate-green
+  cardAlt:   '#1a2127',  // lifted slate
+  border:    '#2a3530',  // slate-silver border
+  gold:      '#bdb9aa',  // antique silver (replaces tarnished brass)
+  goldLight: '#dcd9c8',  // bright silver highlight
+  text:      '#e6e3d8',  // off-white silver
+  textMuted: '#8c8e85',  // ash silver-grey
+  textDim:   '#4a4d48',  // crypt slate
+  green:     '#7aab78',  // visible sage — used for WIN / JOIN / Playing Now
+  red:       '#b03434',  // brighter crimson — used for LOSS / forfeit / danger
+  blue:      '#7a96b8',  // muted steel blue — used for IN PROGRESS / info
 };
 
-// Old-book serif — Times reads more medieval than Georgia at small sizes.
+// Old-book serif for headings; keep mono for code/IDs.
 export const F = {
   serif: Platform.OS === 'ios' ? 'Times New Roman' : 'serif',
   mono:  Platform.OS === 'ios' ? 'Courier New' : 'monospace',

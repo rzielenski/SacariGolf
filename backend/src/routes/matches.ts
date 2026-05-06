@@ -17,7 +17,25 @@ function kFactor(totalMatches: number, elo: number) {
   return 24;
 }
 
-// holesPlayed / teeboxHoles scales the rating for partial rounds (e.g. 9 holes on an 18-hole course)
+// Score differential scaled to an 18-hole equivalent so players on different
+// courses, different teeboxes, and different hole counts can be compared fairly.
+//
+//   18-hole round on an 18-hole teebox  → standard formula
+//   9-hole round on a 9-hole teebox     → standard formula on 9-hole rating, then ×2
+//   9-hole round on an 18-hole teebox   → use ½ the 18-hole rating (assume front 9), then ×2
+//
+// The doubling converts a 9-hole "strokes over rating" into an 18-hole equivalent
+// so a 5-stroke-over diff on 9 holes is treated like a 10-stroke-over diff on 18.
+function diff18(gross: number, courseRating: number, slopeRating: number, holesPlayed = 18, teeboxHoles = 18) {
+  let r = courseRating;
+  if (holesPlayed === 9 && teeboxHoles === 18) {
+    r = courseRating / 2; // assume the player completed the front 9
+  }
+  const raw = (gross - r) * (113 / slopeRating);
+  return holesPlayed === 9 ? raw * 2 : raw;
+}
+
+// Kept for backwards compatibility / one place that still wants the un-doubled value
 function scoreDifferential(gross: number, courseRating: number, slopeRating: number, holesPlayed = 18, teeboxHoles = 18) {
   const adjustedRating = courseRating * (holesPlayed / teeboxHoles);
   return (gross - adjustedRating) * (113 / slopeRating);
@@ -118,10 +136,12 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
             u.username, u.elo, u.avatar_url,
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
             t.course_id, t.num_holes,
+            c.course_name,
             r.hole_scores
      FROM match_players mp
      JOIN users u ON u.user_id = mp.user_id
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
      LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
      WHERE mp.match_id = $1`,
     [req.params.id]
@@ -330,7 +350,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const getDiff = (players: typeof allPlayers, topN?: number) => {
         const diffs = players.map((p) =>
           p.course_rating && p.slope_rating
-            ? scoreDifferential(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played)
+            ? diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played)
             : p.strokes
         ).sort((a: number, b: number) => a - b); // ascending — lower is better in golf
         const used = topN ? diffs.slice(0, topN) : diffs;
@@ -470,23 +490,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           [req.params.id, opp.user_id, opp.teebox_id, opp.strokes]
         );
 
-        // Build the player objects used only for ELO resolution.
-        // Cross-format: normalise the 18-hole player to a 9-hole equivalent by halving
-        // their strokes (average of front 9 and back 9) and their course rating.
-        // scoreDifferential then compares both players on the same 9-hole basis.
-        let myPForElo = { ...myP };
-        let oppForElo = { ...opp, side: 2 };
-
-        if (isCrossFormat) {
-          const myIs18 = myP.holes_played > opp.holes_played;
-          const eighteenSide = myIs18 ? myPForElo : oppForElo;
-          eighteenSide.strokes = Math.round(eighteenSide.strokes / 2);
-          if (eighteenSide.course_rating) eighteenSide.course_rating = eighteenSide.course_rating / 2;
-          eighteenSide.holes_played = 9;
-          eighteenSide.teebox_num_holes = 9;
-        }
-
-        result = await resolveElo([myPForElo], [oppForElo], req.params.id, matchRows[0].match_type);
+        // No special-case normalization needed — diff18() inside resolveElo
+        // already converts each player's score to an 18-hole equivalent so a
+        // 9-hole player vs an 18-hole player compares fairly.
+        const oppForElo = { ...opp, side: 2 };
+        result = await resolveElo([myP], [oppForElo], req.params.id, matchRows[0].match_type);
         result.autoMatched = true;
         result.crossFormat = isCrossFormat;
         result.opponentUsername = opp.username;

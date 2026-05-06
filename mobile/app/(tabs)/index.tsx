@@ -9,6 +9,7 @@ import { useAuth } from '../../lib/auth';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { Match } from '../../types';
+import { Divider, OrnamentTitle } from '../../components/Flourish';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -150,7 +151,9 @@ export default function HomeScreen() {
       </TouchableOpacity>
 
       {/* Recent matches */}
-      <Text style={styles.sectionTitle}>Recent Matches</Text>
+      <Divider style={{ marginTop: 8, marginBottom: 8 }} />
+      <OrnamentTitle title="Recent Matches" align="center" />
+
       {loading ? (
         <ActivityIndicator color={C.gold} style={{ marginTop: 24 }} />
       ) : matches.length === 0 ? (

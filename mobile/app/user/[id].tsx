@@ -7,6 +7,7 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
+import { OrnamentTitle } from '../../components/Flourish';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -195,7 +196,7 @@ export default function UserProfileScreen() {
       {/* Best round */}
       {profile.best_round && (
         <>
-          <Text style={styles.sectionTitle}>BEST ROUND</Text>
+          <OrnamentTitle title="Best Round" />
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.gold }]}
             onPress={() => profile.best_round.hole_scores?.length
@@ -222,7 +223,7 @@ export default function UserProfileScreen() {
       )}
 
       {/* Recent rounds */}
-      <Text style={styles.sectionTitle}>RECENT ROUNDS</Text>
+      <OrnamentTitle title="Recent Rounds" />
       {profile.recent_rounds?.length === 0 ? (
         <Text style={styles.empty}>No rounds played yet.</Text>
       ) : (

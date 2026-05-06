@@ -9,6 +9,7 @@ import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../../lib/api';
+import { useAuth } from '../../../lib/auth';
 import { C, F } from '../../../lib/colors';
 import { Hole, Teebox, Course } from '../../../types';
 
@@ -60,6 +61,7 @@ export default function ScoringScreen() {
   const { id, holes: holesParam } = useLocalSearchParams<{ id: string; holes?: string }>();
   // numHoles is a state so it can be corrected after loading the match's existing teebox
   const [numHoles, setNumHoles] = useState<number>(holesParam ? parseInt(holesParam, 10) : 18);
+  const { user } = useAuth();
 
   // Match / course data
   const [match, setMatch] = useState<any>(null);
@@ -136,12 +138,13 @@ export default function ScoringScreen() {
         if (raw) saved = JSON.parse(raw);
       } catch { /* ignore */ }
 
-      // Resolve which course/teebox to load: server-side player data wins,
-      // but fall back to the locally-saved choice (challenge matches don't
-      // persist teebox to the match record until scores are submitted).
-      const playerWithTeebox = m.players?.find((p: any) => p.teebox_id && p.course_id);
-      const courseIdToLoad = playerWithTeebox?.course_id ?? saved?.courseId;
-      const teeboxIdToLoad = playerWithTeebox?.teebox_id ?? saved?.teeboxId;
+      // Resolve which course/teebox to load — only look at THIS user's player row,
+      // because every player in a match can pick their own course/teebox.
+      // Falls back to locally-saved choice if I haven't picked yet (challenge
+      // matches don't persist teebox to match_players until scores submit).
+      const myPlayer = m.players?.find((p: any) => p.user_id === user?.user_id);
+      const courseIdToLoad = myPlayer?.course_id ?? saved?.courseId;
+      const teeboxIdToLoad = myPlayer?.teebox_id ?? saved?.teeboxId;
 
       if (courseIdToLoad && teeboxIdToLoad) {
         const courseDetails: Course = await api.courses.get(courseIdToLoad);
@@ -169,7 +172,7 @@ export default function ScoringScreen() {
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, user?.user_id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -288,7 +291,11 @@ export default function ScoringScreen() {
   }, []);
 
   const selectTeebox = (t: Teebox, c: Course) => {
-    const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, numHoles);
+    // Each player chooses their own teebox — play the full hole count it offers.
+    // diff18() on the backend normalises 9-hole rounds to 18-hole equivalents
+    // so different teeboxes (and different hole counts) compare fairly.
+    const playableHoles = Math.min(t.num_holes, (t.holes ?? []).length);
+    const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, playableHoles);
     if (h.length === 0) {
       Alert.alert(
         'No Hole Data',
@@ -296,6 +303,7 @@ export default function ScoringScreen() {
       );
       return;
     }
+    setNumHoles(playableHoles);
     setTeebox(t);
     setCourse(c);
     setHoles(h);
@@ -525,12 +533,12 @@ export default function ScoringScreen() {
               <TouchableOpacity onPress={() => setFullCourse(null)} style={{ marginBottom: 8, paddingHorizontal: 20 }}>
                 <Text style={{ color: C.gold }}>← Choose different course</Text>
               </TouchableOpacity>
-              {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).length === 0 && (
+              {(fullCourse.teeboxes ?? []).length === 0 && (
                 <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
-                  No tee boxes available for {numHoles} holes at this course.
+                  No tee boxes available at this course.
                 </Text>
               )}
-              {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).map((t) => (
+              {(fullCourse.teeboxes ?? []).map((t) => (
                 <TouchableOpacity
                   key={t.teebox_id}
                   style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}

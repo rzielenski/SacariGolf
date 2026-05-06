@@ -7,6 +7,7 @@ import {
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
+import { Divider } from '../../components/Flourish';
 
 const SACARI_LOGO = require('../../assets/sacari-logo.jpg');
 
@@ -120,6 +121,7 @@ export default function LoginScreen() {
         <View style={styles.logoBox}>
           <Image source={SACARI_LOGO} style={styles.logoImage} resizeMode="contain" />
           <Text style={styles.logoSub}>Est. 2026</Text>
+          <Divider style={{ width: 200, marginTop: 4 }} />
         </View>
 
         {/* Form card */}

@@ -96,6 +96,7 @@ export interface MatchPlayer {
   slope_rating: number | null;
   num_holes?: number;
   course_id?: string;
+  course_name?: string;
   teebox_id?: string;
   hole_scores?: number[] | null;
 }

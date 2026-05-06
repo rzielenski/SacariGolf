@@ -10,6 +10,7 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
 import { ScorecardCard } from '../../components/Scorecard';
+import { OrnamentTitle, Divider } from '../../components/Flourish';
 
 export default function MatchLobbyScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -154,7 +155,8 @@ export default function MatchLobbyScreen() {
       })()}
 
       {/* Players */}
-      <Text style={styles.sectionTitle}>Players</Text>
+      <OrnamentTitle title="Players" />
+
       {match.players?.map((p) => (
         <PlayerCard
           key={p.user_id}
@@ -188,7 +190,7 @@ export default function MatchLobbyScreen() {
       {!isCompleted && myPlayer && !myPlayer.completed && (
         <TouchableOpacity style={styles.startBtn} onPress={handleStartScoring}>
           <Text style={styles.startBtnText}>
-            {hasSavedProgress ? '▶ Continue Match' : '⛳ Start Scoring'}
+            {hasSavedProgress ? 'Continue Match' : 'Start Scoring'}
           </Text>
         </TouchableOpacity>
       )}
@@ -203,7 +205,8 @@ export default function MatchLobbyScreen() {
       {/* Auto-rendered scorecards once the match is completed */}
       {isCompleted && match.players?.some((p) => p.hole_scores?.length) && (
         <>
-          <Text style={[styles.sectionTitle, { marginTop: 24 }]}>Scorecards</Text>
+          <Divider style={{ marginTop: 24 }} />
+          <OrnamentTitle title="Scorecards" align="center" />
           {match.players?.filter((p) => p.hole_scores?.length).map((p) => (
             <ScorecardCard
               key={p.user_id}
@@ -315,8 +318,14 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
           {player.username} {isMe && <Text style={{ color: C.gold }}>(You)</Text>}
         </Text>
         <Text style={styles.playerElo}>{player.elo} ELO · Side {player.side}</Text>
-        {player.teebox_name && (
-          <Text style={styles.playerTeebox}>{player.teebox_name} tees</Text>
+        {player.teebox_name ? (
+          <Text style={styles.playerTeebox} numberOfLines={1}>
+            {player.course_name ? `${player.course_name} · ` : ''}
+            {player.teebox_name} tees
+            {player.num_holes ? ` · ${player.num_holes}h` : ''}
+          </Text>
+        ) : (
+          <Text style={[styles.playerTeebox, { color: C.textDim }]}>Picking course…</Text>
         )}
       </View>
       <View style={styles.playerStatus}>

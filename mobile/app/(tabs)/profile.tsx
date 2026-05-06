@@ -10,6 +10,7 @@ import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
+import { OrnamentTitle, Divider } from '../../components/Flourish';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -28,7 +29,7 @@ function ProgressBar({ value, max, color }: { value: number; max: number; color:
   );
 }
 const pb = StyleSheet.create({
-  track: { height: 6, backgroundColor: '#2a3a2a', borderRadius: 3, overflow: 'hidden' },
+  track: { height: 6, backgroundColor: C.cardAlt, borderRadius: 3, overflow: 'hidden' },
   fill: { height: '100%', borderRadius: 3 },
 });
 
@@ -227,18 +228,18 @@ export default function ProfileScreen() {
   };
 
   const notifIcon = (type: string) => {
-    if (type === 'friend_request') return '👤';
-    if (type === 'match_invite') return '⛳';
-    if (type === 'clan_invite') return '🏆';
-    if (type === 'match_result') return '🏅';
-    return '🔔';
+    if (type === 'friend_request') return 'FR';
+    if (type === 'match_invite') return 'MA';
+    if (type === 'clan_invite') return 'CL';
+    if (type === 'match_result') return 'RS';
+    return '·';
   };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* Bell */}
       <TouchableOpacity style={styles.bellBtn} onPress={openNotifications}>
-        <Text style={styles.bellIcon}>🔔</Text>
+        <Text style={styles.bellIcon}>NOTICES</Text>
         {notifCount > 0 && (
           <View style={styles.bellBadge}>
             <Text style={styles.bellBadgeText}>{notifCount > 9 ? '9+' : notifCount}</Text>
@@ -351,7 +352,8 @@ export default function ProfileScreen() {
       {/* Best Round */}
       {bestRound && (
         <>
-          <Text style={styles.profSectionTitle}>BEST ROUND</Text>
+          <OrnamentTitle title="Best Round" />
+
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.gold }]}
             onPress={() => bestRound.hole_scores?.length
@@ -380,7 +382,8 @@ export default function ProfileScreen() {
       {/* Recent Rounds */}
       {recentRounds.length > 0 && (
         <>
-          <Text style={styles.profSectionTitle}>RECENT ROUNDS</Text>
+          <OrnamentTitle title="Recent Rounds" />
+
           {recentRounds.map((r: any) => (
             <TouchableOpacity
               key={r.round_id}
@@ -656,9 +659,11 @@ const styles = StyleSheet.create({
 
   bellBtn: {
     position: 'absolute', top: 60, right: 20, zIndex: 10,
-    width: 40, height: 40, justifyContent: 'center', alignItems: 'center',
+    paddingHorizontal: 10, paddingVertical: 8, borderRadius: 4,
+    borderWidth: 1, borderColor: C.gold + '88',
+    justifyContent: 'center', alignItems: 'center',
   },
-  bellIcon: { fontSize: 22 },
+  bellIcon: { fontSize: 10, color: C.gold, fontWeight: '800', letterSpacing: 1.5, fontFamily: F.serif },
   bellBadge: {
     position: 'absolute', top: 0, right: 0,
     backgroundColor: C.red, borderRadius: 8,
