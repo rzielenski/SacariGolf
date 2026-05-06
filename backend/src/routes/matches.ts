@@ -321,19 +321,35 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
 
-    // Pin-contribution reward: if this player pinned the majority of holes
-    // they played in this round, grant a 'lucky_round' perk for next match.
+    // Pin-contribution reward: if a majority of the holes the player COULD have
+    // contributed to (still NULL, or filled by them) actually were filled by
+    // them, grant a 'lucky_round' perk. The feature only applies when at least
+    // one hole the player played was missing pin data — if every pin was
+    // already known, there was nothing to contribute and no perk possible.
     let perkAwarded = false;
-    if (!matchRows[0].is_practice && Array.isArray(holeScores) && holeScores.length > 0) {
+    if (!matchRows[0].is_practice && Array.isArray(holeScores) && holeScores.length > 0 && resolvedTeeboxId) {
+      // Count "eligible" holes among the ones this player played:
+      //   - pin still NULL (they had the chance, missed it), OR
+      //   - pin_set_by = me (they took the chance and filled it)
+      // Rows where someone else filled the pin before the player arrived don't count.
+      const { rows: opportunityRows } = await client.query(
+        `SELECT COUNT(*)::int AS n FROM holes
+         WHERE teebox_id = $1
+           AND hole_num <= $2
+           AND (pin_lat IS NULL OR pin_set_by = $3)`,
+        [resolvedTeeboxId, holeScores.length, req.userId]
+      );
+      const opportunityCount = opportunityRows[0]?.n ?? 0;
+
       const { rows: contribRows } = await client.query(
         `SELECT COUNT(*)::int AS n FROM pin_contributions
          WHERE user_id = $1 AND match_id = $2`,
         [req.userId, req.params.id]
       );
       const contribCount = contribRows[0]?.n ?? 0;
-      if (contribCount * 2 > holeScores.length) {
-        // Avoid double-awarding for the same match (e.g. duo match where one
-        // player submits, perk granted, then the other teammate submits again)
+
+      if (opportunityCount > 0 && contribCount * 2 > opportunityCount) {
+        // Avoid double-awarding for the same match (duo/squad — multiple submitters)
         const { rows: alreadyRows } = await client.query(
           `SELECT 1 FROM user_perks WHERE user_id = $1 AND earned_match_id = $2`,
           [req.userId, req.params.id]
