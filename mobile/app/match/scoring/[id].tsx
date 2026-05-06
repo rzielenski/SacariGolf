@@ -653,7 +653,7 @@ export default function ScoringScreen() {
       rain:         weather.rain,
     });
     const effective = Math.round(baseYds + (-adj.effective_delta_yds));
-    if (Math.abs(effective - baseYds) < 2) return null;
+    if (effective === baseYds) return null;
     return {
       effective, breakdown: adj, windAlong: along,
       altRelative: homeElevationFt != null,
@@ -1375,15 +1375,27 @@ export default function ScoringScreen() {
       {/* ── Measure distance banner — centered, lifts with score panel ── */}
       {measureDist !== null && (() => {
         const raw = Math.round(measureDist);
-        // Apply weather adjustments to the measure distance for premium users.
-        // Slope isn't included here because we don't know the elevation of
-        // the tapped point — only the pin chip has slope info.
+        // Slope adjustment: when the hole has a known pin elevation in the
+        // database AND we have the player's GPS altitude, treat the pin
+        // elevation as a stand-in for "where they're aiming" and apply the
+        // same yards-per-metre slope correction the TO PIN chip uses. It's
+        // an approximation when the tapped point isn't ON the green, but
+        // most measure ops happen on the same hole and the pin is the best
+        // proxy for hole-end elevation.
+        let slopeAdj = 0;
+        if (knownPin?.elevation_m != null && typeof userCoord?.altitude === 'number') {
+          const elevDiffM = knownPin.elevation_m - userCoord.altitude;
+          slopeAdj = Math.round(elevDiffM * 1.09);
+        }
+        const slopeBase = raw + slopeAdj;
+
+        // Apply weather adjustments on top of the slope-adjusted base.
         let adjusted: number | null = null;
         if (userIsPremium && weather?.temperature_f != null) {
           const courseAltFt = weather.elevation_ft
             ?? (typeof userCoord?.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
           const altDeltaFt = homeElevationFt != null ? courseAltFt - homeElevationFt : courseAltFt;
-          // Wind component along measure-line
+          // Wind component along the measure-line
           let along = 0;
           if (measurePin && userCoord && weather.wind_speed_mph && weather.wind_from_bearing != null) {
             const lat1 = userCoord.latitude * Math.PI / 180;
@@ -1394,15 +1406,22 @@ export default function ScoringScreen() {
             const shotBearingDeg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
             along = windComponents(weather.wind_speed_mph, weather.wind_from_bearing, shotBearingDeg).along_mph;
           }
-          const adj = adjustDistance(raw, {
+          const adj = adjustDistance(slopeBase, {
             altitudeFt: altDeltaFt,
             temperatureF: weather.temperature_f,
             windAlongMph: along,
             rain: weather.rain,
           });
-          const eff = Math.round(raw + (-adj.effective_delta_yds));
-          if (Math.abs(eff - raw) >= 2) adjusted = eff;
+          const eff = Math.round(slopeBase + (-adj.effective_delta_yds));
+          // Show ANY non-zero adjustment, however small — the user is paying
+          // attention to it and a "−1 yds" plays-like still tells them the
+          // direction conditions are pushing the ball.
+          if (eff !== raw) adjusted = eff;
+        } else if (slopeAdj !== 0) {
+          // Free user OR no weather: still surface slope-only adjustment.
+          adjusted = slopeBase;
         }
+
         return (
           <Animated.View style={[
             styles.distBanner,
