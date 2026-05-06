@@ -16,7 +16,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
-            u.handicap_index, u.bio, u.home_course_id,
+            u.handicap_index, u.bio, u.home_course_id, u.email_verified,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -68,12 +68,16 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 }));
 
 router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { q } = req.query;
+  const raw = String(req.query.q ?? '').trim();
+  if (!raw) return res.json([]);
+  // Cap query length and strip pattern wildcards so a long/% input can't
+  // trigger an expensive scan.
+  const q = raw.slice(0, 50).replace(/[%_]/g, '');
   if (!q) return res.json([]);
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, avatar_url FROM users
      WHERE username ILIKE $1 AND user_id != $2 LIMIT 20`,
-    [`%${q}%`, req.userId]
+    [`${q}%`, req.userId]
   );
   return res.json(rows);
 }));
@@ -102,8 +106,14 @@ router.get('/me/friend-requests', requireAuth, wrap(async (req: AuthRequest, res
 }));
 
 router.post('/me/friends/request', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { friendId } = req.body;
+  const { friendId } = req.body ?? {};
   if (!friendId) return res.status(400).json({ error: 'friendId required' });
+  if (friendId === req.userId) return res.status(400).json({ error: 'Cannot friend yourself' });
+  // Verify target user exists (returns a friendlier error than a silent INSERT)
+  const { rows: targetRows } = await pool.query(
+    `SELECT 1 FROM users WHERE user_id = $1`, [friendId]
+  );
+  if (!targetRows.length) return res.status(404).json({ error: 'User not found' });
 
   await pool.query(
     `INSERT INTO friends (user_id, friend_id, status) VALUES ($1, $2, 'pending')
@@ -130,11 +140,17 @@ router.post('/me/friends/request', requireAuth, wrap(async (req: AuthRequest, re
 }));
 
 router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { friendId } = req.body;
-  await pool.query(
-    `UPDATE friends SET status = 'accepted' WHERE user_id = $1 AND friend_id = $2`,
+  const { friendId } = req.body ?? {};
+  if (!friendId) return res.status(400).json({ error: 'friendId required' });
+  // Use RETURNING + rowCount so we surface a real 404 instead of silently
+  // succeeding on a non-existent / already-accepted / declined request.
+  const { rows } = await pool.query(
+    `UPDATE friends SET status = 'accepted'
+     WHERE user_id = $1 AND friend_id = $2 AND status = 'pending'
+     RETURNING user_id`,
     [friendId, req.userId]
   );
+  if (!rows.length) return res.status(404).json({ error: 'No pending request from that user' });
   return res.json({ success: true });
 }));
 
@@ -399,12 +415,24 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
 
 // Avatar upload
 router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { imageBase64, mimeType } = req.body;
-  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
-  const ext = mimeType === 'image/png' ? 'png' : 'jpg';
+  const { imageBase64, mimeType } = req.body ?? {};
+  if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    return res.status(400).json({ error: 'imageBase64 required' });
+  }
+  // Whitelist MIME types — fall back is jpg
+  const ext = mimeType === 'image/png' ? 'png'
+    : mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg'
+    : null;
+  if (!ext) return res.status(400).json({ error: 'Only PNG and JPEG avatars are allowed' });
+  // Decode and size-cap before touching disk (2 MB)
+  const buffer = Buffer.from(imageBase64, 'base64');
+  if (buffer.length === 0) return res.status(400).json({ error: 'Invalid image data' });
+  if (buffer.length > 2 * 1024 * 1024) {
+    return res.status(413).json({ error: 'Avatar must be 2 MB or smaller' });
+  }
   const filename = `avatar_${req.userId}.${ext}`;
   const filepath = path.join(AVATARS_DIR, filename);
-  fs.writeFileSync(filepath, Buffer.from(imageBase64, 'base64'));
+  fs.writeFileSync(filepath, buffer);
   const avatarUrl = `/uploads/avatars/${filename}`;
   await pool.query(`UPDATE users SET avatar_url = $1 WHERE user_id = $2`, [avatarUrl, req.userId]);
   return res.json({ avatar_url: avatarUrl });

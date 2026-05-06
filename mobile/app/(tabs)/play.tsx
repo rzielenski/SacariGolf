@@ -84,7 +84,7 @@ export default function PlayScreen() {
     setSearching(true);
     try {
       const results = await api.courses.search(q);
-      setCourses(results);
+      setCourses(Array.isArray(results) ? results : []);
     } catch { } finally { setSearching(false); }
   }, []);
 

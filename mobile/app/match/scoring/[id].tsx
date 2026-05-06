@@ -538,9 +538,13 @@ export default function ScoringScreen() {
   // ── Scoring helpers ─────────────────────────────────────────────────────────
 
   const adjustScore = (delta: number) => {
+    // Guard against currentHole drifting out of bounds (e.g. holes were resliced
+    // or scoring screen briefly mounts before holes load).
+    if (currentHole < 0 || currentHole >= holes.length) return;
+    const fallbackPar = holes[currentHole]?.par ?? 4;
     setScores((prev) => {
       const next = [...prev];
-      next[currentHole] = Math.max(1, Math.min(20, (next[currentHole] ?? holes[currentHole].par) + delta));
+      next[currentHole] = Math.max(1, Math.min(20, (next[currentHole] ?? fallbackPar) + delta));
       return next;
     });
   };

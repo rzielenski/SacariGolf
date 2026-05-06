@@ -19,7 +19,16 @@ CREATE TABLE users (
   handicap_index REAL,
   bio TEXT,
   home_course_id UUID REFERENCES courses(course_id) ON DELETE SET NULL,
-  notifications_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  notifications_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Forgot-password support: stores SHA-256 hash of a 6-digit code (so leaking
+  -- the table doesn't reveal active codes) plus its expiry. Cleared on use.
+  reset_code_hash TEXT,
+  reset_code_expires_at TIMESTAMPTZ,
+  -- Email verification: same pattern. email_verified flips true on first
+  -- successful POST /auth/verify-email; the code/expiry get cleared then.
+  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  email_verify_code_hash TEXT,
+  email_verify_expires_at TIMESTAMPTZ
 );
 
 -- Friends

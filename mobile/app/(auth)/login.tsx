@@ -185,6 +185,15 @@ export default function LoginScreen() {
               : <Text style={styles.btnText}>{btnLabel}</Text>}
           </TouchableOpacity>
 
+          {step === 'password' && (
+            <TouchableOpacity
+              onPress={() => router.push({ pathname: '/(auth)/reset', params: { email: email.trim().toLowerCase() } } as any)}
+              style={styles.forgotBtn}
+            >
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
+          )}
+
           {step !== 'email' && (
             <TouchableOpacity
               onPress={() => { fade(() => { setStep('email'); setPassword(''); setName(''); }); }}
@@ -244,6 +253,8 @@ const styles = StyleSheet.create({
 
   backBtn: { alignItems: 'center', paddingVertical: 4 },
   backText: { color: C.textMuted, fontSize: 13 },
+  forgotBtn: { alignItems: 'center', paddingVertical: 6, marginTop: -4 },
+  forgotText: { color: C.gold, fontSize: 13, fontWeight: '600' },
 
   eloNote: { color: C.textDim, fontSize: 12, textAlign: 'center' },
 });

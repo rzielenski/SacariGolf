@@ -53,30 +53,52 @@ router.get('/invites', requireAuth, wrap(async (req: AuthRequest, res: Response)
 
 // POST /clans/invites/:inviteId/accept (must be before /:id)
 router.post('/invites/:inviteId/accept', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { rows } = await pool.query(
-    `UPDATE clan_invites SET status = 'accepted'
-     WHERE invite_id = $1 AND to_user_id = $2 AND status = 'pending'
-       AND (expires_at IS NULL OR expires_at > NOW())
-     RETURNING clan_id`,
-    [req.params.inviteId, req.userId]
-  );
-  if (!rows.length) return res.status(404).json({ error: 'Invite not found or expired' });
-  const { clan_id: clanId } = rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Atomic accept: only one caller flips the status. If 0 rows, invite gone/expired/already used.
+    const { rows } = await client.query(
+      `UPDATE clan_invites SET status = 'accepted'
+       WHERE invite_id = $1 AND to_user_id = $2 AND status = 'pending'
+         AND (expires_at IS NULL OR expires_at > NOW())
+       RETURNING clan_id`,
+      [req.params.inviteId, req.userId]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Invite not found or expired' });
+    }
+    const { clan_id: clanId } = rows[0];
 
-  const { rows: clanRows } = await pool.query(
-    `SELECT c.max_players, COUNT(cm.user_id)::int AS member_count
-     FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
-     WHERE c.clan_id = $1 GROUP BY c.clan_id`,
-    [clanId]
-  );
-  if (clanRows[0]?.member_count >= clanRows[0]?.max_players) {
-    return res.status(409).json({ error: 'Clan is now full' });
+    // Lock the clan row + count members so concurrent joins/accepts can't oversize it.
+    const { rows: clanRows } = await client.query(
+      `SELECT c.max_players,
+              (SELECT COUNT(*)::int FROM clan_members WHERE clan_id = c.clan_id) AS member_count
+       FROM clans c
+       WHERE c.clan_id = $1
+       FOR UPDATE`,
+      [clanId]
+    );
+    if (!clanRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Clan not found' });
+    }
+    if (clanRows[0].member_count >= clanRows[0].max_players) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Clan is now full' });
+    }
+    await client.query(
+      `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [clanId, req.userId]
+    );
+    await client.query('COMMIT');
+    return res.json({ clanId });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  await pool.query(
-    `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [clanId, req.userId]
-  );
-  return res.json({ clanId });
 }));
 
 // POST /clans/invites/:inviteId/decline (must be before /:id)
@@ -89,15 +111,22 @@ router.post('/invites/:inviteId/decline', requireAuth, wrap(async (req: AuthRequ
 }));
 
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { name, clanMode } = req.body;
+  const { name, clanMode } = req.body ?? {};
   if (!name || !clanMode) return res.status(400).json({ error: 'name and clanMode required' });
+  const trimmedName = String(name).trim().slice(0, 60);
+  if (trimmedName.length < 2) {
+    return res.status(400).json({ error: 'Clan name must be 2–60 characters' });
+  }
+  if (clanMode !== 'duo' && clanMode !== 'squad') {
+    return res.status(400).json({ error: 'clanMode must be duo or squad' });
+  }
   const maxPlayers = clanMode === 'duo' ? 2 : 4;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
       `INSERT INTO clans (name, clan_mode, max_players) VALUES ($1, $2, $3) RETURNING *`,
-      [name, clanMode, maxPlayers]
+      [trimmedName, clanMode, maxPlayers]
     );
     const clan = rows[0];
     await client.query(
@@ -135,7 +164,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 }));
 
 router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { name, isPublic } = req.body;
+  const { name, isPublic } = req.body ?? {};
   const { rows } = await pool.query(
     `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
     [req.params.id, req.userId]
@@ -145,8 +174,12 @@ router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) =
   }
   const updates: string[] = [];
   const vals: any[] = [];
-  if (name !== undefined) { vals.push(name); updates.push(`name = $${vals.length}`); }
-  if (isPublic !== undefined) { vals.push(isPublic); updates.push(`is_public = $${vals.length}`); }
+  if (name !== undefined) {
+    const t = String(name).trim().slice(0, 60);
+    if (t.length < 2) return res.status(400).json({ error: 'Clan name must be 2–60 characters' });
+    vals.push(t); updates.push(`name = $${vals.length}`);
+  }
+  if (isPublic !== undefined) { vals.push(!!isPublic); updates.push(`is_public = $${vals.length}`); }
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
   vals.push(req.params.id);
   const { rows: updated } = await pool.query(
@@ -192,18 +225,31 @@ router.delete('/:id/members/:userId', requireAuth, wrap(async (req: AuthRequest,
 }));
 
 router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { toUserId } = req.body;
+  const { toUserId } = req.body ?? {};
   if (!toUserId) return res.status(400).json({ error: 'toUserId required' });
-  const { rows } = await pool.query(
-    `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
-    [req.params.id, req.userId]
-  );
-  if (!rows.length || rows[0].role !== 'leader') {
-    return res.status(403).json({ error: 'Only the clan leader can transfer leadership' });
-  }
+  if (toUserId === req.userId) return res.status(400).json({ error: 'You are already the leader' });
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Lock both rows so a concurrent kick/leave can't sneak in between checks
+    const { rows: meRows } = await client.query(
+      `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2 FOR UPDATE`,
+      [req.params.id, req.userId]
+    );
+    if (!meRows.length || meRows[0].role !== 'leader') {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Only the clan leader can transfer leadership' });
+    }
+    // The target must already be a member of this clan
+    const { rows: targetRows } = await client.query(
+      `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id = $2 FOR UPDATE`,
+      [req.params.id, toUserId]
+    );
+    if (!targetRows.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'New leader must be a clan member' });
+    }
     await client.query(
       `UPDATE clan_members SET role = 'member' WHERE clan_id = $1 AND user_id = $2`,
       [req.params.id, req.userId]
@@ -223,26 +269,45 @@ router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Res
 }));
 
 router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { rows: clanRows } = await pool.query(
-    `SELECT c.clan_id, c.max_players, COUNT(cm.user_id)::int AS member_count
-     FROM clans c LEFT JOIN clan_members cm ON cm.clan_id = c.clan_id
-     WHERE c.clan_id = $1 GROUP BY c.clan_id`,
-    [req.params.id]
-  );
-  if (!clanRows.length) return res.status(404).json({ error: 'Clan not found' });
-  if (clanRows[0].member_count >= clanRows[0].max_players) {
-    return res.status(409).json({ error: 'Clan is full' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Lock the clan row so concurrent joins can't both bypass the cap.
+    const { rows: clanRows } = await client.query(
+      `SELECT c.clan_id, c.max_players, c.is_public,
+              (SELECT COUNT(*)::int FROM clan_members WHERE clan_id = c.clan_id) AS member_count
+       FROM clans c
+       WHERE c.clan_id = $1
+       FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!clanRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Clan not found' }); }
+    if (!clanRows[0].is_public) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'This clan is invite-only' });
+    }
+    if (clanRows[0].member_count >= clanRows[0].max_players) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Clan is full' });
+    }
+    await client.query(
+      `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.userId]
+    );
+    await client.query('COMMIT');
+    return res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  await pool.query(
-    `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [req.params.id, req.userId]
-  );
-  return res.json({ success: true });
 }));
 
 router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { toUserId } = req.body;
+  const { toUserId } = req.body ?? {};
   if (!toUserId) return res.status(400).json({ error: 'toUserId required' });
+  if (toUserId === req.userId) return res.status(400).json({ error: 'Cannot invite yourself' });
 
   const { rows: roleRows } = await pool.query(
     `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
@@ -251,6 +316,15 @@ router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Respo
   if (!roleRows.length || roleRows[0].role !== 'leader') {
     return res.status(403).json({ error: 'Only the clan leader can invite members' });
   }
+  // Confirm the target exists (avoids silent failures + UX surprise)
+  const { rows: targetRows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1`, [toUserId]);
+  if (!targetRows.length) return res.status(404).json({ error: 'User not found' });
+  // Don't invite someone who is already in the clan
+  const { rows: existing } = await pool.query(
+    `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+    [req.params.id, toUserId]
+  );
+  if (existing.length) return res.status(409).json({ error: 'User is already in this clan' });
 
   const { rows: clanRows } = await pool.query(
     `SELECT c.max_players, COUNT(cm.user_id)::int AS member_count

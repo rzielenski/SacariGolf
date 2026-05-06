@@ -1,13 +1,13 @@
 {
   "expo": {
-    "name": "Sacari Golf",
-    "slug": "sacari-golf",
+    "name": "Sacari",
+    "slug": "sacari",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.jpg",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
-    "scheme": "sacarigolf",
+    "scheme": "sacari",
     "splash": {
       "image": "./assets/sacari-logo.jpg",
       "resizeMode": "contain",
@@ -15,9 +15,10 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.sacarigolf.app",
+      "bundleIdentifier": "com.sacari.app",
+      "buildNumber": "1",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Sacari Golf uses your location to center the course map and measure shot distances.",
+        "NSLocationWhenInUseUsageDescription": "Sacari uses your location to center the course map and measure shot distances.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -26,7 +27,8 @@
         "foregroundImage": "./assets/adaptive-icon.jpg",
         "backgroundColor": "#06080a"
       },
-      "package": "com.sacarigolf.app",
+      "package": "com.sacari.app",
+      "versionCode": 1,
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
@@ -38,7 +40,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Sacari Golf uses your location to center the course map and measure shot distances."
+          "locationWhenInUsePermission": "Sacari uses your location to center the course map and measure shot distances."
         }
       ],
       [
@@ -54,7 +56,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "6ae9316f-ce54-4c6f-8574-304e8d5949a4"
+        "projectId": "a442cf20-2e9b-44a1-a36e-5615b84ab145"
       }
     },
     "owner": "rich1468"

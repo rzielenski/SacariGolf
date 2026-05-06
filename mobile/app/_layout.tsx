@@ -83,6 +83,7 @@ export default function RootLayout() {
         <Stack.Screen name="leaderboard" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="user/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
     </AuthProvider>
   );

@@ -9,6 +9,7 @@ export interface User {
   avatar_url: string | null;
   created_at: string;
   handicap_index: number | null;
+  email_verified?: boolean;
   bio?: string | null;
   home_course_id?: string | null;
   home_course_name?: string | null;

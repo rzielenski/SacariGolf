@@ -45,6 +45,14 @@ export const api = {
       request<{ token: string; user: any }>('POST', '/auth/register', { username, email, password }, false),
     login: (email: string, password: string) =>
       request<{ token: string; user: any }>('POST', '/auth/login', { email, password }, false),
+    forgotPassword: (email: string) =>
+      request<{ success: true }>('POST', '/auth/forgot', { email }, false),
+    resetPassword: (email: string, code: string, password: string) =>
+      request<{ token: string; user: any }>('POST', '/auth/reset', { email, code, password }, false),
+    verifyEmail: (code: string) =>
+      request<{ success: true; alreadyVerified?: boolean }>('POST', '/auth/verify-email', { code }),
+    resendVerification: () =>
+      request<{ success: true; alreadyVerified?: boolean }>('POST', '/auth/resend-verification', {}),
   },
 
   users: {

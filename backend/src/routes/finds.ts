@@ -18,15 +18,32 @@ function expectedScore(rA: number, rB: number) {
 }
 
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { imageBase64, mimeType, description } = req.body;
-  if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+  const { imageBase64, mimeType, description } = req.body ?? {};
+  if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    return res.status(400).json({ error: 'imageBase64 required' });
+  }
+  // MIME whitelist
+  const ext = mimeType === 'image/png' ? 'png'
+    : mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg'
+    : null;
+  if (!ext) return res.status(400).json({ error: 'Only PNG and JPEG images are allowed' });
 
-  const ext = mimeType === 'image/png' ? 'png' : 'jpg';
+  // Decode + size cap (5 MB)
+  const buffer = Buffer.from(imageBase64, 'base64');
+  if (buffer.length === 0) return res.status(400).json({ error: 'Invalid image data' });
+  if (buffer.length > 5 * 1024 * 1024) {
+    return res.status(413).json({ error: 'Image must be 5 MB or smaller' });
+  }
+  // Trim + cap description
+  const desc = typeof description === 'string'
+    ? description.trim().slice(0, 280)
+    : null;
+
   const filename = `${crypto.randomUUID()}.${ext}`;
   const filepath = path.join(UPLOADS_DIR, filename);
 
   try {
-    fs.writeFileSync(filepath, Buffer.from(imageBase64, 'base64'));
+    fs.writeFileSync(filepath, buffer);
   } catch {
     return res.status(500).json({ error: 'Failed to save image' });
   }
@@ -34,7 +51,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   try {
     const { rows } = await pool.query(
       `INSERT INTO finds (user_id, photo_url, description) VALUES ($1, $2, $3) RETURNING *`,
-      [req.userId, `/uploads/${filename}`, description?.trim() || null]
+      [req.userId, `/uploads/${filename}`, desc || null]
     );
     return res.status(201).json(rows[0]);
   } catch (err) {
@@ -117,7 +134,7 @@ router.get('/mine', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 }));
 
 router.post('/:id/report', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { reason } = req.body;
+  const reason = String(req.body?.reason ?? '').trim().slice(0, 500);
   if (!reason) return res.status(400).json({ error: 'reason required' });
   await pool.query(
     `INSERT INTO find_reports (find_id, reporter_id, reason)
@@ -133,8 +150,19 @@ router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) 
     [req.params.id, req.userId]
   );
   if (!rows.length) return res.status(404).json({ error: 'Find not found or not yours' });
-  const filepath = path.join(UPLOADS_DIR, path.basename(rows[0].photo_url));
-  if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+  // Strict filename whitelist: only delete files that match our generated naming
+  // (UUID.ext). Defends against any malformed/legacy photo_url entries that
+  // might try to escape the uploads directory.
+  const base = path.basename(String(rows[0].photo_url));
+  if (/^[a-zA-Z0-9-]+\.(png|jpg|jpeg)$/.test(base)) {
+    const filepath = path.join(UPLOADS_DIR, base);
+    // Ensure resolved path stays inside UPLOADS_DIR
+    const resolved = path.resolve(filepath);
+    const root = path.resolve(UPLOADS_DIR);
+    if (resolved.startsWith(root + path.sep) || resolved === root) {
+      if (fs.existsSync(resolved)) fs.unlinkSync(resolved);
+    }
+  }
   return res.json({ success: true });
 }));
 

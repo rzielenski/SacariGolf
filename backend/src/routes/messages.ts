@@ -34,6 +34,36 @@ router.get('/conversations', requireAuth, wrap(async (req: AuthRequest, res: Res
   return res.json(rows);
 }));
 
+// Helper: confirm caller is allowed to read/post in this match or clan.
+async function memberOfChat(userId: string, matchId?: any, clanId?: any) {
+  if (matchId) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+      [matchId, userId]
+    );
+    return rows.length > 0;
+  }
+  if (clanId) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+      [clanId, userId]
+    );
+    return rows.length > 0;
+  }
+  return false;
+}
+
+// Helper: confirm two users are friends (for DM gating)
+async function areFriends(a: string, b: string) {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM friends
+     WHERE ((user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1))
+       AND status = 'accepted'`,
+    [a, b]
+  );
+  return rows.length > 0;
+}
+
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { matchId, clanId, toUserId } = req.query;
 
@@ -50,6 +80,10 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   }
 
   if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
+  // Anyone can read a match's chat once they're in it; same for clan chats.
+  if (!(await memberOfChat(req.userId!, matchId, clanId))) {
+    return res.status(403).json({ error: 'Not a member of this chat' });
+  }
   const col = matchId ? 'match_id' : 'clan_id';
   const val = matchId ?? clanId;
 
@@ -65,26 +99,38 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId, toUserId, body } = req.body;
-  if (!body?.trim()) return res.status(400).json({ error: 'body required' });
+  const { matchId, clanId, toUserId, body } = req.body ?? {};
+  // Trim, require non-empty, hard-cap length to prevent message-spam DoS.
+  const text = typeof body === 'string' ? body.trim().slice(0, 2000) : '';
+  if (!text) return res.status(400).json({ error: 'body required' });
 
   if (toUserId) {
+    if (toUserId === req.userId) return res.status(400).json({ error: 'Cannot DM yourself' });
+    // Gate DMs to friends only — keeps random users from spamming.
+    if (!(await areFriends(req.userId!, toUserId))) {
+      return res.status(403).json({ error: 'You can only DM friends' });
+    }
     const { rows } = await pool.query(
       `INSERT INTO direct_messages (from_user_id, to_user_id, body) VALUES ($1, $2, $3)
        RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id`,
-      [req.userId, toUserId, body.trim()]
+      [req.userId, toUserId, text]
     );
     const msg = rows[0];
     const { rows: senderRows } = await pool.query('SELECT username FROM users WHERE user_id = $1', [req.userId]);
     const senderName = senderRows[0]?.username ?? 'Someone';
     const { rows: recipRows } = await pool.query('SELECT push_token FROM users WHERE user_id = $1', [toUserId]);
     if (recipRows[0]?.push_token) {
-      await sendPush([recipRows[0].push_token], senderName, body.trim(), { type: 'dm', fromUserId: req.userId });
+      await sendPush([recipRows[0].push_token], senderName, text, { type: 'dm', fromUserId: req.userId });
     }
     return res.status(201).json({ ...msg, username: senderName });
   }
 
   if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
+
+  // Sender must actually be a participant of the match / clan
+  if (!(await memberOfChat(req.userId!, matchId, clanId))) {
+    return res.status(403).json({ error: 'Not a member of this chat' });
+  }
 
   const col = matchId ? 'match_id' : 'clan_id';
   const val = matchId ?? clanId;
@@ -92,7 +138,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `INSERT INTO messages (${col}, user_id, body) VALUES ($1, $2, $3)
      RETURNING message_id, created_at, body, user_id`,
-    [val, req.userId, body.trim()]
+    [val, req.userId, text]
   );
   const msg = rows[0];
 
@@ -123,7 +169,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   await sendPush(
     tokenRows.map((r) => r.push_token),
     senderName,
-    body.trim(),
+    text,
     matchId ? { type: 'chat', matchId } : { type: 'clan_chat', clanId }
   );
 

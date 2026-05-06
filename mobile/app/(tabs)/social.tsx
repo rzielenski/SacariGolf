@@ -70,7 +70,7 @@ function FriendsTab() {
     setSearching(true);
     try {
       const results = await api.users.search(q);
-      setSearchResults(results);
+      setSearchResults(Array.isArray(results) ? results : []);
     } finally { setSearching(false); }
   };
 
@@ -137,16 +137,19 @@ function FriendsTab() {
   };
 
   const sendChallenge = async (friend: any, holes: string) => {
+    // Defensive — only allow 9 or 18 even if a stale Alert button somehow
+    // passes a different value.
+    const parsed = parseInt(holes, 10);
+    const numHoles: 9 | 18 = parsed === 9 ? 9 : 18;
     try {
-      const numHoles = parseInt(holes, 10) as 9 | 18;
       const match = await api.matches.create({
         matchType: 'solo',
-        name: `${holes}-hole challenge`,
+        name: `${numHoles}-hole challenge`,
         numHoles,
       });
       await api.invites.send(match.match_id, friend.user_id);
       Alert.alert('Challenge sent!', `${friend.username} has been invited. Start your round now — they'll join when they accept.`, [
-        { text: 'Start My Round', onPress: () => router.push(`/match/scoring/${match.match_id}?holes=${holes}` as any) },
+        { text: 'Start My Round', onPress: () => router.push(`/match/scoring/${match.match_id}?holes=${numHoles}` as any) },
         { text: 'Later' },
       ]);
     } catch (e: any) {

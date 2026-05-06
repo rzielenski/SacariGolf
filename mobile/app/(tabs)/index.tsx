@@ -33,13 +33,17 @@ export default function HomeScreen() {
   const load = useCallback(async () => {
     try {
       const [m] = await Promise.all([api.matches.list(), refreshUser()]);
-      setMatches(m.slice(0, 5));
+      // Guard against the API returning a non-array (server error / proxy
+      // returning HTML, etc.) so we don't crash on .slice
+      setMatches(Array.isArray(m) ? m.slice(0, 5) : []);
     } catch { /* silent */ } finally {
       setLoading(false);
       setRefreshing(false);
     }
     // Lightweight: also fetch active perks for the banner. Failures are silent.
-    api.users.perks().then((rows) => setPerkCount(rows.length)).catch(() => { });
+    api.users.perks()
+      .then((rows) => setPerkCount(Array.isArray(rows) ? rows.length : 0))
+      .catch(() => { });
   }, [refreshUser]);
 
   const deleteMatch = useCallback(async (matchId: string) => {
@@ -64,6 +68,12 @@ export default function HomeScreen() {
   }, [deleteMatch]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Clean up the ELO-tap timer if the component unmounts mid-sequence so we
+  // don't fire setState on an unmounted screen.
+  useEffect(() => {
+    return () => { if (eloTapTimer.current) clearTimeout(eloTapTimer.current); };
+  }, []);
 
   if (!user) return null;
 
@@ -122,6 +132,23 @@ export default function HomeScreen() {
           <Text style={styles.eloStatLabel}>Win Rate</Text>
         </View>
       </View>
+
+      {/* Email-verification banner — only while user hasn't confirmed yet */}
+      {user.email_verified === false && (
+        <TouchableOpacity
+          style={styles.verifyBanner}
+          onPress={() => router.push('/verify-email' as any)}
+          activeOpacity={0.7}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={styles.verifyBannerLabel}>VERIFY YOUR EMAIL</Text>
+            <Text style={styles.verifyBannerMsg}>
+              Tap to enter the 6-digit code we sent to {user.email}.
+            </Text>
+          </View>
+          <Text style={styles.verifyBannerChev}>›</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Lucky Round perk banner — applies automatically to next ranked match */}
       {perkCount > 0 && (
@@ -253,14 +280,24 @@ export default function HomeScreen() {
               keyboardType="decimal-pad"
               maxLength={5}
             />
-            {handicapInput.trim() !== '' && !isNaN(parseFloat(handicapInput)) && (
-              <View style={styles.modalCalcBox}>
-                <Text style={styles.modalCalcLabel}>Course Handicap (example — slope 113, rating 72, par 72)</Text>
-                <Text style={styles.modalCalcVal}>
-                  {Math.round(parseFloat(handicapInput) * 113 / 113 + (72 - 72))} strokes
-                </Text>
-              </View>
-            )}
+            {handicapInput.trim() !== '' && !isNaN(parseFloat(handicapInput)) && (() => {
+              // Course handicap example using a slightly tougher-than-average
+              // course (slope 130, rating 72.0, par 72) so the number actually
+              // differs from the bare index. Formula: HCI × (slope/113) + (CR − Par).
+              const exampleSlope = 130;
+              const exampleRating = 72.0;
+              const examplePar = 72;
+              const hi = parseFloat(handicapInput);
+              const ch = Math.round(hi * (exampleSlope / 113) + (exampleRating - examplePar));
+              return (
+                <View style={styles.modalCalcBox}>
+                  <Text style={styles.modalCalcLabel}>
+                    Course Handicap (example — slope {exampleSlope}, rating {exampleRating.toFixed(1)}, par {examplePar})
+                  </Text>
+                  <Text style={styles.modalCalcVal}>{ch} strokes</Text>
+                </View>
+              );
+            })()}
           </View>
         </View>
       </Modal>
@@ -400,6 +437,15 @@ const styles = StyleSheet.create({
   },
   perkBannerLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
   perkBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
+
+  verifyBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: C.red + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
+    borderWidth: 1, borderColor: C.red, marginBottom: 14, gap: 8,
+  },
+  verifyBannerLabel: { color: C.red, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
+  verifyBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
+  verifyBannerChev: { color: C.red, fontSize: 24, fontWeight: '300' },
   handicapLabel: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
   handicapValue: { color: C.gold, fontSize: 15, fontWeight: '800', fontFamily: F.serif },
 
