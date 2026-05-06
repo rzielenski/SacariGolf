@@ -297,15 +297,15 @@ export default function ProfileScreen() {
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>✎</Text>
           </View>
         </TouchableOpacity>
-        <View style={styles.usernameRow}>
-          <Text style={styles.username}>{user.username}</Text>
+        <Text style={styles.username}>{user.username}</Text>
+        <View style={styles.usernameSubRow}>
           {isPremium(user as any) && (
             <View style={styles.premiumPill}>
               <Text style={styles.premiumPillText}>👑 PREMIUM</Text>
             </View>
           )}
           <TouchableOpacity onPress={changeUsername} style={styles.editUsernameBtn}>
-            <Text style={styles.editUsernameBtnText}>Edit</Text>
+            <Text style={styles.editUsernameBtnText}>Edit username</Text>
           </TouchableOpacity>
         </View>
         <Text style={styles.email}>{user.email}</Text>
@@ -844,9 +844,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: C.bg,
   },
-  usernameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
-  username: { color: C.text, fontSize: 24, fontWeight: '900' },
-  editUsernameBtn: { borderRadius: 4, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: C.gold + '88' },
+  username: { color: C.text, fontSize: 24, fontWeight: '900', textAlign: 'center' },
+  usernameSubRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, marginTop: 6, marginBottom: 4,
+  },
+  editUsernameBtn: { borderRadius: 4, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: C.gold + '88' },
   editUsernameBtnText: { color: C.gold, fontSize: 11, fontWeight: '700' },
   email: { color: C.textMuted, fontSize: 13, marginTop: 2 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5, marginTop: 10 },

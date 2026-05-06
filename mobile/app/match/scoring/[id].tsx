@@ -16,8 +16,8 @@ import { C, F } from '../../../lib/colors';
 import { Hole, Teebox, Course } from '../../../types';
 
 const { width: SCREEN_W } = Dimensions.get('window');
-const COLLAPSED_H = 92;
-const EXPANDED_H = 348;
+const COLLAPSED_H = 110;
+const EXPANDED_H = 380;
 const ON_COURSE_METRES = 3 * 1609.34;
 
 // Per-shot color palette — each successive shot on a hole renders in the next color.
@@ -144,6 +144,12 @@ export default function ScoringScreen() {
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherSheetVisible, setWeatherSheetVisible] = useState(false);
   const userIsPremium = isPremium(user as any);
+  // Elevation of the user's home course, used as a baseline so altitude
+  // effects on plays-like distance are RELATIVE to where the player normally
+  // calibrates their distances. e.g. a player who lives at 5,000 ft will
+  // see a NEGATIVE altitude adjustment when playing at sea level (ball
+  // flies shorter than they're used to). Fetched once per round.
+  const [homeElevationFt, setHomeElevationFt] = useState<number | null>(null);
 
   // Per-hole stat tracking — putts, chips, fairway hit. Indexed by the hole
   // INDEX in our holes array (not hole_num) so we can submit it as a parallel
@@ -469,11 +475,28 @@ export default function ScoringScreen() {
 
   // Keep the ref pointed at the current closure so the watch listener (which
   // we register once) always operates on fresh state.
-  // ── Weather fetching ───────────────────────────────────────────────────
-  // Fetches once we have a GPS lock, then refreshes every 15 min. Available
-  // to all users (raw chip), but auto-adjustment math is premium-gated.
+  // ── Home-course elevation baseline ─────────────────────────────────────
+  // One-time fetch when we know the user's home course coordinates. Reused
+  // by the altitude adjustment so distances are calibrated relative to where
+  // the player typically plays. Premium-only since it's only consumed by
+  // the plays-like math, which is itself premium.
   useEffect(() => {
-    if (!userCoord) return;
+    if (!userIsPremium) return;
+    const homeLat = (user as any)?.home_course_lat;
+    const homeLng = (user as any)?.home_course_lng;
+    if (typeof homeLat !== 'number' || typeof homeLng !== 'number') return;
+    let cancelled = false;
+    api.weather.current(homeLat, homeLng)
+      .then((d) => { if (!cancelled && d.elevation_ft != null) setHomeElevationFt(d.elevation_ft); })
+      .catch(() => { /* non-fatal — falls back to absolute altitude */ });
+    return () => { cancelled = true; };
+  }, [userIsPremium, (user as any)?.home_course_lat, (user as any)?.home_course_lng]);
+
+  // ── Weather fetching ───────────────────────────────────────────────────
+  // Premium-only — non-premium users get the upgrade prompt instead, so we
+  // don't bother hitting the upstream for them. Refreshes every 15 min.
+  useEffect(() => {
+    if (!userCoord || !userIsPremium) return;
     let cancelled = false;
     const load = () => {
       api.weather.current(userCoord.latitude, userCoord.longitude)
@@ -485,7 +508,8 @@ export default function ScoringScreen() {
     return () => { cancelled = true; clearInterval(id); };
     // Only re-key on coarse position change to avoid spamming the upstream.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userCoord ? Math.round(userCoord.latitude * 100) : null,
+  }, [userIsPremium,
+      userCoord ? Math.round(userCoord.latitude * 100) : null,
       userCoord ? Math.round(userCoord.longitude * 100) : null]);
 
   // ── Auto-fill hole stats from tracked shots ────────────────────────────
@@ -610,18 +634,31 @@ export default function ScoringScreen() {
     }
 
     // Use measured GPS altitude as a fallback if upstream elevation is missing.
-    const altFt = weather.elevation_ft
+    const courseAltFt = weather.elevation_ft
       ?? (typeof userCoord?.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
 
+    // Altitude effect is RELATIVE to the player's home course when one is set.
+    // A player who calibrates their distances at 5,000 ft will see a negative
+    // adjustment when playing at sea level (denser air → less carry than they
+    // expect). When no home course is known, falls back to absolute altitude
+    // (i.e. sea-level baseline).
+    const altDeltaFt = homeElevationFt != null
+      ? courseAltFt - homeElevationFt
+      : courseAltFt;
+
     const adj = adjustDistance(baseYds, {
-      altitudeFt:   altFt,
+      altitudeFt:   altDeltaFt,
       temperatureF: weather.temperature_f,
       windAlongMph: along,
       rain:         weather.rain,
     });
     const effective = Math.round(baseYds + (-adj.effective_delta_yds));
     if (Math.abs(effective - baseYds) < 2) return null;
-    return { effective, breakdown: adj, windAlong: along };
+    return {
+      effective, breakdown: adj, windAlong: along,
+      altRelative: homeElevationFt != null,
+      altDeltaFt,
+    };
   })();
 
   const markPin = () => {
@@ -1096,36 +1133,59 @@ export default function ScoringScreen() {
         </View>
       </View>
 
-      {/* ── Track-shot button (floats over the map, right side) ── */}
-      <TouchableOpacity
-        style={styles.trackShotBtn}
-        onPress={recordShot}
-        onLongPress={undoShot}
-        delayLongPress={500}
-        disabled={!userCoord}
-      >
-        <Text style={styles.trackShotLabel}>TRACK SHOT</Text>
-        <Text style={styles.trackShotCount}>
-          {currentShots.length === 0 ? 'Tap to begin' : `Shot ${currentShots.length + 1}`}
-        </Text>
-        {currentShots.length > 0 && (
-          <Text style={styles.trackShotHint}>Hold to undo</Text>
-        )}
-      </TouchableOpacity>
+      {/* ── Top action row: WEATHER · TRACK SHOT · CLUB ── */}
+      <View style={styles.topActionRow}>
+        {/* WEATHER — premium users see live conditions; free users see a lock that prompts upgrade. */}
+        <TouchableOpacity
+          style={[styles.topChip, !userIsPremium && styles.topChipLocked]}
+          onPress={() => setWeatherSheetVisible(true)}
+          activeOpacity={0.7}
+        >
+          {userIsPremium && weather ? (
+            <>
+              <Text style={styles.topChipLabel}>WX</Text>
+              <Text style={styles.topChipValue}>
+                {weather.temperature_f != null ? `${weather.temperature_f}°` : '—'}
+                {weather.wind_speed_mph != null ? ` · ${weather.wind_speed_mph}mph` : ''}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.topChipLabel}>WEATHER</Text>
+              <Text style={styles.topChipValue}>👑</Text>
+            </>
+          )}
+        </TouchableOpacity>
 
-      {/* ── Club tag chip — opens picker. Lives just under TRACK SHOT. ── */}
-      <TouchableOpacity
-        style={styles.clubChip}
-        onPress={() => setClubPickerVisible(true)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.clubChipLabel}>CLUB</Text>
-        <Text style={styles.clubChipVal}>
-          {currentShots[currentShots.length - 1]?.club?.toUpperCase()
-            ?? pendingClub?.toUpperCase()
-            ?? '—'}
-        </Text>
-      </TouchableOpacity>
+        {/* TRACK SHOT — record a GPS waypoint. Long-press to undo. */}
+        <TouchableOpacity
+          style={[styles.topChip, styles.topChipPrimary, !userCoord && { opacity: 0.4 }]}
+          onPress={recordShot}
+          onLongPress={undoShot}
+          delayLongPress={500}
+          disabled={!userCoord}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.topChipLabel, { color: C.gold }]}>TRACK SHOT</Text>
+          <Text style={styles.topChipValue}>
+            {currentShots.length === 0 ? 'Tap to begin' : `Shot ${currentShots.length + 1}`}
+          </Text>
+        </TouchableOpacity>
+
+        {/* CLUB tag — opens picker for the current/next shot. */}
+        <TouchableOpacity
+          style={styles.topChip}
+          onPress={() => setClubPickerVisible(true)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.topChipLabel}>CLUB</Text>
+          <Text style={styles.topChipValue}>
+            {currentShots[currentShots.length - 1]?.club?.toUpperCase()
+              ?? pendingClub?.toUpperCase()
+              ?? '—'}
+          </Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Club picker modal */}
       <Modal
@@ -1183,57 +1243,57 @@ export default function ScoringScreen() {
         }}
       />
 
-      {/* ── Pin distance / Mark Pin button (right side, below track shot) ── */}
-      {yardsToPin != null ? (
-        <View style={styles.pinDistChip}>
-          <Text style={styles.pinDistLabel}>TO PIN</Text>
-          <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
-          {slopeAdjustment && (
-            <Text style={styles.pinDistPlaysLike}>
-              plays {slopeAdjustment.playsLike}  ({slopeAdjustment.uphill ? '+' : ''}{slopeAdjustment.adj})
-            </Text>
-          )}
-          {weatherAdjustment && (
-            <Text style={styles.pinDistWeather}>
-              wx {weatherAdjustment.effective}  ({weatherAdjustment.effective > yardsToPin ? '+' : ''}{weatherAdjustment.effective - yardsToPin})
-            </Text>
-          )}
-        </View>
-      ) : (
-        <TouchableOpacity
-          style={styles.markPinBtn}
-          onPress={markPin}
-          disabled={!userCoord}
-        >
-          <Text style={styles.markPinLabel}>MARK PIN</Text>
-          <Text style={styles.markPinHint}>Stand on the green</Text>
-        </TouchableOpacity>
-      )}
-
-      {/* ── Weather chip ── */}
-      {weather && (
-        <TouchableOpacity
-          style={styles.weatherChip}
-          onPress={() => setWeatherSheetVisible(true)}
-          activeOpacity={0.7}
-        >
-          <Text style={styles.weatherChipMain}>
-            {weather.temperature_f != null ? `${weather.temperature_f}°` : '—'}
-            {' · '}
-            {weather.wind_speed_mph != null ? `${weather.wind_speed_mph}mph` : '—'}
-          </Text>
-          <Text style={styles.weatherChipSub}>
-            {weather.rain === 'heavy' ? '🌧️ heavy'
-             : weather.rain === 'light' ? '🌦️ light'
-             : weather.elevation_ft ? `${weather.elevation_ft}ft elev` : 'clear'}
-          </Text>
-          {!userIsPremium && (
-            <View style={styles.weatherPremPill}>
-              <Text style={styles.weatherPremText}>👑 Premium</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      )}
+      {/* ── Pin distance / Mark Pin — bottom-right, lifts with the score panel ── */}
+      <Animated.View style={[
+        styles.pinDistAnchor,
+        // Sit 12px above the panel's current top edge, regardless of
+        // collapsed/expanded state.
+        { bottom: Animated.add(panelAnim, new Animated.Value(12)) },
+      ]}>
+        {yardsToPin != null ? (
+          <View style={[styles.mapChipBase, styles.pinDistChip]}>
+            <Text style={styles.pinDistLabel}>TO PIN</Text>
+            <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
+            {(() => {
+              // Combined adjusted distance: weatherAdjustment.effective already
+              // layers weather on top of the slope-adjusted base. If only slope
+              // is available (free user, no weather data), fall back to that.
+              const adjusted = weatherAdjustment?.effective ?? slopeAdjustment?.playsLike ?? null;
+              if (adjusted == null || adjusted === yardsToPin) return null;
+              const delta = adjusted - yardsToPin;
+              const sign = delta > 0 ? '+' : '';
+              return (
+                <Text style={styles.pinDistPlaysLike}>
+                  plays {adjusted} ({sign}{delta})
+                </Text>
+              );
+            })()}
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={[styles.markPinBtnSmall, !userCoord && { opacity: 0.4 }]}
+            onPress={() => {
+              if (!userCoord) {
+                Alert.alert('No GPS', 'Wait for a GPS lock before marking the pin.');
+                return;
+              }
+              Alert.alert(
+                'Confirm Pin Location',
+                'Are you standing at the cup right now? This GPS reading will become the pin location for everyone playing this hole.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Yes, mark it', style: 'default', onPress: markPin },
+                ],
+              );
+            }}
+            disabled={!userCoord}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.markPinLabelSmall}>MARK</Text>
+            <Text style={styles.markPinLabelSmall}>PIN</Text>
+          </TouchableOpacity>
+        )}
+      </Animated.View>
 
       {/* Weather details sheet */}
       <Modal
@@ -1249,8 +1309,23 @@ export default function ScoringScreen() {
         >
           <TouchableOpacity activeOpacity={1} onPress={() => { /* swallow */ }}>
             <View style={styles.advSheet}>
-              <Text style={styles.advTitle}>Conditions</Text>
-              {weather && (
+              <Text style={styles.advTitle}>{userIsPremium ? 'Conditions' : 'Weather'}</Text>
+              {!userIsPremium ? (
+                // Free users: simple paywall — no live weather data shown.
+                <View style={styles.wxLockBox}>
+                  <Text style={styles.wxLockTitle}>👑 Premium feature</Text>
+                  <Text style={styles.wxLockBody}>
+                    See live conditions and plays-like distances auto-adjusted
+                    for altitude, temperature, wind, and rain.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.wxLockBtn}
+                    onPress={() => { setWeatherSheetVisible(false); router.push('/premium' as any); }}
+                  >
+                    <Text style={styles.wxLockBtnText}>UNLOCK PREMIUM</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : weather ? (
                 <>
                   <View style={styles.wxGrid}>
                     <WxStat label="TEMP"   value={weather.temperature_f != null ? `${weather.temperature_f}°F` : '—'} />
@@ -1258,13 +1333,19 @@ export default function ScoringScreen() {
                     <WxStat label="RAIN"   value={weather.rain.toUpperCase()} />
                     <WxStat label="ELEV"   value={weather.elevation_ft != null ? `${weather.elevation_ft} ft` : '—'} />
                   </View>
-                  {userIsPremium && weatherAdjustment && yardsToPin != null ? (
+                  {weatherAdjustment && yardsToPin != null && (
                     <>
                       <Text style={styles.advSection}>PLAYS-LIKE BREAKDOWN</Text>
                       <Text style={styles.wxBaseLine}>
                         Base distance: {yardsToPin} yds
                       </Text>
-                      <WxRow label="Altitude"     yds={weatherAdjustment.breakdown.altitude_yds} />
+                      <WxRow
+                        label={weatherAdjustment.altRelative ? 'Altitude vs home' : 'Altitude'}
+                        yds={weatherAdjustment.breakdown.altitude_yds}
+                        extra={weatherAdjustment.altRelative
+                          ? `${weatherAdjustment.altDeltaFt > 0 ? '+' : ''}${weatherAdjustment.altDeltaFt} ft`
+                          : undefined}
+                      />
                       <WxRow label="Temperature"  yds={weatherAdjustment.breakdown.temperature_yds} />
                       <WxRow label="Wind"         yds={weatherAdjustment.breakdown.wind_yds} extra={
                         weatherAdjustment.windAlong > 0
@@ -1280,22 +1361,9 @@ export default function ScoringScreen() {
                         <Text style={styles.wxTotalVal}>{weatherAdjustment.effective} yds</Text>
                       </View>
                     </>
-                  ) : !userIsPremium ? (
-                    <View style={styles.wxLockBox}>
-                      <Text style={styles.wxLockTitle}>👑 Premium feature</Text>
-                      <Text style={styles.wxLockBody}>
-                        Auto-adjusted plays-like distances using altitude, temperature, wind, and rain.
-                      </Text>
-                      <TouchableOpacity
-                        style={styles.wxLockBtn}
-                        onPress={() => { setWeatherSheetVisible(false); router.push('/premium' as any); }}
-                      >
-                        <Text style={styles.wxLockBtnText}>SEE PLANS</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : null}
+                  )}
                 </>
-              )}
+              ) : null}
               <TouchableOpacity style={styles.advCloseBtn} onPress={() => setWeatherSheetVisible(false)}>
                 <Text style={styles.advCloseText}>Done</Text>
               </TouchableOpacity>
@@ -1304,15 +1372,56 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       </Modal>
 
-      {/* ── Measure distance banner ── */}
-      {measureDist !== null && (
-        <View style={styles.distBanner}>
-          <Text style={styles.distNum}>{Math.round(measureDist)} yds</Text>
-          <TouchableOpacity onPress={() => setMeasurePin(null)} style={styles.distClear}>
-            <Text style={styles.distClearText}>Clear</Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      {/* ── Measure distance banner — centered, lifts with score panel ── */}
+      {measureDist !== null && (() => {
+        const raw = Math.round(measureDist);
+        // Apply weather adjustments to the measure distance for premium users.
+        // Slope isn't included here because we don't know the elevation of
+        // the tapped point — only the pin chip has slope info.
+        let adjusted: number | null = null;
+        if (userIsPremium && weather?.temperature_f != null) {
+          const courseAltFt = weather.elevation_ft
+            ?? (typeof userCoord?.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
+          const altDeltaFt = homeElevationFt != null ? courseAltFt - homeElevationFt : courseAltFt;
+          // Wind component along measure-line
+          let along = 0;
+          if (measurePin && userCoord && weather.wind_speed_mph && weather.wind_from_bearing != null) {
+            const lat1 = userCoord.latitude * Math.PI / 180;
+            const lat2 = measurePin.latitude * Math.PI / 180;
+            const dLng = (measurePin.longitude - userCoord.longitude) * Math.PI / 180;
+            const y = Math.sin(dLng) * Math.cos(lat2);
+            const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+            const shotBearingDeg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+            along = windComponents(weather.wind_speed_mph, weather.wind_from_bearing, shotBearingDeg).along_mph;
+          }
+          const adj = adjustDistance(raw, {
+            altitudeFt: altDeltaFt,
+            temperatureF: weather.temperature_f,
+            windAlongMph: along,
+            rain: weather.rain,
+          });
+          const eff = Math.round(raw + (-adj.effective_delta_yds));
+          if (Math.abs(eff - raw) >= 2) adjusted = eff;
+        }
+        return (
+          <Animated.View style={[
+            styles.distBanner,
+            { bottom: Animated.add(panelAnim, new Animated.Value(20)) },
+          ]}>
+            <View>
+              <Text style={styles.distNum}>{raw} yds</Text>
+              {adjusted != null && (
+                <Text style={styles.distAdj}>
+                  plays {adjusted} ({adjusted > raw ? '+' : ''}{adjusted - raw})
+                </Text>
+              )}
+            </View>
+            <TouchableOpacity onPress={() => setMeasurePin(null)} style={styles.distClear}>
+              <Text style={styles.distClearText}>Clear</Text>
+            </TouchableOpacity>
+          </Animated.View>
+        );
+      })()}
 
       {/* ── Score panel (collapsible, anchored at bottom) ── */}
       <Animated.View style={[styles.panel, { height: panelAnim }]}>
@@ -1589,29 +1698,41 @@ const styles = StyleSheet.create({
   topBarBtnActive: { borderColor: C.gold },
   topBarBtnText: { color: C.textMuted, fontWeight: '700', fontSize: 11 },
 
-  // Shot tracking
-  trackShotBtn: {
-    position: 'absolute', right: 12, top: 140,
-    backgroundColor: C.bg + 'ee',
-    borderRadius: 8, borderWidth: 1, borderColor: C.gold,
-    paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center',
-    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
-    elevation: 6, minWidth: 86,
+  // ── Top action row (3 small chips: Weather · Track · Club) ─────────────
+  topActionRow: {
+    position: 'absolute', top: 124, left: 12, right: 12,
+    flexDirection: 'row', gap: 8,
+    zIndex: 5,
   },
-  trackShotLabel: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 1.2 },
-  trackShotCount: { color: C.text, fontWeight: '700', fontSize: 12, marginTop: 3 },
-  trackShotHint: { color: C.textDim, fontSize: 9, marginTop: 2 },
-
-  clubChip: {
-    position: 'absolute', left: 12, top: 140,
+  topChip: {
+    flex: 1,
     backgroundColor: C.bg + 'ee',
-    borderRadius: 6, borderWidth: 1, borderColor: '#a8a8b0',
-    paddingHorizontal: 10, paddingVertical: 6, alignItems: 'center',
+    borderRadius: 6, borderWidth: 1, borderColor: C.gold + '66',
+    paddingVertical: 8, paddingHorizontal: 8,
+    alignItems: 'center', justifyContent: 'center', minHeight: 50,
     shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
-    elevation: 5, minWidth: 86,
+    elevation: 4,
   },
-  clubChipLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
-  clubChipVal: { color: C.text, fontWeight: '900', fontSize: 13, marginTop: 2 },
+  topChipPrimary: { borderColor: C.gold, borderWidth: 2 },
+  topChipLocked:  { borderColor: C.textMuted + '88' },
+  topChipLabel:   { color: C.textMuted, fontWeight: '800', fontSize: 9, letterSpacing: 1 },
+  topChipValue:   { color: C.text, fontWeight: '900', fontSize: 12, marginTop: 2 },
+
+  // ── Bottom-right pin anchor — bottom value follows panel height ────────
+  pinDistAnchor: { position: 'absolute', right: 12 },
+
+  // Floating chip base — used by pin distance / mark-pin variants.
+  mapChipBase: {
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 8, borderWidth: 1,
+    paddingHorizontal: 10, paddingVertical: 8,
+    minWidth: 110, minHeight: 64,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
+    elevation: 6,
+  },
+  pinDistChip: { borderColor: '#fff', backgroundColor: C.green + 'ee' },
+  markPinBtn:  { borderColor: C.green },
 
   clubPickerBackdrop: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end',
@@ -1640,34 +1761,11 @@ const styles = StyleSheet.create({
   },
   shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
 
-  // Pin distance + Mark Pin
-  pinDistChip: {
-    position: 'absolute', right: 12, top: 218,
-    backgroundColor: C.green + 'ee',
-    borderRadius: 8, borderWidth: 1, borderColor: '#fff',
-    paddingHorizontal: 12, paddingVertical: 8, alignItems: 'center', minWidth: 86,
-  },
+  // Pin distance + Mark Pin (chip variants are defined above; only the
+  // text styling lives here)
   pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
-  pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 10, marginTop: 2, opacity: 0.9 },
-  pinDistWeather: { color: C.gold, fontWeight: '800', fontSize: 10, marginTop: 1 },
-
-  // Weather chip — sits below the pin distance / mark pin button on the right
-  weatherChip: {
-    position: 'absolute', right: 12, top: 296,
-    backgroundColor: C.bg + 'ee',
-    borderRadius: 6, borderWidth: 1, borderColor: C.gold + '88',
-    paddingHorizontal: 10, paddingVertical: 6, minWidth: 86, alignItems: 'center',
-    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
-    elevation: 5,
-  },
-  weatherChipMain: { color: C.text, fontWeight: '900', fontSize: 12 },
-  weatherChipSub: { color: C.textMuted, fontSize: 9, marginTop: 1 },
-  weatherPremPill: {
-    marginTop: 3, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3,
-    backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold,
-  },
-  weatherPremText: { color: C.gold, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+  pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 11, marginTop: 3, opacity: 0.95 },
 
   // Weather details sheet
   wxGrid: { flexDirection: 'row', gap: 8, marginTop: 12 },
@@ -1707,14 +1805,19 @@ const styles = StyleSheet.create({
     backgroundColor: C.gold, borderRadius: 6,
   },
   wxLockBtnText: { color: C.bg, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
-  markPinBtn: {
-    position: 'absolute', right: 12, top: 218,
+
+  // Mark Pin chip text styling (chip variant defined above)
+  // Compact MARK / PIN button — stacked label, smaller footprint than the
+  // floating chips so the centered distance banner has more breathing room.
+  markPinBtnSmall: {
     backgroundColor: C.bg + 'ee',
     borderRadius: 8, borderWidth: 1, borderColor: C.green,
-    paddingHorizontal: 10, paddingVertical: 8, alignItems: 'center', minWidth: 86,
+    paddingHorizontal: 10, paddingVertical: 8,
+    minWidth: 70, alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
+    elevation: 6,
   },
-  markPinLabel: { color: C.green, fontWeight: '800', fontSize: 10, letterSpacing: 1.2 },
-  markPinHint: { color: C.textDim, fontSize: 9, marginTop: 2 },
+  markPinLabelSmall: { color: C.green, fontWeight: '900', fontSize: 12, letterSpacing: 1.5, lineHeight: 14 },
 
   // Pin marker on the map (small red flag)
   pinMarker: { width: 18, height: 24, alignItems: 'center' },
@@ -1735,10 +1838,9 @@ const styles = StyleSheet.create({
   },
   pinInner: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#fff' },
 
-  // Distance banner
+  // Distance banner — centered, lifts with the collapsible score panel.
   distBanner: {
     position: 'absolute',
-    bottom: COLLAPSED_H + 12,
     alignSelf: 'center',
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: C.bg + 'f0', borderRadius: 6,
@@ -1747,7 +1849,8 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 }, elevation: 8,
   },
-  distNum: { fontFamily: F.serif, color: C.gold, fontSize: 24, fontWeight: '700' },
+  distNum: { fontFamily: F.serif, color: C.gold, fontSize: 22, fontWeight: '700' },
+  distAdj: { color: C.text, fontSize: 11, fontWeight: '700', marginTop: 2 },
   distClear: { borderRadius: 4, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: C.border },
   distClearText: { color: C.textMuted, fontWeight: '700', fontSize: 11 },
 
@@ -1764,7 +1867,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center', marginBottom: 10,
   },
   collapsedRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10, paddingBottom: 12,
+    flexDirection: 'row', alignItems: 'center', gap: 10, paddingBottom: 28,
   },
   holeSummary: { flex: 1, alignItems: 'center' },
   holeSummaryHole: { color: C.text, fontWeight: '700', fontSize: 13 },
@@ -1786,7 +1889,7 @@ const styles = StyleSheet.create({
   miniSubmitText: { color: '#000', fontWeight: '900', fontSize: 13 },
 
   // Expanded panel content
-  expandedContent: { paddingHorizontal: 16, paddingBottom: 8 },
+  expandedContent: { paddingHorizontal: 16, paddingBottom: 36 },
   hcapLine: { color: C.textDim, fontSize: 11, letterSpacing: 1, textAlign: 'center', marginBottom: 8 },
 
   scoreRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
@@ -1861,7 +1964,8 @@ const styles = StyleSheet.create({
 
   // ── Single DETAILS button on the score panel ────────────────────────────
   detailBtn: {
-    marginTop: 10, paddingVertical: 12, paddingHorizontal: 14,
+    marginTop: 4, marginBottom: 12,
+    paddingVertical: 12, paddingHorizontal: 14,
     borderRadius: 8, borderWidth: 1, borderColor: C.gold,
     backgroundColor: C.card, alignItems: 'center',
   },
@@ -1876,10 +1980,22 @@ const styles = StyleSheet.create({
   advBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
   advSheet: {
     backgroundColor: C.card, borderTopLeftRadius: 16, borderTopRightRadius: 16,
-    padding: 20, paddingBottom: 36, maxHeight: '85%',
+    height: '92%',
     borderTopWidth: 1, borderColor: C.gold + '88',
   },
+  advSheetInner: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
   advTitle: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900', textAlign: 'center' },
+  advSheetHeader: {
+    paddingTop: 8, paddingHorizontal: 20,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  advSheetGrip: {
+    width: 40, height: 4, borderRadius: 2, backgroundColor: C.border,
+    alignSelf: 'center', marginBottom: 12,
+  },
+  advSheetTitleRow: { flexDirection: 'row', alignItems: 'center', paddingBottom: 12 },
+  advHeaderClose: { paddingHorizontal: 12, paddingVertical: 6 },
+  advHeaderCloseText: { color: C.gold, fontWeight: '900', fontSize: 14, letterSpacing: 0.6 },
   advSection: { color: C.textMuted, fontSize: 11, fontWeight: '800', letterSpacing: 1.2, marginTop: 18, marginBottom: 8 },
 
   // Direction button (LEFT / FAIRWAY / RIGHT and the green compass rose)
@@ -2118,10 +2234,24 @@ function AdvancedEntryModal({
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <TouchableOpacity style={styles.advBackdrop} activeOpacity={1} onPress={onClose}>
-        <TouchableOpacity activeOpacity={1} onPress={() => { /* swallow */ }}>
-          <ScrollView style={styles.advSheet} contentContainerStyle={{ paddingBottom: 40 }}>
-            <Text style={styles.advTitle}>Hole Detail</Text>
+      <View style={styles.advBackdrop}>
+        <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onClose} />
+        <View style={styles.advSheet}>
+          {/* Header: drag handle + title + close, fixed at top */}
+          <View style={styles.advSheetHeader}>
+            <View style={styles.advSheetGrip} />
+            <View style={styles.advSheetTitleRow}>
+              <Text style={[styles.advTitle, { flex: 1, textAlign: 'left' }]}>Hole Detail</Text>
+              <TouchableOpacity onPress={onClose} style={styles.advHeaderClose}>
+                <Text style={styles.advHeaderCloseText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <ScrollView
+            style={styles.advSheetInner}
+            contentContainerStyle={{ paddingBottom: 60 }}
+            showsVerticalScrollIndicator={true}
+          >
 
             {/* Putts + Chips counts — basic numbers */}
             <Text style={styles.advSection}>SHOT COUNTS</Text>
@@ -2225,19 +2355,20 @@ function AdvancedEntryModal({
               </View>
             ))}
 
-            <TouchableOpacity style={styles.advCloseBtn} onPress={onClose}>
-              <Text style={styles.advCloseText}>Done</Text>
-            </TouchableOpacity>
           </ScrollView>
-        </TouchableOpacity>
-      </TouchableOpacity>
+        </View>
+      </View>
     </Modal>
   );
 }
 
-// Touch-driven slider that snaps to a fixed list of stops. No native deps —
-// uses a simple onLayout + PanResponder pattern. Stops are evenly spaced
-// visually even though their underlying values are non-uniform (3,6,10,…).
+// Touch-driven slider over a discrete value set. The thumb tracks the finger
+// continuously while dragging (fluid feel), but the saved value always snaps
+// to the nearest stop. On release, the thumb glides to the snapped position.
+//
+// "Magnetism" comes from the rounding-to-nearest behaviour: the saved value
+// flips to the next stop only when you cross the midpoint, so each stop has
+// a comfortable capture zone.
 function SnapSlider({
   stops, value, onChange,
 }: {
@@ -2246,11 +2377,12 @@ function SnapSlider({
   onChange: (v: number) => void;
 }) {
   const [trackWidth, setTrackWidth] = useState(0);
+  const [dragX, setDragX] = useState<number | null>(null); // null = not dragging
   const idx = Math.max(0, stops.indexOf(value));
   const segCount = stops.length - 1;
   const fracForIdx = (i: number) => (segCount === 0 ? 0 : i / segCount);
 
-  const fromX = (x: number) => {
+  const valueAtX = (x: number) => {
     if (trackWidth <= 0) return stops[0];
     const frac = Math.max(0, Math.min(1, x / trackWidth));
     const closestIdx = Math.round(frac * segCount);
@@ -2261,14 +2393,27 @@ function SnapSlider({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
     onPanResponderGrant: (e) => {
-      const v = fromX(e.nativeEvent.locationX);
+      const x = e.nativeEvent.locationX;
+      setDragX(x);
+      const v = valueAtX(x);
       if (v !== value) onChange(v);
     },
     onPanResponderMove: (e) => {
-      const v = fromX(e.nativeEvent.locationX);
+      const x = e.nativeEvent.locationX;
+      setDragX(x);
+      const v = valueAtX(x);
       if (v !== value) onChange(v);
     },
+    onPanResponderRelease: () => setDragX(null),
+    onPanResponderTerminate: () => setDragX(null),
   });
+
+  // Thumb position: follow finger continuously while dragging; otherwise
+  // sit on the snapped stop. Clamped to the track bounds.
+  const thumbX = dragX != null
+    ? Math.max(0, Math.min(trackWidth, dragX))
+    : fracForIdx(idx) * trackWidth;
+  const fillPct = trackWidth > 0 ? (thumbX / trackWidth) * 100 : 0;
 
   return (
     <View style={styles.snapWrap} {...responder.panHandlers}>
@@ -2276,7 +2421,7 @@ function SnapSlider({
         style={styles.snapTrack}
         onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
       >
-        <View style={[styles.snapFill, { width: `${fracForIdx(idx) * 100}%` }]} />
+        <View style={[styles.snapFill, { width: `${fillPct}%` }]} />
         {stops.map((s, i) => (
           <View
             key={s}
@@ -2290,7 +2435,7 @@ function SnapSlider({
         {trackWidth > 0 && (
           <View style={[
             styles.snapThumb,
-            { left: fracForIdx(idx) * trackWidth - 11, top: -9 },
+            { left: thumbX - 11, top: -9 },
           ]} />
         )}
       </View>
