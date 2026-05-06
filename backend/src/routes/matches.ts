@@ -914,17 +914,18 @@ router.post('/:id/started', requireAuth, wrap(async (req: AuthRequest, res: Resp
 // Updates the hole's pin coords iff they're not already set (first contributor wins).
 // Records a contribution credit so we can reward the user for pinning ≥50% of holes.
 router.post('/:id/pin', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeId, lat, lng } = req.body ?? {};
+  const { holeId, lat, lng, elevationM } = req.body ?? {};
   if (typeof holeId !== 'string' || typeof lat !== 'number' || typeof lng !== 'number') {
     return res.status(400).json({ error: 'holeId, lat, lng required' });
   }
   if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
     return res.status(400).json({ error: 'invalid coords' });
   }
+  // Sanity check elevation: -500m (Dead Sea) to +9000m (Everest)
+  const elev = (typeof elevationM === 'number' && elevationM > -500 && elevationM < 9000)
+    ? elevationM : null;
 
   // Verify the user is in this match AND the hole belongs to their teebox.
-  // Without the join you could earn contribution credits for any hole on any
-  // course just by knowing its hole_id.
   const { rows: pRows } = await pool.query(
     `SELECT 1 FROM match_players mp
      JOIN holes h ON h.teebox_id = mp.teebox_id
@@ -936,13 +937,25 @@ router.post('/:id/pin', requireAuth, wrap(async (req: AuthRequest, res: Response
   }
 
   // First contributor wins — only set the pin if it's currently null.
-  // We DO record the contribution credit either way.
+  // Elevation is also only set on the first contribution (avoids drift across
+  // many players' GPS altitudes; later we can crowd-average if we want).
   await pool.query(
     `UPDATE holes
-     SET pin_lat = $2, pin_lng = $3, pin_set_at = NOW(), pin_set_by = $4
+     SET pin_lat = $2, pin_lng = $3,
+         pin_elevation_m = COALESCE(pin_elevation_m, $5),
+         pin_set_at = NOW(), pin_set_by = $4
      WHERE hole_id = $1 AND pin_lat IS NULL`,
-    [holeId, lat, lng, req.userId]
+    [holeId, lat, lng, req.userId, elev]
   );
+  // If the pin was already set but elevation wasn't, fill it in (lets the data
+  // get better as more players walk the course with altitude-capable devices).
+  if (elev != null) {
+    await pool.query(
+      `UPDATE holes SET pin_elevation_m = $2
+       WHERE hole_id = $1 AND pin_elevation_m IS NULL`,
+      [holeId, elev]
+    );
+  }
   await pool.query(
     `INSERT INTO pin_contributions (user_id, match_id, hole_id)
      VALUES ($1, $2, $3)
@@ -962,12 +975,19 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   const shots = req.body?.shots;
   if (!Array.isArray(shots)) return res.status(400).json({ error: 'shots array required' });
 
-  // Validate shape — clamp to reasonable values; reject anything obviously bogus
+  // Validate shape — clamp to reasonable values; reject anything obviously bogus.
+  // Elevation is optional (older clients won't send it) but persisted when present.
   const clean = shots
     .filter((s: any) => typeof s?.lat === 'number' && typeof s?.lng === 'number'
       && Math.abs(s.lat) <= 90 && Math.abs(s.lng) <= 180)
     .slice(0, 30) // hard cap shots per hole
-    .map((s: any) => ({ lat: s.lat, lng: s.lng }));
+    .map((s: any) => {
+      const out: any = { lat: s.lat, lng: s.lng };
+      if (typeof s.elevation_m === 'number' && s.elevation_m > -500 && s.elevation_m < 9000) {
+        out.elevation_m = s.elevation_m;
+      }
+      return out;
+    });
 
   // Verify membership
   const { rows } = await pool.query(

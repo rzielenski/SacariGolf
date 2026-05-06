@@ -79,8 +79,10 @@ export default function ScoringScreen() {
   const [scorecardVisible, setScorecardVisible] = useState(false);
 
   // Per-hole shot tracking. Keyed by hole_num (the actual hole number on the
-  // course, not the index into our `holes` array).
-  type ShotPoint = { lat: number; lng: number };
+  // course, not the index into our `holes` array). elevation_m is the device's
+  // GPS altitude at the moment the shot was tracked — captured so we can
+  // crowdsource pin elevation data and offer slope-adjusted distances.
+  type ShotPoint = { lat: number; lng: number; elevation_m?: number };
   const [shotsByHole, setShotsByHole] = useState<Record<number, ShotPoint[]>>({});
 
   // Course selection
@@ -99,7 +101,7 @@ export default function ScoringScreen() {
   // Map / location
   const mapRef = useRef<MapView>(null);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
-  const [userCoord, setUserCoord] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [userCoord, setUserCoord] = useState<{ latitude: number; longitude: number; altitude?: number | null } | null>(null);
   const [measurePin, setMeasurePin] = useState<{ latitude: number; longitude: number } | null>(null);
   const [onCourse, setOnCourse] = useState(true);
   const [following, setFollowing] = useState(true);
@@ -228,7 +230,11 @@ export default function ScoringScreen() {
         maximumAge: 0,
       } as any);
       if (!active) return;
-      const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+      const coord = {
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        altitude: pos.coords.altitude, // meters, may be null on some devices
+      };
       const cLat = course?.latitude ?? 0;
       const cLng = course?.longitude ?? 0;
       const near = !cLat || distMetres(coord.latitude, coord.longitude, cLat, cLng) <= ON_COURSE_METRES;
@@ -240,7 +246,11 @@ export default function ScoringScreen() {
         { accuracy: Location.Accuracy.High, distanceInterval: 2 },
         (loc) => {
           if (!active) return;
-          const c = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+          const c = {
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+            altitude: loc.coords.altitude,
+          };
           const near2 = !cLat || distMetres(c.latitude, c.longitude, cLat, cLng) <= ON_COURSE_METRES;
           setOnCourse(near2);
           if (!near2) setFollowing(false);
@@ -350,7 +360,9 @@ export default function ScoringScreen() {
     }
     setShotsByHole((prev) => {
       const cur = prev[currentHoleNum] ?? [];
-      const next = [...cur, { lat: userCoord.latitude, lng: userCoord.longitude }];
+      const point: ShotPoint = { lat: userCoord.latitude, lng: userCoord.longitude };
+      if (typeof userCoord.altitude === 'number') point.elevation_m = userCoord.altitude;
+      const next = [...cur, point];
       persistShots(currentHoleNum, next);
       return { ...prev, [currentHoleNum]: next };
     });
@@ -371,12 +383,17 @@ export default function ScoringScreen() {
 
   // Local override for pins set during this round (so the UI updates immediately
   // even though the holes API response is cached in our state).
-  const [pinByHole, setPinByHole] = useState<Record<string, { lat: number; lng: number }>>({});
+  type LocalPin = { lat: number; lng: number; elevation_m?: number | null };
+  const [pinByHole, setPinByHole] = useState<Record<string, LocalPin>>({});
   const currentHoleObj = holes[currentHole];
-  const knownPin = currentHoleObj
+  const knownPin: LocalPin | null = currentHoleObj
     ? (pinByHole[currentHoleObj.hole_id] ??
        (currentHoleObj.pin_lat != null && currentHoleObj.pin_lng != null
-         ? { lat: currentHoleObj.pin_lat, lng: currentHoleObj.pin_lng }
+         ? {
+             lat: currentHoleObj.pin_lat,
+             lng: currentHoleObj.pin_lng,
+             elevation_m: currentHoleObj.pin_elevation_m ?? null,
+           }
          : null))
     : null;
 
@@ -384,14 +401,30 @@ export default function ScoringScreen() {
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
     : null;
 
+  // Slope adjustment: each metre of elevation gain adds ~1.09 yards to the
+  // play distance (and conversely, downhill plays shorter). Only computed
+  // when we have both pin and player altitude AND the difference is large
+  // enough to be meaningful (≥ 2 yards) — suppresses GPS noise on flat holes.
+  const slopeAdjustment = (() => {
+    if (!knownPin || !userCoord || yardsToPin == null) return null;
+    const pinElev = knownPin.elevation_m;
+    const userAlt = userCoord.altitude;
+    if (typeof pinElev !== 'number' || typeof userAlt !== 'number') return null;
+    const elevDiffM = pinElev - userAlt;       // positive = uphill
+    const adj = Math.round(elevDiffM * 1.09);  // yards of correction
+    if (Math.abs(adj) < 2) return null;        // too small to surface
+    return { adj, playsLike: yardsToPin + adj, uphill: adj > 0 };
+  })();
+
   const markPin = () => {
     if (!userCoord || !currentHoleObj) {
       Alert.alert('No GPS', 'Wait for a GPS lock before marking the pin.');
       return;
     }
-    const point = { lat: userCoord.latitude, lng: userCoord.longitude };
+    const elevation_m = typeof userCoord.altitude === 'number' ? userCoord.altitude : null;
+    const point: LocalPin = { lat: userCoord.latitude, lng: userCoord.longitude, elevation_m };
     setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
-    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng)
+    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng, elevation_m)
       .catch((e: any) => {
         // Roll back local override so the user can retry rather than silently
         // believing the pin was saved.
@@ -869,6 +902,11 @@ export default function ScoringScreen() {
         <View style={styles.pinDistChip}>
           <Text style={styles.pinDistLabel}>TO PIN</Text>
           <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
+          {slopeAdjustment && (
+            <Text style={styles.pinDistPlaysLike}>
+              plays {slopeAdjustment.playsLike}  ({slopeAdjustment.uphill ? '+' : ''}{slopeAdjustment.adj})
+            </Text>
+          )}
         </View>
       ) : (
         <TouchableOpacity
@@ -1164,6 +1202,7 @@ const styles = StyleSheet.create({
   },
   pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
+  pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 10, marginTop: 2, opacity: 0.9 },
   markPinBtn: {
     position: 'absolute', right: 12, top: 222,
     backgroundColor: C.bg + 'ee',

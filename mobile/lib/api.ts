@@ -99,10 +99,10 @@ export const api = {
     submitScores: (id: string, body: object) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
-    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number }[]) =>
+    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number; elevation_m?: number }[]) =>
       request<any>('PUT', `/matches/${id}/shots/${holeNum}`, { shots }),
-    contributePin: (id: string, holeId: string, lat: number, lng: number) =>
-      request<any>('POST', `/matches/${id}/pin`, { holeId, lat, lng }),
+    contributePin: (id: string, holeId: string, lat: number, lng: number, elevationM?: number | null) =>
+      request<any>('POST', `/matches/${id}/pin`, { holeId, lat, lng, elevationM }),
     listShotTracks: (id: string, userId?: string) =>
       request<{ user_id: string; hole_num: number; shots: { lat: number; lng: number }[] }[]>(
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`

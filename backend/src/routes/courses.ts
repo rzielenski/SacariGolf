@@ -78,7 +78,8 @@ router.get('/:id', requireAuth, wrap(async (req: Request, res: Response) => {
   let holes: any[] = [];
   if (teeboxIds.length > 0) {
     const { rows: holeRows } = await pool.query(
-      `SELECT hole_id, teebox_id, hole_num, par, yardage, handicap, pin_lat, pin_lng
+      `SELECT hole_id, teebox_id, hole_num, par, yardage, handicap,
+              pin_lat, pin_lng, pin_elevation_m
        FROM holes WHERE teebox_id = ANY($1) ORDER BY teebox_id, hole_num`,
       [teeboxIds]
     );

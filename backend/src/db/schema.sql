@@ -96,6 +96,7 @@ CREATE TABLE holes (
   handicap SMALLINT,
   pin_lat REAL,             -- center of green (community-contributed)
   pin_lng REAL,
+  pin_elevation_m REAL,     -- device-reported altitude when first pin was set
   pin_set_at TIMESTAMPTZ,
   pin_set_by UUID REFERENCES users(user_id) ON DELETE SET NULL,
   UNIQUE (teebox_id, hole_num)

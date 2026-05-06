@@ -68,6 +68,7 @@ export interface Hole {
   handicap: number | null;
   pin_lat?: number | null;
   pin_lng?: number | null;
+  pin_elevation_m?: number | null;
 }
 
 export interface Match {
