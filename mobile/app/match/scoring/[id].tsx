@@ -125,7 +125,7 @@ export default function ScoringScreen() {
   // Per-hole stat tracking — putts, chips, fairway hit. Indexed by the hole
   // INDEX in our holes array (not hole_num) so we can submit it as a parallel
   // array alongside scores. Tracking is opt-in: untouched holes stay empty.
-  type HoleStat = { putts?: number; chips?: number; fairwayHit?: boolean | null };
+  type HoleStat = { putts?: number; chips?: number; gir?: boolean | null; fairwayHit?: boolean | null };
   const [holeStats, setHoleStats] = useState<HoleStat[]>([]);
 
   // Course selection
@@ -1113,6 +1113,35 @@ export default function ScoringScreen() {
                   </Text>
                 </TouchableOpacity>
               )}
+              <TouchableOpacity
+                style={[
+                  styles.fwBtn,
+                  holeStats[currentHole]?.gir === true && styles.fwBtnHit,
+                  holeStats[currentHole]?.gir === false && styles.fwBtnMiss,
+                ]}
+                onPress={() => setHoleStats((prev) => {
+                  const next = [...prev];
+                  const cur = next[currentHole]?.gir;
+                  // Cycle through: null → true (GIR) → false (miss) → null
+                  const nextVal: boolean | null | undefined =
+                    cur === undefined || cur === null ? true
+                    : cur === true ? false
+                    : null;
+                  next[currentHole] = { ...(next[currentHole] ?? {}), gir: nextVal as any };
+                  return next;
+                })}
+              >
+                <Text style={styles.fwLabel}>GIR</Text>
+                <Text style={[
+                  styles.fwValue,
+                  holeStats[currentHole]?.gir === true && { color: C.green },
+                  holeStats[currentHole]?.gir === false && { color: C.red },
+                ]}>
+                  {holeStats[currentHole]?.gir === true ? 'YES'
+                   : holeStats[currentHole]?.gir === false ? 'NO'
+                   : '—'}
+                </Text>
+              </TouchableOpacity>
             </View>
 
             <View style={styles.navRow}>

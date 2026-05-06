@@ -154,15 +154,25 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
-// Aggregated tee-to-green / short-game / putting stats from a player's
-// completed rounds. Computes simplified strokes-gained relative to a "scratch
-// baseline" where a hole = (par − 2) tee-to-green strokes + 2 putts:
-//   SG_putting        = 2 − putts
-//   SG_short_game     = −chips                (each chip is a stroke spent because the green was missed)
-//   SG_tee_to_green   = (par − 2) − (strokes − putts − chips)
-//   SG_total          = par − strokes
-// Holes without recorded stats are excluded from the SG average so old rounds
-// don't dilute new tracking.
+// Aggregated stats from a player's completed rounds. Computes a simplified
+// 4-category strokes-gained model relative to a "scratch baseline" where a
+// hole = (par − 2) full swings to the green + 2 putts. Each component is
+// designed so the four categories sum to (par − strokes), matching score-vs-par.
+//
+//   SG: Putting       = 2 − putts
+//   SG: Around-Green  = chips > 0 ? (1 − chips) : 0
+//                       (1 chip baseline when off-green; 0 contribution when GIR.
+//                        Driving a par-4 green and chipping → GIR + 1 chip is fine,
+//                        the chip is the "around-green" stroke and SG_ATG = 0)
+//   SG: Approach      = gir ? 0 : −1
+//                       (missing the green = a forced extra stroke, attributed here)
+//   SG: Off-the-Tee   = (par − strokes) − SG_putting − SG_around_green − SG_approach
+//                       (the residual: any strokes saved/lost beyond what the other
+//                        three categories account for. Captures eagle-able drives,
+//                        first-shot disasters, and par-5 reach-in-2 bonuses.)
+//
+// Holes without putts AND chips AND gir tracked are excluded from SG averaging
+// so old untracked rounds don't dilute new data.
 router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT r.round_id, r.created_at, r.hole_scores, r.hole_stats, r.total_score,
@@ -195,11 +205,12 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
   let upAndDownCount = 0;    // chips ≥ 1 and putts == 1 → saved par from off green
   let upAndDownChances = 0;  // any hole with chips ≥ 1 and putts tracked
 
-  // SG aggregators (only over holes that have full stats)
+  // SG aggregators — 4 categories. Only over holes with full stat tracking.
   let sgHoles = 0;
   let sgPutting = 0;
-  let sgShortGame = 0;
-  let sgTeeToGreen = 0;
+  let sgAroundGreen = 0;
+  let sgApproach = 0;
+  let sgOffTee = 0;
   let sgTotal = 0;
 
   for (const r of rows) {
@@ -217,6 +228,7 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
       const s = stats[i] ?? {};
       const putts = typeof s.putts === 'number' ? s.putts : null;
       const chips = typeof s.chips === 'number' ? s.chips : null;
+      const gir = typeof s.gir === 'boolean' ? s.gir : null;
       const fwHit = typeof s.fairwayHit === 'boolean' ? s.fairwayHit : null;
 
       if (putts !== null) {
@@ -225,13 +237,14 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
       }
       if (chips !== null) totalChips += chips;
 
-      // GIR derived: chips === 0 means we reached the green in regulation.
-      if (chips !== null) {
+      // GIR is now its own input — no longer derived from chips. (You can drive
+      // a par-4 green and still chip onto it, which is GIR with chips ≥ 1.)
+      if (gir !== null) {
         girEligible += 1;
-        if (chips === 0) girCount += 1;
+        if (gir) girCount += 1;
       }
 
-      // Up-and-downs
+      // Up-and-downs: chip(s) used AND saved par with a single putt
       if (chips !== null && putts !== null && chips >= 1) {
         upAndDownChances += 1;
         if (putts === 1) upAndDownCount += 1;
@@ -243,15 +256,18 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
         if (fwHit) fwHits += 1;
       }
 
-      // Strokes gained — needs both putts and chips to be tracked
-      if (putts !== null && chips !== null) {
+      // 4-category SG — needs putts, chips AND gir tracked.
+      // SG_OTT is the residual so all four sum to (par − strokes).
+      if (putts !== null && chips !== null && gir !== null) {
         sgHoles += 1;
         const putt = 2 - putts;
-        const short = -chips;
-        const tee = (par - 2) - (strokes - putts - chips);
+        const around = chips > 0 ? (1 - chips) : 0;
+        const approach = gir ? 0 : -1;
+        const tee = (par - strokes) - putt - around - approach;
         sgPutting += putt;
-        sgShortGame += short;
-        sgTeeToGreen += tee;
+        sgAroundGreen += around;
+        sgApproach += approach;
+        sgOffTee += tee;
         sgTotal += (par - strokes);
       }
     }
@@ -279,10 +295,11 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     sg_holes: sgHoles,
     sg_per_round: sgHoles && roundsCount
       ? {
-          putting:     round((sgPutting     / sgHoles) * (holesPlayed / roundsCount)),
-          short_game:  round((sgShortGame   / sgHoles) * (holesPlayed / roundsCount)),
-          tee_to_green:round((sgTeeToGreen  / sgHoles) * (holesPlayed / roundsCount)),
-          total:       round((sgTotal       / sgHoles) * (holesPlayed / roundsCount)),
+          off_tee:      round((sgOffTee      / sgHoles) * (holesPlayed / roundsCount)),
+          approach:     round((sgApproach    / sgHoles) * (holesPlayed / roundsCount)),
+          around_green: round((sgAroundGreen / sgHoles) * (holesPlayed / roundsCount)),
+          putting:      round((sgPutting     / sgHoles) * (holesPlayed / roundsCount)),
+          total:        round((sgTotal       / sgHoles) * (holesPlayed / roundsCount)),
         }
       : null,
   });

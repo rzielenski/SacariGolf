@@ -28,6 +28,7 @@ export default function UserProfileScreen() {
   const [activeRound, setActiveRound] = useState<any | null>(null);
   const [courseRecords, setCourseRecords] = useState<any[]>([]);
   const [spectating, setSpectating] = useState(false);
+  const [stats, setStats] = useState<any | null>(null);
 
   const openScorecard = (round: any) => {
     setScorecardEntry({
@@ -64,6 +65,10 @@ export default function UserProfileScreen() {
 
   useEffect(() => {
     api.users.courseRecords(id).then(setCourseRecords).catch(() => { });
+  }, [id]);
+
+  useEffect(() => {
+    api.users.stats(id).then(setStats).catch(() => { });
   }, [id]);
 
   // Poll the player's live in-progress round every 15s while the screen is open
@@ -152,6 +157,34 @@ export default function UserProfileScreen() {
         />
         <Stat label="Course Records" value={courseRecords.length} />
       </View>
+
+      {/* Performance — only when this user has tracked any stats */}
+      {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
+        <>
+          <OrnamentTitle title="Performance" />
+          <View style={styles.perfGrid}>
+            <Stat label="GIR" value={stats.gir_pct != null ? `${stats.gir_pct}%` : '—'} />
+            <Stat label="Fairways" value={stats.fw_hit_pct != null ? `${stats.fw_hit_pct}%` : '—'} />
+            <Stat label="Putts/Round" value={stats.avg_putts_per_round != null ? stats.avg_putts_per_round.toFixed(1) : '—'} />
+            <Stat label="Up-and-Down" value={stats.up_and_down_pct != null ? `${stats.up_and_down_pct}%` : '—'} />
+            <Stat label="3-putts" value={stats.three_putt_count ?? 0} />
+            <Stat label="Avg/Hole" value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'} />
+          </View>
+
+          {stats.sg_per_round && stats.sg_holes > 0 && (
+            <>
+              <Text style={styles.sgSubtitle}>STROKES GAINED PER ROUND</Text>
+              <View style={styles.sgRow}>
+                <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
+                <SGCell label="Approach" value={stats.sg_per_round.approach} />
+                <SGCell label="Around" value={stats.sg_per_round.around_green} />
+                <SGCell label="Putt" value={stats.sg_per_round.putting} />
+                <SGCell label="Total" value={stats.sg_per_round.total} highlight />
+              </View>
+            </>
+          )}
+        </>
+      )}
 
       {/* Course records detail */}
       {courseRecords.length > 0 && (
@@ -310,6 +343,17 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+function SGCell({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
+  const sign = value > 0 ? '+' : '';
+  const color = value > 0 ? C.green : value < 0 ? C.red : C.textMuted;
+  return (
+    <View style={[styles.sgCell, highlight && { borderColor: C.gold }]}>
+      <Text style={styles.sgLabel}>{label.toUpperCase()}</Text>
+      <Text style={[styles.sgValue, { color }]}>{sign}{value.toFixed(1)}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   centered: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center' },
@@ -343,6 +387,15 @@ const styles = StyleSheet.create({
   homeCourseLoc: { color: C.textMuted, fontSize: 12, marginTop: 2 },
 
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
+  perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },
+  sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginBottom: 6, marginTop: 2 },
+  sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
+  sgCell: {
+    flex: 1, paddingVertical: 10, alignItems: 'center',
+    backgroundColor: C.card, borderRadius: 6, borderWidth: 1, borderColor: C.border,
+  },
+  sgLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  sgValue: { fontSize: 18, fontWeight: '900', marginTop: 2, fontFamily: F.serif },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 10, padding: 14,
     alignItems: 'center', borderWidth: 1, borderColor: C.border,

@@ -391,8 +391,9 @@ export default function ProfileScreen() {
             <>
               <Text style={styles.sgSubtitle}>STROKES GAINED PER ROUND  ·  positive = better than scratch baseline</Text>
               <View style={styles.sgRow}>
-                <SGCell label="Tee→Green" value={stats.sg_per_round.tee_to_green} />
-                <SGCell label="Short" value={stats.sg_per_round.short_game} />
+                <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
+                <SGCell label="Approach" value={stats.sg_per_round.approach} />
+                <SGCell label="Around" value={stats.sg_per_round.around_green} />
                 <SGCell label="Putt" value={stats.sg_per_round.putting} />
                 <SGCell label="Total" value={stats.sg_per_round.total} highlight />
               </View>

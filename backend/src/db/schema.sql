@@ -152,7 +152,7 @@ CREATE TABLE rounds (
   teebox_id UUID REFERENCES teeboxes(teebox_id),
   hole_scores SMALLINT[] NOT NULL DEFAULT '{}',
   -- Optional per-hole detail. Array indexed parallel to hole_scores.
-  -- Each element: { putts: number, chips: number, fairwayHit: boolean|null }
+  -- Each element: { putts: number, chips: number, gir: boolean|null, fairwayHit: boolean|null }
   -- Empty array if the player didn't track these.
   hole_stats JSONB NOT NULL DEFAULT '[]',
   total_score INTEGER,

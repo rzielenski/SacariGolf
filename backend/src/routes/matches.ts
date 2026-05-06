@@ -258,8 +258,8 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
 }));
 
 // Sanitise a hole_stats array — same length as scores, each entry has
-// putts (0–10), chips (0–10), fairwayHit (bool|null). Bad input is silently
-// dropped rather than failing the whole submission.
+// putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null). Bad input
+// is silently dropped rather than failing the whole submission.
 function cleanHoleStats(input: any, expectedLength: number): any[] {
   if (!Array.isArray(input)) return [];
   return input.slice(0, expectedLength).map((h: any) => {
@@ -267,6 +267,7 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
     const cleaned: any = {};
     if (typeof h.putts === 'number' && h.putts >= 0 && h.putts <= 10) cleaned.putts = Math.floor(h.putts);
     if (typeof h.chips === 'number' && h.chips >= 0 && h.chips <= 10) cleaned.chips = Math.floor(h.chips);
+    if (typeof h.gir === 'boolean') cleaned.gir = h.gir;
     if (typeof h.fairwayHit === 'boolean') cleaned.fairwayHit = h.fairwayHit;
     return cleaned;
   });

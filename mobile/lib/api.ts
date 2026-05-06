@@ -104,7 +104,7 @@ export const api = {
       three_putt_count: number;
       up_and_down_pct: number | null; up_and_downs: number; up_and_down_chances: number;
       sg_holes: number;
-      sg_per_round: { putting: number; short_game: number; tee_to_green: number; total: number } | null;
+      sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number } | null;
     }>('GET', `/users/${id}/stats`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
