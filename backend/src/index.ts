@@ -16,6 +16,7 @@ import roundsRouter from './routes/rounds';
 import premiumRouter from './routes/premium';
 import weatherRouter from './routes/weather';
 import { runMigrations } from './db/migrate';
+import { startCleanupSchedule } from './utils/cleanup';
 
 const app = express();
 app.use(cors());
@@ -54,5 +55,8 @@ const PORT = process.env.PORT || 3000;
 runMigrations()
   .catch((e) => console.error('Migration runner crashed (continuing anyway):', e))
   .finally(() => {
+    // Kick off the hourly cleanup that auto-cancels stale (>24h idle) rounds.
+    // Runs immediately once on boot too, in case we slept through a window.
+    startCleanupSchedule();
     app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
   });

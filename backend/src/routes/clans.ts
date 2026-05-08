@@ -1,8 +1,14 @@
 import { Router, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
+const CLAN_AVATARS_DIR = path.join(UPLOADS_DIR, 'clan-avatars');
+if (!fs.existsSync(CLAN_AVATARS_DIR)) fs.mkdirSync(CLAN_AVATARS_DIR, { recursive: true });
 
 const router = Router();
 
@@ -164,7 +170,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 }));
 
 router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { name, isPublic } = req.body ?? {};
+  const { name, isPublic, theme } = req.body ?? {};
   const { rows } = await pool.query(
     `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
     [req.params.id, req.userId]
@@ -180,6 +186,41 @@ router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) =
     vals.push(t); updates.push(`name = $${vals.length}`);
   }
   if (isPublic !== undefined) { vals.push(!!isPublic); updates.push(`is_public = $${vals.length}`); }
+
+  // Theme song update — accepts an iTunes track payload from the mobile
+  // search modal, or `null` to clear. URLs are validated for https + Apple
+  // CDN host so a hostile client can't make us proxy arbitrary audio.
+  if (theme !== undefined) {
+    if (theme === null) {
+      updates.push(`theme_track_id = NULL`);
+      updates.push(`theme_track_title = NULL`);
+      updates.push(`theme_track_artist = NULL`);
+      updates.push(`theme_track_artwork = NULL`);
+      updates.push(`theme_track_preview = NULL`);
+    } else if (typeof theme === 'object') {
+      const { trackId, title, artist, artworkUrl, previewUrl } = theme;
+      if (typeof trackId !== 'string' || typeof title !== 'string'
+       || typeof artist !== 'string' || typeof previewUrl !== 'string') {
+        return res.status(400).json({ error: 'Invalid theme payload' });
+      }
+      // Sanity-check the URLs come from Apple's CDN domain.
+      const okHost = (u: string) =>
+        /^https:\/\/[^\/]*\.mzstatic\.com\//.test(u)
+        || /^https:\/\/[^\/]*\.itunes\.apple\.com\//.test(u);
+      if (!okHost(previewUrl) || (artworkUrl && !okHost(artworkUrl))) {
+        return res.status(400).json({ error: 'Theme URLs must come from Apple\'s CDN' });
+      }
+      vals.push(trackId.slice(0, 64));     updates.push(`theme_track_id = $${vals.length}`);
+      vals.push(title.slice(0, 200));      updates.push(`theme_track_title = $${vals.length}`);
+      vals.push(artist.slice(0, 200));     updates.push(`theme_track_artist = $${vals.length}`);
+      vals.push((artworkUrl ?? '').slice(0, 500) || null);
+      updates.push(`theme_track_artwork = $${vals.length}`);
+      vals.push(previewUrl.slice(0, 500)); updates.push(`theme_track_preview = $${vals.length}`);
+    } else {
+      return res.status(400).json({ error: 'theme must be an object or null' });
+    }
+  }
+
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
   vals.push(req.params.id);
   const { rows: updated } = await pool.query(
@@ -189,39 +230,105 @@ router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) =
   return res.json(updated[0]);
 }));
 
+/** Leader-only avatar upload. Mirrors the user-avatar upload pattern. */
+router.post('/:id/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: roleRows } = await pool.query(
+    `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!roleRows.length || roleRows[0].role !== 'leader') {
+    return res.status(403).json({ error: 'Only the clan leader can change the clan avatar' });
+  }
+  const { imageBase64, mimeType } = req.body ?? {};
+  if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    return res.status(400).json({ error: 'imageBase64 required' });
+  }
+  const ext = mimeType === 'image/png' ? 'png'
+    : mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg'
+    : null;
+  if (!ext) return res.status(400).json({ error: 'Only PNG and JPEG avatars are allowed' });
+  const buffer = Buffer.from(imageBase64, 'base64');
+  if (buffer.length === 0) return res.status(400).json({ error: 'Invalid image data' });
+  if (buffer.length > 2 * 1024 * 1024) {
+    return res.status(413).json({ error: 'Avatar must be 2 MB or smaller' });
+  }
+  const filename = `clan_${req.params.id}.${ext}`;
+  const filepath = path.join(CLAN_AVATARS_DIR, filename);
+  fs.writeFileSync(filepath, buffer);
+  const avatarUrl = `/uploads/clan-avatars/${filename}`;
+  await pool.query(`UPDATE clans SET avatar_url = $1 WHERE clan_id = $2`, [avatarUrl, req.params.id]);
+  return res.json({ avatar_url: avatarUrl });
+}));
+
 router.delete('/:id/members/:userId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const isSelf = req.params.userId === req.userId;
-  if (!isSelf) {
-    const { rows } = await pool.query(
-      `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
-      [req.params.id, req.userId]
-    );
-    if (!rows.length || rows[0].role !== 'leader') {
-      return res.status(403).json({ error: 'Only the clan leader can kick members' });
-    }
-    const { rows: target } = await pool.query(
-      `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
-      [req.params.id, req.params.userId]
-    );
-    if (target[0]?.role === 'leader') return res.status(400).json({ error: 'Cannot kick the leader' });
-  } else {
-    const { rows } = await pool.query(
-      `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
-      [req.params.id, req.userId]
-    );
-    if (rows[0]?.role === 'leader') {
-      const { rows: others } = await pool.query(
-        `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id != $2 LIMIT 1`,
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Permissions: leader can kick anyone (except themselves via this path);
+    // a member can leave themselves.
+    if (!isSelf) {
+      const { rows } = await client.query(
+        `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
         [req.params.id, req.userId]
       );
-      if (others.length) return res.status(400).json({ error: 'Transfer leadership before leaving' });
+      if (!rows.length || rows[0].role !== 'leader') {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Only the clan leader can kick members' });
+      }
+      const { rows: target } = await client.query(
+        `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+        [req.params.id, req.params.userId]
+      );
+      if (target[0]?.role === 'leader') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Cannot kick the leader' });
+      }
     }
+
+    // Was the departing user the leader? If so, auto-promote the longest-
+    // tenured remaining member (oldest joined_at). If they're the last
+    // member, delete the empty clan to keep things tidy.
+    const { rows: leavingRoleRows } = await client.query(
+      `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2 FOR UPDATE`,
+      [req.params.id, req.params.userId]
+    );
+    const wasLeader = leavingRoleRows[0]?.role === 'leader';
+
+    await client.query(
+      `DELETE FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
+      [req.params.id, req.params.userId]
+    );
+
+    if (wasLeader) {
+      const { rows: heir } = await client.query(
+        `SELECT user_id FROM clan_members
+         WHERE clan_id = $1
+         ORDER BY joined_at ASC
+         LIMIT 1`,
+        [req.params.id]
+      );
+      if (heir.length) {
+        await client.query(
+          `UPDATE clan_members SET role = 'leader' WHERE clan_id = $1 AND user_id = $2`,
+          [req.params.id, heir[0].user_id]
+        );
+      } else {
+        // No members left — delete the orphan clan rather than leaving a
+        // zombie row. clan_members rows already gone via CASCADE.
+        await client.query(`DELETE FROM clans WHERE clan_id = $1`, [req.params.id]);
+      }
+    }
+
+    await client.query('COMMIT');
+    return res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-  await pool.query(
-    `DELETE FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
-    [req.params.id, req.params.userId]
-  );
-  return res.json({ success: true });
 }));
 
 router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Response) => {

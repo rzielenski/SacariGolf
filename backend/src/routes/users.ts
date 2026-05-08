@@ -315,6 +315,61 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
 }));
 
 /**
+ * Past shots this user has tracked at a specific course+hole, across every
+ * round they've ever played. Used by the in-round "ghost shots" overlay so
+ * the player can see where they've landed shots on this hole in the past.
+ *
+ * Excludes the current match so the overlay doesn't duplicate the in-progress
+ * round's shots, which are already drawn separately. Hole_num is matched
+ * across all teeboxes for the course (a par 4 from white tees is the same
+ * physical hole as the par 4 from blue tees).
+ *
+ * Query: ?courseId=<uuid>&holeNum=<int>[&excludeMatchId=<uuid>]
+ */
+router.get('/:id/hole-shots', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const courseId = String(req.query.courseId ?? '');
+  const holeNum = parseInt(String(req.query.holeNum ?? ''), 10);
+  const excludeMatchId = String(req.query.excludeMatchId ?? '');
+  if (!courseId || !Number.isFinite(holeNum) || holeNum < 1 || holeNum > 36) {
+    return res.status(400).json({ error: 'courseId and holeNum required' });
+  }
+  // Authorisation: only the user themselves (or in future, a friend with
+  // explicit consent) can fetch their own historical shots. For now we lock
+  // to self so this endpoint can't be used to surveil random players.
+  if (req.params.id !== req.userId) {
+    return res.status(403).json({ error: 'Can only fetch your own past shots' });
+  }
+
+  const params: any[] = [req.params.id, courseId, holeNum];
+  let where = `WHERE st.user_id = $1
+               AND t.course_id = $2
+               AND st.hole_num = $3`;
+  if (excludeMatchId) {
+    params.push(excludeMatchId);
+    where += ` AND st.match_id != $${params.length}`;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT st.match_id, st.shots, m.created_at
+       FROM shot_tracks st
+       JOIN match_players mp ON mp.match_id = st.match_id AND mp.user_id = st.user_id
+       JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+       JOIN matches m ON m.match_id = st.match_id
+      ${where}
+      ORDER BY m.created_at DESC
+      LIMIT 50`,
+    params
+  );
+  return res.json({
+    rounds: rows.map((r: any) => ({
+      match_id: r.match_id,
+      created_at: r.created_at,
+      shots: r.shots,
+    })),
+  });
+}));
+
+/**
  * Per-club stats — aggregates every tracked shot the user has tagged with a
  * `club` field across all of their matches. Returns:
  *   • Per-club counts and median/avg distance (in yards)
@@ -725,13 +780,52 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 }));
 
 router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  await pool.query(`DELETE FROM users WHERE user_id = $1`, [req.userId]);
+  // Hand off clan leadership BEFORE deleting the user. Otherwise the
+  // CASCADE wipes their clan_members row but leaves the clan leaderless.
+  // For each clan they currently lead, promote the longest-tenured remaining
+  // member; if none, delete the orphaned clan.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: ledClans } = await client.query(
+      `SELECT clan_id FROM clan_members WHERE user_id = $1 AND role = 'leader' FOR UPDATE`,
+      [req.userId]
+    );
+    for (const c of ledClans) {
+      const { rows: heir } = await client.query(
+        `SELECT user_id FROM clan_members
+         WHERE clan_id = $1 AND user_id != $2
+         ORDER BY joined_at ASC
+         LIMIT 1`,
+        [c.clan_id, req.userId]
+      );
+      if (heir.length) {
+        await client.query(
+          `UPDATE clan_members SET role = 'leader' WHERE clan_id = $1 AND user_id = $2`,
+          [c.clan_id, heir[0].user_id]
+        );
+      } else {
+        // Last member — clan dies with them.
+        await client.query(`DELETE FROM clans WHERE clan_id = $1`, [c.clan_id]);
+      }
+    }
+    await client.query(`DELETE FROM users WHERE user_id = $1`, [req.userId]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
   return res.json({ success: true });
 }));
 
 // Live in-progress round (if any). Returns null when:
 //   - the user has no in-progress match with a teebox set
 //   - the requesting viewer is in the same match (anti-cheat)
+//   - the round has been idle for more than 4 hours (treat as paused —
+//     keeps zombie tabs from showing as "playing now" indefinitely)
+//   - the round was cancelled (auto-set by the cleanup cron after 24h idle)
 // Returns the round info even if no hole_scores yet, so the friend's profile
 // can show "PLAYING NOW" right when they pick a teebox.
 router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
@@ -739,7 +833,18 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
     `SELECT mp.match_id, mp.teebox_id,
             r.hole_scores, r.created_at AS round_started_at,
             t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
-            c.course_id, c.course_name
+            c.course_id, c.course_name,
+            -- Last meaningful activity for this user on this match — pick
+            -- the most recent of: round start, score updates (rounds.created_at),
+            -- and shot tracking saves. Powers the 4h staleness gate.
+            GREATEST(
+              m.created_at,
+              COALESCE(r.created_at, m.created_at),
+              COALESCE((SELECT MAX(updated_at)
+                          FROM shot_tracks
+                         WHERE match_id = mp.match_id AND user_id = mp.user_id),
+                       m.created_at)
+            ) AS last_activity_at
      FROM match_players mp
      JOIN matches m ON m.match_id = mp.match_id
      LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
@@ -747,6 +852,7 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
      LEFT JOIN courses c ON c.course_id = t.course_id
      WHERE mp.user_id = $1
        AND m.completed = false
+       AND m.cancelled = false
        AND mp.completed = false
        AND m.is_practice = false
        AND mp.teebox_id IS NOT NULL
@@ -754,6 +860,15 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
      LIMIT 1`,
     [req.params.id]
   );
+
+  // Pause the live status if no activity in the last 4 hours. The match
+  // itself stays in-progress (player can resume by tracking another shot or
+  // saving a score), but spectators stop seeing it as "live."
+  if (rows.length) {
+    const last = new Date(rows[0].last_activity_at);
+    const ageHours = (Date.now() - last.getTime()) / (1000 * 60 * 60);
+    if (ageHours >= 4) return res.json(null);
+  }
   if (!rows.length) return res.json(null);
 
   const active = rows[0];

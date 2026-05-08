@@ -4,7 +4,7 @@ import {
   Alert, ActivityIndicator, Animated, Dimensions, TextInput, Modal,
   PanResponder,
 } from 'react-native';
-import MapView, { Marker, Polyline, Region } from 'react-native-maps';
+import MapView, { Marker, Polyline, Circle, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
@@ -168,6 +168,31 @@ export default function ScoringScreen() {
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherSheetVisible, setWeatherSheetVisible] = useState(false);
   const userIsPremium = isPremium(user as any);
+  // Past shots from previous rounds on the current hole — premium overlay.
+  // Indexed by hole_num; each entry is the full raw shot track from an old
+  // round. Filtering to "near current GPS" happens at render time so the
+  // overlay updates as the player walks.
+  type PastRound = { match_id: string; created_at: string; shots: any[] };
+  const [pastShotsByHole, setPastShotsByHole] = useState<Record<number, PastRound[]>>({});
+
+  // Per-club performance — drives the auto-club-suggest and heatmap overlay
+  // (both premium-only). Loaded once on mount, refreshed implicitly each
+  // round since data only grows.
+  type ClubStat = {
+    club: string;
+    shots: number;
+    avg_yds: number;
+    median_yds: number;
+    dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+  };
+  const [clubStats, setClubStats] = useState<ClubStat[] | null>(null);
+
+  // Past shots this user has tracked on the CURRENT hole in PRIOR rounds.
+  // Drives the "ghost shots" overlay so the player can see where they've
+  // landed shots on this hole before. Premium-only. Refreshed on hole change.
+  type PastRoundShots = { match_id: string; created_at: string; shots: Shot[] };
+  const [pastHoleShots, setPastHoleShots] = useState<PastRoundShots[]>([]);
+
   // Elevation of the user's home course, used as a baseline so altitude
   // effects on plays-like distance are RELATIVE to where the player normally
   // calibrates their distances. e.g. a player who lives at 5,000 ft will
@@ -557,8 +582,11 @@ export default function ScoringScreen() {
         return { ...prev, [currentHoleNum]: next };
       });
       setActiveShot(null);
-      // Force the player to consciously pick the club for the NEXT shot.
+      // Reset the club so the next shot's suggestion takes effect (or so the
+      // player can consciously override). Clear the manual-flag too — fresh
+      // shot, fresh decision.
       setPendingClub(null);
+      pendingClubManualRef.current = false;
       return;
     }
     // START tracking — but only if a club has been picked first.
@@ -598,6 +626,74 @@ export default function ScoringScreen() {
       return { ...prev, [currentHoleNum]: next };
     });
   };
+  // ── Past shots at this hole — premium ghost-shot overlay ──────────────
+  // Pulls every tracked shot this user has landed on the current course +
+  // hole in prior rounds. Only refetches when the hole or course changes.
+  useEffect(() => {
+    if (!userIsPremium) { setPastHoleShots([]); return; }
+    if (!user || !course || currentHoleNum == null) return;
+    let cancelled = false;
+    api.users.holeShots(user.user_id, course.course_id, currentHoleNum, id)
+      .then((d) => {
+        if (cancelled) return;
+        // Normalise both segment and legacy point formats into segment shape.
+        const normalized: PastRoundShots[] = d.rounds.map((r) => {
+          const raw = (r.shots as any[]) ?? [];
+          let segs: Shot[] = [];
+          if (raw.length === 0) {
+            segs = [];
+          } else if (raw[0]?.start && raw[0]?.end) {
+            segs = raw as Shot[];
+          } else {
+            for (let i = 0; i < raw.length - 1; i++) {
+              segs.push({
+                club: raw[i]?.club ?? 'unknown',
+                start: { lat: raw[i].lat, lng: raw[i].lng },
+                end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng },
+              });
+            }
+          }
+          return { match_id: r.match_id, created_at: r.created_at, shots: segs };
+        }).filter((r) => r.shots.length > 0);
+        setPastHoleShots(normalized);
+      })
+      .catch(() => { /* silent — overlay just stays empty */ });
+    return () => { cancelled = true; };
+  }, [userIsPremium, user?.user_id, course?.course_id, currentHoleNum, id]);
+
+  // ── Past-shots fetch ──────────────────────────────────────────────────
+  // When the player switches holes (and they're premium), fetch their shot
+  // history for the new hole. Cached per session so revisiting a hole later
+  // in the round doesn't re-hit the API.
+  useEffect(() => {
+    if (!userIsPremium || !user || !course || currentHoleNum == null) return;
+    if (pastShotsByHole[currentHoleNum] !== undefined) return; // already loaded
+    let cancelled = false;
+    api.users.holeShots(user.user_id, course.course_id, currentHoleNum, id)
+      .then((d) => {
+        if (cancelled) return;
+        setPastShotsByHole((prev) => ({ ...prev, [currentHoleNum]: d.rounds ?? [] }));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Cache the empty result so we don't keep retrying
+        setPastShotsByHole((prev) => ({ ...prev, [currentHoleNum]: [] }));
+      });
+    return () => { cancelled = true; };
+  }, [userIsPremium, user?.user_id, course?.course_id, currentHoleNum, id]);
+
+  // ── Per-club stats fetch ───────────────────────────────────────────────
+  // Premium-only consumer (suggest + heatmap), but we always fetch since the
+  // free user could upgrade mid-round and we want the data ready.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    api.users.clubStats(user.user_id)
+      .then((d) => { if (!cancelled) setClubStats(d.clubs); })
+      .catch(() => { /* non-fatal — overlay & suggest just stay disabled */ });
+    return () => { cancelled = true; };
+  }, [user?.user_id]);
+
   // ── Home-course elevation baseline ─────────────────────────────────────
   // One-time fetch when we know the user's home course coordinates. Reused
   // by the altitude adjustment so distances are calibrated relative to where
@@ -723,8 +819,14 @@ export default function ScoringScreen() {
 
   /** Pick a club. If a shot is currently being tracked (start already
    *  recorded), the active shot's club is updated. Otherwise the choice
-   *  is held in pendingClub for the next TRACK press. */
+   *  is held in pendingClub for the next TRACK press.
+   *
+   *  Manual picks "stick": once the player taps a club, we mark the
+   *  pendingClub as user-owned so subsequent auto-suggestions (distance
+   *  changes as they walk closer) don't overwrite it. */
+  const pendingClubManualRef = useRef(false);
   const pickClub = (club: string | null) => {
+    pendingClubManualRef.current = club !== null;
     setPendingClub(club);
     if (activeShot && club) {
       setActiveShot({ ...activeShot, club });
@@ -790,6 +892,135 @@ export default function ScoringScreen() {
     const minSurface = isDem ? 1 : 3;
     if (Math.abs(adj) < minSurface) return null;
     return { adj, playsLike: yardsToPin + adj, uphill: adj > 0 };
+  })();
+
+  // ── Auto-suggest the most likely club from yardsToPin ─────────────────
+  // Picks the bag club whose median distance is closest to the current
+  // remaining yardage. Putter chosen automatically when very close to the
+  // pin. Premium-gated: matches "smart caddie" features in commercial apps.
+  const suggestedClub = useMemo<string | null>(() => {
+    if (!userIsPremium || !clubStats?.length || yardsToPin == null) return null;
+    if (yardsToPin <= 5) {
+      // Tap-in range — putter if it's in the bag.
+      return clubStats.some((c) => c.club === 'putter') ? 'putter' : null;
+    }
+    let best: { club: string; diff: number } | null = null;
+    for (const c of clubStats) {
+      if (c.median_yds <= 0) continue;
+      // Skip the putter for full-shot suggestions — players don't putt 100 yds.
+      if (c.club === 'putter') continue;
+      const diff = Math.abs(c.median_yds - yardsToPin);
+      if (!best || diff < best.diff) best = { club: c.club, diff };
+    }
+    return best?.club ?? null;
+  }, [userIsPremium, clubStats, yardsToPin]);
+
+  // Push the suggestion into pendingClub when the player hasn't manually
+  // picked one. Re-runs on yardage change so as you walk to your ball, the
+  // recommendation updates if the right club changes.
+  useEffect(() => {
+    if (!userIsPremium) return;
+    if (activeShot) return;                    // tracking — don't disturb the active club
+    if (pendingClubManualRef.current) return;  // user chose manually — respect it
+    if (!suggestedClub) return;
+    if (pendingClub === suggestedClub) return;
+    setPendingClub(suggestedClub);
+  }, [userIsPremium, activeShot, suggestedClub, pendingClub]);
+
+  // ── Past shots near my current spot ───────────────────────────────────
+  // Pulls past rounds at this hole and keeps only the segments whose START
+  // was within ~20m of where the player is right now. Lets them see "last
+  // time I was here, the ball ended up over there" — useful for picking
+  // a target line based on what's actually worked before.
+  type PastSeg = { start: { lat: number; lng: number }; end: { lat: number; lng: number }; club?: string; match_id: string; created_at: string };
+  const NEARBY_RADIUS_M = 20;
+  const nearbyPastShots = useMemo<PastSeg[]>(() => {
+    if (!userIsPremium || !userCoord || currentHoleNum == null) return [];
+    const rounds = pastShotsByHole[currentHoleNum];
+    if (!rounds?.length) return [];
+    const here = { lat: userCoord.latitude, lng: userCoord.longitude };
+    const out: PastSeg[] = [];
+    for (const round of rounds) {
+      const raw: any[] = Array.isArray(round.shots) ? round.shots : [];
+      // Convert legacy point format into segments on the fly.
+      const segs: { start: any; end: any; club?: string }[] = [];
+      if (raw.length && raw[0]?.start && raw[0]?.end) {
+        for (const s of raw) {
+          if (s?.start && s?.end) segs.push({ start: s.start, end: s.end, club: s.club });
+        }
+      } else {
+        for (let i = 0; i < raw.length - 1; i++) {
+          segs.push({ start: raw[i], end: raw[i + 1], club: raw[i]?.club });
+        }
+      }
+      for (const s of segs) {
+        const d = distMetres(here.lat, here.lng, s.start.lat, s.start.lng);
+        if (d <= NEARBY_RADIUS_M) {
+          out.push({ ...s, match_id: round.match_id, created_at: round.created_at });
+        }
+      }
+    }
+    return out;
+  }, [
+    userIsPremium, currentHoleNum, pastShotsByHole,
+    // Re-evaluate when the player's coarse position changes (within ~5m).
+    userCoord ? Math.round(userCoord.latitude * 20000) : null,
+    userCoord ? Math.round(userCoord.longitude * 20000) : null,
+  ]);
+
+  // ── Heatmap overlay: project dispersion of the active/pending club onto
+  // the map, anchored at the player's current position with "forward" =
+  // bearing toward the known pin. Premium-only.
+  type LL = { latitude: number; longitude: number };
+  const heatmapPoints = useMemo<LL[]>(() => {
+    if (!userIsPremium || !userCoord || !knownPin || !clubStats?.length) return [];
+    const club = activeShot?.club ?? pendingClub;
+    if (!club) return [];
+    const cs = clubStats.find((c) => c.club === club);
+    if (!cs?.dispersion?.length || !cs.median_yds) return [];
+
+    // Bearing from player to pin, in radians (0 = N, clockwise).
+    const lat1 = userCoord.latitude * Math.PI / 180;
+    const lat2 = knownPin.lat * Math.PI / 180;
+    const dLng = (knownPin.lng - userCoord.longitude) * Math.PI / 180;
+    const yB = Math.sin(dLng) * Math.cos(lat2);
+    const xB = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+    const aimBearing = Math.atan2(yB, xB);
+
+    // Walk a fixed bearing + distance from a start coord. Standard great-circle.
+    const R = 6371000;
+    const YDS_TO_M = 0.9144;
+    const project = (start: LL, bearingRad: number, distYds: number): LL => {
+      const distM = distYds * YDS_TO_M;
+      const sLat = start.latitude * Math.PI / 180;
+      const sLng = start.longitude * Math.PI / 180;
+      const eLat = Math.asin(
+        Math.sin(sLat) * Math.cos(distM / R) +
+        Math.cos(sLat) * Math.sin(distM / R) * Math.cos(bearingRad)
+      );
+      const eLng = sLng + Math.atan2(
+        Math.sin(bearingRad) * Math.sin(distM / R) * Math.cos(sLat),
+        Math.cos(distM / R) - Math.sin(sLat) * Math.sin(eLat)
+      );
+      return { latitude: eLat * 180 / Math.PI, longitude: eLng * 180 / Math.PI };
+    };
+
+    const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
+    return cs.dispersion.map((d) => {
+      // Step 1: forward along aim bearing by (median + long_yds).
+      const forward = project(start, aimBearing, cs.median_yds + d.long_yds);
+      // Step 2: lateral perpendicular to aim. Positive lateral_yds = right.
+      return project(forward, aimBearing + Math.PI / 2, d.lateral_yds);
+    });
+  }, [userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub]);
+
+  // Color for the overlay — track the same palette as the saved-shot lines
+  // so a quick glance ties the lines and the heat together.
+  const heatmapColor = (() => {
+    const club = activeShot?.club ?? pendingClub;
+    if (!club || !clubStats?.length) return SHOT_COLORS[0];
+    const idx = clubStats.findIndex((c) => c.club === club);
+    return SHOT_COLORS[(Math.max(0, idx)) % SHOT_COLORS.length];
   })();
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
@@ -984,6 +1215,7 @@ export default function ScoringScreen() {
     if (next < 0 || next >= holes.length) return;
     setCurrentHole(next);
     setPendingClub(null);    // each hole picks its own club fresh
+    pendingClubManualRef.current = false;
     setActiveShot(null);     // discard any in-progress shot
   };
 
@@ -991,6 +1223,7 @@ export default function ScoringScreen() {
     setScorecardVisible(false);
     setCurrentHole(index);
     setPendingClub(null);
+    pendingClubManualRef.current = false;
     setActiveShot(null);
   };
 
@@ -1231,6 +1464,75 @@ export default function ScoringScreen() {
           </>
         )}
 
+        {/* Past shots from prior rounds at this hole — faint colored lines
+            so they sit visually behind the current round's shots and the
+            heatmap. Each prior round gets its own color from the same palette
+            so a quick glance can compare different rounds. */}
+        {pastHoleShots.flatMap((round, ri) =>
+          round.shots.map((shot, si) => {
+            const color = SHOT_COLORS[ri % SHOT_COLORS.length];
+            return (
+              <React.Fragment key={`past-${round.match_id}-${si}`}>
+                <Polyline
+                  coordinates={[
+                    { latitude: shot.start.lat, longitude: shot.start.lng },
+                    { latitude: shot.end.lat,   longitude: shot.end.lng },
+                  ]}
+                  strokeColor={color + '88'}
+                  strokeWidth={2}
+                  lineDashPattern={[4, 4]}
+                />
+                <Marker
+                  coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                  opacity={0.55}
+                >
+                  <View style={[styles.pastShotDot, { backgroundColor: color }]} />
+                </Marker>
+              </React.Fragment>
+            );
+          })
+        )}
+
+        {/* Past-shot overlay — your shots from previous rounds where you
+            stood within ~20m of your current position. Drawn as faint
+            white-ish dashed lines with small endpoint markers, distinct
+            from the bright current-round colors. */}
+        {nearbyPastShots.map((shot, i) => (
+          <React.Fragment key={`past-${shot.match_id}-${i}`}>
+            <Polyline
+              coordinates={[
+                { latitude: shot.start.lat, longitude: shot.start.lng },
+                { latitude: shot.end.lat,   longitude: shot.end.lng },
+              ]}
+              strokeColor="rgba(255,255,255,0.55)"
+              strokeWidth={2}
+              lineDashPattern={[4, 4]}
+            />
+            <Marker
+              coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
+              anchor={{ x: 0.5, y: 0.5 }}
+              opacity={0.8}
+            >
+              <View style={styles.pastShotEndDot} />
+            </Marker>
+          </React.Fragment>
+        ))}
+
+        {/* Heatmap overlay — projects past shots with the active/pending club
+            onto the map, anchored at the player and aimed at the pin. Many
+            overlapping translucent circles approximate density visually. */}
+        {heatmapPoints.length > 0 && heatmapPoints.map((p, i) => (
+          <Circle
+            key={`heat-${i}`}
+            center={p}
+            radius={2.5}            // metres — small enough to "stack" visually
+            fillColor={heatmapColor + '55'}    // ~33% alpha
+            strokeColor={heatmapColor + '88'}  // slightly stronger stroke
+            strokeWidth={0.5}
+          />
+        ))}
+
         {/* Pin marker (center of green) for the current hole */}
         {knownPin && (
           <Marker
@@ -1402,13 +1704,16 @@ export default function ScoringScreen() {
           </Text>
         </TouchableOpacity>
 
-        {/* CLUB picker. Required before TRACK can be pressed. */}
+        {/* CLUB picker. Required before TRACK can be pressed. Premium users
+            see the auto-suggested club here unless they've picked manually. */}
         <TouchableOpacity
           style={styles.topChip}
           onPress={() => setClubPickerVisible(true)}
           activeOpacity={0.7}
         >
-          <Text style={styles.topChipLabel}>CLUB</Text>
+          <Text style={styles.topChipLabel}>
+            CLUB{userIsPremium && pendingClub && !pendingClubManualRef.current ? ' · AUTO' : ''}
+          </Text>
           <Text style={styles.topChipValue}>
             {(activeShot?.club ?? pendingClub)?.toUpperCase() ?? '—'}
           </Text>
@@ -2046,6 +2351,15 @@ const styles = StyleSheet.create({
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: '#fff', borderWidth: 3,
     shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 2,
+  },
+  pastShotDot: {
+    width: 9, height: 9, borderRadius: 5,
+    borderWidth: 1, borderColor: '#fff',
+  },
+  pastShotEndDot: {
+    width: 9, height: 9, borderRadius: 5,
+    backgroundColor: 'rgba(255,255,255,0.7)',
+    borderWidth: 1, borderColor: 'rgba(0,0,0,0.6)',
   },
 
   // Pin distance + Mark Pin (chip variants are defined above; only the

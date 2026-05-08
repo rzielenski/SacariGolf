@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
   Alert, ActivityIndicator, TextInput, Modal, RefreshControl, Switch,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '../../lib/api';
+import { api, API_BASE } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Clan, ClanMember } from '../../types';
+import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 
 function rankBadge(elo: number) {
   if (elo >= 2000) return { label: 'Diamond', color: '#5b9cf6' };
@@ -34,6 +36,69 @@ export default function ClanDetailScreen() {
   const [inviteVisible, setInviteVisible] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
   const [loadingFriends, setLoadingFriends] = useState(false);
+
+  // Avatar / theme state
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [themePickerVisible, setThemePickerVisible] = useState(false);
+
+  const changeAvatar = async () => {
+    if (uploadingAvatar) return;
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Allow photo access to set a clan avatar.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.8,
+      base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    setUploadingAvatar(true);
+    try {
+      const asset = result.assets[0];
+      const mime = asset.mimeType ?? 'image/jpeg';
+      const { avatar_url } = await api.clans.uploadAvatar(id, asset.base64!, mime);
+      // Cache-bust the URL so the new image shows immediately.
+      setClan((prev) => prev ? { ...prev, avatar_url: `${avatar_url}?t=${Date.now()}` } as any : prev);
+    } catch (e: any) {
+      Alert.alert('Upload failed', e.message ?? 'Try again.');
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const setTheme = async (track: ThemeTrack) => {
+    try {
+      await api.clans.update(id, { theme: track });
+      setClan((prev) => prev ? {
+        ...prev,
+        theme_track_id: track.trackId,
+        theme_track_title: track.title,
+        theme_track_artist: track.artist,
+        theme_track_artwork: track.artworkUrl,
+        theme_track_preview: track.previewUrl,
+      } as any : prev);
+    } catch (e: any) {
+      Alert.alert('Could not save theme', e.message ?? 'Try again.');
+    }
+  };
+
+  const clearTheme = async () => {
+    try {
+      await api.clans.update(id, { theme: null });
+      setClan((prev) => prev ? {
+        ...prev,
+        theme_track_id: null, theme_track_title: null,
+        theme_track_artist: null, theme_track_artwork: null,
+        theme_track_preview: null,
+      } as any : prev);
+    } catch (e: any) {
+      Alert.alert('Could not clear theme', e.message ?? 'Try again.');
+    }
+  };
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -194,9 +259,29 @@ export default function ClanDetailScreen() {
       >
         {/* Clan identity */}
         <View style={styles.clanHero}>
-          <View style={styles.clanIcon}>
-            <Text style={styles.clanIconText}>{clan.name[0].toUpperCase()}</Text>
-          </View>
+          <TouchableOpacity
+            onPress={isLeader ? changeAvatar : undefined}
+            disabled={!isLeader || uploadingAvatar}
+            activeOpacity={isLeader ? 0.8 : 1}
+          >
+            {(clan as any).avatar_url ? (
+              <Image
+                source={{ uri: `${API_BASE}${(clan as any).avatar_url}` }}
+                style={styles.clanAvatar}
+              />
+            ) : (
+              <View style={styles.clanIcon}>
+                <Text style={styles.clanIconText}>{clan.name[0].toUpperCase()}</Text>
+              </View>
+            )}
+            {isLeader && (
+              <View style={styles.clanAvatarEditBadge}>
+                <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800' }}>
+                  {uploadingAvatar ? '…' : '✎'}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
           <Text style={styles.clanName}>{clan.name}</Text>
           <View style={styles.badgeRow}>
             <View style={[styles.badge, { borderColor: rank.color }]}>
@@ -210,6 +295,45 @@ export default function ClanDetailScreen() {
             </View>
           </View>
         </View>
+
+        {/* Theme song row — visible to everyone, editable by the leader.
+            Tapping opens the iTunes search modal; long-press clears. */}
+        {(isLeader || (clan as any).theme_track_title) && (
+          <TouchableOpacity
+            style={styles.themeRow}
+            onPress={() => isLeader && setThemePickerVisible(true)}
+            onLongPress={() => isLeader && (clan as any).theme_track_title && Alert.alert(
+              'Clear theme song?',
+              `Remove "${(clan as any).theme_track_title}"?`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Remove', style: 'destructive', onPress: clearTheme },
+              ],
+            )}
+            disabled={!isLeader}
+            activeOpacity={isLeader ? 0.7 : 1}
+          >
+            {(clan as any).theme_track_artwork ? (
+              <Image source={{ uri: (clan as any).theme_track_artwork }} style={styles.themeArt} />
+            ) : (
+              <View style={[styles.themeArt, { backgroundColor: C.cardAlt, justifyContent: 'center', alignItems: 'center' }]}>
+                <Text style={{ color: C.textMuted, fontSize: 18 }}>♫</Text>
+              </View>
+            )}
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.themeLabel}>CLAN ANTHEM</Text>
+              {(clan as any).theme_track_title ? (
+                <>
+                  <Text style={styles.themeTitle} numberOfLines={1}>{(clan as any).theme_track_title}</Text>
+                  <Text style={styles.themeArtist} numberOfLines={1}>{(clan as any).theme_track_artist}</Text>
+                </>
+              ) : (
+                <Text style={styles.themeArtist}>{isLeader ? 'Tap to pick a theme song' : '—'}</Text>
+              )}
+            </View>
+            {isLeader && <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>}
+          </TouchableOpacity>
+        )}
 
         {/* Stats */}
         <View style={styles.statsRow}>
@@ -372,6 +496,13 @@ export default function ClanDetailScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Theme song picker — iTunes Search modal */}
+      <ThemeSongPicker
+        visible={themePickerVisible}
+        onClose={() => setThemePickerVisible(false)}
+        onPick={setTheme}
+      />
     </View>
   );
 }
@@ -464,6 +595,25 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: C.gold,
   },
   clanIconText: { fontFamily: F.serif, color: C.gold, fontSize: 36, fontWeight: '700' },
+  clanAvatar: {
+    width: 80, height: 80, borderRadius: 8, marginBottom: 12,
+    borderWidth: 2, borderColor: C.gold,
+  },
+  clanAvatarEditBadge: {
+    position: 'absolute', bottom: 12, right: -2,
+    backgroundColor: C.gold, width: 22, height: 22, borderRadius: 11,
+    justifyContent: 'center', alignItems: 'center',
+    borderWidth: 2, borderColor: C.bg,
+  },
+  themeRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    borderRadius: 8, padding: 10, marginBottom: 12,
+  },
+  themeArt: { width: 48, height: 48, borderRadius: 4 },
+  themeLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  themeTitle: { color: C.text, fontWeight: '700', fontSize: 14, marginTop: 2 },
+  themeArtist: { color: C.textMuted, fontSize: 12, marginTop: 1 },
   clanName: { fontFamily: F.serif, color: C.text, fontSize: 26, fontWeight: '700', marginBottom: 10 },
   badgeRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
   badge: {

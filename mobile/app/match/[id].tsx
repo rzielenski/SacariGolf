@@ -11,6 +11,7 @@ import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
 import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
+import { MatchFoundIntro, SidePlayer } from '../../components/MatchFoundIntro';
 
 export default function MatchLobbyScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -23,6 +24,23 @@ export default function MatchLobbyScreen() {
   const [cancelling, setCancelling] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+  // First-view "VS" intro — shown once per match per device, then suppressed.
+  const [introVisible, setIntroVisible] = useState(false);
+
+  // Check if we've already shown the intro for this match. AsyncStorage key
+  // is per-match so revisiting a match later in the day doesn't re-trigger.
+  useEffect(() => {
+    if (!match || !user || introVisible) return;
+    // Only show for matches with an opposing side (skip solos / unmatched).
+    const sides = new Set((match.players ?? []).map((p: any) => p.side));
+    if (sides.size < 2) return;
+    const key = `match_intro_seen_${id}`;
+    AsyncStorage.getItem(key).then((seen) => {
+      if (seen) return;
+      setIntroVisible(true);
+      AsyncStorage.setItem(key, '1').catch(() => { });
+    });
+  }, [match, user, id, introVisible]);
 
   const load = useCallback(async () => {
     try {
@@ -123,7 +141,14 @@ export default function MatchLobbyScreen() {
     }
   };
 
+  // Group players by side for the intro. The viewer's own side is rendered
+  // on the left, opponent on the right — irrespective of side number.
+  const mySideNum: 1 | 2 = (myPlayer?.side === 2 ? 2 : 1);
+  const side1Players: SidePlayer[] = (match?.players ?? []).filter((p: any) => p.side === 1) as any;
+  const side2Players: SidePlayer[] = (match?.players ?? []).filter((p: any) => p.side === 2) as any;
+
   return (
+    <View style={{ flex: 1, backgroundColor: C.bg }}>
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
         <Text style={styles.backBtnText}>← Back</Text>
@@ -332,6 +357,16 @@ export default function MatchLobbyScreen() {
         }}
       />
     </ScrollView>
+
+    {/* Match-found "VS" intro overlay — shown once per match per device. */}
+    <MatchFoundIntro
+      visible={introVisible}
+      meSide={mySideNum}
+      side1Players={side1Players}
+      side2Players={side2Players}
+      onDismiss={() => setIntroVisible(false)}
+    />
+    </View>
   );
 }
 

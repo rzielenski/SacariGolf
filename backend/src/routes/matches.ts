@@ -137,12 +137,32 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
             t.course_id, t.num_holes,
             c.course_name,
-            r.round_id, r.hole_scores, r.hole_stats
+            r.round_id, r.hole_scores, r.hole_stats,
+            -- Clan attribution (for the match-found "VS" transition).
+            -- Picks the player's most-recently-joined clan as their banner.
+            cl.clan_id,
+            cl.name              AS clan_name,
+            cl.elo               AS clan_elo,
+            cl.avatar_url        AS clan_avatar_url,
+            cl.theme_track_title AS clan_theme_title,
+            cl.theme_track_artist AS clan_theme_artist,
+            cl.theme_track_artwork AS clan_theme_artwork,
+            cl.theme_track_preview AS clan_theme_preview
      FROM match_players mp
      JOIN users u ON u.user_id = mp.user_id
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
      LEFT JOIN courses c ON c.course_id = t.course_id
      LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+     LEFT JOIN LATERAL (
+       SELECT cl.clan_id, cl.name, cl.elo, cl.avatar_url,
+              cl.theme_track_title, cl.theme_track_artist,
+              cl.theme_track_artwork, cl.theme_track_preview
+         FROM clan_members cm
+         JOIN clans cl ON cl.clan_id = cm.clan_id
+        WHERE cm.user_id = mp.user_id
+        ORDER BY cm.joined_at DESC
+        LIMIT 1
+     ) cl ON true
      WHERE mp.match_id = $1`,
     [req.params.id]
   );

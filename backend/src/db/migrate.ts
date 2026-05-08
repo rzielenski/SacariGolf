@@ -20,6 +20,33 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Clan customization: avatar image (uploaded like user avatars) and a
+    // theme song sourced from the iTunes Search API (preview URL is a 30s
+    // CDN-hosted MP4/M4A that any client can stream without auth).
+    name: 'clans.avatar_and_theme',
+    sql: `
+      ALTER TABLE clans
+        ADD COLUMN IF NOT EXISTS avatar_url             TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_id         TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_title      TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_artist     TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_artwork    TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_preview    TEXT;
+    `,
+  },
+  {
+    // Distinct flag from `completed`. A match becomes `cancelled` when:
+    //   • the player abandons it (no activity for 24h, auto-set by cron)
+    //   • someone explicitly cancels (future feature)
+    // Cancelled matches are excluded from stats, handicap, ELO, and "active
+    // round" lookups. They remain in the table for audit/debug.
+    name: 'matches.cancelled_flag',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
+  {
     // pin_contributions originally tracked only WHO contributed (for perks).
     // We now also store WHERE (each user's GPS reading), so we can median-blend
     // multiple contributions on the same hole and converge on the true cup

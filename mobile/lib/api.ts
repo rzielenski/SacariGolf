@@ -106,6 +106,16 @@ export const api = {
       sg_holes: number;
       sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number } | null;
     }>('GET', `/users/${id}/stats`),
+    holeShots: (id: string, courseId: string, holeNum: number, excludeMatchId?: string) => {
+      const q = new URLSearchParams({
+        courseId,
+        holeNum: String(holeNum),
+        ...(excludeMatchId ? { excludeMatchId } : {}),
+      });
+      return request<{
+        rounds: { match_id: string; created_at: string; shots: any[] }[];
+      }>('GET', `/users/${id}/hole-shots?${q.toString()}`);
+    },
     sgAdvanced: (id: string) => request<{
       shots_used: number;
       holes_used: number;
@@ -250,7 +260,13 @@ export const api = {
     get: (id: string) => request<any>('GET', `/clans/${id}`),
     create: (name: string, clanMode: string) => request<any>('POST', '/clans', { name, clanMode }),
     join: (id: string) => request<any>('POST', `/clans/${id}/join`, {}),
-    update: (id: string, body: { name?: string; isPublic?: boolean }) => request<any>('PATCH', `/clans/${id}`, body),
+    update: (id: string, body: {
+      name?: string;
+      isPublic?: boolean;
+      theme?: { trackId: string; title: string; artist: string; artworkUrl?: string; previewUrl: string } | null;
+    }) => request<any>('PATCH', `/clans/${id}`, body),
+    uploadAvatar: (id: string, imageBase64: string, mimeType: string) =>
+      request<{ avatar_url: string }>('POST', `/clans/${id}/avatar`, { imageBase64, mimeType }),
     kick: (id: string, userId: string) => request<any>('DELETE', `/clans/${id}/members/${userId}`, {}),
     leave: (id: string, userId: string) => request<any>('DELETE', `/clans/${id}/members/${userId}`, {}),
     transfer: (id: string, toUserId: string) => request<any>('POST', `/clans/${id}/transfer`, { toUserId }),

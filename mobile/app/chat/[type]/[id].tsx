@@ -51,7 +51,14 @@ export default function ChatScreen() {
         ? { clanId: id, body: trimmed }
         : { toUserId: id, body: trimmed };
       const msg = await api.messages.send(params);
-      setMessages((prev) => [...prev, msg]);
+      // Race-safe append: if a poll fired between the POST being committed
+      // server-side and its response coming back, the polled list may
+      // already contain this message. Dedupe by message_id so we don't
+      // briefly show two copies (the duplicate would otherwise vanish on
+      // the next poll, ~5s later — exactly the visible flash).
+      setMessages((prev) => (
+        prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
+      ));
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     } catch { setText(trimmed); } finally { setSending(false); }
   };

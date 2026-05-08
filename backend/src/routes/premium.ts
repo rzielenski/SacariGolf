@@ -182,4 +182,140 @@ router.post('/admin/revoke', async (req, res) => {
   }
 });
 
+/**
+ * Dev-only — seed a user's account with realistic dummy club-shot data so
+ * the heatmap and auto-club-suggest features can be exercised before the
+ * user has played enough live rounds. Same `x-admin-token` gate as the
+ * other admin endpoints.
+ *
+ *   POST /premium/admin/seed-clubs
+ *     header: x-admin-token
+ *     body:   { email: string,
+ *               clubMedians: { driver?: number, '7i'?: number, ... },
+ *               shotsPerClub?: number   // default 25
+ *             }
+ *
+ * Generates `shotsPerClub` segments per club with Gaussian-noised distance
+ * (~10% of median) and bearing (~5° std). All shots originate from a single
+ * fixed lat/lng so the dispersion stats compute cleanly. Inserts a single
+ * practice match + match_players row + one shot_tracks row to host the data.
+ */
+router.post('/admin/seed-clubs', async (req, res) => {
+  const expected = process.env.PREMIUM_ADMIN_TOKEN;
+  const provided = req.header('x-admin-token');
+  if (!expected || !provided || provided !== expected) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const { email, clubMedians, shotsPerClub = 25 } = req.body ?? {};
+  if (typeof email !== 'string' || !clubMedians || typeof clubMedians !== 'object') {
+    return res.status(400).json({ error: 'email and clubMedians required' });
+  }
+
+  // Lookup user
+  const { rows: userRows } = await pool.query(
+    `SELECT user_id FROM users WHERE email = $1`,
+    [email.trim().toLowerCase()]
+  );
+  if (!userRows.length) return res.status(404).json({ error: 'User not found' });
+  const userId = userRows[0].user_id;
+
+  // Box-Muller transform for Gaussian noise.
+  const randNorm = () => {
+    const u = 1 - Math.random(), v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+
+  // Walk a fixed bearing + distance from a start coord.
+  const R = 6371000;
+  const YDS_TO_M = 0.9144;
+  const project = (
+    start: { lat: number; lng: number },
+    bearingRad: number,
+    distYds: number,
+  ) => {
+    const distM = distYds * YDS_TO_M;
+    const sLat = start.lat * Math.PI / 180;
+    const sLng = start.lng * Math.PI / 180;
+    const eLat = Math.asin(
+      Math.sin(sLat) * Math.cos(distM / R) +
+      Math.cos(sLat) * Math.sin(distM / R) * Math.cos(bearingRad)
+    );
+    const eLng = sLng + Math.atan2(
+      Math.sin(bearingRad) * Math.sin(distM / R) * Math.cos(sLat),
+      Math.cos(distM / R) - Math.sin(sLat) * Math.sin(eLat)
+    );
+    return { lat: eLat * 180 / Math.PI, lng: eLng * 180 / Math.PI };
+  };
+
+  // Anchor everything at one fictitious tee box. The actual location is
+  // irrelevant — the club-stats aggregator only uses relative geometry.
+  const ORIGIN = { lat: 40.0, lng: -74.0 };
+
+  const allShots: any[] = [];
+  for (const [club, raw] of Object.entries(clubMedians)) {
+    const median = Number(raw);
+    if (!Number.isFinite(median) || median <= 0) continue;
+    // Distance noise: 10% std (realistic-ish for a 10-handicap).
+    // Bearing noise: ~5° std → 9% lateral spread at a given distance.
+    const distSigmaYds = median * 0.10;
+    const bearingSigmaRad = 5 * Math.PI / 180;
+    for (let i = 0; i < shotsPerClub; i++) {
+      const dist = Math.max(10, median + randNorm() * distSigmaYds);
+      const bearing = randNorm() * bearingSigmaRad;
+      // Tiny per-shot start jitter so the points don't land literally on top
+      // of each other (helps haversine stay non-zero on edge cases).
+      const start = project(ORIGIN, Math.random() * 2 * Math.PI, 1);
+      const end = project(start, bearing, dist);
+      allShots.push({
+        club: club.toLowerCase(),
+        start: { lat: start.lat, lng: start.lng },
+        end:   { lat: end.lat,   lng: end.lng   },
+        recorded_at: new Date(Date.now() - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+    }
+  }
+
+  if (!allShots.length) return res.status(400).json({ error: 'No valid clubs in clubMedians' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Practice match record so the join in club-stats finds the rows.
+    const { rows: m } = await client.query(
+      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, completed)
+       VALUES ('solo', '[seed] club data', true, 'stroke', 18, true)
+       RETURNING match_id`,
+      []
+    );
+    const matchId = m[0].match_id;
+    await client.query(
+      `INSERT INTO match_players (match_id, user_id, side, completed)
+       VALUES ($1, $2, 1, true)`,
+      [matchId, userId]
+    );
+    // Stuff every shot into hole_num=1 — the club-stats endpoint doesn't
+    // care which hole the shots are on, just iterates the JSONB array.
+    await client.query(
+      `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
+       VALUES ($1, $2, 1, $3, NOW())`,
+      [matchId, userId, JSON.stringify(allShots)]
+    );
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      match_id: matchId,
+      total_shots: allShots.length,
+      clubs: Object.fromEntries(
+        Object.entries(clubMedians).map(([k, v]) => [k.toLowerCase(), v])
+      ),
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /premium/admin/seed-clubs failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
 export default router;
