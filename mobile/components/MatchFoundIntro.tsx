@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing,
+  View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing, Modal,
 } from 'react-native';
 import { Audio } from 'expo-av';
 import { C, F } from '../lib/colors';
@@ -113,7 +113,9 @@ export function MatchFoundIntro({
     };
   }, [visible, opponentTheme]);
 
-  if (!visible) return null;
+  // Don't early-return on !visible — the Modal handles that itself. Bailing
+  // out here would unmount the Animated.Value refs and reset the animation
+  // each time the parent re-renders, defeating the whole purpose.
 
   const renderSide = (
     players: SidePlayer[],
@@ -172,22 +174,35 @@ export function MatchFoundIntro({
     );
   };
 
+  // Wrapping in <Modal transparent> so the overlay floats above EVERY screen
+  // regardless of where MatchFoundWatcher sits in the layout tree. Without
+  // this, an absolute-positioned View can be drawn UNDER the Stack navigator
+  // (later siblings paint on top), making the intro invisible until you
+  // navigate.
   return (
-    <Animated.View style={[s.backdrop, { opacity: fadeIn }]} pointerEvents="auto">
-      <View style={s.row}>
-        {renderSide(side1Players, meSide === 1, leftSlide)}
+    <Modal
+      visible={visible}
+      transparent
+      animationType="none"
+      onRequestClose={onDismiss}
+      statusBarTranslucent
+    >
+      <Animated.View style={[s.backdrop, { opacity: fadeIn }]} pointerEvents="auto">
+        <View style={s.row}>
+          {renderSide(side1Players, meSide === 1, leftSlide)}
 
-        <Animated.View style={[s.versusBadge, { transform: [{ scale: versusScale }] }]}>
-          <Text style={s.versusText}>VS</Text>
-        </Animated.View>
+          <Animated.View style={[s.versusBadge, { transform: [{ scale: versusScale }] }]}>
+            <Text style={s.versusText}>VS</Text>
+          </Animated.View>
 
-        {renderSide(side2Players, meSide === 2, rightSlide)}
-      </View>
+          {renderSide(side2Players, meSide === 2, rightSlide)}
+        </View>
 
-      <TouchableOpacity onPress={onDismiss} style={s.dismissBtn} activeOpacity={0.85}>
-        <Text style={s.dismissText}>TAP TO START</Text>
-      </TouchableOpacity>
-    </Animated.View>
+        <TouchableOpacity onPress={onDismiss} style={s.dismissBtn} activeOpacity={0.85}>
+          <Text style={s.dismissText}>TAP TO START</Text>
+        </TouchableOpacity>
+      </Animated.View>
+    </Modal>
   );
 }
 
