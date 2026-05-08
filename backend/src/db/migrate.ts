@@ -20,6 +20,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // pin_contributions originally tracked only WHO contributed (for perks).
+    // We now also store WHERE (each user's GPS reading), so we can median-blend
+    // multiple contributions on the same hole and converge on the true cup
+    // position over time. Columns are nullable so old rows survive.
+    name: 'pin_contributions.add_coords',
+    sql: `
+      ALTER TABLE pin_contributions
+        ADD COLUMN IF NOT EXISTS lat REAL,
+        ADD COLUMN IF NOT EXISTS lng REAL,
+        ADD COLUMN IF NOT EXISTS elevation_m REAL;
+    `,
+  },
+  {
     // One-shot grant: every account created before the cutoff timestamp gets
     // lifetime premium ('founder' plan) as a thank-you to early users. Future
     // signups (created_at >= cutoff) are unaffected. Idempotent because the

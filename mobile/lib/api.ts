@@ -142,6 +142,11 @@ export const api = {
       observed_at: string | null;
       cached: boolean;
     }>('GET', `/weather?lat=${lat}&lng=${lng}`),
+    elevation: (lat: number, lng: number) => request<{
+      elevation_m: number;
+      source: 'usgs_3dep' | 'open_meteo_copernicus' | string;
+      cached: boolean;
+    }>('GET', `/weather/elevation?lat=${lat}&lng=${lng}`),
   },
 
   premium: {
@@ -190,10 +195,13 @@ export const api = {
     }) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
-    saveShotTrack: (id: string, holeNum: number, shots: { lat: number; lng: number; elevation_m?: number; club?: string; lie?: string }[]) =>
+    saveShotTrack: (id: string, holeNum: number, shots: any[]) =>
+      // Accepts either segment-format or legacy point-format. The server
+      // sanitises both and stores them as JSONB, so callers can pass through
+      // whatever shape the local state holds.
       request<any>('PUT', `/matches/${id}/shots/${holeNum}`, { shots }),
     contributePin: (id: string, holeId: string, lat: number, lng: number, elevationM?: number | null) =>
-      request<any>('POST', `/matches/${id}/pin`, { holeId, lat, lng, elevationM }),
+      request<{ success: true; samples: number }>('POST', `/matches/${id}/pin`, { holeId, lat, lng, elevationM }),
     listShotTracks: (id: string, userId?: string) =>
       request<{ user_id: string; hole_num: number; shots: { lat: number; lng: number }[] }[]>(
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`

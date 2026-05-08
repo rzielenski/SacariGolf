@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Platform } from 'react-native';
+import { Platform, AppState, Keyboard } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
@@ -69,10 +69,30 @@ function AuthGuard() {
   );
 }
 
+/**
+ * Dismisses the on-screen keyboard whenever the app moves to background or
+ * inactive state. iOS sometimes mis-restores layout dimensions if the
+ * keyboard was visible at the moment of suspension — text fields end up
+ * pushed off-screen, modals don't recenter, etc. Closing the keyboard before
+ * suspension avoids the whole class of bug.
+ */
+function KeyboardDismissOnBackground() {
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'inactive' || state === 'background') {
+        Keyboard.dismiss();
+      }
+    });
+    return () => sub.remove();
+  }, []);
+  return null;
+}
+
 export default function RootLayout() {
   return (
     <AuthProvider>
       <StatusBar style="light" />
+      <KeyboardDismissOnBackground />
       <AuthGuard />
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />

@@ -361,19 +361,37 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     return Math.atan2(y, x);
   }
 
-  for (const row of rows) {
-    const shots: any[] = Array.isArray(row.shots) ? row.shots : [];
-    for (let i = 0; i < shots.length - 1; i++) {
-      const cur = shots[i];
-      const nxt = shots[i + 1];
+  /** Walk the per-hole shot list, normalising both the new segment format
+   *  and the legacy point format into (start, end, club) triples. */
+  const eachShotSegment = (rawShots: any[]): { start: any; end: any; club: string }[] => {
+    if (!rawShots.length) return [];
+    if (rawShots[0]?.start && rawShots[0]?.end) {
+      // New segment format
+      return rawShots
+        .filter((s: any) => s?.start && s?.end && typeof s.club === 'string')
+        .map((s: any) => ({ start: s.start, end: s.end, club: s.club }));
+    }
+    // Legacy: points where shots[i] = "where shot i+1 was hit FROM"
+    const out: { start: any; end: any; club: string }[] = [];
+    for (let i = 0; i < rawShots.length - 1; i++) {
+      const cur = rawShots[i];
+      const nxt = rawShots[i + 1];
       if (typeof cur?.lat !== 'number' || typeof nxt?.lat !== 'number') continue;
-      if (typeof cur.club !== 'string') continue; // untagged → skip
-      const dist_m = haversine(cur, nxt);
+      if (typeof cur.club !== 'string') continue;
+      out.push({ start: cur, end: nxt, club: cur.club });
+    }
+    return out;
+  };
+
+  for (const row of rows) {
+    const segments = eachShotSegment(Array.isArray(row.shots) ? row.shots : []);
+    for (const seg of segments) {
+      const dist_m = haversine(seg.start, seg.end);
       if (dist_m < 1 || dist_m > 500) continue; // sanity: drop GPS noise / impossibly long
-      const b = bearing(cur, nxt);
-      const arr = byClub.get(cur.club) ?? [];
+      const b = bearing(seg.start, seg.end);
+      const arr = byClub.get(seg.club) ?? [];
       arr.push({ dist_m, bearing: b });
-      byClub.set(cur.club, arr);
+      byClub.set(seg.club, arr);
     }
   }
 
@@ -497,45 +515,56 @@ router.get('/:id/sg-advanced', requireAuth, wrap(async (req: AuthRequest, res: R
   const holeIdsSeen = new Set<string>();
   const matchIdsSeen = new Set<string>();
 
+  // Normalize either format into a flat list of {start, end, club, lie} tuples
+  // per hole. The new segment format is canonical; legacy points get paired.
+  const toSegments = (raw: any[]): { start: any; end: any; club?: string; lie?: string }[] => {
+    if (!raw.length) return [];
+    if (raw[0]?.start && raw[0]?.end) {
+      return raw
+        .filter((s: any) => s?.start && s?.end)
+        .map((s: any) => ({ start: s.start, end: s.end, club: s.club, lie: s.lie }));
+    }
+    const out: { start: any; end: any; club?: string; lie?: string }[] = [];
+    for (let i = 0; i < raw.length - 1; i++) {
+      out.push({ start: raw[i], end: raw[i + 1], club: raw[i]?.club, lie: raw[i]?.lie });
+    }
+    return out;
+  };
+
   for (const row of rows) {
-    const shots: any[] = Array.isArray(row.shots) ? row.shots : [];
+    const segments = toSegments(Array.isArray(row.shots) ? row.shots : []);
     const holes: any[] = Array.isArray(row.holes) ? row.holes : [];
     const holeMeta = holes.find((h: any) => h.hole_num === row.hole_num);
     if (!holeMeta || holeMeta.pin_lat == null || holeMeta.pin_lng == null) continue;
-    if (shots.length < 2) continue;
+    if (segments.length === 0) continue;
 
     const par = holeMeta.par ?? 4;
     const pin = { lat: holeMeta.pin_lat, lng: holeMeta.pin_lng };
     const holed = (Array.isArray(row.hole_scores) ? row.hole_scores[row.hole_num - 1] : null) ?? null;
 
-    for (let i = 0; i < shots.length; i++) {
-      const cur = shots[i];
-      const nxt = shots[i + 1];
-      const isLast = i === shots.length - 1;
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const isLast = i === segments.length - 1;
 
-      // Start lie: prefer player tag, else infer from position.
-      const startLie: Lie = (cur?.lie as Lie) ?? (i === 0 ? 'tee' : 'fairway');
-      const startDist = haversineYds(cur, pin);
+      const startDist = haversineYds(seg.start, pin);
+      const endDist0  = haversineYds(seg.end, pin);
       if (startDist == null) continue;
 
+      // Start lie: prefer player tag, else infer.
+      const startLie: Lie = (seg.lie as Lie) ?? (i === 0 ? 'tee' : 'fairway');
+
+      // End lie/distance: holed out on the last shot if scorecard total matches.
       let endLie: Lie;
       let endDist: number;
-
-      if (isLast) {
-        // Final tracked shot: assume holed out if scorecard agrees with shot count
-        // (i.e. shots.length === holed). Otherwise end at last GPS point.
-        if (typeof holed === 'number' && shots.length === holed) {
-          endLie = 'green';
-          endDist = 0;
-        } else {
-          endLie = (cur?.lie as Lie) ?? 'green';
-          // estimate end distance from the GPS itself: if very close to pin, assume holed
-          const d = haversineYds(cur, pin) ?? 0;
-          endDist = d < 3 ? 0 : d;
-        }
+      if (isLast && typeof holed === 'number' && segments.length === holed) {
+        endLie = 'green';
+        endDist = 0;
+      } else if (endDist0 != null) {
+        endLie = endDist0 < 30 ? 'green' : 'fairway';
+        endDist = endDist0 < 3 ? 0 : endDist0;
       } else {
-        endLie = (nxt?.lie as Lie) ?? (haversineYds(nxt, pin)! < 30 ? 'green' : 'fairway');
-        endDist = haversineYds(nxt, pin) ?? 0;
+        // No usable end distance — skip this shot entirely.
+        continue;
       }
 
       allShots.push({

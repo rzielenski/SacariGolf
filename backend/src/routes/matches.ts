@@ -263,8 +263,9 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
 // is silently dropped rather than failing the whole submission.
 const FAIRWAY_MISS_VALUES = new Set(['left', 'right']);
 const GREEN_MISS_VALUES = new Set(['left', 'right', 'short', 'long']);
-// Snap stops for putt-distance entry, in feet. Anything else is dropped.
-const PUTT_DIST_STOPS = new Set([3, 6, 10, 15, 20, 30, 40, 50]);
+// Putt distances are integer feet, range 0–120 (a 120-ft putt would be a
+// nearly-cross-green lag — any longer is almost certainly bad input).
+const PUTT_DIST_MAX_FT = 120;
 
 function cleanHoleStats(input: any, expectedLength: number): any[] {
   if (!Array.isArray(input)) return [];
@@ -282,12 +283,13 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
       cleaned.greenMiss = h.greenMiss;
     }
     if (Array.isArray(h.puttDistances)) {
-      // Cap at the player's putt count when known, else 10. Drop non-stop values.
+      // Cap at the player's putt count when known, else 10. Each entry is an
+      // integer feet value; reject negatives, oversized, and non-numeric.
       const max = typeof cleaned.putts === 'number' ? cleaned.putts : 10;
       const dists = h.puttDistances
         .slice(0, max)
-        .map((d: any) => Number(d))
-        .filter((d: number) => Number.isFinite(d) && PUTT_DIST_STOPS.has(d));
+        .map((d: any) => Math.round(Number(d)))
+        .filter((d: number) => Number.isFinite(d) && d >= 0 && d <= PUTT_DIST_MAX_FT);
       if (dists.length) cleaned.puttDistances = dists;
     }
     return cleaned;
@@ -977,33 +979,66 @@ router.post('/:id/pin', requireAuth, wrap(async (req: AuthRequest, res: Response
     return res.status(404).json({ error: 'Not in match or hole not on your teebox' });
   }
 
-  // First contributor wins — only set the pin if it's currently null.
-  // Elevation is also only set on the first contribution (avoids drift across
-  // many players' GPS altitudes; later we can crowd-average if we want).
+  // Upsert this user's contribution for this match+hole. Re-marking by the
+  // same user during the same match overwrites their previous reading
+  // (helpful: their GPS may have improved since the first attempt).
   await pool.query(
-    `UPDATE holes
-     SET pin_lat = $2, pin_lng = $3,
-         pin_elevation_m = COALESCE(pin_elevation_m, $5),
-         pin_set_at = NOW(), pin_set_by = $4
-     WHERE hole_id = $1 AND pin_lat IS NULL`,
-    [holeId, lat, lng, req.userId, elev]
+    `INSERT INTO pin_contributions (user_id, match_id, hole_id, lat, lng, elevation_m)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, match_id, hole_id) DO UPDATE
+       SET lat = EXCLUDED.lat,
+           lng = EXCLUDED.lng,
+           elevation_m = COALESCE(EXCLUDED.elevation_m, pin_contributions.elevation_m),
+           created_at = NOW()`,
+    [req.userId, req.params.id, holeId, lat, lng, elev]
   );
-  // If the pin was already set but elevation wasn't, fill it in (lets the data
-  // get better as more players walk the course with altitude-capable devices).
-  if (elev != null) {
+
+  // Recompute the canonical pin position from ALL contributors (across every
+  // match) using a median to stay robust against an outlier from someone who
+  // marked while walking past the green. PostgreSQL's percentile_cont(0.5)
+  // gives us a continuous median which is fine for lat/lng.
+  const { rows: medRows } = await pool.query(
+    `SELECT
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) AS med_lat,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lng) AS med_lng,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY elevation_m)
+         FILTER (WHERE elevation_m IS NOT NULL)              AS med_elev,
+       COUNT(*)::int                                          AS samples
+     FROM pin_contributions
+     WHERE hole_id = $1 AND lat IS NOT NULL AND lng IS NOT NULL`,
+    [holeId]
+  );
+  const med = medRows[0];
+  if (med?.med_lat != null && med.med_lng != null) {
+    // Try to upgrade pin elevation to a DEM (digital elevation model) value
+    // from Open-Meteo's terrain API, which is far more accurate than median
+    // GPS altitude (~1m DEM error vs ±15m GPS error). We fall back to the
+    // median GPS reading if DEM lookup fails so slope still works.
+    let elevToStore: number | null = med.med_elev ?? null;
+    try {
+      const dResp = await fetch(
+        `https://api.open-meteo.com/v1/elevation?latitude=${med.med_lat}&longitude=${med.med_lng}`
+      );
+      if (dResp.ok) {
+        const dData = await dResp.json() as any;
+        const demM = dData?.elevation?.[0];
+        if (typeof demM === 'number') elevToStore = demM;
+      }
+    } catch { /* DEM is best-effort — fall through to GPS median */ }
+
     await pool.query(
-      `UPDATE holes SET pin_elevation_m = $2
-       WHERE hole_id = $1 AND pin_elevation_m IS NULL`,
-      [holeId, elev]
+      `UPDATE holes
+         SET pin_lat = $2,
+             pin_lng = $3,
+             pin_elevation_m = COALESCE($4, pin_elevation_m),
+             pin_set_at = NOW(),
+             pin_set_by = COALESCE(pin_set_by, $5)
+       WHERE hole_id = $1`,
+      [holeId, med.med_lat, med.med_lng, elevToStore, req.userId]
     );
   }
-  await pool.query(
-    `INSERT INTO pin_contributions (user_id, match_id, hole_id)
-     VALUES ($1, $2, $3)
-     ON CONFLICT DO NOTHING`,
-    [req.userId, req.params.id, holeId]
-  );
-  return res.json({ success: true });
+
+  return res.json({ success: true, samples: med?.samples ?? 1 });
 }));
 
 // PUT a player's shot track for a single hole. Replaces the full array.
@@ -1026,26 +1061,50 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   ]);
   const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
 
-  // Validate shape — clamp to reasonable values; reject anything obviously bogus.
-  // Elevation, club, and lie are optional (older clients won't send them) but
-  // persisted when present.
-  const clean = shots
-    .filter((s: any) => typeof s?.lat === 'number' && typeof s?.lng === 'number'
-      && Math.abs(s.lat) <= 90 && Math.abs(s.lng) <= 180)
-    .slice(0, 30) // hard cap shots per hole
-    .map((s: any) => {
-      const out: any = { lat: s.lat, lng: s.lng };
-      if (typeof s.elevation_m === 'number' && s.elevation_m > -500 && s.elevation_m < 9000) {
-        out.elevation_m = s.elevation_m;
-      }
+  // Validate one Pt (used for start/end of segments AND for legacy points).
+  const cleanPt = (p: any): { lat: number; lng: number; elevation_m?: number } | null => {
+    if (typeof p?.lat !== 'number' || typeof p?.lng !== 'number') return null;
+    if (Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180) return null;
+    const out: any = { lat: p.lat, lng: p.lng };
+    if (typeof p.elevation_m === 'number' && p.elevation_m > -500 && p.elevation_m < 9000) {
+      out.elevation_m = p.elevation_m;
+    }
+    return out;
+  };
+
+  // Accept BOTH formats:
+  //   • New (segments): { club, lie?, start: Pt, end: Pt, recorded_at? }
+  //   • Legacy (points): { lat, lng, elevation_m?, club?, lie? }
+  // Old clients that send legacy data still work; new clients send segments.
+  const clean = shots.slice(0, 30).map((s: any) => {
+    if (s?.start && s?.end) {
+      const start = cleanPt(s.start);
+      const end = cleanPt(s.end);
+      if (!start || !end) return null;
+      const out: any = { start, end };
       if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
         out.club = s.club.toLowerCase();
+      } else if (typeof s.club === 'string') {
+        out.club = 'unknown';
       }
       if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
         out.lie = s.lie.toLowerCase();
       }
+      if (typeof s.recorded_at === 'string') out.recorded_at = s.recorded_at;
       return out;
-    });
+    }
+    // Legacy point format
+    const pt = cleanPt(s);
+    if (!pt) return null;
+    const out: any = { ...pt };
+    if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+      out.club = s.club.toLowerCase();
+    }
+    if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
+      out.lie = s.lie.toLowerCase();
+    }
+    return out;
+  }).filter((s: any) => s !== null);
 
   // Verify membership
   const { rows } = await pool.query(

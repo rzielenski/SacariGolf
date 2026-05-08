@@ -21,6 +21,8 @@ const router = Router();
 
 const OPEN_METEO = 'https://api.open-meteo.com/v1/forecast';
 const OPEN_METEO_ELEV = 'https://api.open-meteo.com/v1/elevation';
+// USGS 3DEP — 1m resolution, ~1m vertical accuracy, US-only. Free, no key.
+const USGS_EPQS = 'https://epqs.nationalmap.gov/v1/json';
 
 // Tiny in-memory cache so we don't hammer Open-Meteo when many players load
 // the same course in quick succession. Keyed by quantized lat/lng.
@@ -31,6 +33,24 @@ const CACHE_TTL_MS = 10 * 60 * 1000;  // 10 minutes — weather doesn't change t
 function cacheKey(lat: number, lng: number) {
   // Round to 0.01° (~1.1 km). Players within a single course collapse to one entry.
   return `${lat.toFixed(2)},${lng.toFixed(2)}`;
+}
+
+// Elevation is keyed at finer precision because terrain varies meaningfully
+// across a course (a hilltop and a fairway 200m away differ by 30m+). 5
+// decimal places ≈ 1.1m grid, plenty fine for slope work. Elevation also
+// doesn't drift, so the cache lives much longer than weather.
+type ElevEntry = { fetched_at: number; data: { elevation_m: number; source: string } };
+const elevCache = new Map<string, ElevEntry>();
+const ELEV_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days
+function elevKey(lat: number, lng: number) {
+  return `${lat.toFixed(5)},${lng.toFixed(5)}`;
+}
+
+/** USGS 3DEP coverage box (CONUS + most of Alaska). Coarse but rejects
+ *  obviously-non-US points before wasting an upstream request. */
+function isLikelyUS(lat: number, lng: number) {
+  return (lat >= 24 && lat <= 50 && lng >= -125 && lng <= -66)
+      || (lat >= 51 && lat <= 72 && lng >= -180 && lng <= -130); // AK
 }
 
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
@@ -94,6 +114,72 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     console.error('GET /weather upstream failed:', err);
     res.status(502).json({ error: 'Weather provider unavailable' });
   }
+}));
+
+/**
+ * High-precision elevation lookup for a single lat/lng. Used by the slope
+ * adjustment on the scoring screen.
+ *
+ * Provider chain (best → worst):
+ *   1. USGS 3DEP (US only, 1m resolution, ~1m vertical accuracy)
+ *   2. Open-Meteo Copernicus DEM (worldwide, 30m resolution, ~3m accuracy)
+ *
+ * Aggressively cached at ~1m grid for 30 days — terrain doesn't change.
+ */
+router.get('/elevation', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const lat = parseFloat(String(req.query.lat ?? ''));
+  const lng = parseFloat(String(req.query.lng ?? ''));
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ error: 'lat and lng required' });
+  }
+
+  const key = elevKey(lat, lng);
+  const cached = elevCache.get(key);
+  if (cached && Date.now() - cached.fetched_at < ELEV_TTL_MS) {
+    return res.json({ ...cached.data, cached: true });
+  }
+
+  let elevation_m: number | null = null;
+  let source = 'unknown';
+
+  // Try USGS 3DEP first when in coverage. Fastest, most accurate option.
+  if (isLikelyUS(lat, lng)) {
+    try {
+      const r = await fetch(`${USGS_EPQS}?x=${lng}&y=${lat}&units=Meters&wkid=4326&includeDate=false`);
+      if (r.ok) {
+        const d = await r.json() as any;
+        // EPQS returns { value: <elevation in meters> } — rejects with -1000000 for no data
+        const v = typeof d?.value === 'number' ? d.value : Number(d?.value);
+        if (Number.isFinite(v) && v > -500 && v < 9000) {
+          elevation_m = v;
+          source = 'usgs_3dep';
+        }
+      }
+    } catch { /* fall through to global provider */ }
+  }
+
+  // Fallback: Open-Meteo's worldwide Copernicus DEM
+  if (elevation_m == null) {
+    try {
+      const r = await fetch(`${OPEN_METEO_ELEV}?latitude=${lat}&longitude=${lng}`);
+      if (r.ok) {
+        const d = await r.json() as any;
+        const v = d?.elevation?.[0];
+        if (typeof v === 'number' && v > -500 && v < 9000) {
+          elevation_m = v;
+          source = 'open_meteo_copernicus';
+        }
+      }
+    } catch { /* */ }
+  }
+
+  if (elevation_m == null) {
+    return res.status(502).json({ error: 'No elevation data available for this location' });
+  }
+
+  const data = { elevation_m, source };
+  elevCache.set(key, { fetched_at: Date.now(), data });
+  res.json({ ...data, cached: false });
 }));
 
 export default router;

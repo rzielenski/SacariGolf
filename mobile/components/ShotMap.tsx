@@ -4,9 +4,13 @@ import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 
-const SHOT_COLORS = ['#4a9eff', '#9c2128', '#7aab78', '#bdb9aa', '#c89a45', '#a672b8', '#d4794a'];
+// High-contrast palette tuned to stand out against satellite-imagery green.
+const SHOT_COLORS = ['#4a9eff', '#e63946', '#ff66c4', '#ff9f1c', '#00bbf9', '#9d4edd', '#ffd60a'];
 
-type Shot = { lat: number; lng: number };
+/** Normalised shot — the renderer treats both segment and legacy formats
+ *  the same way once we've converted them on load. */
+type Pt = { lat: number; lng: number };
+type Shot = { start: Pt; end: Pt; club?: string };
 
 function distYards(lat1: number, lon1: number, lat2: number, lon2: number) {
   const R = 6371000;
@@ -45,18 +49,34 @@ export function ShotMapModal({
       .then((rows) => {
         if (cancelled) return;
         const row = rows.find((r) => r.hole_num === holeNum);
-        setShots(row?.shots ?? []);
+        const raw = (row?.shots as any[]) ?? [];
+        if (!raw.length) { setShots([]); return; }
+        // Detect format and normalise to segment shape.
+        if (raw[0]?.start && raw[0]?.end) {
+          setShots(raw as Shot[]);
+        } else {
+          const segs: Shot[] = [];
+          for (let i = 0; i < raw.length - 1; i++) {
+            segs.push({
+              start: { lat: raw[i].lat, lng: raw[i].lng },
+              end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng },
+              club:  raw[i]?.club,
+            });
+          }
+          setShots(segs);
+        }
       })
       .catch(() => { if (!cancelled) setShots([]); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [visible, matchId, userId, holeNum]);
 
-  // Compute initial map region from shot extents
+  // Compute initial map region from all shot endpoints
   const region: Region | undefined = shots.length > 0
     ? (() => {
-        const lats = shots.map((s) => s.lat);
-        const lngs = shots.map((s) => s.lng);
+        const allPts = shots.flatMap((s) => [s.start, s.end]);
+        const lats = allPts.map((p) => p.lat);
+        const lngs = allPts.map((p) => p.lng);
         const minLat = Math.min(...lats), maxLat = Math.max(...lats);
         const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
         return {
@@ -68,11 +88,10 @@ export function ShotMapModal({
       })()
     : undefined;
 
-  // Per-segment distances
-  const segments = shots.slice(1).map((s, i) => ({
-    from: shots[i],
-    to: s,
-    yards: distYards(shots[i].lat, shots[i].lng, s.lat, s.lng),
+  // Per-shot distances
+  const segments = shots.map((s) => ({
+    yards: distYards(s.start.lat, s.start.lng, s.end.lat, s.end.lng),
+    club: s.club,
   }));
   const totalYards = segments.reduce((a, b) => a + b.yards, 0);
 
@@ -106,28 +125,35 @@ export function ShotMapModal({
                 pitchEnabled={false}
                 rotateEnabled={false}
               >
-                {shots.slice(1).map((sh, i) => (
-                  <Polyline
-                    key={`l${i}`}
-                    coordinates={[
-                      { latitude: shots[i].lat, longitude: shots[i].lng },
-                      { latitude: sh.lat, longitude: sh.lng },
-                    ]}
-                    strokeColor={SHOT_COLORS[i % SHOT_COLORS.length]}
-                    strokeWidth={3}
-                  />
-                ))}
-                {shots.map((sh, i) => (
-                  <Marker
-                    key={`m${i}`}
-                    coordinate={{ latitude: sh.lat, longitude: sh.lng }}
-                    anchor={{ x: 0.5, y: 0.5 }}
-                  >
-                    <View style={[s.dot, { backgroundColor: SHOT_COLORS[i % SHOT_COLORS.length] }]}>
-                      <Text style={s.dotText}>{i + 1}</Text>
-                    </View>
-                  </Marker>
-                ))}
+                {shots.map((shot, i) => {
+                  const color = SHOT_COLORS[i % SHOT_COLORS.length];
+                  return (
+                    <React.Fragment key={`shot-${i}`}>
+                      <Polyline
+                        coordinates={[
+                          { latitude: shot.start.lat, longitude: shot.start.lng },
+                          { latitude: shot.end.lat,   longitude: shot.end.lng },
+                        ]}
+                        strokeColor={color}
+                        strokeWidth={4}
+                      />
+                      <Marker
+                        coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
+                        anchor={{ x: 0.5, y: 0.5 }}
+                      >
+                        <View style={[s.dot, { backgroundColor: color }]}>
+                          <Text style={s.dotText}>{i + 1}</Text>
+                        </View>
+                      </Marker>
+                      <Marker
+                        coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
+                        anchor={{ x: 0.5, y: 0.5 }}
+                      >
+                        <View style={[s.endDot, { borderColor: color }]} />
+                      </Marker>
+                    </React.Fragment>
+                  );
+                })}
               </MapView>
             </View>
 
@@ -148,8 +174,9 @@ export function ShotMapModal({
               {segments.map((seg, i) => (
                 <View key={i} style={s.shotRow}>
                   <View style={[s.shotRowDot, { backgroundColor: SHOT_COLORS[i % SHOT_COLORS.length] }]}>
-                    <Text style={s.shotRowDotText}>{i + 1}→{i + 2}</Text>
+                    <Text style={s.shotRowDotText}>SHOT {i + 1}</Text>
                   </View>
+                  {seg.club && <Text style={s.shotRowClub}>{seg.club.toUpperCase()}</Text>}
                   <Text style={s.shotRowYards}>{Math.round(seg.yards)} yds</Text>
                 </View>
               ))}
@@ -186,6 +213,11 @@ const s = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 3,
   },
   dotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
+  endDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#fff', borderWidth: 3,
+  },
+  shotRowClub: { color: C.gold, fontWeight: '800', fontSize: 11 },
 
   summary: {
     flexDirection: 'row', justifyContent: 'space-around',

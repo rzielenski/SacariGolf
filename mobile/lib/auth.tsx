@@ -69,30 +69,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
-    // Navigate FIRST while we're still legitimately on a screen that has the
-    // logout button — otherwise the calling screen's `if (!user) return null`
-    // can render an empty frame and the redirect from AuthGuard sometimes
-    // doesn't fire on the first tap (Alert dismissal + state propagation race).
-    router.replace('/(auth)/login');
-    await AsyncStorage.removeItem('coc_token');
+    // Order matters here. Two well-known races to dodge:
+    //   1. If we navigate FIRST while user is still truthy, AuthGuard sees
+    //      "user && inAuthGroup" and bounces us right back to /(tabs)/ —
+    //      the user has to tap Log Out a second time for the second pass
+    //      (with cleared state) to land on login.
+    //   2. If we just clear state and rely on AuthGuard to redirect,
+    //      sometimes the next render hasn't run yet and the user briefly
+    //      sees a blank Profile screen (`if (!user) return null`).
+    //
+    // Fix: clear state synchronously, then defer the explicit redirect to
+    // the next frame so React has committed the null user. By then AuthGuard
+    // also agrees we belong on login, so no fight.
     setToken(null);
     setUser(null);
+    AsyncStorage.removeItem('coc_token').catch(() => { });
+    requestAnimationFrame(() => router.replace('/(auth)/login'));
   };
 
   const deleteAccount = async () => {
     // Try the server delete, but never let a network/auth error trap the user
     // in a half-logged-out state. We always end on the login screen with
-    // local state cleared.
+    // local state cleared. Same race-avoidance pattern as logout() above.
     try {
       await api.users.deleteAccount();
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn('deleteAccount: server call failed', err);
     }
-    router.replace('/(auth)/login');
-    await AsyncStorage.removeItem('coc_token');
     setToken(null);
     setUser(null);
+    AsyncStorage.removeItem('coc_token').catch(() => { });
+    requestAnimationFrame(() => router.replace('/(auth)/login'));
   };
 
   const refreshUser = async () => {

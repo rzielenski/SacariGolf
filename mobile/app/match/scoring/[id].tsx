@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Alert, ActivityIndicator, Animated, Dimensions, TextInput, Modal,
@@ -21,7 +21,18 @@ const EXPANDED_H = 380;
 const ON_COURSE_METRES = 3 * 1609.34;
 
 // Per-shot color palette — each successive shot on a hole renders in the next color.
-const SHOT_COLORS = ['#4a9eff', '#9c2128', '#7aab78', '#bdb9aa', '#c89a45', '#a672b8', '#d4794a'];
+// High-contrast palette tuned to stand out against satellite-imagery green
+// (fairway/rough) and brown (sand/dirt). Avoids any greens/yellow-greens
+// that would blend with grass.
+const SHOT_COLORS = [
+  '#4a9eff', // bright blue
+  '#e63946', // crimson
+  '#ff66c4', // magenta
+  '#ff9f1c', // orange
+  '#00bbf9', // cyan
+  '#9d4edd', // violet
+  '#ffd60a', // school-bus yellow
+];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,15 +128,28 @@ export default function ScoringScreen() {
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
 
-  // Per-hole shot tracking. Keyed by hole_num (the actual hole number on the
-  // course, not the index into our `holes` array). elevation_m is the device's
-  // GPS altitude at the moment the shot was tracked — captured so we can
-  // crowdsource pin elevation data and offer slope-adjusted distances.
-  // `club` and `lie` are optional and feed per-club stats / heatmap. Tracking
-  // a club is opt-in: a player can record shots without ever picking one.
-  type ShotPoint = { lat: number; lng: number; elevation_m?: number; club?: string; lie?: string };
-  const [shotsByHole, setShotsByHole] = useState<Record<number, ShotPoint[]>>({});
-  // Pre-selected club for the next shot, persisted across taps. Cleared on hole change.
+  // Per-hole shot tracking. Each shot is a SEGMENT with a start point (where
+  // the player struck the ball) and an end point (where the ball came to
+  // rest, recorded when the player walks to it and taps STOP). Drawn as a
+  // colored polyline on the map for the current hole AND for spectators.
+  //
+  // Recording flow: pick club → tap TRACK (records start) → walk to ball →
+  // tap TRACK again (records end). Repeat.
+  type Pt = { lat: number; lng: number; elevation_m?: number };
+  type Shot = {
+    club: string;
+    lie?: string;
+    start: Pt;
+    end: Pt;
+    recorded_at?: string;
+  };
+  const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
+  // The shot currently being recorded (TRACK pressed once, not yet stopped).
+  // null = idle. Only one shot at a time per hole.
+  type ActiveShot = { club: string; lie?: string; start: Pt; startedAt: string };
+  const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
+  // Pre-selected club for the next shot. Cleared after each recorded shot
+  // and on hole change so the player must consciously pick again.
   const [pendingClub, setPendingClub] = useState<string | null>(null);
   const [clubPickerVisible, setClubPickerVisible] = useState(false);
   // Advanced detail entry modal — miss directions + per-putt distance sliders
@@ -150,6 +174,15 @@ export default function ScoringScreen() {
   // see a NEGATIVE altitude adjustment when playing at sea level (ball
   // flies shorter than they're used to). Fetched once per round.
   const [homeElevationFt, setHomeElevationFt] = useState<number | null>(null);
+
+  // Precise terrain elevation at the player's CURRENT position, sourced from
+  // the high-resolution DEM endpoint (USGS 3DEP for US, Copernicus elsewhere).
+  // Refreshed when the player moves >5m horizontally. This replaces the GPS
+  // altimeter (±15m noise + frame mismatch) for slope calculations.
+  const [playerElevationM, setPlayerElevationM] = useState<number | null>(null);
+  const lastElevFetchCoord = useRef<{ lat: number; lng: number } | null>(null);
+  // Per-session cache so we don't refetch the same lat/lng across renders.
+  const elevCacheRef = useRef<Map<string, number>>(new Map());
 
   // Per-hole stat tracking — putts, chips, fairway hit. Indexed by the hole
   // INDEX in our holes array (not hole_num) so we can submit it as a parallel
@@ -198,6 +231,16 @@ export default function ScoringScreen() {
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const [userCoord, setUserCoord] = useState<{ latitude: number; longitude: number; altitude?: number | null } | null>(null);
   const [measurePin, setMeasurePin] = useState<{ latitude: number; longitude: number } | null>(null);
+  // DEM elevation at the tapped measure point. Looked up once per pin set
+  // and cached locally — terrain doesn't move.
+  const [measureElevationM, setMeasureElevationM] = useState<number | null>(null);
+  // When the user taps the Clear button (which sits inside an absolute-
+  // positioned banner OVER the MapView), iOS's native MapView still receives
+  // the same physical tap — without this guard the map's onPress fires right
+  // after, dropping a NEW measure pin at the banner's screen position. We
+  // record the moment Clear was tapped and ignore map-onPress events that
+  // happen within ~300ms after.
+  const ignoreMapTapUntil = useRef(0);
   const [onCourse, setOnCourse] = useState(true);
   const [following, setFollowing] = useState(true);
   const [locGranted, setLocGranted] = useState(false);
@@ -281,10 +324,32 @@ export default function ScoringScreen() {
           setSelectingCourse(false);
           // Notify friends a round has started (idempotent — backend only fires once)
           api.matches.started(id).catch(() => { });
-          // Hydrate any previously-saved shot tracks for this round
+          // Hydrate any previously-saved shot tracks for this round.
+          // Backward compat: older rounds stored shots as flat point arrays
+          // ([{lat, lng, club?}]); newer rounds use segment objects
+          // ({start, end, club}). Convert legacy data on the fly so resumed
+          // rounds keep their tracks visible.
           api.matches.listShotTracks(id, user?.user_id).then((rows) => {
-            const byHole: Record<number, ShotPoint[]> = {};
-            for (const r of rows) byHole[r.hole_num] = r.shots ?? [];
+            const byHole: Record<number, Shot[]> = {};
+            for (const r of rows) {
+              const raw = (r.shots as any[]) ?? [];
+              if (!raw.length) { byHole[r.hole_num] = []; continue; }
+              if (raw[0]?.start && raw[0]?.end) {
+                byHole[r.hole_num] = raw as Shot[];
+              } else {
+                // Legacy: pair consecutive points into segments
+                const segs: Shot[] = [];
+                for (let i = 0; i < raw.length - 1; i++) {
+                  segs.push({
+                    club: raw[i]?.club ?? 'unknown',
+                    lie: raw[i]?.lie,
+                    start: { lat: raw[i].lat, lng: raw[i].lng, elevation_m: raw[i].elevation_m },
+                    end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng, elevation_m: raw[i + 1].elevation_m },
+                  });
+                }
+                byHole[r.hole_num] = segs;
+              }
+            }
             setShotsByHole(byHole);
           }).catch(() => { });
         }
@@ -451,30 +516,88 @@ export default function ScoringScreen() {
   const currentHoleNum = holes[currentHole]?.hole_num;
   const currentShots = currentHoleNum != null ? (shotsByHole[currentHoleNum] ?? []) : [];
 
-  const persistShots = (holeNum: number, next: ShotPoint[]) => {
+  const persistShots = (holeNum: number, next: Shot[]) => {
     api.matches.saveShotTrack(id, holeNum, next).catch(() => { /* best-effort */ });
   };
 
-  const recordShot = () => {
+  /** Snapshot the player's current GPS into a Pt. */
+  const ptFromCoord = (): Pt | null => {
+    if (!userCoord) return null;
+    const p: Pt = { lat: userCoord.latitude, lng: userCoord.longitude };
+    if (typeof userCoord.altitude === 'number') p.elevation_m = userCoord.altitude;
+    return p;
+  };
+
+  /**
+   * Toggle shot tracking. Three states:
+   *   • Idle, no club        → prompt to pick one, open picker
+   *   • Idle, club selected  → start tracking (record start point)
+   *   • Tracking             → stop, finalize the shot, persist
+   */
+  const onTrackPress = () => {
     if (!userCoord || currentHoleNum == null) {
       Alert.alert('No GPS', 'Wait for a GPS lock before tracking shots.');
       return;
     }
+    // STOP tracking — finalize the active shot.
+    if (activeShot) {
+      const end = ptFromCoord();
+      if (!end) return;
+      const newShot: Shot = {
+        club: activeShot.club,
+        lie: activeShot.lie,
+        start: activeShot.start,
+        end,
+        recorded_at: new Date().toISOString(),
+      };
+      setShotsByHole((prev) => {
+        const cur = prev[currentHoleNum] ?? [];
+        const next = [...cur, newShot];
+        persistShots(currentHoleNum, next);
+        return { ...prev, [currentHoleNum]: next };
+      });
+      setActiveShot(null);
+      // Force the player to consciously pick the club for the NEXT shot.
+      setPendingClub(null);
+      return;
+    }
+    // START tracking — but only if a club has been picked first.
+    if (!pendingClub) {
+      Alert.alert(
+        'Pick a club first',
+        'Tap CLUB to choose what you\'re hitting before tracking the shot.',
+        [{ text: 'OK', onPress: () => setClubPickerVisible(true) }],
+      );
+      return;
+    }
+    const start = ptFromCoord();
+    if (!start) return;
+    setActiveShot({
+      club: pendingClub,
+      start,
+      startedAt: new Date().toISOString(),
+    });
+  };
+
+  /** Cancel the in-progress shot without recording it. */
+  const cancelActiveShot = () => {
+    if (!activeShot) return;
+    setActiveShot(null);
+  };
+
+  /** Long-press the TRACK button to undo: cancel active shot, OR remove the
+   *  most recently recorded shot if idle. */
+  const onTrackLongPress = () => {
+    if (activeShot) { cancelActiveShot(); return; }
+    if (currentHoleNum == null) return;
     setShotsByHole((prev) => {
       const cur = prev[currentHoleNum] ?? [];
-      const point: ShotPoint = { lat: userCoord.latitude, lng: userCoord.longitude };
-      if (typeof userCoord.altitude === 'number') point.elevation_m = userCoord.altitude;
-      // Tag with the currently-selected club so the per-club aggregator can
-      // bucket this shot. Optional — skipped if user never picked one.
-      if (pendingClub) point.club = pendingClub;
-      const next = [...cur, point];
+      if (!cur.length) return prev;
+      const next = cur.slice(0, -1);
       persistShots(currentHoleNum, next);
       return { ...prev, [currentHoleNum]: next };
     });
   };
-
-  // Keep the ref pointed at the current closure so the watch listener (which
-  // we register once) always operates on fresh state.
   // ── Home-course elevation baseline ─────────────────────────────────────
   // One-time fetch when we know the user's home course coordinates. Reused
   // by the altitude adjustment so distances are calibrated relative to where
@@ -491,6 +614,50 @@ export default function ScoringScreen() {
       .catch(() => { /* non-fatal — falls back to absolute altitude */ });
     return () => { cancelled = true; };
   }, [userIsPremium, (user as any)?.home_course_lat, (user as any)?.home_course_lng]);
+
+  // ── DEM elevation for an arbitrary tapped point (measure tool) ─────────
+  useEffect(() => {
+    if (!measurePin) { setMeasureElevationM(null); return; }
+    const k = `${measurePin.latitude.toFixed(5)},${measurePin.longitude.toFixed(5)}`;
+    const cached = elevCacheRef.current.get(k);
+    if (cached != null) { setMeasureElevationM(cached); return; }
+    let cancelled = false;
+    api.weather.elevation(measurePin.latitude, measurePin.longitude)
+      .then((d) => {
+        if (cancelled) return;
+        elevCacheRef.current.set(k, d.elevation_m);
+        setMeasureElevationM(d.elevation_m);
+      })
+      .catch(() => { /* slope on measure stays disabled this tap */ });
+    return () => { cancelled = true; };
+  }, [measurePin?.latitude, measurePin?.longitude]);
+
+  // ── Precise player elevation (DEM-sourced) ─────────────────────────────
+  // Fetches every time the player moves >5m horizontally. Hits the
+  // high-resolution elevation endpoint (USGS 3DEP for US courses, Copernicus
+  // DEM elsewhere). This is the foundation of accurate slope.
+  useEffect(() => {
+    if (!userCoord) return;
+    const last = lastElevFetchCoord.current;
+    if (last) {
+      const moved = distMetres(last.lat, last.lng, userCoord.latitude, userCoord.longitude);
+      if (moved < 5) return;
+    }
+    lastElevFetchCoord.current = { lat: userCoord.latitude, lng: userCoord.longitude };
+    // Fine-grid cache key — matches server-side rounding.
+    const k = `${userCoord.latitude.toFixed(5)},${userCoord.longitude.toFixed(5)}`;
+    const cached = elevCacheRef.current.get(k);
+    if (cached != null) { setPlayerElevationM(cached); return; }
+    let cancelled = false;
+    api.weather.elevation(userCoord.latitude, userCoord.longitude)
+      .then((d) => {
+        if (cancelled) return;
+        elevCacheRef.current.set(k, d.elevation_m);
+        setPlayerElevationM(d.elevation_m);
+      })
+      .catch(() => { /* slope just won't update this tick — non-fatal */ });
+    return () => { cancelled = true; };
+  }, [userCoord?.latitude, userCoord?.longitude]);
 
   // ── Weather fetching ───────────────────────────────────────────────────
   // Premium-only — non-premium users get the upgrade prompt instead, so we
@@ -546,34 +713,22 @@ export default function ScoringScreen() {
       return next;
     });
     // currentShots is a new array each render so include only its length / last
-    // coordinates as deps to avoid infinite loops.
+    // segment endpoint as deps to avoid infinite loops.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentHole, currentShots.length, currentShots[currentShots.length - 1]?.lat, currentShots[currentShots.length - 1]?.lng]);
+  }, [
+    currentHole, currentShots.length,
+    currentShots[currentShots.length - 1]?.end?.lat,
+    currentShots[currentShots.length - 1]?.end?.lng,
+  ]);
 
-  // Set/replace the club tag on the most-recent shot of the current hole.
-  const setLastShotClub = (club: string | null) => {
-    if (currentHoleNum == null) return;
+  /** Pick a club. If a shot is currently being tracked (start already
+   *  recorded), the active shot's club is updated. Otherwise the choice
+   *  is held in pendingClub for the next TRACK press. */
+  const pickClub = (club: string | null) => {
     setPendingClub(club);
-    setShotsByHole((prev) => {
-      const cur = prev[currentHoleNum] ?? [];
-      if (!cur.length) return prev; // no shot yet — pendingClub will tag the next one
-      const last = { ...cur[cur.length - 1] };
-      if (club) last.club = club; else delete last.club;
-      const next = [...cur.slice(0, -1), last];
-      persistShots(currentHoleNum, next);
-      return { ...prev, [currentHoleNum]: next };
-    });
-  };
-
-  const undoShot = () => {
-    if (currentHoleNum == null) return;
-    setShotsByHole((prev) => {
-      const cur = prev[currentHoleNum] ?? [];
-      if (!cur.length) return prev;
-      const next = cur.slice(0, -1);
-      persistShots(currentHoleNum, next);
-      return { ...prev, [currentHoleNum]: next };
-    });
+    if (activeShot && club) {
+      setActiveShot({ ...activeShot, club });
+    }
   };
 
   // ── Pin (center of green) — community-contributed location & distance ──────
@@ -582,6 +737,9 @@ export default function ScoringScreen() {
   // even though the holes API response is cached in our state).
   type LocalPin = { lat: number; lng: number; elevation_m?: number | null };
   const [pinByHole, setPinByHole] = useState<Record<string, LocalPin>>({});
+  // Count of distinct GPS contributions to each hole's pin position. Used to
+  // show users how confident the pin location is and encourage re-marking.
+  const [pinSamplesByHole, setPinSamplesByHole] = useState<Record<string, number>>({});
   const currentHoleObj = holes[currentHole];
   const knownPin: LocalPin | null = currentHoleObj
     ? (pinByHole[currentHoleObj.hole_id] ??
@@ -599,17 +757,38 @@ export default function ScoringScreen() {
     : null;
 
   // Slope adjustment: each metre of elevation gain adds ~1.09 yards to the
-  // play distance (and conversely, downhill plays shorter). Only computed
-  // when we have both pin and player altitude AND the difference is large
-  // enough to be meaningful (≥ 2 yards) — suppresses GPS noise on flat holes.
+  // play distance (downhill plays shorter, conversely).
+  //
+  // BOTH elevations now come from the same DEM-frame source:
+  //   • Player: high-resolution DEM at current GPS position (USGS 3DEP for
+  //     US, Copernicus elsewhere) — refreshed every 5m of movement.
+  //   • Pin: DEM elevation looked up server-side when the pin was last
+  //     contributed (see contributePin route).
+  // Both are orthometric/sea-level so the difference is meaningful. Expected
+  // slope error is ~±5 yds (limited by DEM accuracy, ~2-4m per side). Falls
+  // back to GPS altimeter only when DEM lookup hasn't completed yet.
   const slopeAdjustment = (() => {
     if (!knownPin || !userCoord || yardsToPin == null) return null;
-    const pinElev = knownPin.elevation_m;
-    const userAlt = userCoord.altitude;
-    if (typeof pinElev !== 'number' || typeof userAlt !== 'number') return null;
-    const elevDiffM = pinElev - userAlt;       // positive = uphill
-    const adj = Math.round(elevDiffM * 1.09);  // yards of correction
-    if (Math.abs(adj) < 2) return null;        // too small to surface
+    const pinElevM = knownPin.elevation_m;
+    if (typeof pinElevM !== 'number') return null;
+
+    let userElevM: number | null = null;
+    let isDem = false;
+    if (typeof playerElevationM === 'number') {
+      userElevM = playerElevationM;
+      isDem = true;
+    } else if (typeof userCoord.altitude === 'number') {
+      // GPS altimeter fallback while the first DEM lookup is in flight.
+      userElevM = userCoord.altitude;
+    }
+    if (userElevM == null) return null;
+
+    const elevDiffM = pinElevM - userElevM;       // positive = uphill
+    const adj = Math.round(elevDiffM * 1.09);     // yards of correction
+    // Suppress sub-yard noise on the DEM path (high confidence); tighter
+    // threshold on GPS fallback to avoid surfacing pure noise.
+    const minSurface = isDem ? 1 : 3;
+    if (Math.abs(adj) < minSurface) return null;
     return { adj, playsLike: yardsToPin + adj, uphill: adj > 0 };
   })();
 
@@ -670,6 +849,11 @@ export default function ScoringScreen() {
     const point: LocalPin = { lat: userCoord.latitude, lng: userCoord.longitude, elevation_m };
     setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
     api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng, elevation_m)
+      .then((res) => {
+        if (typeof res?.samples === 'number') {
+          setPinSamplesByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: res.samples }));
+        }
+      })
       .catch((e: any) => {
         // Roll back local override so the user can retry rather than silently
         // believing the pin was saved.
@@ -799,13 +983,15 @@ export default function ScoringScreen() {
     const next = currentHole + dir;
     if (next < 0 || next >= holes.length) return;
     setCurrentHole(next);
-    setPendingClub(null); // reset club tag between holes
+    setPendingClub(null);    // each hole picks its own club fresh
+    setActiveShot(null);     // discard any in-progress shot
   };
 
   const jumpToHole = (index: number) => {
     setScorecardVisible(false);
     setCurrentHole(index);
     setPendingClub(null);
+    setActiveShot(null);
   };
 
   const handleSubmit = () => {
@@ -1019,6 +1205,9 @@ export default function ScoringScreen() {
         showsCompass
         mapType="satellite"
         onPress={(e) => {
+          // Suppress phantom taps that bleed through from overlay buttons
+          // (e.g. the Clear button on the measure banner).
+          if (Date.now() < ignoreMapTapUntil.current) return;
           setMeasurePin(e.nativeEvent.coordinate);
           setFollowing(false);
         }}
@@ -1055,33 +1244,62 @@ export default function ScoringScreen() {
           </Marker>
         )}
 
-        {/* Shot track for the current hole — each shot a different color line */}
-        {currentShots.map((sh, i) => {
-          if (i === 0) return null;
-          const prev = currentShots[i - 1];
+        {/* Saved shots for the current hole — each as a colored start→end
+            polyline, with a numbered start dot and end dot. */}
+        {currentShots.map((shot, i) => {
+          const color = SHOT_COLORS[i % SHOT_COLORS.length];
           return (
-            <Polyline
-              key={`shot-line-${i}`}
-              coordinates={[
-                { latitude: prev.lat, longitude: prev.lng },
-                { latitude: sh.lat, longitude: sh.lng },
-              ]}
-              strokeColor={SHOT_COLORS[(i - 1) % SHOT_COLORS.length]}
-              strokeWidth={3}
-            />
+            <React.Fragment key={`shot-${i}`}>
+              <Polyline
+                coordinates={[
+                  { latitude: shot.start.lat, longitude: shot.start.lng },
+                  { latitude: shot.end.lat,   longitude: shot.end.lng },
+                ]}
+                strokeColor={color}
+                strokeWidth={4}
+              />
+              <Marker
+                coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <View style={[styles.shotDot, { backgroundColor: color }]}>
+                  <Text style={styles.shotDotText}>{i + 1}</Text>
+                </View>
+              </Marker>
+              <Marker
+                coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <View style={[styles.shotEndDot, { borderColor: color }]} />
+              </Marker>
+            </React.Fragment>
           );
         })}
-        {currentShots.map((sh, i) => (
-          <Marker
-            key={`shot-${i}`}
-            coordinate={{ latitude: sh.lat, longitude: sh.lng }}
-            anchor={{ x: 0.5, y: 0.5 }}
-          >
-            <View style={[styles.shotDot, { backgroundColor: SHOT_COLORS[i % SHOT_COLORS.length] }]}>
-              <Text style={styles.shotDotText}>{i + 1}</Text>
-            </View>
-          </Marker>
-        ))}
+
+        {/* Live tracking line — drawn while the player is between TRACK
+            start and TRACK stop. Goes from the start point to current GPS,
+            updates as the player walks. */}
+        {activeShot && userCoord && (
+          <>
+            <Polyline
+              coordinates={[
+                { latitude: activeShot.start.lat, longitude: activeShot.start.lng },
+                { latitude: userCoord.latitude,   longitude: userCoord.longitude },
+              ]}
+              strokeColor={SHOT_COLORS[currentShots.length % SHOT_COLORS.length]}
+              strokeWidth={4}
+              lineDashPattern={[8, 6]}
+            />
+            <Marker
+              coordinate={{ latitude: activeShot.start.lat, longitude: activeShot.start.lng }}
+              anchor={{ x: 0.5, y: 0.5 }}
+            >
+              <View style={[styles.shotDot, { backgroundColor: SHOT_COLORS[currentShots.length % SHOT_COLORS.length] }]}>
+                <Text style={styles.shotDotText}>{currentShots.length + 1}</Text>
+              </View>
+            </Marker>
+          </>
+        )}
       </MapView>
 
       {/* ── Top bar (floats over map) ── */}
@@ -1157,22 +1375,34 @@ export default function ScoringScreen() {
           )}
         </TouchableOpacity>
 
-        {/* TRACK SHOT — record a GPS waypoint. Long-press to undo. */}
+        {/* TRACK SHOT — toggles start/stop. Long-press while idle removes
+            the most recent shot; long-press while tracking cancels. */}
         <TouchableOpacity
-          style={[styles.topChip, styles.topChipPrimary, !userCoord && { opacity: 0.4 }]}
-          onPress={recordShot}
-          onLongPress={undoShot}
+          style={[
+            styles.topChip,
+            styles.topChipPrimary,
+            !userCoord && { opacity: 0.4 },
+            activeShot && styles.topChipTracking,
+          ]}
+          onPress={onTrackPress}
+          onLongPress={onTrackLongPress}
           delayLongPress={500}
           disabled={!userCoord}
           activeOpacity={0.7}
         >
-          <Text style={[styles.topChipLabel, { color: C.gold }]}>TRACK SHOT</Text>
+          <Text style={[styles.topChipLabel, { color: activeShot ? C.red : C.gold }]}>
+            {activeShot ? 'STOP' : 'TRACK'}
+          </Text>
           <Text style={styles.topChipValue}>
-            {currentShots.length === 0 ? 'Tap to begin' : `Shot ${currentShots.length + 1}`}
+            {activeShot
+              ? `${activeShot.club.toUpperCase()} live`
+              : currentShots.length === 0
+                ? 'Tap to begin'
+                : `Shot ${currentShots.length + 1}`}
           </Text>
         </TouchableOpacity>
 
-        {/* CLUB tag — opens picker for the current/next shot. */}
+        {/* CLUB picker. Required before TRACK can be pressed. */}
         <TouchableOpacity
           style={styles.topChip}
           onPress={() => setClubPickerVisible(true)}
@@ -1180,9 +1410,7 @@ export default function ScoringScreen() {
         >
           <Text style={styles.topChipLabel}>CLUB</Text>
           <Text style={styles.topChipValue}>
-            {currentShots[currentShots.length - 1]?.club?.toUpperCase()
-              ?? pendingClub?.toUpperCase()
-              ?? '—'}
+            {(activeShot?.club ?? pendingClub)?.toUpperCase() ?? '—'}
           </Text>
         </TouchableOpacity>
       </View>
@@ -1200,28 +1428,28 @@ export default function ScoringScreen() {
           onPress={() => setClubPickerVisible(false)}
         >
           <View style={styles.clubPickerSheet}>
-            <Text style={styles.clubPickerTitle}>Tag Club</Text>
+            <Text style={styles.clubPickerTitle}>Pick Club</Text>
             <Text style={styles.clubPickerSub}>
-              {currentShots.length === 0
-                ? 'Pre-select a club for your next tracked shot'
-                : `Tagging shot #${currentShots.length}`}
+              {activeShot
+                ? `Tracking ${activeShot.club.toUpperCase()} shot — change club:`
+                : 'Required before you start tracking'}
             </Text>
             <View style={styles.clubGrid}>
               {(['driver','3w','5w','7w','hybrid','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const).map(c => {
-                const active = (currentShots[currentShots.length - 1]?.club ?? pendingClub) === c;
+                const active = (activeShot?.club ?? pendingClub) === c;
                 return (
                   <TouchableOpacity
                     key={c}
                     style={[styles.clubBtn, active && styles.clubBtnActive]}
-                    onPress={() => { setLastShotClub(c); setClubPickerVisible(false); }}
+                    onPress={() => { pickClub(c); setClubPickerVisible(false); }}
                   >
                     <Text style={[styles.clubBtnText, active && { color: C.bg }]}>{c.toUpperCase()}</Text>
                   </TouchableOpacity>
                 );
               })}
             </View>
-            <TouchableOpacity style={styles.clubClearBtn} onPress={() => { setLastShotClub(null); setClubPickerVisible(false); }}>
-              <Text style={styles.clubClearText}>Clear tag</Text>
+            <TouchableOpacity style={styles.clubClearBtn} onPress={() => { pickClub(null); setClubPickerVisible(false); }}>
+              <Text style={styles.clubClearText}>Clear</Text>
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
@@ -1251,7 +1479,27 @@ export default function ScoringScreen() {
         { bottom: Animated.add(panelAnim, new Animated.Value(12)) },
       ]}>
         {yardsToPin != null ? (
-          <View style={[styles.mapChipBase, styles.pinDistChip]}>
+          // Tappable: lets the user contribute another GPS reading to refine
+          // the crowdsourced pin location. The backend median-blends across
+          // all contributions, so the pin gets more accurate with each one.
+          <TouchableOpacity
+            style={[styles.mapChipBase, styles.pinDistChip]}
+            onPress={() => {
+              if (!userCoord || !currentHoleObj) return;
+              const samples = pinSamplesByHole[currentHoleObj.hole_id] ?? null;
+              Alert.alert(
+                'Refine Pin Location',
+                samples != null
+                  ? `Currently averaged from ${samples} contribution${samples === 1 ? '' : 's'}. Are you standing at the cup right now? Your reading will help refine the location.`
+                  : 'Are you standing at the cup right now? Your reading will help refine the pin location.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Yes, refine', style: 'default', onPress: markPin },
+                ],
+              );
+            }}
+            activeOpacity={0.7}
+          >
             <Text style={styles.pinDistLabel}>TO PIN</Text>
             <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
             {(() => {
@@ -1268,7 +1516,16 @@ export default function ScoringScreen() {
                 </Text>
               );
             })()}
-          </View>
+            {(() => {
+              const samples = currentHoleObj && pinSamplesByHole[currentHoleObj.hole_id];
+              if (!samples) return null;
+              return (
+                <Text style={styles.pinDistSamples}>
+                  {samples} sample{samples === 1 ? '' : 's'} · tap to refine
+                </Text>
+              );
+            })()}
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity
             style={[styles.markPinBtnSmall, !userCoord && { opacity: 0.4 }]}
@@ -1375,16 +1632,15 @@ export default function ScoringScreen() {
       {/* ── Measure distance banner — centered, lifts with score panel ── */}
       {measureDist !== null && (() => {
         const raw = Math.round(measureDist);
-        // Slope adjustment: when the hole has a known pin elevation in the
-        // database AND we have the player's GPS altitude, treat the pin
-        // elevation as a stand-in for "where they're aiming" and apply the
-        // same yards-per-metre slope correction the TO PIN chip uses. It's
-        // an approximation when the tapped point isn't ON the green, but
-        // most measure ops happen on the same hole and the pin is the best
-        // proxy for hole-end elevation.
+        // Slope adjustment: use the DEM elevation at the EXACT tapped point
+        // as the destination, and the player's DEM elevation as the source.
+        // Both in the same orthometric frame → accurate within ~5 yards
+        // anywhere on the planet. Falls back to GPS altimeter while DEM
+        // lookups are still in flight.
         let slopeAdj = 0;
-        if (knownPin?.elevation_m != null && typeof userCoord?.altitude === 'number') {
-          const elevDiffM = knownPin.elevation_m - userCoord.altitude;
+        const playerElev = playerElevationM ?? (typeof userCoord?.altitude === 'number' ? userCoord.altitude : null);
+        if (measureElevationM != null && playerElev != null) {
+          const elevDiffM = measureElevationM - playerElev;
           slopeAdj = Math.round(elevDiffM * 1.09);
         }
         const slopeBase = raw + slopeAdj;
@@ -1435,7 +1691,13 @@ export default function ScoringScreen() {
                 </Text>
               )}
             </View>
-            <TouchableOpacity onPress={() => setMeasurePin(null)} style={styles.distClear}>
+            <TouchableOpacity
+              onPress={() => {
+                ignoreMapTapUntil.current = Date.now() + 300;
+                setMeasurePin(null);
+              }}
+              style={styles.distClear}
+            >
               <Text style={styles.distClearText}>Clear</Text>
             </TouchableOpacity>
           </Animated.View>
@@ -1733,6 +1995,7 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   topChipPrimary: { borderColor: C.gold, borderWidth: 2 },
+  topChipTracking: { borderColor: C.red, borderWidth: 2, backgroundColor: C.red + '22' },
   topChipLocked:  { borderColor: C.textMuted + '88' },
   topChipLabel:   { color: C.textMuted, fontWeight: '800', fontSize: 9, letterSpacing: 1 },
   topChipValue:   { color: C.text, fontWeight: '900', fontSize: 12, marginTop: 2 },
@@ -1779,12 +2042,18 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
   },
   shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
+  shotEndDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#fff', borderWidth: 3,
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 2,
+  },
 
   // Pin distance + Mark Pin (chip variants are defined above; only the
   // text styling lives here)
   pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
   pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 11, marginTop: 3, opacity: 0.95 },
+  pinDistSamples: { color: '#fff', fontSize: 9, marginTop: 2, opacity: 0.75, fontStyle: 'italic' },
 
   // Weather details sheet
   wxGrid: { flexDirection: 'row', gap: 8, marginTop: 12 },
@@ -2045,26 +2314,32 @@ const styles = StyleSheet.create({
   putLabel: { color: C.text, fontSize: 13, fontWeight: '700' },
   putVal: { color: C.gold, fontFamily: F.serif, fontSize: 16, fontWeight: '900' },
 
-  // SnapSlider primitive
-  snapWrap: { paddingVertical: 12 },
-  snapTrack: {
-    height: 4, backgroundColor: C.border, borderRadius: 2,
-    flexDirection: 'row', alignItems: 'center', position: 'relative',
+  // WheelPicker (horizontal scroll-wheel for putt distance)
+  wheelWrap: {
+    height: 64, backgroundColor: C.bg, borderRadius: 8,
+    borderWidth: 1, borderColor: C.border, overflow: 'hidden',
+    position: 'relative', justifyContent: 'center',
   },
-  snapFill: { position: 'absolute', left: 0, top: 0, height: 4, backgroundColor: C.gold, borderRadius: 2 },
-  snapStop: {
-    width: 8, height: 8, borderRadius: 4, backgroundColor: C.cardAlt,
-    borderWidth: 1, borderColor: C.border, position: 'absolute',
+  wheelSelector: {
+    position: 'absolute', top: 4, bottom: 4,
+    backgroundColor: C.gold + '14',
+    borderLeftWidth: 1, borderRightWidth: 1, borderColor: C.gold + '88',
   },
-  snapStopActive: { backgroundColor: C.gold, borderColor: C.gold },
-  snapThumb: {
-    position: 'absolute', width: 22, height: 22, borderRadius: 11,
-    backgroundColor: C.gold, borderWidth: 2, borderColor: C.bg,
-    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+  wheelArrow: {
+    position: 'absolute', top: 0, width: 8, height: 6,
+    borderLeftWidth: 4, borderRightWidth: 4, borderTopWidth: 6,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent',
+    borderTopColor: C.gold,
   },
-  snapStopLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 18, paddingHorizontal: 2 },
-  snapStopLabel: { color: C.textMuted, fontSize: 10 },
-  snapStopLabelActive: { color: C.gold, fontWeight: '900' },
+  wheelItem: { alignItems: 'center', justifyContent: 'center', height: '100%' },
+  wheelItemText: { color: C.textMuted, fontSize: 14, fontWeight: '600' },
+  wheelItemMajor: { color: C.text, fontSize: 16, fontWeight: '800' },
+  wheelItemActive: { color: C.gold, fontWeight: '900', fontFamily: F.serif, fontSize: 18 },
+  wheelTick: {
+    width: 1, height: 6, backgroundColor: C.border, marginTop: 4,
+  },
+  wheelTickMajor: { height: 10, backgroundColor: C.textMuted },
+  wheelTickActive: { backgroundColor: C.gold, width: 2 },
 
   advCloseBtn: { marginTop: 20, alignSelf: 'center', padding: 10 },
   advCloseText: { color: C.gold, fontSize: 14, fontWeight: '700' },
@@ -2090,22 +2365,19 @@ function bearingRad(a: { lat: number; lng: number }, b: { lat: number; lng: numb
 
 /**
  * Infer per-hole stat fields (fairwayHit/Miss, gir/greenMiss, putts, chips)
- * from a sequence of tracked shot GPS points + the hole's pin location.
+ * from a sequence of tracked shot SEGMENTS + the hole's pin location.
  *
- * Conventions:
- *   • `shots[i]` is the GPS where shot i+1 was struck FROM. So `shots[0]` is
- *     the tee box; `shots[1]` is where the tee shot landed; `shots[2]` is
- *     where shot 2 landed; etc. The ball ending in the cup is implicit.
- *   • "GIR" = the player's `par − 2` shot landed on the green (within ~12 yds).
- *   • Fairway concept only applies to par 4+.
- *   • Green miss direction uses the tee→pin centerline as the reference axis.
- *     Right of line = positive lateral; long = past the pin along the axis.
+ * Each shot is a segment: shot.start = where the player struck the ball,
+ * shot.end = where it came to rest. So:
+ *   • Shot 1's landing = shots[0].end
+ *   • GIR shot's landing = shots[par - 3].end (par 3 → shot 1; par 4 → shot 2)
+ *   • Putt count = shots whose start was on the green
  *
  * Returns only the fields it can confidently derive; everything else stays
  * undefined so the caller can leave manual values intact.
  */
 function inferHoleStatsFromShots(
-  shots: { lat: number; lng: number }[],
+  shots: { start: { lat: number; lng: number }; end: { lat: number; lng: number } }[],
   hole: { par: number; pin_lat?: number | null; pin_lng?: number | null },
 ): {
   fairwayHit?: boolean;
@@ -2117,7 +2389,7 @@ function inferHoleStatsFromShots(
 } {
   if (!hole.pin_lat || !hole.pin_lng || shots.length === 0) return {};
   const pin = { lat: hole.pin_lat, lng: hole.pin_lng };
-  const tee = shots[0];
+  const tee = shots[0].start;
   const centerB = bearingRad(tee, pin);
   const teeToPinYds = haversineYds(tee, pin);
 
@@ -2137,9 +2409,9 @@ function inferHoleStatsFromShots(
 
   const out: ReturnType<typeof inferHoleStatsFromShots> = {};
 
-  // Fairway hit (par 4+, needs the tee shot to have landed somewhere)
-  if (hole.par >= 4 && shots.length >= 2) {
-    const teeShotLanding = shots[1];
+  // Fairway hit (par 4+, needs at least one shot recorded so we have a landing)
+  if (hole.par >= 4 && shots.length >= 1) {
+    const teeShotLanding = shots[0].end;
     const { lateral } = project(teeShotLanding);
     if (Math.abs(lateral) <= FAIRWAY_HALF_YDS) {
       out.fairwayHit = true;
@@ -2150,11 +2422,12 @@ function inferHoleStatsFromShots(
     }
   }
 
-  // GIR: did the player's `par − 2` shot land on the green?
-  // shots[par - 2] is where that shot ENDED (= where the next shot was hit from).
-  const girLandingIdx = hole.par - 2;
-  if (girLandingIdx >= 1 && shots.length > girLandingIdx) {
-    const girLanding = shots[girLandingIdx];
+  // GIR: did the player's `par − 2`th shot land on the green?
+  // That shot is `shots[par - 3]` (zero-indexed). Par 3 → shots[0].end,
+  // par 4 → shots[1].end, par 5 → shots[2].end.
+  const girShotIdx = hole.par - 3;
+  if (girShotIdx >= 0 && shots.length > girShotIdx) {
+    const girLanding = shots[girShotIdx].end;
     const distToPin = haversineYds(girLanding, pin);
     if (distToPin <= GREEN_RADIUS_YDS) {
       out.gir = true;
@@ -2162,31 +2435,24 @@ function inferHoleStatsFromShots(
     } else {
       out.gir = false;
       const { lateral, longitudinal } = project(girLanding);
-      // Decide whether the dominant miss is lateral or distance.
-      const distMiss = longitudinal - teeToPinYds; // + = long, − = short
+      const distMiss = longitudinal - teeToPinYds;
       if (Math.abs(lateral) > Math.abs(distMiss)) {
         out.greenMiss = lateral > 0 ? 'right' : 'left';
       } else {
         out.greenMiss = distMiss > 0 ? 'long' : 'short';
       }
     }
-  } else if (girLandingIdx >= 1 && shots.length === girLandingIdx) {
-    // Player only recorded enough shots to reach the green-attempt position
-    // (e.g. par 4 with 2 tracked shots). No landing position = ambiguous.
-    // Skip auto-fill.
   }
 
-  // Putts and chips — count shots whose start position implies the lie type.
-  // "On green" is within ~GREEN_RADIUS_YDS of pin; chips are the band 12–30 yds.
+  // Putts and chips — count shots whose START was on/near the green.
+  // On-green = within GREEN_RADIUS_YDS of pin; chip = 12–30 yds out.
   let putts = 0, chips = 0;
-  for (let i = 1; i < shots.length; i++) {
-    // shots[i] is the start position of shot (i+1). To check "did shot i+1
-    // come from on/near the green", measure shots[i]'s distance to pin.
-    const dist = haversineYds(shots[i], pin);
+  for (const shot of shots) {
+    const dist = haversineYds(shot.start, pin);
     if (dist <= GREEN_RADIUS_YDS) putts += 1;
     else if (dist <= 30) chips += 1;
   }
-  if (shots.length > 1) {
+  if (shots.length > 0) {
     out.putts = putts;
     out.chips = chips;
   }
@@ -2223,7 +2489,9 @@ function WxRow({ label, yds, extra }: { label: string; yds: number; extra?: stri
 // Lets the player record the direction of fairway and green misses, plus the
 // distance of each individual putt. All optional; informs strokes-gained.
 
-const PUTT_STOPS = [3, 6, 10, 15, 20, 30, 40, 50] as const;
+// Putt distances are stored as integers in feet, range 0–80. The wheel
+// picker renders that range; the data model accepts any non-negative int.
+const PUTT_MAX_FT = 80;
 
 function AdvancedEntryModal({
   visible, onClose, holePar, stat, onChange,
@@ -2241,11 +2509,11 @@ function AdvancedEntryModal({
   const putts  = stat?.putts ?? 0;
   const dists: number[] = stat?.puttDistances ?? [];
 
-  // Set the i-th putt distance, padding with default 10ft for any earlier
+  // Set the i-th putt distance, padding with default 0 for any earlier
   // putts the player hasn't dialed in yet.
   const setPuttDist = (i: number, d: number) => {
     const next = [...dists];
-    while (next.length <= i) next.push(10);
+    while (next.length <= i) next.push(0);
     next[i] = d;
     // Trim to current putt count so we don't store stale entries.
     onChange({ puttDistances: next.slice(0, putts) });
@@ -2354,7 +2622,7 @@ function AdvancedEntryModal({
               </TouchableOpacity>
             </View>
 
-            {/* Per-putt distance sliders — one per putt entered on the basic screen */}
+            {/* Per-putt distance — scroll-wheel picker per putt */}
             <Text style={styles.advSection}>
               PUTT DISTANCES {putts === 0 ? '(set Putts on the basic screen first)' : `· ${putts} putt${putts === 1 ? '' : 's'}`}
             </Text>
@@ -2363,12 +2631,13 @@ function AdvancedEntryModal({
                 <View style={styles.putHeader}>
                   <Text style={styles.putLabel}>Putt #{i + 1}</Text>
                   <Text style={styles.putVal}>
-                    {(dists[i] ?? 10) === 50 ? '50+ ft' : `${dists[i] ?? 10} ft`}
+                    {dists[i] != null ? `${dists[i]} ft` : '— ft'}
                   </Text>
                 </View>
-                <SnapSlider
-                  stops={[...PUTT_STOPS]}
-                  value={dists[i] ?? 10}
+                <WheelPicker
+                  min={0}
+                  max={PUTT_MAX_FT}
+                  value={dists[i] ?? 0}
                   onChange={(v) => setPuttDist(i, v)}
                 />
               </View>
@@ -2381,90 +2650,89 @@ function AdvancedEntryModal({
   );
 }
 
-// Touch-driven slider over a discrete value set. The thumb tracks the finger
-// continuously while dragging (fluid feel), but the saved value always snaps
-// to the nearest stop. On release, the thumb glides to the snapped position.
-//
-// "Magnetism" comes from the rounding-to-nearest behaviour: the saved value
-// flips to the next stop only when you cross the midpoint, so each stop has
-// a comfortable capture zone.
-function SnapSlider({
-  stops, value, onChange,
+/**
+ * Horizontal scroll-wheel picker for integer values. Renders [min..max] as
+ * fixed-width tiles, snaps to a tile on release, and reports the centered
+ * tile via onChange. The center indicator shows which value is currently
+ * selected.
+ */
+function WheelPicker({
+  min, max, value, onChange,
 }: {
-  stops: number[];
+  min: number;
+  max: number;
   value: number;
   onChange: (v: number) => void;
 }) {
-  const [trackWidth, setTrackWidth] = useState(0);
-  const [dragX, setDragX] = useState<number | null>(null); // null = not dragging
-  const idx = Math.max(0, stops.indexOf(value));
-  const segCount = stops.length - 1;
-  const fracForIdx = (i: number) => (segCount === 0 ? 0 : i / segCount);
+  const ITEM_W = 44;
+  const scrollRef = useRef<ScrollView>(null);
+  const items = useMemo(
+    () => Array.from({ length: max - min + 1 }, (_, i) => min + i),
+    [min, max]
+  );
+  const [containerW, setContainerW] = useState(0);
+  const sidePad = Math.max(0, (containerW - ITEM_W) / 2);
 
-  const valueAtX = (x: number) => {
-    if (trackWidth <= 0) return stops[0];
-    const frac = Math.max(0, Math.min(1, x / trackWidth));
-    const closestIdx = Math.round(frac * segCount);
-    return stops[Math.max(0, Math.min(stops.length - 1, closestIdx))];
+  // Snap the scroll position to the current value when it changes externally
+  // (e.g. modal first opens). We skip if the user is mid-drag.
+  const draggingRef = useRef(false);
+  useEffect(() => {
+    if (draggingRef.current || !scrollRef.current || containerW === 0) return;
+    const idx = Math.max(0, Math.min(items.length - 1, value - min));
+    scrollRef.current.scrollTo({ x: idx * ITEM_W, animated: false });
+  }, [value, containerW, items.length, min]);
+
+  const onMomentumEnd = (e: any) => {
+    const x = e.nativeEvent.contentOffset.x;
+    const idx = Math.round(x / ITEM_W);
+    const clamped = Math.max(0, Math.min(items.length - 1, idx));
+    const v = min + clamped;
+    if (v !== value) onChange(v);
   };
 
-  const responder = PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: (e) => {
-      const x = e.nativeEvent.locationX;
-      setDragX(x);
-      const v = valueAtX(x);
-      if (v !== value) onChange(v);
-    },
-    onPanResponderMove: (e) => {
-      const x = e.nativeEvent.locationX;
-      setDragX(x);
-      const v = valueAtX(x);
-      if (v !== value) onChange(v);
-    },
-    onPanResponderRelease: () => setDragX(null),
-    onPanResponderTerminate: () => setDragX(null),
-  });
-
-  // Thumb position: follow finger continuously while dragging; otherwise
-  // sit on the snapped stop. Clamped to the track bounds.
-  const thumbX = dragX != null
-    ? Math.max(0, Math.min(trackWidth, dragX))
-    : fracForIdx(idx) * trackWidth;
-  const fillPct = trackWidth > 0 ? (thumbX / trackWidth) * 100 : 0;
-
   return (
-    <View style={styles.snapWrap} {...responder.panHandlers}>
-      <View
-        style={styles.snapTrack}
-        onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+    <View
+      style={styles.wheelWrap}
+      onLayout={(e) => setContainerW(e.nativeEvent.layout.width)}
+    >
+      {/* Center selector: a vertical strip + arrow, marks the active value */}
+      <View pointerEvents="none" style={[styles.wheelSelector, { left: containerW / 2 - ITEM_W / 2, width: ITEM_W }]} />
+      <View pointerEvents="none" style={[styles.wheelArrow, { left: containerW / 2 - 4 }]} />
+
+      <ScrollView
+        ref={scrollRef}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        snapToInterval={ITEM_W}
+        decelerationRate="fast"
+        contentContainerStyle={{ paddingHorizontal: sidePad, alignItems: 'center' }}
+        onScrollBeginDrag={() => { draggingRef.current = true; }}
+        onScrollEndDrag={() => { draggingRef.current = false; }}
+        onMomentumScrollEnd={onMomentumEnd}
       >
-        <View style={[styles.snapFill, { width: `${fillPct}%` }]} />
-        {stops.map((s, i) => (
-          <View
-            key={s}
-            style={[
-              styles.snapStop,
-              { left: `${fracForIdx(i) * 100}%`, marginLeft: -4, top: -2 },
-              i <= idx && styles.snapStopActive,
-            ]}
-          />
-        ))}
-        {trackWidth > 0 && (
-          <View style={[
-            styles.snapThumb,
-            { left: thumbX - 11, top: -9 },
-          ]} />
-        )}
-      </View>
-      <View style={styles.snapStopLabels}>
-        {stops.map((s, i) => (
-          <Text key={s} style={[styles.snapStopLabel, i === idx && styles.snapStopLabelActive]}>
-            {s === 50 ? '50+' : s}
-          </Text>
-        ))}
-      </View>
+        {items.map((n) => {
+          const active = n === value;
+          // Highlight ticks at every 5 ft for easier visual reference.
+          const isMajor = n % 5 === 0;
+          return (
+            <View key={n} style={[styles.wheelItem, { width: ITEM_W }]}>
+              <Text style={[
+                styles.wheelItemText,
+                isMajor && styles.wheelItemMajor,
+                active && styles.wheelItemActive,
+              ]}>
+                {n}
+              </Text>
+              <View style={[
+                styles.wheelTick,
+                isMajor && styles.wheelTickMajor,
+                active && styles.wheelTickActive,
+              ]} />
+            </View>
+          );
+        })}
+      </ScrollView>
     </View>
   );
 }
+
