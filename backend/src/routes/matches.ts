@@ -112,15 +112,18 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ── Team-vs-team auto-pairing ──────────────────────────────────────
-    // For duo/squad matches: try to immediately pair this match against
-    // another open team in the pool. The MatchFoundWatcher on both phones
-    // will detect `has_opponent` flipping and fire the VS intro animation
-    // — the user sees it the moment they create the match (or the moment
-    // their opponent's leader does, in which case it pops up on their
-    // existing match).
+    // ── Auto-pairing on creation (solo, duo, squad) ─────────────────────
+    // Try to immediately pair this match against another open match in the
+    // pool. The MatchFoundWatcher on both phones detects `has_opponent`
+    // flipping and fires the VS intro animation — the user sees it the
+    // moment they create the match (or the moment their opponent's leader
+    // does, in which case it pops up on their existing match).
+    //
+    // Wrapped in try/catch so a transient error (e.g. cancelled column not
+    // yet migrated) only skips pairing instead of failing match creation.
     let autoPairedOpponentMatchId: string | null = null;
-    if ((matchType === 'duo' || matchType === 'squad') && !isPractice) {
+    try {
+    if (!isPractice) {
       // Find candidate opponent matches:
       //   • same match_type, format, num_holes
       //   • still open (not completed, not cancelled, not superseded)
@@ -210,6 +213,12 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
         }
       }
     }
+    } catch (pairErr) {
+      // Pairing is best-effort — log and continue. The match is still valid
+      // without an opponent (player can wait for next pool sweep on their
+      // submission, or for the next opposing leader to create a match).
+      console.warn('[match-create] auto-pair failed:', pairErr);
+    }
 
     await client.query('COMMIT');
     return res.status(201).json({ ...match, auto_paired: !!autoPairedOpponentMatchId });
@@ -237,8 +246,13 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
             t.course_id, t.num_holes,
             c.course_name,
             r.round_id, r.hole_scores, r.hole_stats,
-            -- Clan attribution (for the match-found "VS" transition).
-            -- Picks the player's most-recently-joined clan as their banner.
+            -- Personal theme song — falls back to this if no team theme.
+            u.theme_track_title   AS user_theme_title,
+            u.theme_track_artist  AS user_theme_artist,
+            u.theme_track_artwork AS user_theme_artwork,
+            u.theme_track_preview AS user_theme_preview,
+            -- Team attribution (for the match-found "VS" transition).
+            -- Picks the player's most-recently-joined team as their banner.
             cl.clan_id,
             cl.name              AS clan_name,
             cl.elo               AS clan_elo,

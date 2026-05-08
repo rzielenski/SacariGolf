@@ -83,7 +83,14 @@ export const api = {
 
   users: {
     me: () => request<any>('GET', '/users/me'),
-    update: (body: { pushToken?: string; handicapIndex?: number | null; username?: string; bio?: string | null; homeCourseId?: string | null }) => request<any>('PATCH', '/users/me', body),
+    update: (body: {
+      pushToken?: string;
+      handicapIndex?: number | null;
+      username?: string;
+      bio?: string | null;
+      homeCourseId?: string | null;
+      theme?: { trackId: string; title: string; artist: string; artworkUrl?: string; previewUrl: string } | null;
+    }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<{ notifications: any[]; unread_count: number }>('GET', '/users/me/notifications'),
     perks: () => request<{ perk_id: string; perk_type: string; earned_at: string }[]>('GET', '/users/me/perks'),

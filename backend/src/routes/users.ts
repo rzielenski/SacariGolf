@@ -19,6 +19,8 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
+            u.theme_track_id, u.theme_track_title, u.theme_track_artist,
+            u.theme_track_artwork, u.theme_track_preview,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -31,7 +33,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -59,6 +61,39 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     if (existing.length) return res.status(409).json({ error: 'Username already taken' });
     values.push(username); updates.push(`username = $${values.length}`);
   }
+
+  // Theme song (iTunes preview). Same payload shape as the team theme PATCH;
+  // null clears it. Apple-CDN host check matches the team route.
+  if (theme !== undefined) {
+    if (theme === null) {
+      updates.push(`theme_track_id = NULL`);
+      updates.push(`theme_track_title = NULL`);
+      updates.push(`theme_track_artist = NULL`);
+      updates.push(`theme_track_artwork = NULL`);
+      updates.push(`theme_track_preview = NULL`);
+    } else if (typeof theme === 'object') {
+      const { trackId, title, artist, artworkUrl, previewUrl } = theme as any;
+      if (typeof trackId !== 'string' || typeof title !== 'string'
+       || typeof artist !== 'string' || typeof previewUrl !== 'string') {
+        return res.status(400).json({ error: 'Invalid theme payload' });
+      }
+      const okHost = (u: string) =>
+        /^https:\/\/[^\/]*\.mzstatic\.com\//.test(u)
+        || /^https:\/\/[^\/]*\.itunes\.apple\.com\//.test(u);
+      if (!okHost(previewUrl) || (artworkUrl && !okHost(artworkUrl))) {
+        return res.status(400).json({ error: "Theme URLs must come from Apple's CDN" });
+      }
+      values.push(trackId.slice(0, 64));     updates.push(`theme_track_id = $${values.length}`);
+      values.push(title.slice(0, 200));      updates.push(`theme_track_title = $${values.length}`);
+      values.push(artist.slice(0, 200));     updates.push(`theme_track_artist = $${values.length}`);
+      values.push((artworkUrl ?? '').slice(0, 500) || null);
+      updates.push(`theme_track_artwork = $${values.length}`);
+      values.push(previewUrl.slice(0, 500)); updates.push(`theme_track_preview = $${values.length}`);
+    } else {
+      return res.status(400).json({ error: 'theme must be an object or null' });
+    }
+  }
+
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
 
   values.push(req.userId);

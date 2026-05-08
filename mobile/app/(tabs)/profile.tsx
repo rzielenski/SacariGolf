@@ -9,6 +9,7 @@ import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
 import { isPremium } from '../../lib/premium';
+import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
@@ -55,6 +56,24 @@ export default function ProfileScreen() {
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
   const [hcapModalVisible, setHcapModalVisible] = useState(false);
   const [hcapDifferentials, setHcapDifferentials] = useState<any[]>([]);
+  const [themePickerVisible, setThemePickerVisible] = useState(false);
+
+  const setUserTheme = async (track: ThemeTrack) => {
+    try {
+      await api.users.update({ theme: track });
+      await refreshUser?.();
+    } catch (e: any) {
+      Alert.alert('Could not save theme', e.message ?? 'Try again.');
+    }
+  };
+  const clearUserTheme = async () => {
+    try {
+      await api.users.update({ theme: null });
+      await refreshUser?.();
+    } catch (e: any) {
+      Alert.alert('Could not clear theme', e.message ?? 'Try again.');
+    }
+  };
 
   const openScorecard = (round: any) => {
     if (!user) return;
@@ -404,6 +423,42 @@ export default function ProfileScreen() {
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
+      {/* Personal theme song — plays during the match-found VS animation
+          when no team theme is set. Solo players use this. */}
+      <TouchableOpacity
+        style={styles.themeBtn}
+        onPress={() => setThemePickerVisible(true)}
+        onLongPress={() => (user as any)?.theme_track_title && Alert.alert(
+          'Clear theme song?',
+          `Remove "${(user as any).theme_track_title}"?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Remove', style: 'destructive', onPress: clearUserTheme },
+          ],
+        )}
+        activeOpacity={0.7}
+      >
+        {(user as any)?.theme_track_artwork ? (
+          <Image source={{ uri: (user as any).theme_track_artwork }} style={styles.themeBtnArt} />
+        ) : (
+          <View style={[styles.themeBtnArt, { backgroundColor: C.cardAlt, justifyContent: 'center', alignItems: 'center' }]}>
+            <Text style={{ color: C.textMuted, fontSize: 16 }}>♫</Text>
+          </View>
+        )}
+        <View style={{ flex: 1, marginLeft: 12 }}>
+          <Text style={styles.themeBtnLabel}>MY ANTHEM</Text>
+          {(user as any)?.theme_track_title ? (
+            <>
+              <Text style={styles.themeBtnTitle} numberOfLines={1}>{(user as any).theme_track_title}</Text>
+              <Text style={styles.themeBtnArtist} numberOfLines={1}>{(user as any).theme_track_artist}</Text>
+            </>
+          ) : (
+            <Text style={styles.themeBtnArtist}>Tap to pick a song</Text>
+          )}
+        </View>
+        <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>
+      </TouchableOpacity>
+
       {/* Aggregated round stats — only shown once user has any tracked data */}
       {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
         <>
@@ -739,6 +794,13 @@ export default function ProfileScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Personal theme picker — iTunes search */}
+      <ThemeSongPicker
+        visible={themePickerVisible}
+        onClose={() => setThemePickerVisible(false)}
+        onPick={setUserTheme}
+      />
     </ScrollView>
   );
 }
@@ -794,6 +856,16 @@ const styles = StyleSheet.create({
     marginTop: 0, marginBottom: 16,
   },
   premiumBtnLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 0.8 },
+
+  themeBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    borderRadius: 8, padding: 10, marginBottom: 16,
+  },
+  themeBtnArt: { width: 48, height: 48, borderRadius: 4 },
+  themeBtnLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  themeBtnTitle: { color: C.text, fontWeight: '700', fontSize: 14, marginTop: 2 },
+  themeBtnArtist: { color: C.textMuted, fontSize: 12, marginTop: 1 },
   premiumPill: {
     backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold,
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 3,

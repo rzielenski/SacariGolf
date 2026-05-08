@@ -20,6 +20,21 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Per-user theme song. Same shape as the team theme but lives on the
+    // user record so a solo player has a personal anthem too. The match-
+    // found intro picks team theme first, then falls back to the player's
+    // personal theme if no team theme is set.
+    name: 'users.theme_columns',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS theme_track_id      TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_title   TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_artist  TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_artwork TEXT,
+        ADD COLUMN IF NOT EXISTS theme_track_preview TEXT;
+    `,
+  },
+  {
     // Clan customization: avatar image (uploaded like user avatars) and a
     // theme song sourced from the iTunes Search API (preview URL is a 30s
     // CDN-hosted MP4/M4A that any client can stream without auth).

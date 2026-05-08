@@ -21,6 +21,12 @@ export type SidePlayer = {
   username: string;
   avatar_url?: string | null;
   elo?: number | null;
+  // Per-user theme — used when no team theme is set (solos use this).
+  user_theme_title?: string | null;
+  user_theme_artist?: string | null;
+  user_theme_artwork?: string | null;
+  user_theme_preview?: string | null;
+  // Team attribution. Takes priority over per-user theme when present.
   clan_name?: string | null;
   clan_elo?: number | null;
   clan_avatar_url?: string | null;
@@ -50,9 +56,16 @@ export function MatchFoundIntro({
   const soundRef = useRef<Audio.Sound | null>(null);
 
   // Pick the OPPONENT side's first available theme preview to play.
+  // Team theme takes priority; falls back to any player's personal theme.
   const opponentPlayers = meSide === 1 ? side2Players : side1Players;
   const opponentTheme =
-    opponentPlayers.find((p) => p.clan_theme_preview)?.clan_theme_preview ?? null;
+    opponentPlayers.find((p) => p.clan_theme_preview)?.clan_theme_preview
+    ?? opponentPlayers.find((p) => p.user_theme_preview)?.user_theme_preview
+    ?? null;
+  const opponentThemeTitle =
+    opponentPlayers.find((p) => p.clan_theme_title)?.clan_theme_title
+    ?? opponentPlayers.find((p) => p.user_theme_title)?.user_theme_title
+    ?? null;
 
   // Run animations when the modal becomes visible.
   useEffect(() => {
@@ -147,11 +160,11 @@ export function MatchFoundIntro({
             </View>
           ))}
         </View>
-        {!isMe && opponentTheme && lead?.clan_theme_title && (
+        {!isMe && opponentTheme && opponentThemeTitle && (
           <View style={s.themePill}>
             <Text style={s.themePillLabel}>♫ ANTHEM</Text>
             <Text style={s.themePillTitle} numberOfLines={1}>
-              {lead.clan_theme_title}
+              {opponentThemeTitle}
             </Text>
           </View>
         )}
