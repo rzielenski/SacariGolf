@@ -19,6 +19,10 @@ function rankBadge(elo: number) {
   return { label: 'Bronze', color: '#a1673a' };
 }
 
+/** Renames the legacy "clan" concept to its size-specific user-facing term:
+ *  Duo (2 players) or Squad (3+). The internal `clan_mode` column drives this. */
+const groupLabel = (mode?: string) => (mode === 'duo' ? 'Duo' : 'Squad');
+
 export default function ClanDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
@@ -179,8 +183,8 @@ export default function ClanDetailScreen() {
 
   const leaveClan = () => {
     Alert.alert(
-      'Leave clan?',
-      isLeader ? 'Transfer leadership first or disband by leaving as the last member.' : "You'll need to rejoin to get back in.",
+      'Leave team?',
+      isLeader ? 'Leadership will transfer to the longest-tenured member, or the team disbands if you\'re the last one.' : "You'll need to rejoin to get back in.",
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -209,7 +213,7 @@ export default function ClanDetailScreen() {
   const inviteFriend = async (friendId: string, friendName: string) => {
     try {
       await api.clans.invite(id, friendId);
-      Alert.alert('Invite sent!', `${friendName} has been invited to the clan.`);
+      Alert.alert('Invite sent!', `${friendName} has been invited to the ${groupLabel(clan?.clan_mode).toLowerCase()}.`);
     } catch (e: any) { Alert.alert('Error', e.message); }
   };
 
@@ -296,44 +300,45 @@ export default function ClanDetailScreen() {
           </View>
         </View>
 
-        {/* Theme song row — visible to everyone, editable by the leader.
-            Tapping opens the iTunes search modal; long-press clears. */}
-        {(isLeader || (clan as any).theme_track_title) && (
-          <TouchableOpacity
-            style={styles.themeRow}
-            onPress={() => isLeader && setThemePickerVisible(true)}
-            onLongPress={() => isLeader && (clan as any).theme_track_title && Alert.alert(
-              'Clear theme song?',
-              `Remove "${(clan as any).theme_track_title}"?`,
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Remove', style: 'destructive', onPress: clearTheme },
-              ],
-            )}
-            disabled={!isLeader}
-            activeOpacity={isLeader ? 0.7 : 1}
-          >
-            {(clan as any).theme_track_artwork ? (
-              <Image source={{ uri: (clan as any).theme_track_artwork }} style={styles.themeArt} />
-            ) : (
-              <View style={[styles.themeArt, { backgroundColor: C.cardAlt, justifyContent: 'center', alignItems: 'center' }]}>
-                <Text style={{ color: C.textMuted, fontSize: 18 }}>♫</Text>
-              </View>
-            )}
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Text style={styles.themeLabel}>CLAN ANTHEM</Text>
-              {(clan as any).theme_track_title ? (
-                <>
-                  <Text style={styles.themeTitle} numberOfLines={1}>{(clan as any).theme_track_title}</Text>
-                  <Text style={styles.themeArtist} numberOfLines={1}>{(clan as any).theme_track_artist}</Text>
-                </>
-              ) : (
-                <Text style={styles.themeArtist}>{isLeader ? 'Tap to pick a theme song' : '—'}</Text>
-              )}
+        {/* Anthem row — ALWAYS rendered so the section is discoverable
+            regardless of clan size, mode, or member-loading race. Tap opens
+            the iTunes search (leader only); long-press clears. */}
+        <TouchableOpacity
+          style={styles.themeRow}
+          onPress={() => isLeader && setThemePickerVisible(true)}
+          onLongPress={() => isLeader && (clan as any).theme_track_title && Alert.alert(
+            'Clear theme song?',
+            `Remove "${(clan as any).theme_track_title}"?`,
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Remove', style: 'destructive', onPress: clearTheme },
+            ],
+          )}
+          disabled={!isLeader}
+          activeOpacity={isLeader ? 0.7 : 1}
+        >
+          {(clan as any).theme_track_artwork ? (
+            <Image source={{ uri: (clan as any).theme_track_artwork }} style={styles.themeArt} />
+          ) : (
+            <View style={[styles.themeArt, { backgroundColor: C.cardAlt, justifyContent: 'center', alignItems: 'center' }]}>
+              <Text style={{ color: C.textMuted, fontSize: 18 }}>♫</Text>
             </View>
-            {isLeader && <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>}
-          </TouchableOpacity>
-        )}
+          )}
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <Text style={styles.themeLabel}>TEAM ANTHEM</Text>
+            {(clan as any).theme_track_title ? (
+              <>
+                <Text style={styles.themeTitle} numberOfLines={1}>{(clan as any).theme_track_title}</Text>
+                <Text style={styles.themeArtist} numberOfLines={1}>{(clan as any).theme_track_artist}</Text>
+              </>
+            ) : (
+              <Text style={styles.themeArtist}>
+                {isLeader ? 'Tap to pick a theme song' : 'No anthem set'}
+              </Text>
+            )}
+          </View>
+          {isLeader && <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>}
+        </TouchableOpacity>
 
         {/* Stats */}
         <View style={styles.statsRow}>
@@ -376,7 +381,7 @@ export default function ClanDetailScreen() {
               style={styles.chatBtn}
               onPress={() => router.push(`/chat/clan/${id}` as any)}
             >
-              <Text style={styles.chatBtnText}>Clan Chat</Text>
+              <Text style={styles.chatBtnText}>Team Chat</Text>
             </TouchableOpacity>
           )}
           {isLeader && clan.member_count < clan.max_players && (
@@ -386,7 +391,7 @@ export default function ClanDetailScreen() {
           )}
           {!isMember && clan.member_count < clan.max_players && (
             <TouchableOpacity style={styles.joinBtn} onPress={joinClan}>
-              <Text style={styles.joinBtnText}>Join Clan</Text>
+              <Text style={styles.joinBtnText}>Join Team</Text>
             </TouchableOpacity>
           )}
           {!isMember && clan.member_count >= clan.max_players && (
@@ -396,7 +401,7 @@ export default function ClanDetailScreen() {
           )}
           {isMember && (
             <TouchableOpacity style={styles.leaveBtn} onPress={leaveClan}>
-              <Text style={styles.leaveBtnText}>Leave Clan</Text>
+              <Text style={styles.leaveBtnText}>Leave Team</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -454,27 +459,27 @@ export default function ClanDetailScreen() {
       >
         <View style={styles.modalContainer}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Edit Clan</Text>
+            <Text style={styles.modalTitle}>Edit Team</Text>
             <TouchableOpacity onPress={() => setEditVisible(false)}>
               <Text style={styles.modalCancel}>Cancel</Text>
             </TouchableOpacity>
           </View>
 
           <ScrollView style={styles.modalBody}>
-            <Text style={styles.fieldLabel}>Clan Name</Text>
+            <Text style={styles.fieldLabel}>Name</Text>
             <TextInput
               style={styles.input}
               value={editName}
               onChangeText={setEditName}
-              placeholder="Clan name..."
+              placeholder="Team name..."
               placeholderTextColor={C.textMuted}
               maxLength={32}
             />
 
             <View style={styles.toggleRow}>
               <View>
-                <Text style={styles.fieldLabel}>Public Clan</Text>
-                <Text style={styles.fieldSub}>Public clans appear in the browse list</Text>
+                <Text style={styles.fieldLabel}>Public</Text>
+                <Text style={styles.fieldSub}>Public groups appear in the browse list</Text>
               </View>
               <Switch
                 value={editPublic}

@@ -1050,7 +1050,7 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
        ORDER BY ci.created_at DESC LIMIT 10`,
       [req.userId]
     );
-    for (const r of cis) notes.push({ type: 'clan_invite', title: 'Clan Invite', body: `${r.from_name} invited you to join ${r.clan_name}`, data: { clanId: r.clan_id, inviteId: r.invite_id }, created_at: r.created_at });
+    for (const r of cis) notes.push({ type: 'clan_invite', title: 'Team Invite', body: `${r.from_name} invited you to join ${r.clan_name}`, data: { clanId: r.clan_id, inviteId: r.invite_id }, created_at: r.created_at });
   } catch { /* table may not exist yet */ }
 
   // Recent match results (3-day window)

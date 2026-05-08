@@ -25,7 +25,7 @@ export default function SocialScreen() {
             onPress={() => setTab(t)}
           >
             <Text style={[styles.tabLabel, tab === t && styles.tabLabelActive]}>
-              {t === 'friends' ? 'Friends' : t === 'clans' ? 'Clans' : 'Chats'}
+              {t === 'friends' ? 'Friends' : t === 'clans' ? 'Teams' : 'Chats'}
             </Text>
           </TouchableOpacity>
         ))}
@@ -105,7 +105,7 @@ function FriendsTab() {
       const result = await api.clans.acceptClanInvite(invite.invite_id);
       setClanInvites((prev) => prev.filter((i) => i.invite_id !== invite.invite_id));
       Alert.alert('Joined!', `You joined ${invite.clan_name}.`, [
-        { text: 'View Clan', onPress: () => router.push(`/clan/${result.clanId}` as any) },
+        { text: 'View Team', onPress: () => router.push(`/clan/${result.clanId}` as any) },
         { text: 'OK' },
       ]);
     } catch (e: any) { Alert.alert('Error', e.message); }
@@ -203,7 +203,7 @@ function FriendsTab() {
       {/* Clan Invites */}
       {clanInvites.length > 0 && (
         <>
-          <Text style={styles.sectionTitle}>Clan Invites</Text>
+          <Text style={styles.sectionTitle}>Team Invites</Text>
           {clanInvites.map((inv) => (
             <View key={inv.invite_id} style={styles.inviteRow}>
               <View style={{ flex: 1 }}>
@@ -344,7 +344,7 @@ function ClansTab() {
     try {
       await api.clans.join(clanId);
       load();
-      Alert.alert('Joined clan!');
+      Alert.alert('Joined!');
     } catch (e: any) { Alert.alert('Error', e.message); }
   };
 
@@ -353,7 +353,7 @@ function ClansTab() {
   return (
     <ScrollView style={{ flex: 1 }}>
       <TouchableOpacity style={styles.createBtn} onPress={() => setShowCreate(!showCreate)}>
-        <Text style={styles.createBtnText}>+ Create Clan</Text>
+        <Text style={styles.createBtnText}>+ Create Team</Text>
       </TouchableOpacity>
 
       {showCreate && (
@@ -362,7 +362,7 @@ function ClansTab() {
             style={styles.searchInput}
             value={clanName}
             onChangeText={setClanName}
-            placeholder="Clan name..."
+            placeholder="Team name..."
             placeholderTextColor={C.textMuted}
           />
           <View style={styles.modeRow}>
@@ -384,12 +384,12 @@ function ClansTab() {
 
       {mine.length > 0 && (
         <>
-          <Text style={styles.sectionTitle}>My Clans</Text>
+          <Text style={styles.sectionTitle}>My Teams</Text>
           {mine.map((c) => <ClanCard key={c.clan_id} clan={c} joined />)}
         </>
       )}
 
-      <Text style={styles.sectionTitle}>Public Clans</Text>
+      <Text style={styles.sectionTitle}>Public Teams</Text>
       {clans.filter((c) => !mine.find((m) => m.clan_id === c.clan_id)).map((c) => (
         <ClanCard key={c.clan_id} clan={c} onJoin={() => joinClan(c.clan_id)} />
       ))}
@@ -479,7 +479,7 @@ function ChatsTab() {
         </TouchableOpacity>
       ))}
 
-      <Text style={styles.sectionTitle}>Clan Chats</Text>
+      <Text style={styles.sectionTitle}>Team Chats</Text>
       {clans.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No clans joined</Text>}
       {clans.map((c) => (
         <TouchableOpacity

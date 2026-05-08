@@ -87,11 +87,11 @@ router.post('/invites/:inviteId/accept', requireAuth, wrap(async (req: AuthReque
     );
     if (!clanRows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Clan not found' });
+      return res.status(404).json({ error: 'Team not found' });
     }
     if (clanRows[0].member_count >= clanRows[0].max_players) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Clan is now full' });
+      return res.status(409).json({ error: 'Team is now full' });
     }
     await client.query(
       `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
@@ -121,7 +121,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   if (!name || !clanMode) return res.status(400).json({ error: 'name and clanMode required' });
   const trimmedName = String(name).trim().slice(0, 60);
   if (trimmedName.length < 2) {
-    return res.status(400).json({ error: 'Clan name must be 2–60 characters' });
+    return res.status(400).json({ error: 'Team name must be 2–60 characters' });
   }
   if (clanMode !== 'duo' && clanMode !== 'squad') {
     return res.status(400).json({ error: 'clanMode must be duo or squad' });
@@ -156,7 +156,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
      WHERE c.clan_id = $1 GROUP BY c.clan_id`,
     [req.params.id]
   );
-  if (!clanRows.length) return res.status(404).json({ error: 'Clan not found' });
+  if (!clanRows.length) return res.status(404).json({ error: 'Team not found' });
 
   const { rows: members } = await pool.query(
     `SELECT cm.user_id, cm.role, cm.joined_at,
@@ -176,13 +176,13 @@ router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) =
     [req.params.id, req.userId]
   );
   if (!rows.length || rows[0].role !== 'leader') {
-    return res.status(403).json({ error: 'Only the clan leader can do this' });
+    return res.status(403).json({ error: 'Only the team leader can do this' });
   }
   const updates: string[] = [];
   const vals: any[] = [];
   if (name !== undefined) {
     const t = String(name).trim().slice(0, 60);
-    if (t.length < 2) return res.status(400).json({ error: 'Clan name must be 2–60 characters' });
+    if (t.length < 2) return res.status(400).json({ error: 'Team name must be 2–60 characters' });
     vals.push(t); updates.push(`name = $${vals.length}`);
   }
   if (isPublic !== undefined) { vals.push(!!isPublic); updates.push(`is_public = $${vals.length}`); }
@@ -237,7 +237,7 @@ router.post('/:id/avatar', requireAuth, wrap(async (req: AuthRequest, res: Respo
     [req.params.id, req.userId]
   );
   if (!roleRows.length || roleRows[0].role !== 'leader') {
-    return res.status(403).json({ error: 'Only the clan leader can change the clan avatar' });
+    return res.status(403).json({ error: 'Only the team leader can change the team avatar' });
   }
   const { imageBase64, mimeType } = req.body ?? {};
   if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
@@ -275,7 +275,7 @@ router.delete('/:id/members/:userId', requireAuth, wrap(async (req: AuthRequest,
       );
       if (!rows.length || rows[0].role !== 'leader') {
         await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Only the clan leader can kick members' });
+        return res.status(403).json({ error: 'Only the team leader can kick members' });
       }
       const { rows: target } = await client.query(
         `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
@@ -346,7 +346,7 @@ router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Res
     );
     if (!meRows.length || meRows[0].role !== 'leader') {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'Only the clan leader can transfer leadership' });
+      return res.status(403).json({ error: 'Only the team leader can transfer leadership' });
     }
     // The target must already be a member of this clan
     const { rows: targetRows } = await client.query(
@@ -355,7 +355,7 @@ router.post('/:id/transfer', requireAuth, wrap(async (req: AuthRequest, res: Res
     );
     if (!targetRows.length) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'New leader must be a clan member' });
+      return res.status(400).json({ error: 'New leader must be a team member' });
     }
     await client.query(
       `UPDATE clan_members SET role = 'member' WHERE clan_id = $1 AND user_id = $2`,
@@ -388,14 +388,14 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
        FOR UPDATE`,
       [req.params.id]
     );
-    if (!clanRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Clan not found' }); }
+    if (!clanRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Team not found' }); }
     if (!clanRows[0].is_public) {
       await client.query('ROLLBACK');
-      return res.status(403).json({ error: 'This clan is invite-only' });
+      return res.status(403).json({ error: 'This team is invite-only' });
     }
     if (clanRows[0].member_count >= clanRows[0].max_players) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'Clan is full' });
+      return res.status(409).json({ error: 'Team is full' });
     }
     await client.query(
       `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
@@ -421,7 +421,7 @@ router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Respo
     [req.params.id, req.userId]
   );
   if (!roleRows.length || roleRows[0].role !== 'leader') {
-    return res.status(403).json({ error: 'Only the clan leader can invite members' });
+    return res.status(403).json({ error: 'Only the team leader can invite members' });
   }
   // Confirm the target exists (avoids silent failures + UX surprise)
   const { rows: targetRows } = await pool.query(`SELECT 1 FROM users WHERE user_id = $1`, [toUserId]);
@@ -431,7 +431,7 @@ router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Respo
     `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
     [req.params.id, toUserId]
   );
-  if (existing.length) return res.status(409).json({ error: 'User is already in this clan' });
+  if (existing.length) return res.status(409).json({ error: 'User is already in this team' });
 
   const { rows: clanRows } = await pool.query(
     `SELECT c.max_players, COUNT(cm.user_id)::int AS member_count
@@ -439,9 +439,9 @@ router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Respo
      WHERE c.clan_id = $1 GROUP BY c.clan_id`,
     [req.params.id]
   );
-  if (!clanRows.length) return res.status(404).json({ error: 'Clan not found' });
+  if (!clanRows.length) return res.status(404).json({ error: 'Team not found' });
   if (clanRows[0].member_count >= clanRows[0].max_players) {
-    return res.status(409).json({ error: 'Clan is full' });
+    return res.status(409).json({ error: 'Team is full' });
   }
 
   await pool.query(
@@ -459,7 +459,7 @@ router.post('/:id/invite', requireAuth, wrap(async (req: AuthRequest, res: Respo
   if (rows[0]?.push_token) {
     await sendPush(
       [rows[0].push_token],
-      'Clan Invite',
+      'Team Invite',
       `${rows[0].from_name} invited you to join ${rows[0].clan_name}!`,
       { type: 'clanInvite', clanId: req.params.id }
     );

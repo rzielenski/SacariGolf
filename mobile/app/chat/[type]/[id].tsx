@@ -63,7 +63,7 @@ export default function ChatScreen() {
     } catch { setText(trimmed); } finally { setSending(false); }
   };
 
-  const title = type === 'dm' ? (name ?? 'Direct Message') : type === 'match' ? 'Match Chat' : 'Clan Chat';
+  const title = type === 'dm' ? (name ?? 'Direct Message') : type === 'match' ? 'Match Chat' : 'Team Chat';
 
   return (
     <KeyboardAvoidingView

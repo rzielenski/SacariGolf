@@ -7,6 +7,7 @@ import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
+import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -61,11 +62,16 @@ function AuthGuard() {
   // Pre-warm map tiles for the user's home course so the next round there
   // loads instantly even on a flaky connection.
   return (
-    <HomeCoursePreloader
-      courseId={user?.home_course_id ?? null}
-      lat={user?.home_course_lat ?? null}
-      lng={user?.home_course_lng ?? null}
-    />
+    <>
+      <HomeCoursePreloader
+        courseId={user?.home_course_id ?? null}
+        lat={user?.home_course_lat ?? null}
+        lng={user?.home_course_lng ?? null}
+      />
+      {/* Polls /matches and triggers the VS intro when an opponent appears
+          on any of the user's pending matches — works from any screen. */}
+      {user && <MatchFoundWatcher />}
+    </>
   );
 }
 

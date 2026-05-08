@@ -182,7 +182,7 @@ export default function HomeScreen() {
         </TouchableOpacity>
         <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/(tabs)/social')}>
           <Text style={styles.actionMark}>CC</Text>
-          <Text style={styles.actionLabel}>Clans</Text>
+          <Text style={styles.actionLabel}>Teams</Text>
         </TouchableOpacity>
       </View>
 

@@ -60,7 +60,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       );
       if (!roleRows.length || roleRows[0].role !== 'leader') {
         await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Only the clan leader can start a squad match' });
+        return res.status(403).json({ error: 'Only the team leader can start a squad match' });
       }
     }
 
@@ -201,7 +201,15 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.match_id, m.match_type, m.name, m.completed, m.created_at, m.is_practice,
             mr.winner_side, mr.delta_elo, mr.details,
-            mp_me.side AS my_side, mp_me.strokes AS my_strokes
+            mp_me.side AS my_side, mp_me.strokes AS my_strokes,
+            -- True once an opponent has been added on the other side.
+            -- Powers the "match found" intro on the client — when this flips
+            -- from false to true between polls we know to fire the animation.
+            EXISTS(
+              SELECT 1 FROM match_players mp_opp
+              WHERE mp_opp.match_id = m.match_id
+                AND mp_opp.side != mp_me.side
+            ) AS has_opponent
      FROM matches m
      JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
      LEFT JOIN match_results mr ON mr.match_id = m.match_id
@@ -650,6 +658,14 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
       if (candidates.length > 0) {
         const opp = candidates[0];
+        // Defensive: the pool query already filters `mp.user_id != $1` AND
+        // the match_players (match_id, user_id) PK would also reject this.
+        // But we double-check here so a future refactor of the pool query
+        // can't accidentally pair a user against themselves.
+        if (opp.user_id === myP.user_id) {
+          console.warn('[match] skipped self-match candidate', { userId: myP.user_id, matchId: req.params.id });
+          // Fall through as if no candidate found — match stays pending.
+        } else {
         // Fetch teebox data for opponent separately (can't LEFT JOIN with FOR UPDATE)
         if (opp.teebox_id) {
           const { rows: tbRows } = await client.query(
@@ -698,6 +714,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           `UPDATE matches SET completed = true, superseded_by_match_id = $2 WHERE match_id = $1`,
           [opp.opp_match_id, req.params.id]
         );
+        }  // end !self-match guard
       }
       // No candidate → stay pending (match.completed stays false, scores are recorded)
 

@@ -113,7 +113,7 @@ export default function PlayScreen() {
       if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
         Alert.alert(
           'Match Created!',
-          'Your clan partners have been invited. They have 24 hours to accept.',
+          'Your teammates have been invited. They have 24 hours to accept.',
           [{ text: 'OK', onPress: () => router.push(`/match/${match.match_id}` as any) }]
         );
       } else {
@@ -133,7 +133,7 @@ export default function PlayScreen() {
   };
 
   // Button label for next step
-  const nextStepLabel = matchType === 'duo' || matchType === 'squad' ? 'Select Clan →' : 'Select Course →';
+  const nextStepLabel = matchType === 'duo' || matchType === 'squad' ? 'Select Team →' : 'Select Course →';
 
   // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
@@ -222,13 +222,13 @@ export default function PlayScreen() {
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyText}>
                   {matchType === 'duo'
-                    ? 'No eligible duo clans'
-                    : 'No eligible squad clans'}
+                    ? 'No eligible duos'
+                    : 'No eligible squads'}
                 </Text>
                 <Text style={styles.emptySub}>
                   {matchType === 'duo'
-                    ? 'Your duo clan must have both members before starting a match'
-                    : 'Your squad clan needs at least 3 members and you must be the leader'}
+                    ? 'Your duo must have both members before starting a match'
+                    : 'Your squad needs at least 3 members and you must be the leader'}
                 </Text>
               </View>
             )
