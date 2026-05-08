@@ -112,8 +112,107 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // ── Team-vs-team auto-pairing ──────────────────────────────────────
+    // For duo/squad matches: try to immediately pair this match against
+    // another open team in the pool. The MatchFoundWatcher on both phones
+    // will detect `has_opponent` flipping and fire the VS intro animation
+    // — the user sees it the moment they create the match (or the moment
+    // their opponent's leader does, in which case it pops up on their
+    // existing match).
+    let autoPairedOpponentMatchId: string | null = null;
+    if ((matchType === 'duo' || matchType === 'squad') && !isPractice) {
+      // Find candidate opponent matches:
+      //   • same match_type, format, num_holes
+      //   • still open (not completed, not cancelled, not superseded)
+      //   • created in the last 24 h (don't pair stale stuff)
+      //   • doesn't already have an opponent (no players on side != 1)
+      //   • doesn't include the creator as a player
+      // Sorted by ELO proximity using each team's average ELO.
+      const { rows: candidates } = await client.query(
+        `SELECT m.match_id
+         FROM matches m
+         WHERE m.match_id != $1
+           AND m.match_type = $2
+           AND m.format = $3
+           AND m.num_holes = $4
+           AND m.completed = false
+           AND m.cancelled = false
+           AND m.superseded_by_match_id IS NULL
+           AND m.is_practice = false
+           AND m.created_at > NOW() - INTERVAL '24 hours'
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp_opp
+             WHERE mp_opp.match_id = m.match_id AND mp_opp.side != 1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp_self
+             WHERE mp_self.match_id = m.match_id AND mp_self.user_id = $5
+           )
+         ORDER BY ABS(
+           COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
+                     JOIN users u ON u.user_id = mp_a.user_id
+                     WHERE mp_a.match_id = $1), 1200) -
+           COALESCE((SELECT AVG(u.elo) FROM match_players mp_b
+                     JOIN users u ON u.user_id = mp_b.user_id
+                     WHERE mp_b.match_id = m.match_id), 1200)
+         )
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`,
+        [match.match_id, matchType, resolvedFormat, resolvedNumHoles, req.userId]
+      );
+
+      if (candidates.length) {
+        autoPairedOpponentMatchId = candidates[0].match_id;
+        // Move opponent team's players into THIS match as side 2.
+        await client.query(
+          `INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed)
+           SELECT $1, user_id, teebox_id, 2, strokes, completed
+           FROM match_players
+           WHERE match_id = $2
+           ON CONFLICT (match_id, user_id) DO NOTHING`,
+          [match.match_id, autoPairedOpponentMatchId]
+        );
+        // Migrate any pending invites from the opponent's match so their
+        // teammates who haven't accepted yet end up on side 2 of THIS match.
+        await client.query(
+          `UPDATE match_invites SET match_id = $1
+           WHERE match_id = $2 AND status = 'pending'`,
+          [match.match_id, autoPairedOpponentMatchId]
+        );
+        // Migrate the opponent's round (if any score data was already saved)
+        await client.query(
+          `UPDATE rounds SET match_id = $1
+           WHERE match_id = $2`,
+          [match.match_id, autoPairedOpponentMatchId]
+        );
+        // Mark opponent's original match as superseded so it disappears from
+        // their list and they only see THIS match (where they're side 2).
+        await client.query(
+          `UPDATE matches SET completed = true, superseded_by_match_id = $1
+           WHERE match_id = $2`,
+          [match.match_id, autoPairedOpponentMatchId]
+        );
+        // Push-notify the opponent team that they've been matched.
+        const { rows: oppPushRows } = await client.query(
+          `SELECT u.push_token FROM match_players mp
+           JOIN users u ON u.user_id = mp.user_id
+           WHERE mp.match_id = $1 AND u.push_token IS NOT NULL`,
+          [match.match_id]
+        );
+        const oppTokens = oppPushRows.map((r: any) => r.push_token).filter(Boolean);
+        if (oppTokens.length) {
+          await sendPush(
+            oppTokens,
+            'Match Found',
+            `Your ${matchType} match has been paired with an opponent!`,
+            { type: 'matchFound', matchId: match.match_id }
+          );
+        }
+      }
+    }
+
     await client.query('COMMIT');
-    return res.status(201).json(match);
+    return res.status(201).json({ ...match, auto_paired: !!autoPairedOpponentMatchId });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
