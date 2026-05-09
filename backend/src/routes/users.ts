@@ -1015,6 +1015,121 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
   });
 }));
 
+/**
+ * Import shots from a launch monitor (Flightscope, Trackman, etc.) into the
+ * user's stats. Each entry needs at minimum a club + distance; lateral
+ * dispersion is optional. We synthesize GPS coordinates from origin (an
+ * arbitrary point) so the existing club-stats aggregator (which works in
+ * GPS-space) treats them identically to on-course tracked shots.
+ *
+ * Body:  { name?: string, shots: [{ club, distance_yds, lateral_yds?, recorded_at? }, ...] }
+ * Stores everything as a single is_practice match with hole_num=1.
+ */
+router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { name, shots } = req.body ?? {};
+  if (!Array.isArray(shots) || !shots.length) {
+    return res.status(400).json({ error: 'shots array required' });
+  }
+  if (shots.length > 2000) {
+    return res.status(413).json({ error: 'Too many shots (max 2000 per import)' });
+  }
+
+  const ALLOWED_CLUBS = new Set([
+    'driver', '3w', '5w', '7w', 'hybrid',
+    '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
+    'pw', 'gw', 'sw', 'lw', 'putter',
+  ]);
+
+  // Synthesize GPS pair for a shot. Origin is fixed; each shot heads
+  // "north" by its carry distance, with `lateral` yards of perpendicular
+  // offset (positive = right). The aggregator computes haversine + bearing
+  // in shot-local frame, so this matches on-course shot dispersion.
+  const ORIGIN = { lat: 40.0, lng: -74.0 };
+  const R = 6371000;
+  const YDS_TO_M = 0.9144;
+  const project = (start: { lat: number; lng: number }, bearingRad: number, distYds: number) => {
+    const distM = distYds * YDS_TO_M;
+    const sLat = start.lat * Math.PI / 180;
+    const sLng = start.lng * Math.PI / 180;
+    const eLat = Math.asin(
+      Math.sin(sLat) * Math.cos(distM / R) +
+      Math.cos(sLat) * Math.sin(distM / R) * Math.cos(bearingRad)
+    );
+    const eLng = sLng + Math.atan2(
+      Math.sin(bearingRad) * Math.sin(distM / R) * Math.cos(sLat),
+      Math.cos(distM / R) - Math.sin(sLat) * Math.sin(eLat)
+    );
+    return { lat: eLat * 180 / Math.PI, lng: eLng * 180 / Math.PI };
+  };
+
+  const cleaned: any[] = [];
+  for (const s of shots) {
+    const club = typeof s?.club === 'string' ? s.club.toLowerCase() : null;
+    if (!club || !ALLOWED_CLUBS.has(club)) continue;
+    const dist = Number(s?.distance_yds);
+    if (!Number.isFinite(dist) || dist < 5 || dist > 500) continue;
+    const lat = Number(s?.lateral_yds ?? 0);
+    const lateral = Number.isFinite(lat) ? Math.max(-200, Math.min(200, lat)) : 0;
+    // Tiny per-shot start jitter so identical-distance shots don't all collide.
+    const startJitterBearing = Math.random() * 2 * Math.PI;
+    const start = project(ORIGIN, startJitterBearing, 0.5);
+    // Forward by distance (north), then perpendicular by lateral.
+    const forward = project(start, 0, dist);
+    const end = project(forward, Math.PI / 2, lateral);
+    cleaned.push({
+      club,
+      start: { lat: start.lat, lng: start.lng },
+      end:   { lat: end.lat,   lng: end.lng },
+      recorded_at: typeof s?.recorded_at === 'string'
+        ? s.recorded_at
+        : new Date().toISOString(),
+    });
+  }
+
+  if (!cleaned.length) {
+    return res.status(400).json({ error: 'No valid shots found in payload' });
+  }
+
+  const matchName = typeof name === 'string' && name.trim()
+    ? name.trim().slice(0, 80)
+    : `Imported shots · ${new Date().toLocaleDateString()}`;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: m } = await client.query(
+      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, completed)
+       VALUES ('solo', $1, true, 'stroke', 18, true)
+       RETURNING match_id`,
+      [matchName]
+    );
+    const matchId = m[0].match_id;
+    await client.query(
+      `INSERT INTO match_players (match_id, user_id, side, completed)
+       VALUES ($1, $2, 1, true)`,
+      [matchId, req.userId]
+    );
+    await client.query(
+      `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
+       VALUES ($1, $2, 1, $3, NOW())`,
+      [matchId, req.userId, JSON.stringify(cleaned)]
+    );
+    await client.query('COMMIT');
+    return res.json({
+      success: true,
+      match_id: matchId,
+      total_shots: cleaned.length,
+      skipped: shots.length - cleaned.length,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /users/me/import-shots failed:', err);
+    return res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+}));
+
 // Avatar upload
 router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { imageBase64, mimeType } = req.body ?? {};

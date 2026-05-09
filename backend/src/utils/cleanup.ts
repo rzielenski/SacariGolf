@@ -80,8 +80,10 @@ export async function runPairingPass() {
       // Excludes matches that have any player in common with this match.
       const { rows: opps } = await pool.query(
         `SELECT m2.match_id
-           FROM matches m2
-          WHERE m2.match_id != $1
+           FROM matches m2,
+                matches m1
+          WHERE m1.match_id = $1
+            AND m2.match_id != $1
             AND m2.completed = false
             AND m2.cancelled = false
             AND m2.is_practice = false
@@ -94,11 +96,24 @@ export async function runPairingPass() {
               SELECT 1 FROM match_players mp_opp
               WHERE mp_opp.match_id = m2.match_id AND mp_opp.side != 1
             )
+            -- No shared player.
             AND NOT EXISTS (
               SELECT 1 FROM match_players mp_a
               JOIN match_players mp_b
                 ON mp_a.user_id = mp_b.user_id
               WHERE mp_a.match_id = $1 AND mp_b.match_id = m2.match_id
+            )
+            -- No shared team (clan_id stored on match).
+            AND NOT (m1.clan_id IS NOT NULL AND m1.clan_id = m2.clan_id)
+            -- No shared clan member (e.g. teammate created a parallel match).
+            AND NOT EXISTS (
+              SELECT 1
+                FROM match_players mp_a
+                JOIN clan_members cm_a ON cm_a.user_id = mp_a.user_id
+                JOIN clan_members cm_b ON cm_b.clan_id = cm_a.clan_id
+                JOIN match_players mp_b ON mp_b.user_id = cm_b.user_id
+               WHERE mp_a.match_id = $1
+                 AND mp_b.match_id = m2.match_id
             )
           ORDER BY ABS(
             COALESCE((SELECT AVG(u.elo) FROM match_players mp_x

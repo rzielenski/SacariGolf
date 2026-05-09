@@ -22,6 +22,9 @@ export default function PlayScreen() {
   const [joining, setJoining] = useState(false);
   const [matchType, setMatchType] = useState<MatchType>('solo');
   const [numHoles, setNumHoles] = useState<9 | 18>(18);
+  // Front vs back is asked AFTER the user picks 9 holes — only meaningful
+  // when playing a 9-hole subset of an 18-hole teebox.
+  const [holesSubset, setHolesSubset] = useState<'front' | 'back'>('front');
   const [format, setFormat] = useState<Format>('stroke');
   const [selectedClanId, setSelectedClanId] = useState<string | null>(null);
   const [myclans, setMyClans] = useState<any[]>([]);
@@ -102,6 +105,10 @@ export default function PlayScreen() {
   const startMatch = async (teebox: Teebox) => {
     setCreating(true);
     try {
+      // Only relevant when playing 9 holes on an 18-hole teebox; the backend
+      // ignores it for 18-hole rounds.
+      const subsetForReq: 'front' | 'back' | 'full' =
+        numHoles === 9 && (teebox.num_holes ?? 18) >= 18 ? holesSubset : 'full';
       const match = await api.matches.create({
         matchType,
         isPractice: matchType === 'practice',
@@ -109,6 +116,7 @@ export default function PlayScreen() {
         clanId: selectedClanId ?? undefined,
         format: (matchType === 'duo' || matchType === 'squad') ? format : 'stroke',
         numHoles,
+        holesSubset: subsetForReq,
       });
       if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
         Alert.alert(
@@ -117,7 +125,8 @@ export default function PlayScreen() {
           [{ text: 'OK', onPress: () => router.push(`/match/${match.match_id}` as any) }]
         );
       } else {
-        router.push(`/match/scoring/${match.match_id}?holes=${numHoles}` as any);
+        const q = `holes=${numHoles}` + (subsetForReq !== 'full' ? `&subset=${subsetForReq}` : '');
+        router.push(`/match/scoring/${match.match_id}?${q}` as any);
       }
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -181,6 +190,26 @@ export default function PlayScreen() {
             </TouchableOpacity>
           ))}
         </View>
+
+        {/* Front 9 / Back 9 picker — only visible when the user picks 9. */}
+        {numHoles === 9 && (
+          <>
+            <Text style={styles.holeLabel}>Which 9?</Text>
+            <View style={styles.holeRow}>
+              {(['front', 'back'] as const).map((side) => (
+                <TouchableOpacity
+                  key={side}
+                  style={[styles.holeBtn, holesSubset === side && styles.holeBtnActive]}
+                  onPress={() => setHolesSubset(side)}
+                >
+                  <Text style={[styles.holeBtnText, holesSubset === side && styles.holeBtnTextActive]}>
+                    {side === 'front' ? 'Front 9' : 'Back 9'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
 
         <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
           <Text style={styles.nextBtnText}>{nextStepLabel}</Text>

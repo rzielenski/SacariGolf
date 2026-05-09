@@ -50,6 +50,27 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // For 9-hole matches on 18-hole teeboxes, store whether the player chose
+    // the front 9 or the back 9. 18-hole rounds use 'full'. Affects which
+    // ratings (front_course_rating vs back_course_rating) feed the WHS /
+    // ELO calc, and which holes the scoring screen shows.
+    name: 'matches.holes_subset',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS holes_subset TEXT NOT NULL DEFAULT 'full';
+    `,
+  },
+  {
+    // Track which team (clan_id) a duo/squad match was created for. Used by
+    // the auto-pair logic to prevent a team from being matched against
+    // itself or its own teammates' matches. Solo matches stay NULL.
+    name: 'matches.team_clan_id',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS clan_id UUID REFERENCES clans(clan_id) ON DELETE SET NULL;
+    `,
+  },
+  {
     // Distinct flag from `completed`. A match becomes `cancelled` when:
     //   • the player abandons it (no activity for 24h, auto-set by cron)
     //   • someone explicitly cancels (future feature)

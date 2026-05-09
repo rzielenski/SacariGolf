@@ -111,9 +111,15 @@ const stepperStyles = StyleSheet.create({
 // ── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ScoringScreen() {
-  const { id, holes: holesParam } = useLocalSearchParams<{ id: string; holes?: string }>();
+  const { id, holes: holesParam, subset: subsetParam } = useLocalSearchParams<{ id: string; holes?: string; subset?: string }>();
   // numHoles is a state so it can be corrected after loading the match's existing teebox
   const [numHoles, setNumHoles] = useState<number>(holesParam ? parseInt(holesParam, 10) : 18);
+  // Whether to play the front 9, back 9, or full round. Only meaningful for
+  // 9-hole matches on 18-hole teeboxes. Updated after match data loads if
+  // the route param wasn't supplied (e.g. resumed match).
+  const [holesSubset, setHolesSubset] = useState<'front' | 'back' | 'full'>(
+    subsetParam === 'back' ? 'back' : subsetParam === 'front' ? 'front' : 'full'
+  );
   const { user } = useAuth();
 
   // Match / course data
@@ -331,11 +337,23 @@ export default function ScoringScreen() {
           (t) => t.teebox_id === teeboxIdToLoad
         );
         if (tb && tb.holes?.length > 0) {
-          // Use the teebox's own num_holes as ground truth (fixes 9-hole matches
-          // opened via the match lobby which may not have ?holes= in the URL).
-          const effectiveHoles = tb.num_holes ?? numHoles;
+          // Use the match's own num_holes as ground truth (fixes 9-hole
+          // matches opened via the match lobby which may not have ?holes=
+          // in the URL). `m` is the match record loaded above.
+          const effectiveHoles = (m as any)?.num_holes ?? numHoles;
           if (effectiveHoles !== numHoles) setNumHoles(effectiveHoles);
-          const sorted = [...tb.holes].sort((a, b) => a.hole_num - b.hole_num).slice(0, effectiveHoles);
+
+          // Determine which subset (front/back/full). Prefer the match's
+          // stored value over the URL param so a resumed round always
+          // matches what was saved.
+          const matchSubset = (m as any)?.holes_subset as ('front' | 'back' | 'full' | undefined);
+          const effSubset: 'front' | 'back' | 'full' = matchSubset ?? holesSubset ?? 'full';
+          if (effSubset !== holesSubset) setHolesSubset(effSubset);
+
+          // Slice the teebox's full hole list to the right window.
+          const allSorted = [...tb.holes].sort((a, b) => a.hole_num - b.hole_num);
+          const offset = effSubset === 'back' ? 9 : 0;
+          const sorted = allSorted.slice(offset, offset + effectiveHoles);
           setCourse(courseDetails);
           setTeebox(tb);
           setHoles(sorted);

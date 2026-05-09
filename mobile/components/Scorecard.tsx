@@ -37,6 +37,10 @@ export type ScorecardEntry = {
   teebox_par?: number | null; // optional fallback total par
   match_id?: string | null;   // when set, enables shot-map viewing
   round_id?: string | null;   // when set, enables comments / reactions
+  // Which subset of an 18-hole teebox this round covered. 'full' = 18 holes,
+  // 'front' = 1-9, 'back' = 10-18. When 'back', the score array represents
+  // holes 10-18 and the grid should render with those hole numbers.
+  holes_subset?: 'front' | 'back' | 'full' | null;
 };
 
 /** Compute 4-category strokes-gained totals and the per-hole sample size. */
@@ -126,13 +130,19 @@ function useTeeboxHoles(courseId?: string | null, teeboxId?: string | null) {
 
 function buildGridData(entry: ScorecardEntry, holes: any[]) {
   const scores = entry.hole_scores ?? [];
-  const playedHoles = holes.length >= scores.length
-    ? holes.slice(0, scores.length)
-    : scores.map((_, i) => ({ hole_id: `ph-${i}`, hole_num: i + 1, par: 4 }));
-  const front = playedHoles.slice(0, 9);
-  const back = playedHoles.slice(9);
-  const frontScores = scores.slice(0, 9);
-  const backScores = scores.slice(9);
+  // For a back-9 round, the score array's first element is hole 10. Offset
+  // the teebox holes window accordingly so the grid labels match.
+  const isBack9 = entry.holes_subset === 'back';
+  const offset = isBack9 ? 9 : 0;
+  const playedHoles = holes.length >= offset + scores.length
+    ? holes.slice(offset, offset + scores.length)
+    : scores.map((_, i) => ({ hole_id: `ph-${i}`, hole_num: offset + i + 1, par: 4 }));
+  // For a back-9, all played holes go in the "back" column; "front" is empty.
+  // For a front-9 (or 18), the existing 0-9 / 9-18 split applies.
+  const front = isBack9 ? [] : playedHoles.slice(0, 9);
+  const back  = isBack9 ? playedHoles : playedHoles.slice(9);
+  const frontScores = isBack9 ? [] : scores.slice(0, 9);
+  const backScores  = isBack9 ? scores : scores.slice(9);
   const frontPar = front.reduce((a, h) => a + h.par, 0);
   const backPar = back.reduce((a, h) => a + h.par, 0);
   const totalPar = frontPar + backPar;

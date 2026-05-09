@@ -145,6 +145,12 @@ export const api = {
     acceptRequest: (friendId: string) => request<any>('POST', '/users/me/friends/accept', { friendId }),
     leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
+    importShots: (body: {
+      name?: string;
+      shots: { club: string; distance_yds: number; lateral_yds?: number; recorded_at?: string }[];
+    }) => request<{ success: true; match_id: string; total_shots: number; skipped: number }>(
+      'POST', '/users/me/import-shots', body
+    ),
   },
 
   weather: {
@@ -203,7 +209,16 @@ export const api = {
   matches: {
     list: () => request<any[]>('GET', '/matches'),
     get: (id: string) => request<any>('GET', `/matches/${id}`),
-    create: (body: { matchType: string; isPractice?: boolean; teeboxId?: string; clanId?: string; name?: string; format?: string; numHoles?: number }) => request<any>('POST', '/matches', body),
+    create: (body: {
+      matchType: string;
+      isPractice?: boolean;
+      teeboxId?: string;
+      clanId?: string;
+      name?: string;
+      format?: string;
+      numHoles?: number;
+      holesSubset?: 'front' | 'back' | 'full';
+    }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: {
       holeScores: number[];

@@ -58,8 +58,11 @@ export function MatchFoundWatcher() {
             continue;
           }
           // Mark as triggered NOW so a slow detail fetch doesn't allow a
-          // second tick to also pick this match up.
+          // second tick to also pick this match up. Also persist the flag
+          // BEFORE we render the animation — that way, if the app crashes
+          // or backgrounds mid-animation, the next launch won't replay it.
           triggeredThisSession.current.add(m.match_id);
+          await AsyncStorage.setItem(SEEN_KEY(m.match_id), '1').catch(() => { });
           // Fetch the full match so we have player avatars / clan info.
           const detail = await api.matches.get(m.match_id);
           if (cancelled) return;
@@ -94,9 +97,10 @@ export function MatchFoundWatcher() {
     };
   }, [user?.user_id, token]);
 
-  const dismiss = async () => {
-    if (!intro) return;
-    AsyncStorage.setItem(SEEN_KEY(intro.matchId), '1').catch(() => { });
+  const dismiss = () => {
+    // Seen flag is already persisted at trigger time (above). Just close the
+    // overlay — the next poll will skip this match because both the
+    // in-session set and AsyncStorage are populated.
     setIntro(null);
   };
 

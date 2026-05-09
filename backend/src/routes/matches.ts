@@ -20,18 +20,35 @@ function kFactor(totalMatches: number, elo: number) {
 // Score differential scaled to an 18-hole equivalent so players on different
 // courses, different teeboxes, and different hole counts can be compared fairly.
 //
-//   18-hole round on an 18-hole teebox  → standard formula
-//   9-hole round on a 9-hole teebox     → standard formula on 9-hole rating, then ×2
-//   9-hole round on an 18-hole teebox   → use ½ the 18-hole rating (assume front 9), then ×2
+//   18-hole round on an 18-hole teebox       → standard formula
+//   9-hole round on a 9-hole teebox          → standard formula on 9-hole rating, then ×2
+//   9-hole round on an 18-hole teebox        → use the FRONT or BACK 9 rating
+//                                              (caller provides via overrideRating);
+//                                              falls back to half the 18-hole rating
+//                                              when no front/back rating is available.
 //
 // The doubling converts a 9-hole "strokes over rating" into an 18-hole equivalent
 // so a 5-stroke-over diff on 9 holes is treated like a 10-stroke-over diff on 18.
-function diff18(gross: number, courseRating: number, slopeRating: number, holesPlayed = 18, teeboxHoles = 18) {
+function diff18(
+  gross: number,
+  courseRating: number,
+  slopeRating: number,
+  holesPlayed = 18,
+  teeboxHoles = 18,
+  overrideRating?: number | null,
+  overrideSlope?: number | null,
+) {
   let r = courseRating;
+  let s = slopeRating;
   if (holesPlayed === 9 && teeboxHoles === 18) {
-    r = courseRating / 2; // assume the player completed the front 9
+    if (typeof overrideRating === 'number' && overrideRating > 0) {
+      r = overrideRating;
+      if (typeof overrideSlope === 'number' && overrideSlope > 0) s = overrideSlope;
+    } else {
+      r = courseRating / 2; // legacy fallback: half the 18-hole rating
+    }
   }
-  const raw = (gross - r) * (113 / slopeRating);
+  const raw = (gross - r) * (113 / s);
   return holesPlayed === 9 ? raw * 2 : raw;
 }
 
@@ -43,10 +60,15 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 
 // Create match
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles } = req.body;
+  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset } = req.body;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
   const resolvedFormat = (matchType === 'duo' || matchType === 'squad') && format === 'scramble' ? 'scramble' : 'stroke';
   const resolvedNumHoles = (numHoles === 9) ? 9 : 18;
+  // Front vs back is only meaningful for 9-hole matches. 18-hole = 'full'.
+  // Default to 'front' if the client picked 9 but didn't say which.
+  const resolvedHolesSubset = resolvedNumHoles === 9
+    ? (holesSubset === 'back' ? 'back' : 'front')
+    : 'full';
 
   const client = await pool.connect();
   try {
@@ -65,9 +87,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     }
 
     const { rows } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice, format, num_holes)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles]
+      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset]
     );
     const match = rows[0];
 
@@ -147,9 +169,21 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
              SELECT 1 FROM match_players mp_opp
              WHERE mp_opp.match_id = m.match_id AND mp_opp.side != 1
            )
+           -- Same-team protection: never pair against
+           --   (a) my own user
+           --   (b) anyone in MY clan (your duo partner's match)
+           --   (c) any match flagged with the same clan_id as mine
            AND NOT EXISTS (
              SELECT 1 FROM match_players mp_self
              WHERE mp_self.match_id = m.match_id AND mp_self.user_id = $5
+           )
+           AND NOT (m.clan_id IS NOT NULL AND m.clan_id = $6)
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp_cand
+             JOIN clan_members cm_me ON cm_me.user_id = $5
+             JOIN clan_members cm_them ON cm_them.user_id = mp_cand.user_id
+                                      AND cm_them.clan_id = cm_me.clan_id
+             WHERE mp_cand.match_id = m.match_id
            )
          ORDER BY ABS(
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
@@ -161,7 +195,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
          )
          LIMIT 1
          FOR UPDATE SKIP LOCKED`,
-        [match.match_id, matchType, resolvedFormat, resolvedNumHoles, req.userId]
+        [match.match_id, matchType, resolvedFormat, resolvedNumHoles, req.userId, clanId || null]
       );
 
       if (candidates.length) {
@@ -584,10 +618,14 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       );
     }
 
-    // Check if all players have submitted
+    // Check if all players have submitted. Pull both the standard and the
+    // front/back ratings — the resolver below picks the right one based on
+    // matches.holes_subset.
     const { rows: allPlayers } = await client.query(
       `SELECT mp.user_id, mp.side, mp.strokes, mp.teebox_id,
               t.course_rating, t.slope_rating, t.par,
+              t.front_course_rating, t.front_slope_rating,
+              t.back_course_rating,  t.back_slope_rating,
               t.num_holes AS teebox_num_holes,
               COALESCE(array_length(r.hole_scores, 1), 18) AS holes_played,
               u.elo, u.total_matches
@@ -599,6 +637,8 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       [req.params.id]
     );
 
+    const holesSubsetForCalc: string = matchRows[0].holes_subset ?? 'full';
+
     const allDone = allPlayers.every((p) => p.strokes != null);
     let result: any = null;
 
@@ -609,11 +649,27 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       matchType: string
     ) => {
       const getDiff = (players: typeof allPlayers, topN?: number) => {
-        const diffs = players.map((p) =>
-          p.course_rating && p.slope_rating
-            ? diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played)
-            : p.strokes
-        ).sort((a: number, b: number) => a - b); // ascending — lower is better in golf
+        const diffs = players.map((p) => {
+          if (!p.course_rating || !p.slope_rating) return p.strokes;
+          // Pick the proper rating override for 9-hole rounds based on
+          // whether the match was front, back, or full. Falls back to the
+          // half-rating logic inside diff18 when front/back ratings aren't
+          // populated for this teebox.
+          const subset = holesSubsetForCalc;
+          const overrideRating =
+            subset === 'front' ? p.front_course_rating
+            : subset === 'back'  ? p.back_course_rating
+            : null;
+          const overrideSlope =
+            subset === 'front' ? p.front_slope_rating
+            : subset === 'back'  ? p.back_slope_rating
+            : null;
+          return diff18(
+            p.strokes, p.course_rating, p.slope_rating,
+            p.holes_played, p.teebox_num_holes || p.holes_played,
+            overrideRating, overrideSlope,
+          );
+        }).sort((a: number, b: number) => a - b);
         const used = topN ? diffs.slice(0, topN) : diffs;
         return used.reduce((a: number, b: number) => a + b, 0) / used.length;
       };

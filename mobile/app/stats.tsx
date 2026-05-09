@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
 import { Stack, router } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { OrnamentTitle } from '../components/Flourish';
+import { parseCSV } from '../lib/importShots';
 
 /**
  * Detailed stats view. Shows handicap, strokes-gained per category (per round,
@@ -21,6 +24,72 @@ export default function StatsScreen() {
   const [advancedSG, setAdvancedSG] = useState<any | null>(null);
   const [sgMode, setSgMode] = useState<'basic' | 'advanced'>('basic');
   const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+
+  /** Open the system file picker, parse the CSV, and POST it to the import
+   *  endpoint. Works for Flightscope, Trackman, and any vendor CSV with a
+   *  `Club` column and a `Total` or `Carry` distance column. */
+  const importCSV = async () => {
+    if (importing) return;
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: ['text/csv', 'text/comma-separated-values', 'application/csv', '*/*'],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (picked.canceled || !picked.assets?.[0]) return;
+      const uri = picked.assets[0].uri;
+      const raw = await FileSystem.readAsStringAsync(uri);
+
+      const parsed = parseCSV(raw);
+      if (!parsed.shots.length) {
+        Alert.alert(
+          'No shots found',
+          parsed.unmappedClubs.length
+            ? `Couldn't recognize these clubs: ${parsed.unmappedClubs.join(', ')}`
+            : 'Make sure your CSV has a Club column and a Total/Carry column.',
+        );
+        return;
+      }
+
+      const summary = Object.entries(parsed.perClubCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([c, n]) => `${c.toUpperCase()}: ${n}`)
+        .join('\n');
+
+      Alert.alert(
+        'Import shots?',
+        `${parsed.shots.length} shots across ${Object.keys(parsed.perClubCounts).length} clubs:\n\n${summary}${
+          parsed.unmappedClubs.length ? `\n\nSkipped clubs: ${parsed.unmappedClubs.join(', ')}` : ''
+        }`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Import',
+            onPress: async () => {
+              setImporting(true);
+              try {
+                const fileName = picked.assets?.[0].name?.replace(/\.csv$/i, '') ?? null;
+                const res = await api.users.importShots({
+                  name: fileName ? `Import · ${fileName}` : undefined,
+                  shots: parsed.shots,
+                });
+                Alert.alert('Imported', `${res.total_shots} shots added to your stats.`);
+                // No need to refresh anything explicitly — next stats load
+                // (or heatmap visit) reads them from the server.
+              } catch (e: any) {
+                Alert.alert('Import failed', e.message ?? 'Try again.');
+              } finally {
+                setImporting(false);
+              }
+            },
+          },
+        ],
+      );
+    } catch (e: any) {
+      Alert.alert('Could not read file', e.message ?? 'Try a different file.');
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -169,6 +238,23 @@ export default function StatsScreen() {
               <Text style={s.heatmapSub}>Per-club dispersion patterns from your tagged shots</Text>
             </View>
             <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>
+          </TouchableOpacity>
+
+          {/* Import shots from launch monitor CSV */}
+          <View style={{ height: 8 }} />
+          <TouchableOpacity
+            style={s.heatmapBtn}
+            onPress={importCSV}
+            disabled={importing}
+            activeOpacity={0.7}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={s.heatmapLabel}>{importing ? 'IMPORTING…' : 'IMPORT SHOTS (CSV)'}</Text>
+              <Text style={s.heatmapSub}>From Flightscope, Trackman, Mevo, or similar launch monitor exports</Text>
+            </View>
+            {importing
+              ? <ActivityIndicator color={C.gold} size="small" />
+              : <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>}
           </TouchableOpacity>
 
           <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
