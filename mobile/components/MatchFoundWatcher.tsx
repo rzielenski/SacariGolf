@@ -41,13 +41,19 @@ export function MatchFoundWatcher() {
   // queuing the same animation while the server-side mark is in flight.
   // Server is the persistent source of truth; this is just a fast-path.
   const triggeredThisSession = useRef<Set<string>>(new Set());
+  // Mirror of `intro` in a ref so the tick closure always sees the CURRENT
+  // value, not whatever was captured at effect-mount time. Without this
+  // mirror, dismissing a stale intro and waiting for a real one to fire
+  // would silently fail because the closure-captured `intro` would still
+  // look truthy.
+  const showingRef = useRef(false);
 
   useEffect(() => {
     if (!user || !token) return;
     let cancelled = false;
 
     const tick = async () => {
-      if (cancelled || intro) return;            // one intro at a time
+      if (cancelled || showingRef.current) return;   // one intro at a time
       try {
         const matches = await api.matches.list();
         if (cancelled) return;
@@ -92,6 +98,7 @@ export function MatchFoundWatcher() {
             && opponent.some((p: any) => p.clan_id === myClanId);
           if (opponentHasMyClan) continue;
 
+          showingRef.current = true;
           setIntro({ matchId: m.match_id, meSide, side1, side2 });
           // Only show one intro at a time — bail out of the loop. Subsequent
           // matches will fire on the next tick after this one is dismissed.
@@ -121,7 +128,9 @@ export function MatchFoundWatcher() {
 
   const dismiss = () => {
     // Server flag is already persisted at trigger time, so closing the
-    // overlay is purely a local state change.
+    // overlay is purely a local state change. Reset the ref so the next
+    // tick is free to fire a new intro if another match has paired since.
+    showingRef.current = false;
     setIntro(null);
   };
 

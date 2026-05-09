@@ -168,6 +168,29 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Backfill existing rows so the freshly-added column doesn't resurrect
+    // the intro for every old paired match the moment this deploys.
+    // Marks anyone in a match that is already completed, cancelled, superseded,
+    // or older than one hour — i.e. anything that's plausibly "stale" — as
+    // already seen. New / fresh pairs (created in the last hour) keep
+    // intro_shown_at = NULL so their animation can still fire normally.
+    // Idempotent: re-running matches no rows after the first pass.
+    name: 'match_players.intro_shown_at_backfill',
+    sql: `
+      UPDATE match_players mp
+         SET intro_shown_at = NOW()
+       WHERE mp.intro_shown_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM matches m
+            WHERE m.match_id = mp.match_id
+              AND (m.completed = TRUE
+                   OR m.cancelled = TRUE
+                   OR m.superseded_by_match_id IS NOT NULL
+                   OR m.created_at < NOW() - INTERVAL '1 hour')
+         );
+    `,
+  },
+  {
     // One-shot grant: every account created before the cutoff timestamp gets
     // lifetime premium ('founder' plan) as a thank-you to early users. Future
     // signups (created_at >= cutoff) are unaffected. Idempotent because the
