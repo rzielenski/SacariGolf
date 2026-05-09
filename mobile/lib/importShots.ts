@@ -94,7 +94,10 @@ export function parseCSV(raw: string): ParseResult {
   const colDist    = idx('total', 'total distance', 'carry', 'carry distance');
   const colLateral = idx('lateral', 'lateral distance', 'side', 'offline');
   const colShot    = idx('shot', 'shot #', '#');
-  const colDate    = idx('date', 'time', 'timestamp');
+  // NOTE: do NOT match the bare "time" header — Flightscope and Trackman both
+  // use "Time" for ball flight time (a number of seconds), not a timestamp.
+  // We only accept headers that explicitly say date/timestamp.
+  const colDate    = idx('date', 'date time', 'datetime', 'timestamp', 'date/time');
 
   if (colClub < 0 || colDist < 0) {
     return { shots: [], perClubCounts: {}, unmappedClubs: [], rowsSkipped: 0 };
@@ -127,7 +130,17 @@ export function parseCSV(raw: string): ParseResult {
       rowsSkipped++; continue;
     }
     const lateral_yds = colLateral >= 0 ? (parseLateral(cells[colLateral]) ?? undefined) : undefined;
-    const recorded_at = colDate >= 0 ? (cells[colDate]?.trim() || undefined) : undefined;
+    // Only forward `recorded_at` if it actually parses as a real date — guards
+    // against vendor CSVs putting a flight-time number under a header we
+    // misidentified as a timestamp.
+    let recorded_at: string | undefined;
+    if (colDate >= 0) {
+      const raw = cells[colDate]?.trim();
+      if (raw) {
+        const t = Date.parse(raw);
+        if (Number.isFinite(t)) recorded_at = new Date(t).toISOString();
+      }
+    }
 
     shots.push({ club: code, distance_yds, lateral_yds, recorded_at });
     perClubCounts[code] = (perClubCounts[code] ?? 0) + 1;

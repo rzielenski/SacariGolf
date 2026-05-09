@@ -1113,13 +1113,19 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
     // Forward by distance (north), then perpendicular by lateral.
     const forward = project(start, 0, dist);
     const end = project(forward, Math.PI / 2, lateral);
+    // Defensively validate recorded_at — clients can pass arbitrary CSV
+    // cell values, and Postgres rejects anything that doesn't parse as a
+    // timestamp. Fall back to "now" if it's missing or unparseable.
+    let recorded_at = new Date().toISOString();
+    if (typeof s?.recorded_at === 'string') {
+      const t = Date.parse(s.recorded_at);
+      if (Number.isFinite(t)) recorded_at = new Date(t).toISOString();
+    }
     cleaned.push({
       club,
       start: { lat: start.lat, lng: start.lng },
       end:   { lat: end.lat,   lng: end.lng },
-      recorded_at: typeof s?.recorded_at === 'string'
-        ? s.recorded_at
-        : new Date().toISOString(),
+      recorded_at,
     });
   }
 
