@@ -109,10 +109,9 @@ export default function PlayScreen() {
       const match = await api.matches.get(joinId.trim());
       if (match.completed) { Alert.alert('Match already completed'); return; }
       await api.matches.join(joinId.trim(), {});
-      // Same post-create destination convention as creation flows: replace
-      // the wizard with the lobby so a back-press goes back to wherever
-      // they came from instead of trapping them in the join form.
-      router.replace(`/match/${joinId.trim()}` as any);
+      // Push (not replace) — the wizard lives inside the (tabs) group, and
+      // a replace would pop the entire tabs subtree off the root stack.
+      router.push(`/match/${joinId.trim()}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setJoining(false); }
@@ -172,7 +171,11 @@ export default function PlayScreen() {
       // share the match ID, or invite more friends. Avoids the old split
       // where solo/practice jumped straight into scoring while duo/squad
       // bounced through an Alert first — both paths now feel identical.
-      router.replace(`/match/${match.match_id}` as any);
+      //
+      // Use push (not replace) because we're crossing from the (tabs)
+      // group into a sibling root-stack screen — replace would pop the
+      // entire tabs subtree off the stack, leaving nothing to go back to.
+      router.push(`/match/${match.match_id}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setCreating(false); }
