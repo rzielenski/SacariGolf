@@ -89,15 +89,22 @@ export function MatchFoundWatcher() {
           const side2 = players.filter((p) => p.side === 2) as SidePlayer[];
           if (side1.length === 0 || side2.length === 0) continue;
 
-          // Defensive: never animate a match where my clan appears on BOTH
-          // sides. The pairing logic should already reject these, but if a
-          // legacy row slips through we suppress the intro AND consider it
-          // shown so the watcher never re-checks it.
-          const myClanId = (me as any).clan_id;
-          const opponent = meSide === 1 ? side2 : side1;
-          const opponentHasMyClan = !!myClanId
-            && opponent.some((p: any) => p.clan_id === myClanId);
-          if (opponentHasMyClan) continue;
+          // Defensive: for TEAM matches (duo / squad), suppress the intro
+          // if my clan somehow appears on both sides — that would only
+          // happen via a legacy data row, since the server now refuses to
+          // pair team matches with shared clanmates. Solo matches are
+          // intentionally allowed to pair clanmates against each other
+          // (in-house 1v1), so we DO NOT skip on shared-clan for solo —
+          // doing so would silently drop the animation for two friends
+          // in the same league playing 1v1.
+          const detailType = (detail.match_type ?? m.match_type ?? 'solo') as string;
+          if (detailType !== 'solo') {
+            const myClanId = (me as any).clan_id;
+            const opponent = meSide === 1 ? side2 : side1;
+            const opponentHasMyClan = !!myClanId
+              && opponent.some((p: any) => p.clan_id === myClanId);
+            if (opponentHasMyClan) continue;
+          }
 
           showingRef.current = true;
           setIntro({

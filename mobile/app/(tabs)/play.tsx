@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, FlatList, ActivityIndicator, Alert,
@@ -10,6 +10,34 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Course, Teebox } from '../../types';
 import { Divider } from '../../components/Flourish';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Map a tee box name to its industry-standard fabric color so the picker
+// reads at a glance — same mental model as the 18Birdies / Garmin tee list.
+// ─────────────────────────────────────────────────────────────────────────────
+function teeColor(name: string | null | undefined): string {
+  const n = (name ?? '').toLowerCase();
+  if (n.includes('black') || n.includes('tip') || n.includes('champ')) return '#1a1a1a';
+  if (n.includes('gold') || n.includes('senior')) return '#d4af37';
+  if (n.includes('blue')) return '#3268b8';
+  if (n.includes('white') || n.includes("men's") || n.includes('mens')) return '#e8e2d4';
+  if (n.includes('red') || n.includes('forward') || n.includes("women") || n.includes('lady')) return '#c0382b';
+  if (n.includes('green') || n.includes('junior')) return '#3a7d44';
+  if (n.includes('silver')) return '#bfbfbf';
+  if (n.includes('purple')) return '#7d3c98';
+  return C.gold;
+}
+
+// Haversine in metres — used for the "you're at <course>" hero detection.
+function distMetres(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+const ON_SITE_M = 1500; // ~1 mile — generous so a player parked nearby still gets the hero card
 
 type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
 type Format = 'stroke' | 'scramble';
@@ -54,6 +82,47 @@ export default function PlayScreen() {
   const [courseDetails, setCourseDetails] = useState<Course | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [creating, setCreating] = useState(false);
+  // Recent courses + last-used teebox per course, derived from the user's
+  // recent_rounds. Lets us pin the most familiar courses to the top of the
+  // course picker (and badge the matching tee on the teebox screen).
+  const [recentCourses, setRecentCourses] = useState<{
+    course_id: string;
+    course_name: string;
+    city?: string | null;
+    state?: string | null;
+    teebox_id?: string | null;
+    teebox_name?: string | null;
+    last_played_at?: string;
+  }[]>([]);
+  // Current GPS position — used by the course step to find an "on-site" course.
+  const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Pull recent rounds once the user is loaded, so the course step can show a
+  // pinned home course + recent-courses section without an extra round-trip.
+  useEffect(() => {
+    if (!user?.user_id) return;
+    let cancelled = false;
+    api.users.get(user.user_id)
+      .then((profile) => {
+        if (cancelled || !profile?.recent_rounds) return;
+        const seen = new Set<string>();
+        const list: typeof recentCourses = [];
+        for (const r of profile.recent_rounds) {
+          if (!r.course_id || seen.has(r.course_id)) continue;
+          seen.add(r.course_id);
+          list.push({
+            course_id: r.course_id,
+            course_name: r.course_name ?? 'Unknown',
+            teebox_id: r.teebox_id,
+            teebox_name: r.teebox_name,
+            last_played_at: r.created_at,
+          });
+        }
+        setRecentCourses(list.slice(0, 5));
+      })
+      .catch(() => { /* non-fatal — picker still works without recents */ });
+    return () => { cancelled = true; };
+  }, [user?.user_id]);
 
   // Apply URL-param defaults whenever the player lands on this screen with
   // them set. Re-runs if a different friend is challenged without the
@@ -72,7 +141,8 @@ export default function PlayScreen() {
     }
   }, [challengeUserId, params.type]);
 
-  // Load nearby courses once
+  // Load nearby courses once. Also stash the GPS fix so we can detect when
+  // the player is physically AT one of the returned courses → "you're at X" hero.
   useEffect(() => {
     if (step !== 'course' || nearbyCourses.length > 0) return;
     (async () => {
@@ -81,11 +151,41 @@ export default function PlayScreen() {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') return;
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         const results = await api.courses.nearby(pos.coords.latitude, pos.coords.longitude);
         setNearbyCourses(results);
       } catch { } finally { setLoadingNearby(false); }
     })();
   }, [step]);
+
+  // Closest nearby course within ~1 mile, or null. Memoised so the hero only
+  // re-evaluates when the inputs change.
+  const onSiteCourse = useMemo<Course | null>(() => {
+    if (!userPos || !nearbyCourses.length) return null;
+    let best: Course | null = null;
+    let bestDist = Infinity;
+    for (const c of nearbyCourses) {
+      if (c.latitude == null || c.longitude == null) continue;
+      const d = distMetres(userPos.lat, userPos.lng, c.latitude, c.longitude);
+      if (d < bestDist && d <= ON_SITE_M) { best = c; bestDist = d; }
+    }
+    return best;
+  }, [userPos, nearbyCourses]);
+
+  // Home course id (when set) for pinning at the top of the course picker.
+  const homeCourseId = (user as any)?.home_course_id ?? null;
+  const homeCourseStub: Course | null = homeCourseId
+    ? {
+        course_id: homeCourseId,
+        course_name: (user as any)?.home_course_name ?? 'Home Course',
+        club_name: null,
+        city: (user as any)?.home_course_city ?? null,
+        state: (user as any)?.home_course_state ?? null,
+        country: null,
+        latitude: (user as any)?.home_course_lat ?? null,
+        longitude: (user as any)?.home_course_lng ?? null,
+      }
+    : null;
 
   // Load clans when clan step becomes active
   useEffect(() => {
@@ -429,72 +529,189 @@ export default function PlayScreen() {
 
   // ── Course search ─────────────────────────────────────────────────────────────
   if (step === 'course') {
+    // Filter out duplicate IDs across sections so a course never appears twice.
+    const pinnedIds = new Set<string>();
+    if (onSiteCourse) pinnedIds.add(onSiteCourse.course_id);
+    if (homeCourseStub && !pinnedIds.has(homeCourseStub.course_id)) pinnedIds.add(homeCourseStub.course_id);
+    const recentsToShow = recentCourses.filter((c) => !pinnedIds.has(c.course_id));
+    recentsToShow.forEach((c) => pinnedIds.add(c.course_id));
+    const nearbyToShow = nearbyCourses.filter((c) => !pinnedIds.has(c.course_id));
+
     return (
       <View style={styles.container}>
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'format' : 'type')} >
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>Find a Course</Text>
-        <Text style={styles.subtitle}>Search by name, city, or state</Text>
+        <Text style={styles.title}>Where to Play</Text>
         <TextInput
           style={styles.searchInput}
           value={query}
           onChangeText={searchCourses}
-          placeholder="e.g. Potsdam, Clarkson, Pebble..."
+          placeholder="Search course, club, city..."
           placeholderTextColor={C.textMuted}
-          autoFocus
         />
         {(searching || loadingDetails) && <ActivityIndicator color={C.gold} style={{ marginTop: 20 }} />}
-        {query.length < 2 && !searching && (
-          <>
-            {loadingNearby
-              ? <ActivityIndicator color={C.gold} style={{ marginTop: 20 }} />
-              : nearbyCourses.length > 0 && (
-                <>
-                  <Text style={styles.nearbyLabel}>Nearby</Text>
-                  <FlatList
-                    data={nearbyCourses}
-                    keyExtractor={(c) => c.course_id}
-                    renderItem={({ item }) => <CourseRow course={item} onPress={() => selectCourse(item)} />}
-                    scrollEnabled={false}
-                  />
-                </>
-              )}
-          </>
-        )}
-        {query.length >= 2 && (
+
+        {/* SEARCH MODE — flat list of search results */}
+        {query.length >= 2 && !searching && (
           <FlatList
             data={courses}
             keyExtractor={(c) => c.course_id}
             renderItem={({ item }) => <CourseRow course={item} onPress={() => selectCourse(item)} />}
+            ListEmptyComponent={<Text style={styles.emptyMsg}>No courses match "{query}"</Text>}
             style={{ marginTop: 4 }}
           />
+        )}
+
+        {/* DEFAULT MODE — on-site hero + home + recents + nearby */}
+        {query.length < 2 && (
+          <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }}>
+            {/* "You're at X" hero — auto-detected from GPS */}
+            {onSiteCourse && (
+              <TouchableOpacity
+                style={styles.onSiteHero}
+                onPress={() => selectCourse(onSiteCourse)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.onSiteLabel}>YOU'RE AT</Text>
+                <Text style={styles.onSiteName}>{onSiteCourse.course_name}</Text>
+                {(onSiteCourse.city || onSiteCourse.state) && (
+                  <Text style={styles.onSiteLoc}>
+                    {[onSiteCourse.city, onSiteCourse.state].filter(Boolean).join(', ')}
+                  </Text>
+                )}
+                <Text style={styles.onSiteCta}>Tap to start →</Text>
+              </TouchableOpacity>
+            )}
+
+            {/* Home course — pinned card */}
+            {homeCourseStub && homeCourseStub.course_id !== onSiteCourse?.course_id && (
+              <>
+                <Text style={styles.sectionLabel}>★ Home Course</Text>
+                <CourseRow course={homeCourseStub} onPress={() => selectCourse(homeCourseStub)} accent />
+              </>
+            )}
+
+            {/* Recently played */}
+            {recentsToShow.length > 0 && (
+              <>
+                <Text style={styles.sectionLabel}>Recently Played</Text>
+                {recentsToShow.map((rc) => (
+                  <CourseRow
+                    key={rc.course_id}
+                    course={{
+                      course_id: rc.course_id,
+                      course_name: rc.course_name,
+                      club_name: null,
+                      city: rc.city ?? null,
+                      state: rc.state ?? null,
+                      country: null,
+                      latitude: null, longitude: null,
+                    }}
+                    sub={rc.teebox_name ? `Last: ${rc.teebox_name} tees` : undefined}
+                    onPress={() => selectCourse({
+                      course_id: rc.course_id,
+                      course_name: rc.course_name,
+                      club_name: null,
+                      city: rc.city ?? null,
+                      state: rc.state ?? null,
+                      country: null,
+                      latitude: null, longitude: null,
+                    })}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* Nearby (whatever's left) */}
+            {loadingNearby ? (
+              <ActivityIndicator color={C.gold} style={{ marginTop: 20 }} />
+            ) : nearbyToShow.length > 0 ? (
+              <>
+                <Text style={styles.sectionLabel}>Nearby</Text>
+                {nearbyToShow.map((c) => (
+                  <CourseRow key={c.course_id} course={c} onPress={() => selectCourse(c)} />
+                ))}
+              </>
+            ) : null}
+
+            {/* Empty state — first-time user */}
+            {!onSiteCourse && !homeCourseStub && recentsToShow.length === 0 && nearbyToShow.length === 0 && !loadingNearby && (
+              <Text style={styles.emptyMsg}>Search for a course above, or set your home course in the Profile tab.</Text>
+            )}
+          </ScrollView>
         )}
       </View>
     );
   }
 
   // ── Teebox selection ──────────────────────────────────────────────────────────
+  // Find the user's last-played teebox AT THIS COURSE so we can highlight the
+  // matching card. This is one of the highest-friction parts of every other
+  // golf app — for a regular at one course, it should be a single tap.
+  const lastTeeboxIdAtThisCourse = recentCourses.find(
+    (rc) => rc.course_id === courseDetails?.course_id,
+  )?.teebox_id;
+  // Sort: last-played tee first, then everything else in the order returned
+  // by the backend (which is `total_yards DESC` — black/championship up top).
+  const filteredTees = (courseDetails?.teeboxes ?? []).filter((t) => t.num_holes >= numHoles);
+  const orderedTees = lastTeeboxIdAtThisCourse
+    ? [
+        ...filteredTees.filter((t) => t.teebox_id === lastTeeboxIdAtThisCourse),
+        ...filteredTees.filter((t) => t.teebox_id !== lastTeeboxIdAtThisCourse),
+      ]
+    : filteredTees;
+
   return (
     <View style={styles.container}>
       <TouchableOpacity style={styles.backBtn} onPress={() => { setStep('course'); setCourseDetails(null); }}>
         <Text style={styles.backBtnText}>← Back</Text>
       </TouchableOpacity>
       <Text style={styles.title}>{courseDetails?.course_name}</Text>
-      <Text style={styles.subtitle}>Select your tee box</Text>
+      <Text style={styles.subtitle}>
+        Pick your tees — {numHoles === 9
+          ? `${holesSubset === 'back' ? 'Back' : 'Front'} 9`
+          : '18 holes'}
+      </Text>
       <ScrollView>
-        {(courseDetails?.teeboxes ?? []).filter((t) => t.num_holes >= numHoles).map((t) => (
-          <TouchableOpacity key={t.teebox_id} style={styles.teeboxCard} onPress={() => startMatch(t)}>
-            <View style={styles.teeboxLeft}>
-              <Text style={styles.teeboxName}>{t.name}</Text>
-              <Text style={styles.teeboxMeta}>{t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds</Text>
-            </View>
-            <View style={styles.teeboxRight}>
-              <Text style={styles.teeboxRating}>Rating: {t.course_rating}</Text>
-              <Text style={styles.teeboxSlope}>Slope: {t.slope_rating}</Text>
-            </View>
-          </TouchableOpacity>
-        ))}
+        {orderedTees.length === 0 && (
+          <Text style={styles.emptyMsg}>
+            No tees with {numHoles} holes at this course. Pick a different course or change hole count.
+          </Text>
+        )}
+        {orderedTees.map((t) => {
+          const color = teeColor(t.name);
+          const isLast = t.teebox_id === lastTeeboxIdAtThisCourse;
+          return (
+            <TouchableOpacity
+              key={t.teebox_id}
+              style={[styles.teeboxCardV2, isLast && styles.teeboxCardLast]}
+              onPress={() => startMatch(t)}
+              disabled={creating}
+              activeOpacity={0.85}
+            >
+              {/* Vertical color stripe — instant tee identification */}
+              <View style={[styles.teeStripe, { backgroundColor: color }]} />
+              <View style={styles.teeboxLeft}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={styles.teeboxName}>{t.name}</Text>
+                  {isLast && (
+                    <View style={styles.lastBadge}>
+                      <Text style={styles.lastBadgeText}>LAST PLAYED</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.teeboxMeta}>
+                  Par {t.par} · {t.total_yards?.toLocaleString() ?? '—'} yds · {t.num_holes} holes
+                </Text>
+              </View>
+              <View style={styles.teeboxRight}>
+                <Text style={styles.teeboxRating}>{t.course_rating ?? '—'} / {t.slope_rating ?? '—'}</Text>
+                <Text style={styles.teeboxRatingLabel}>RATING / SLOPE</Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
         {creating && (
           <View style={{ alignItems: 'center', marginTop: 20 }}>
             <ActivityIndicator color={C.gold} />
@@ -506,16 +723,36 @@ export default function PlayScreen() {
   );
 }
 
-function CourseRow({ course, onPress }: { course: Course; onPress: () => void }) {
+function CourseRow({
+  course,
+  onPress,
+  accent,
+  sub,
+}: {
+  course: Course;
+  onPress: () => void;
+  accent?: boolean;
+  sub?: string;
+}) {
   return (
-    <TouchableOpacity style={styles.courseCard} onPress={onPress}>
-      <Text style={styles.courseName}>{course.course_name}</Text>
-      {course.club_name && course.club_name !== course.course_name && (
-        <Text style={styles.clubName}>{course.club_name}</Text>
-      )}
-      <Text style={styles.courseLocation}>
-        {[course.city, course.state].filter(Boolean).join(', ')}
-      </Text>
+    <TouchableOpacity
+      style={[styles.courseCard, accent && styles.courseCardAccent]}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={styles.courseName}>{course.course_name}</Text>
+        {course.club_name && course.club_name !== course.course_name && (
+          <Text style={styles.clubName}>{course.club_name}</Text>
+        )}
+        {(course.city || course.state) && (
+          <Text style={styles.courseLocation}>
+            {[course.city, course.state].filter(Boolean).join(', ')}
+          </Text>
+        )}
+        {sub ? <Text style={styles.courseSub}>{sub}</Text> : null}
+      </View>
+      <Text style={styles.courseChev}>›</Text>
     </TouchableOpacity>
   );
 }
@@ -598,5 +835,40 @@ const styles = StyleSheet.create({
   teeboxMeta: { color: C.textMuted, fontSize: 12, marginTop: 4 },
   teeboxRight: { alignItems: 'flex-end' },
   teeboxRating: { color: C.gold, fontWeight: '700', fontSize: 13 },
+  teeboxRatingLabel: { color: C.textDim, fontSize: 9, fontWeight: '700', letterSpacing: 1, marginTop: 2 },
   teeboxSlope: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+
+  // V2 teebox card with the colored fabric stripe + last-played badge.
+  teeboxCardV2: {
+    backgroundColor: C.card, borderRadius: 12, marginBottom: 10,
+    flexDirection: 'row', alignItems: 'center',
+    borderWidth: 1, borderColor: C.border, overflow: 'hidden',
+  },
+  teeboxCardLast: { borderColor: C.gold },
+  teeStripe: { width: 8, alignSelf: 'stretch' },
+  lastBadge: {
+    backgroundColor: C.gold + '33', borderRadius: 4,
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderWidth: 1, borderColor: C.gold,
+  },
+  lastBadgeText: { color: C.gold, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
+
+  // Course-picker enhancements (on-site hero, section labels, accent card)
+  onSiteHero: {
+    backgroundColor: C.gold + '18', borderRadius: 16, padding: 18,
+    marginBottom: 16, borderWidth: 2, borderColor: C.gold,
+  },
+  onSiteLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, marginBottom: 4 },
+  onSiteName: { color: C.text, fontSize: 22, fontWeight: '900', fontFamily: F.serif },
+  onSiteLoc: { color: C.textMuted, fontSize: 13, marginTop: 4 },
+  onSiteCta: { color: C.gold, fontSize: 13, fontWeight: '700', marginTop: 10 },
+  sectionLabel: {
+    color: C.textMuted, fontSize: 11, fontWeight: '700',
+    letterSpacing: 1.5, textTransform: 'uppercase',
+    marginTop: 14, marginBottom: 8,
+  },
+  courseCardAccent: { borderColor: C.gold + '88', backgroundColor: C.gold + '0a' },
+  courseSub: { color: C.gold, fontSize: 12, marginTop: 4, fontStyle: 'italic' },
+  courseChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
+  emptyMsg: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 24, paddingHorizontal: 12 },
 });
