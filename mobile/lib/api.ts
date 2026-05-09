@@ -239,6 +239,11 @@ export const api = {
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`
       ),
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
+    // Tells the server "the VS intro animation has been shown to me on this
+    // match, don't ever fire it again." Server uses COALESCE so the call is
+    // safely idempotent — duplicate calls are no-ops.
+    markIntroShown: (id: string) =>
+      request<{ success: true }>('POST', `/matches/${id}/mark-intro-shown`, {}),
     progress: (id: string, body: {
       holeScores: number[];
       holeStats?: ({ putts?: number; chips?: number; fairwayHit?: boolean | null } | null)[];

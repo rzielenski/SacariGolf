@@ -346,9 +346,14 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 // List my matches
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT m.match_id, m.match_type, m.name, m.completed, m.created_at, m.is_practice,
+    `SELECT m.match_id, m.match_type, m.name, m.completed, m.cancelled,
+            m.created_at, m.is_practice,
             mr.winner_side, mr.delta_elo, mr.details,
             mp_me.side AS my_side, mp_me.strokes AS my_strokes,
+            -- Server-side record that the intro animation has fired for
+            -- THIS user on THIS match. Watcher uses this to decide whether
+            -- to play the VS reveal — guaranteed-once across devices.
+            mp_me.intro_shown_at,
             -- True once an opponent has been added on the other side.
             -- Powers the "match found" intro on the client — when this flips
             -- from false to true between polls we know to fire the animation.
@@ -1101,6 +1106,27 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
     [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]
   );
+  return res.json({ success: true });
+}));
+
+/**
+ * Mark the match-found intro as having been shown to the requesting user.
+ * Called by the mobile MatchFoundWatcher the moment it triggers the VS
+ * animation. Idempotent — uses COALESCE so the FIRST trigger wins and
+ * subsequent calls are no-ops, which keeps the "first time" timestamp
+ * accurate even if the watcher fires twice during a race.
+ *
+ * The list endpoint exposes mp_me.intro_shown_at so the watcher can avoid
+ * even fetching the full match detail on subsequent polls.
+ */
+router.post('/:id/mark-intro-shown', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rowCount } = await pool.query(
+    `UPDATE match_players
+        SET intro_shown_at = COALESCE(intro_shown_at, NOW())
+      WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'Not in match' });
   return res.json({ success: true });
 }));
 

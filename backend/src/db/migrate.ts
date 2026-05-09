@@ -156,6 +156,18 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Server-side record of "match-found intro has been delivered to this
+    // player". Source of truth for the watcher — replaces AsyncStorage so the
+    // intro is genuinely once-and-only-once across devices, reinstalls, and
+    // sessions. Set by POST /matches/:id/mark-intro-shown the moment the
+    // animation kicks off.
+    name: 'match_players.intro_shown_at',
+    sql: `
+      ALTER TABLE match_players
+        ADD COLUMN IF NOT EXISTS intro_shown_at TIMESTAMPTZ;
+    `,
+  },
+  {
     // One-shot grant: every account created before the cutoff timestamp gets
     // lifetime premium ('founder' plan) as a thank-you to early users. Future
     // signups (created_at >= cutoff) are unaffected. Idempotent because the
