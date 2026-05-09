@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
 import { Stack, router } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import { File } from 'expo-file-system';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
@@ -39,7 +39,9 @@ export default function StatsScreen() {
       });
       if (picked.canceled || !picked.assets?.[0]) return;
       const uri = picked.assets[0].uri;
-      const raw = await FileSystem.readAsStringAsync(uri);
+      // expo-file-system v19+ — `readAsStringAsync` is deprecated in favor of
+      // the File class. `.text()` returns the file contents as a UTF-8 string.
+      const raw = await new File(uri).text();
 
       const parsed = parseCSV(raw);
       if (!parsed.shots.length) {
