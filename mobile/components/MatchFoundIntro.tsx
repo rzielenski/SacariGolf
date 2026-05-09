@@ -38,34 +38,42 @@ export type SidePlayer = {
 
 export function MatchFoundIntro({
   visible,
+  matchType,         // 'solo' | 'duo' | 'squad' — controls banner + theme source
   meSide,            // which side (1 or 2) belongs to the viewer
   side1Players,
   side2Players,
   onDismiss,
 }: {
   visible: boolean;
+  matchType: string;
   meSide: 1 | 2;
   side1Players: SidePlayer[];
   side2Players: SidePlayer[];
   onDismiss: () => void;
 }) {
+  // Solo matches always show individual identity (avatar / username /
+  // personal theme). Team matches (duo, squad, anything else with multiple
+  // players per side) show the team banner + team theme. We branch on
+  // match type so a solo player who happens to be in a duo doesn't get
+  // their duo's banner pasted onto a 1v1 match.
+  const isTeamMatch = matchType !== 'solo';
   const fadeIn = useRef(new Animated.Value(0)).current;
   const leftSlide = useRef(new Animated.Value(-300)).current;
   const rightSlide = useRef(new Animated.Value(300)).current;
   const versusScale = useRef(new Animated.Value(0)).current;
   const soundRef = useRef<Audio.Sound | null>(null);
 
-  // Pick the OPPONENT side's first available theme preview to play.
-  // Team theme takes priority; falls back to any player's personal theme.
+  // Pick the OPPONENT side's theme preview based on match type:
+  //   • solo → opponent's personal theme only
+  //   • duo / squad → opponent's team theme only (no falling back to a
+  //     teammate's personal theme — if the team hasn't set one, we go silent)
   const opponentPlayers = meSide === 1 ? side2Players : side1Players;
-  const opponentTheme =
-    opponentPlayers.find((p) => p.clan_theme_preview)?.clan_theme_preview
-    ?? opponentPlayers.find((p) => p.user_theme_preview)?.user_theme_preview
-    ?? null;
-  const opponentThemeTitle =
-    opponentPlayers.find((p) => p.clan_theme_title)?.clan_theme_title
-    ?? opponentPlayers.find((p) => p.user_theme_title)?.user_theme_title
-    ?? null;
+  const opponentTheme = isTeamMatch
+    ? (opponentPlayers.find((p) => p.clan_theme_preview)?.clan_theme_preview ?? null)
+    : (opponentPlayers.find((p) => p.user_theme_preview)?.user_theme_preview ?? null);
+  const opponentThemeTitle = isTeamMatch
+    ? (opponentPlayers.find((p) => p.clan_theme_title)?.clan_theme_title ?? null)
+    : (opponentPlayers.find((p) => p.user_theme_title)?.user_theme_title ?? null);
 
   // Run animations when the modal becomes visible.
   useEffect(() => {
@@ -122,7 +130,50 @@ export function MatchFoundIntro({
     isMe: boolean,
     slide: Animated.Value,
   ) => {
-    // Pick the most-represented clan on this side as the "team" identity.
+    // SOLO — show JUST the player. No clan banner, no member list, the
+    // player IS the side. Theme pill (when this is the opponent) shows
+    // the opponent's personal anthem.
+    if (!isTeamMatch) {
+      const p = players[0];
+      const avatar = p?.avatar_url ? `${API_BASE}${p.avatar_url}` : null;
+      const name = p?.username ?? '—';
+      const elo = p?.elo ?? null;
+      return (
+        <Animated.View
+          style={[
+            s.sideCol,
+            isMe ? s.sideMe : s.sideOpponent,
+            { transform: [{ translateX: slide }] },
+          ]}
+        >
+          <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
+          {avatar ? (
+            <Image source={{ uri: avatar }} style={s.clanAvatar} />
+          ) : (
+            <View style={[s.clanAvatar, s.clanAvatarFallback]}>
+              <Text style={s.clanAvatarFallbackText}>
+                {name[0]?.toUpperCase()}
+              </Text>
+            </View>
+          )}
+          <Text style={s.clanName} numberOfLines={1}>{name}</Text>
+          {elo != null && <Text style={s.clanElo}>{elo} ELO</Text>}
+          {!isMe && opponentTheme && opponentThemeTitle && (
+            <View style={s.themePill}>
+              <Text style={s.themePillLabel}>♫ ANTHEM</Text>
+              <Text style={s.themePillTitle} numberOfLines={1}>
+                {opponentThemeTitle}
+              </Text>
+            </View>
+          )}
+        </Animated.View>
+      );
+    }
+
+    // TEAM (duo / squad) — show the clan banner up top, then list every
+    // player underneath. Falls back to the first player's identity only if
+    // none of the players on this side actually have a clan attached
+    // (defensive — pairing should already require it for team matches).
     const lead = players.find((p) => p.clan_name) ?? players[0];
     const clanAvatar = lead?.clan_avatar_url ? `${API_BASE}${lead.clan_avatar_url}` : null;
     const clanName = lead?.clan_name ?? lead?.username ?? '—';

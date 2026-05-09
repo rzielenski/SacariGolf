@@ -32,6 +32,7 @@ export function MatchFoundWatcher() {
   const { user, token } = useAuth();
   const [intro, setIntro] = useState<{
     matchId: string;
+    matchType: string;
     meSide: 1 | 2;
     side1: SidePlayer[];
     side2: SidePlayer[];
@@ -99,7 +100,13 @@ export function MatchFoundWatcher() {
           if (opponentHasMyClan) continue;
 
           showingRef.current = true;
-          setIntro({ matchId: m.match_id, meSide, side1, side2 });
+          setIntro({
+            matchId: m.match_id,
+            matchType: detail.match_type ?? m.match_type ?? 'solo',
+            meSide,
+            side1,
+            side2,
+          });
           // Only show one intro at a time — bail out of the loop. Subsequent
           // matches will fire on the next tick after this one is dismissed.
           break;
@@ -138,6 +145,7 @@ export function MatchFoundWatcher() {
   return (
     <MatchFoundIntro
       visible={true}
+      matchType={intro.matchType}
       meSide={intro.meSide}
       side1Players={intro.side1}
       side2Players={intro.side2}

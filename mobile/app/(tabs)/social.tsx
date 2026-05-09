@@ -118,43 +118,19 @@ function FriendsTab() {
     } catch { /* silent */ }
   };
 
+  // Challenge a friend → route through the same setup wizard as the Play
+  // tab, with the friend's user_id and username pre-attached. The wizard
+  // then asks the SAME questions (course → teebox → holes / front-back)
+  // every other match creation flow asks, and at the end fires off a
+  // match invite to the friend before navigating to the lobby. Replaces
+  // the old two-button "9 Holes / 18 Holes" Alert.alert flow that skipped
+  // course/teebox entirely and made challenge matches feel like a different
+  // product than ranked matches.
   const challengeFriend = (friend: any) => {
-    Alert.alert(
-      `Challenge ${friend.username}`,
-      'Pick a match format',
-      [
-        {
-          text: '9 Holes',
-          onPress: () => sendChallenge(friend, '9'),
-        },
-        {
-          text: '18 Holes',
-          onPress: () => sendChallenge(friend, '18'),
-        },
-        { text: 'Cancel', style: 'cancel' },
-      ]
+    router.push(
+      `/(tabs)/play?challenge=${encodeURIComponent(friend.user_id)}` +
+      `&challengeName=${encodeURIComponent(friend.username)}` as any,
     );
-  };
-
-  const sendChallenge = async (friend: any, holes: string) => {
-    // Defensive — only allow 9 or 18 even if a stale Alert button somehow
-    // passes a different value.
-    const parsed = parseInt(holes, 10);
-    const numHoles: 9 | 18 = parsed === 9 ? 9 : 18;
-    try {
-      const match = await api.matches.create({
-        matchType: 'solo',
-        name: `${numHoles}-hole challenge`,
-        numHoles,
-      });
-      await api.invites.send(match.match_id, friend.user_id);
-      Alert.alert('Challenge sent!', `${friend.username} has been invited. Start your round now — they'll join when they accept.`, [
-        { text: 'Start My Round', onPress: () => router.push(`/match/scoring/${match.match_id}?holes=${numHoles}` as any) },
-        { text: 'Later' },
-      ]);
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    }
   };
 
   if (loading) return <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />;

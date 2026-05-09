@@ -4,7 +4,7 @@ import {
   TextInput, FlatList, ActivityIndicator, Alert,
 } from 'react-native';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
@@ -15,8 +15,25 @@ type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
 type Format = 'stroke' | 'scramble';
 type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
+const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'practice'];
+
 export default function PlayScreen() {
   const { user } = useAuth();
+  // Optional URL params drive two unified entry points into this wizard:
+  //   • ?type=solo|duo|squad|practice — pre-selects the match type so
+  //     the home-tab quick actions land on the right flow with one tap.
+  //   • ?challenge=<userId>&challengeName=<username> — pre-selects solo,
+  //     hides the type picker, and tells startMatch() to send a match
+  //     invite to that user the moment the match is created. This is what
+  //     the Social → Friends → Challenge button uses — same wizard as
+  //     a normal solo match, just with an invite tagged on at the end.
+  const params = useLocalSearchParams<{
+    type?: string;
+    challenge?: string;
+    challengeName?: string;
+  }>();
+  const challengeUserId = typeof params.challenge === 'string' ? params.challenge : null;
+  const challengeUsername = typeof params.challengeName === 'string' ? params.challengeName : null;
   const [step, setStep] = useState<Step>('type');
   const [joinId, setJoinId] = useState('');
   const [joining, setJoining] = useState(false);
@@ -37,6 +54,23 @@ export default function PlayScreen() {
   const [courseDetails, setCourseDetails] = useState<Course | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [creating, setCreating] = useState(false);
+
+  // Apply URL-param defaults whenever the player lands on this screen with
+  // them set. Re-runs if a different friend is challenged without the
+  // wizard being closed first. Always reset to the type step so the user
+  // sees the holes/front-back picker before being whisked into the course
+  // search.
+  useEffect(() => {
+    if (challengeUserId) {
+      setMatchType('solo');
+      setStep('type');
+      return;
+    }
+    if (typeof params.type === 'string' && (TYPE_VALUES as readonly string[]).includes(params.type)) {
+      setMatchType(params.type as MatchType);
+      setStep('type');
+    }
+  }, [challengeUserId, params.type]);
 
   // Load nearby courses once
   useEffect(() => {
@@ -75,7 +109,10 @@ export default function PlayScreen() {
       const match = await api.matches.get(joinId.trim());
       if (match.completed) { Alert.alert('Match already completed'); return; }
       await api.matches.join(joinId.trim(), {});
-      router.push(`/match/${joinId.trim()}` as any);
+      // Same post-create destination convention as creation flows: replace
+      // the wizard with the lobby so a back-press goes back to wherever
+      // they came from instead of trapping them in the join form.
+      router.replace(`/match/${joinId.trim()}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setJoining(false); }
@@ -117,17 +154,25 @@ export default function PlayScreen() {
         format: (matchType === 'duo' || matchType === 'squad') ? format : 'stroke',
         numHoles,
         holesSubset: subsetForReq,
+        // Friendly default name for challenge matches so the recipient
+        // sees something more descriptive than just "solo" in their
+        // invite list.
+        name: challengeUserId
+          ? `${numHoles}-hole challenge from ${user?.username ?? 'a friend'}`
+          : undefined,
       });
-      if ((matchType === 'duo' || matchType === 'squad') && selectedClanId) {
-        Alert.alert(
-          'Match Created!',
-          'Your teammates have been invited. They have 24 hours to accept.',
-          [{ text: 'OK', onPress: () => router.push(`/match/${match.match_id}` as any) }]
-        );
-      } else {
-        const q = `holes=${numHoles}` + (subsetForReq !== 'full' ? `&subset=${subsetForReq}` : '');
-        router.push(`/match/scoring/${match.match_id}?${q}` as any);
+      // Direct-challenge flow: fire off the invite the moment the match
+      // exists. Non-fatal if it fails — the inviter still has a real match
+      // and can share the ID manually.
+      if (challengeUserId) {
+        api.invites.send(match.match_id, challengeUserId).catch(() => { });
       }
+      // Single, consistent post-creation destination for every flow:
+      // the match lobby. From there the player can tap "Start Scoring",
+      // share the match ID, or invite more friends. Avoids the old split
+      // where solo/practice jumped straight into scoring while duo/squad
+      // bounced through an Alert first — both paths now feel identical.
+      router.replace(`/match/${match.match_id}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setCreating(false); }
@@ -148,11 +193,19 @@ export default function PlayScreen() {
   if (step === 'type') {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Start a Round</Text>
-        <Text style={styles.subtitle}>Choose your match type</Text>
+        <Text style={styles.title}>
+          {challengeUserId ? 'Challenge a Friend' : 'Start a Round'}
+        </Text>
+        <Text style={styles.subtitle}>
+          {challengeUserId
+            ? `1v1 ranked match against ${challengeUsername ?? 'your friend'}`
+            : 'Choose your match type'}
+        </Text>
         <Divider style={{ marginTop: -8, marginBottom: 8 }} />
 
-        {(['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
+        {/* Type cards are hidden in challenge mode — the type is locked to
+            solo and there's no value in showing the other options. */}
+        {!challengeUserId && (['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -174,7 +227,7 @@ export default function PlayScreen() {
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>
-            {matchType === t && <Text style={styles.checkmark}>—</Text>}
+            {matchType === t && <Text style={styles.checkmark}>✓</Text>}
           </TouchableOpacity>
         ))}
 
@@ -215,15 +268,21 @@ export default function PlayScreen() {
           <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
         </TouchableOpacity>
 
-        <View style={styles.divider}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>or</Text>
-          <View style={styles.dividerLine} />
-        </View>
+        {/* Join-by-ID is irrelevant when this screen is the challenge flow —
+            you already know who you're playing against. */}
+        {!challengeUserId && (
+          <>
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
+            </View>
 
-        <TouchableOpacity style={styles.joinMatchBtn} onPress={() => setStep('join')}>
-          <Text style={styles.joinMatchText}>Join Match by ID</Text>
-        </TouchableOpacity>
+            <TouchableOpacity style={styles.joinMatchBtn} onPress={() => setStep('join')}>
+              <Text style={styles.joinMatchText}>Join Match by ID</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
     );
   }

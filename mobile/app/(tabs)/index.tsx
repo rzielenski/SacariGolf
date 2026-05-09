@@ -170,17 +170,29 @@ export default function HomeScreen() {
         </Text>
       </TouchableOpacity>
 
-      {/* Quick actions */}
+      {/* Quick actions — each one drops the user straight into the play
+          wizard with the match type pre-selected, so taking the home-tab
+          shortcut is one tap fewer than tapping Play and then the type
+          card. Solo and Duo are the two most common entry points. */}
       <View style={styles.actionsRow}>
-        <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/(tabs)/play')}>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => router.push('/(tabs)/play?type=solo' as any)}
+        >
           <Text style={styles.actionMark}>1v1</Text>
-          <Text style={styles.actionLabel}>Quick Match</Text>
+          <Text style={styles.actionLabel}>Solo Match</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/(tabs)/play')}>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => router.push('/(tabs)/play?type=duo' as any)}
+        >
           <Text style={styles.actionMark}>2v2</Text>
           <Text style={styles.actionLabel}>Duo Match</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.actionBtn} onPress={() => router.push('/(tabs)/social')}>
+        <TouchableOpacity
+          style={styles.actionBtn}
+          onPress={() => router.push('/(tabs)/social')}
+        >
           <Text style={styles.actionMark}>CC</Text>
           <Text style={styles.actionLabel}>Teams</Text>
         </TouchableOpacity>
