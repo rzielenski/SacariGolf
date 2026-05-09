@@ -103,17 +103,24 @@ export async function runPairingPass() {
                 ON mp_a.user_id = mp_b.user_id
               WHERE mp_a.match_id = $1 AND mp_b.match_id = m2.match_id
             )
-            -- No shared team (clan_id stored on match).
-            AND NOT (m1.clan_id IS NOT NULL AND m1.clan_id = m2.clan_id)
-            -- No shared clan member (e.g. teammate created a parallel match).
-            AND NOT EXISTS (
-              SELECT 1
-                FROM match_players mp_a
-                JOIN clan_members cm_a ON cm_a.user_id = mp_a.user_id
-                JOIN clan_members cm_b ON cm_b.clan_id = cm_a.clan_id
-                JOIN match_players mp_b ON mp_b.user_id = cm_b.user_id
-               WHERE mp_a.match_id = $1
-                 AND mp_b.match_id = m2.match_id
+            -- Same-team protection (DUO / SQUAD only): clanmate filtering
+            -- prevents a clan from being pitted against itself. Solo
+            -- matches between clanmates are intentionally allowed — two
+            -- friends in the same clan should still be able to 1v1.
+            AND (
+              m1.match_type = 'solo'
+              OR (
+                NOT (m1.clan_id IS NOT NULL AND m1.clan_id = m2.clan_id)
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM match_players mp_a
+                    JOIN clan_members cm_a ON cm_a.user_id = mp_a.user_id
+                    JOIN clan_members cm_b ON cm_b.clan_id = cm_a.clan_id
+                    JOIN match_players mp_b ON mp_b.user_id = cm_b.user_id
+                   WHERE mp_a.match_id = $1
+                     AND mp_b.match_id = m2.match_id
+                )
+              )
             )
           ORDER BY ABS(
             COALESCE((SELECT AVG(u.elo) FROM match_players mp_x

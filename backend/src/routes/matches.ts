@@ -169,21 +169,30 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
              SELECT 1 FROM match_players mp_opp
              WHERE mp_opp.match_id = m.match_id AND mp_opp.side != 1
            )
-           -- Same-team protection: never pair against
-           --   (a) my own user
-           --   (b) anyone in MY clan (your duo partner's match)
-           --   (c) any match flagged with the same clan_id as mine
+           -- Self-pair protection (always on): never pair against my own
+           -- user — that would auto-match me with myself.
            AND NOT EXISTS (
              SELECT 1 FROM match_players mp_self
              WHERE mp_self.match_id = m.match_id AND mp_self.user_id = $5
            )
-           AND NOT (m.clan_id IS NOT NULL AND m.clan_id = $6)
-           AND NOT EXISTS (
-             SELECT 1 FROM match_players mp_cand
-             JOIN clan_members cm_me ON cm_me.user_id = $5
-             JOIN clan_members cm_them ON cm_them.user_id = mp_cand.user_id
-                                      AND cm_them.clan_id = cm_me.clan_id
-             WHERE mp_cand.match_id = m.match_id
+           -- Same-team protection (DUO / SQUAD only): two clanmates would
+           -- never want their TEAM to play itself. But for solo matches,
+           -- two players who happen to share a clan should absolutely be
+           -- able to 1v1 — that's a normal "in-house" matchup, just like
+           -- two friends who play in the same league. The match_type test
+           -- gates the clan filter to only the team-vs-team formats.
+           AND (
+             $2 = 'solo'
+             OR (
+               NOT (m.clan_id IS NOT NULL AND m.clan_id = $6)
+               AND NOT EXISTS (
+                 SELECT 1 FROM match_players mp_cand
+                 JOIN clan_members cm_me ON cm_me.user_id = $5
+                 JOIN clan_members cm_them ON cm_them.user_id = mp_cand.user_id
+                                          AND cm_them.clan_id = cm_me.clan_id
+                 WHERE mp_cand.match_id = m.match_id
+               )
+             )
            )
          ORDER BY ABS(
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
