@@ -73,6 +73,21 @@ export function MatchFoundWatcher() {
           const side1 = players.filter((p) => p.side === 1) as SidePlayer[];
           const side2 = players.filter((p) => p.side === 2) as SidePlayer[];
           if (side1.length === 0 || side2.length === 0) continue;
+
+          // Defensive: never animate a match where my clan appears on BOTH
+          // sides (legacy pre-fix data, or any future code path that
+          // accidentally pairs teammates against each other). The match-
+          // creation and cron pair logic should already reject these, but
+          // we double-check before lighting up the player's screen.
+          const myClanId = (me as any).clan_id;
+          const opponent = meSide === 1 ? side2 : side1;
+          const opponentHasMyClan = !!myClanId
+            && opponent.some((p: any) => p.clan_id === myClanId);
+          if (opponentHasMyClan) {
+            // Suppress permanently so we don't re-check this match every poll.
+            await AsyncStorage.setItem(SEEN_KEY(m.match_id), 'self-team').catch(() => { });
+            continue;
+          }
           setIntro({ matchId: m.match_id, meSide, side1, side2 });
           // Only show one intro at a time — bail out of the loop.
           break;

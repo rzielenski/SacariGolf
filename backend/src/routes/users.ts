@@ -384,13 +384,25 @@ router.get('/:id/hole-shots', requireAuth, wrap(async (req: AuthRequest, res: Re
     where += ` AND st.match_id != $${params.length}`;
   }
 
+  // Group the user's shots by (match_id, hole_num) using the new shots
+  // table. Returns one row per round per hole.
   const { rows } = await pool.query(
-    `SELECT st.match_id, st.shots, m.created_at
-       FROM shot_tracks st
-       JOIN match_players mp ON mp.match_id = st.match_id AND mp.user_id = st.user_id
-       JOIN teeboxes t ON t.teebox_id = mp.teebox_id
-       JOIN matches m ON m.match_id = st.match_id
-      ${where}
+    `SELECT s.match_id, m.created_at,
+            json_agg(
+              json_build_object(
+                'club', s.club,
+                'lie',  s.lie,
+                'start', json_build_object('lat', s.start_lat, 'lng', s.start_lng, 'elevation_m', s.start_elevation_m),
+                'end',   json_build_object('lat', s.end_lat,   'lng', s.end_lng,   'elevation_m', s.end_elevation_m),
+                'recorded_at', s.recorded_at
+              ) ORDER BY s.shot_index
+            ) AS shots
+       FROM shots s
+       JOIN matches m       ON m.match_id    = s.match_id
+       JOIN match_players mp ON mp.match_id  = s.match_id AND mp.user_id = s.user_id
+       JOIN teeboxes t       ON t.teebox_id  = mp.teebox_id
+      ${where.replace(/st\./g, 's.')}
+      GROUP BY s.match_id, s.hole_num, m.created_at
       ORDER BY m.created_at DESC
       LIMIT 50`,
     params
@@ -417,15 +429,28 @@ router.get('/:id/hole-shots', requireAuth, wrap(async (req: AuthRequest, res: Re
  * (no end-point to measure to without the pin coordinates).
  */
 router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { rows } = await pool.query(
-    `SELECT st.shots
-       FROM shot_tracks st
-       JOIN match_players mp ON mp.match_id = st.match_id AND mp.user_id = st.user_id
-      WHERE st.user_id = $1
-      ORDER BY st.updated_at DESC
-      LIMIT 200`,
+  // Pull every shot the user has — GPS + launch monitor — directly. With
+  // the new shots table this is O(rows), no JSONB iteration needed. Limit
+  // to a generous cap so a power user with thousands of shots doesn't
+  // blow up memory; the most recent 5000 are plenty for stats.
+  const { rows: shotRows } = await pool.query(
+    `SELECT club, start_lat, start_lng, end_lat, end_lng
+       FROM shots
+      WHERE user_id = $1
+        AND club IS NOT NULL
+        AND club <> 'unknown'
+      ORDER BY recorded_at DESC
+      LIMIT 5000`,
     [req.params.id]
   );
+  // Wrap in the shape the existing aggregator expects.
+  const rows: { shots: any[] }[] = [{
+    shots: shotRows.map((s: any) => ({
+      club: s.club,
+      start: { lat: s.start_lat, lng: s.start_lng },
+      end:   { lat: s.end_lat,   lng: s.end_lng },
+    })),
+  }];
 
   // Per-club bucket: collect every shot's (distance_m, bearing_rad) pair,
   // plus the raw start/end so we can normalise.
@@ -574,16 +599,28 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
  * the basic /stats endpoint in that case.
  */
 router.get('/:id/sg-advanced', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Group rows from the new shots table by (match_id, hole_num) and join
+  // each group with its round + teebox holes for pin coordinates.
   const { rows } = await pool.query(
-    `SELECT st.match_id, st.hole_num, st.shots,
+    `SELECT s.match_id, s.hole_num,
+            json_agg(
+              json_build_object(
+                'club',  s.club,
+                'lie',   s.lie,
+                'start', json_build_object('lat', s.start_lat, 'lng', s.start_lng),
+                'end',   json_build_object('lat', s.end_lat,   'lng', s.end_lng)
+              ) ORDER BY s.shot_index
+            ) AS shots,
             r.hole_scores, r.teebox_id,
             (SELECT json_agg(json_build_object('hole_num', h.hole_num, 'par', h.par,
                                                 'pin_lat', h.pin_lat, 'pin_lng', h.pin_lng))
                FROM holes h WHERE h.teebox_id = r.teebox_id) AS holes
-       FROM shot_tracks st
-       JOIN rounds r ON r.match_id = st.match_id AND r.user_id = st.user_id
-      WHERE st.user_id = $1
-      ORDER BY st.updated_at DESC
+       FROM shots s
+       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = s.user_id
+      WHERE s.user_id = $1
+        AND s.match_id IS NOT NULL
+      GROUP BY s.match_id, s.hole_num, r.hole_scores, r.teebox_id
+      ORDER BY MAX(s.recorded_at) DESC
       LIMIT 200`,
     [req.params.id]
   );
@@ -875,8 +912,8 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
             GREATEST(
               m.created_at,
               COALESCE(r.created_at, m.created_at),
-              COALESCE((SELECT MAX(updated_at)
-                          FROM shot_tracks
+              COALESCE((SELECT MAX(recorded_at)
+                          FROM shots
                          WHERE match_id = mp.match_id AND user_id = mp.user_id),
                        m.created_at)
             ) AS last_activity_at
@@ -1090,34 +1127,31 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
     return res.status(400).json({ error: 'No valid shots found in payload' });
   }
 
-  const matchName = typeof name === 'string' && name.trim()
-    ? name.trim().slice(0, 80)
-    : `Imported shots · ${new Date().toLocaleDateString()}`;
-
+  // No match record needed any more — imported shots go directly into the
+  // shots table with match_id = NULL and source = 'launch_monitor'. This
+  // keeps them safe across match wipes and clearly distinguished from
+  // GPS-tracked shots.
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: m } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, completed)
-       VALUES ('solo', $1, true, 'stroke', 18, true)
-       RETURNING match_id`,
-      [matchName]
-    );
-    const matchId = m[0].match_id;
-    await client.query(
-      `INSERT INTO match_players (match_id, user_id, side, completed)
-       VALUES ($1, $2, 1, true)`,
-      [matchId, req.userId]
-    );
-    await client.query(
-      `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
-       VALUES ($1, $2, 1, $3, NOW())`,
-      [matchId, req.userId, JSON.stringify(cleaned)]
-    );
+    for (let i = 0; i < cleaned.length; i++) {
+      const s = cleaned[i];
+      await client.query(
+        `INSERT INTO shots (
+           user_id, match_id, hole_num, shot_index,
+           club, start_lat, start_lng, end_lat, end_lng, recorded_at, source
+         ) VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, 'launch_monitor')`,
+        [
+          req.userId, i, s.club,
+          s.start.lat, s.start.lng,
+          s.end.lat,   s.end.lng,
+          s.recorded_at,
+        ]
+      );
+    }
     await client.query('COMMIT');
     return res.json({
       success: true,
-      match_id: matchId,
       total_shots: cleaned.length,
       skipped: shots.length - cleaned.length,
     });

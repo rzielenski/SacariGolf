@@ -1313,25 +1313,59 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   }).filter((s: any) => s !== null);
 
   // Verify membership
-  const { rows } = await pool.query(
+  const { rows: members } = await pool.query(
     `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
     [req.params.id, req.userId]
   );
-  if (!rows.length) return res.status(404).json({ error: 'Not in match' });
+  if (!members.length) return res.status(404).json({ error: 'Not in match' });
 
-  await pool.query(
-    `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
-     VALUES ($1, $2, $3, $4, NOW())
-     ON CONFLICT (match_id, user_id, hole_num)
-     DO UPDATE SET shots = EXCLUDED.shots, updated_at = NOW()`,
-    [req.params.id, req.userId, holeNum, JSON.stringify(clean)]
-  );
-  return res.json({ success: true, count: clean.length });
+  // Atomic replace: delete this user's shots for this hole, then insert the
+  // new set. Same effective semantics as the old UPSERT-on-JSONB approach
+  // but each shot is its own durable row in the new `shots` table.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM shots WHERE match_id = $1 AND user_id = $2 AND hole_num = $3`,
+      [req.params.id, req.userId, holeNum]
+    );
+    for (let i = 0; i < clean.length; i++) {
+      const s = clean[i];
+      const start = s.start ?? { lat: s.lat, lng: s.lng, elevation_m: s.elevation_m };
+      // Legacy single-point format gets stored as a degenerate segment
+      // (start == end). Backward-compat for any client that hasn't
+      // upgraded to segment shape.
+      const end = s.end ?? start;
+      await client.query(
+        `INSERT INTO shots (
+           user_id, match_id, hole_num, shot_index,
+           club, lie,
+           start_lat, start_lng, start_elevation_m,
+           end_lat,   end_lng,   end_elevation_m,
+           recorded_at, source
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps')`,
+        [
+          req.userId, req.params.id, holeNum, i,
+          s.club ?? 'unknown', s.lie ?? null,
+          start.lat, start.lng, start.elevation_m ?? null,
+          end.lat,   end.lng,   end.elevation_m ?? null,
+          s.recorded_at ?? new Date().toISOString(),
+        ]
+      );
+    }
+    await client.query('COMMIT');
+    return res.json({ success: true, count: clean.length });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }));
 
 // GET shot tracks for a match — optionally filter by user.
-//   query: ?user=<userId> to restrict to one player
-// Returns rows: [{ user_id, hole_num, shots: [{lat,lng}, ...] }, ...]
+// Returns the shape the old shot_tracks endpoint did so mobile clients
+// don't need to change: [{ user_id, hole_num, shots: [{start, end, club, lie}, ...] }]
 router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const userFilter = req.query.user as string | undefined;
   const params: any[] = [req.params.id];
@@ -1339,7 +1373,24 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
   if (userFilter) { params.push(userFilter); where += ` AND user_id = $2`; }
 
   const { rows } = await pool.query(
-    `SELECT user_id, hole_num, shots FROM shot_tracks ${where}
+    `SELECT user_id, hole_num,
+            json_agg(
+              json_build_object(
+                'club',  club,
+                'lie',   lie,
+                'start', json_build_object(
+                  'lat', start_lat, 'lng', start_lng, 'elevation_m', start_elevation_m
+                ),
+                'end',   json_build_object(
+                  'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
+                ),
+                'recorded_at', recorded_at
+              )
+              ORDER BY shot_index
+            ) AS shots
+     FROM shots
+     ${where}
+     GROUP BY user_id, hole_num
      ORDER BY user_id, hole_num`,
     params
   );

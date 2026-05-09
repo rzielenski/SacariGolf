@@ -26,8 +26,8 @@ export async function cancelStaleMatches() {
                 m.created_at,
                 COALESCE((SELECT MAX(r.created_at)
                             FROM rounds r WHERE r.match_id = m.match_id), m.created_at),
-                COALESCE((SELECT MAX(st.updated_at)
-                            FROM shot_tracks st WHERE st.match_id = m.match_id), m.created_at)
+                COALESCE((SELECT MAX(s.recorded_at)
+                            FROM shots s WHERE s.match_id = m.match_id), m.created_at)
               ) < NOW() - INTERVAL '24 hours'`
     );
     if (rowCount && rowCount > 0) {

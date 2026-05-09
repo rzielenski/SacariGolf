@@ -244,7 +244,11 @@ CREATE TABLE IF NOT EXISTS user_perks (
 );
 CREATE INDEX IF NOT EXISTS user_perks_unused_idx ON user_perks(user_id) WHERE consumed_at IS NULL;
 
--- Shot tracks — per (match, user, hole) — array of {lat, lng} GPS points
+-- DEPRECATED: shot_tracks (legacy JSONB-per-hole storage). Replaced by the
+-- per-row `shots` table created in migrate.ts (`shots.create_table`). Kept
+-- here only so existing databases don't fail this DDL on cold start; no
+-- code reads or writes this table anymore. Safe to DROP in a future
+-- destructive migration once nothing references it.
 CREATE TABLE IF NOT EXISTS shot_tracks (
   match_id UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,

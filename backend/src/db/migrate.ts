@@ -50,6 +50,45 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Durable per-shot table. Replaces the JSONB-array-per-hole approach in
+    // shot_tracks, which was cascade-deleted with matches and made it
+    // impossible to keep launch-monitor imports or generate per-club stats
+    // independently of match lifetime. Each shot is its own row.
+    //
+    //   • match_id is NULLABLE and ON DELETE SET NULL — wiping matches
+    //     preserves the shot history (sets match_id to null on those rows).
+    //   • hole_id likewise SET NULL — teebox-rebuilds don't lose shots.
+    //   • source: 'gps' = tracked during a round, 'launch_monitor' = CSV
+    //     import, 'manual' = future hand-entered.
+    name: 'shots.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS shots (
+        shot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL,
+        hole_id UUID REFERENCES holes(hole_id) ON DELETE SET NULL,
+        hole_num SMALLINT,
+        shot_index SMALLINT NOT NULL DEFAULT 0,
+        club TEXT NOT NULL,
+        lie TEXT,
+        start_lat REAL NOT NULL,
+        start_lng REAL NOT NULL,
+        start_elevation_m REAL,
+        end_lat REAL NOT NULL,
+        end_lng REAL NOT NULL,
+        end_elevation_m REAL,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        source TEXT NOT NULL DEFAULT 'gps'
+      );
+      CREATE INDEX IF NOT EXISTS shots_user_club_idx
+        ON shots(user_id, club);
+      CREATE INDEX IF NOT EXISTS shots_match_user_hole_idx
+        ON shots(match_id, user_id, hole_num);
+      CREATE INDEX IF NOT EXISTS shots_user_recorded_idx
+        ON shots(user_id, recorded_at DESC);
+    `,
+  },
+  {
     // For 9-hole matches on 18-hole teeboxes, store whether the player chose
     // the front 9 or the back 9. 18-hole rounds use 'full'. Affects which
     // ratings (front_course_rating vs back_course_rating) feed the WHS /
@@ -58,6 +97,27 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     sql: `
       ALTER TABLE matches
         ADD COLUMN IF NOT EXISTS holes_subset TEXT NOT NULL DEFAULT 'full';
+    `,
+  },
+  {
+    // One-shot cleanup: cancel any existing matches where the two sides
+    // contain teammates from the same clan (created by older auto-pair
+    // logic that didn't respect team boundaries). Idempotent — once these
+    // are cancelled, the WHERE clause matches nothing on subsequent boots.
+    name: 'matches.cancel_self_team_pairs',
+    sql: `
+      UPDATE matches m
+         SET cancelled = TRUE
+       WHERE m.completed = FALSE
+         AND m.cancelled = FALSE
+         AND EXISTS (
+           SELECT 1
+             FROM match_players p1
+             JOIN match_players p2 ON p2.match_id = p1.match_id AND p2.side <> p1.side
+             JOIN clan_members cm1 ON cm1.user_id = p1.user_id
+             JOIN clan_members cm2 ON cm2.user_id = p2.user_id AND cm2.clan_id = cm1.clan_id
+            WHERE p1.match_id = m.match_id
+         );
     `,
   },
   {

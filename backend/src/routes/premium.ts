@@ -197,8 +197,9 @@ router.post('/admin/revoke', async (req, res) => {
  *
  * Generates `shotsPerClub` segments per club with Gaussian-noised distance
  * (~10% of median) and bearing (~5° std). All shots originate from a single
- * fixed lat/lng so the dispersion stats compute cleanly. Inserts a single
- * practice match + match_players row + one shot_tracks row to host the data.
+ * fixed lat/lng so the dispersion stats compute cleanly. Inserts the rows
+ * directly into the durable `shots` table (no fake match required) with
+ * `source = 'manual'` so they're easy to identify / clean up later.
  */
 router.post('/admin/seed-clubs', async (req, res) => {
   const expected = process.env.PREMIUM_ADMIN_TOKEN;
@@ -280,30 +281,23 @@ router.post('/admin/seed-clubs', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Practice match record so the join in club-stats finds the rows.
-    const { rows: m } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, completed)
-       VALUES ('solo', '[seed] club data', true, 'stroke', 18, true)
-       RETURNING match_id`,
-      []
-    );
-    const matchId = m[0].match_id;
-    await client.query(
-      `INSERT INTO match_players (match_id, user_id, side, completed)
-       VALUES ($1, $2, 1, true)`,
-      [matchId, userId]
-    );
-    // Stuff every shot into hole_num=1 — the club-stats endpoint doesn't
-    // care which hole the shots are on, just iterates the JSONB array.
-    await client.query(
-      `INSERT INTO shot_tracks (match_id, user_id, hole_num, shots, updated_at)
-       VALUES ($1, $2, 1, $3, NOW())`,
-      [matchId, userId, JSON.stringify(allShots)]
-    );
+    // Insert each shot as its own row in the durable `shots` table. No
+    // match association — these are seeded for club-stats / heatmap
+    // purposes only, and aggregators read from `shots` directly now.
+    for (let i = 0; i < allShots.length; i++) {
+      const s = allShots[i];
+      await client.query(
+        `INSERT INTO shots (
+           user_id, match_id, hole_num, shot_index,
+           club, start_lat, start_lng, end_lat, end_lng,
+           recorded_at, source
+         ) VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, 'manual')`,
+        [userId, i, s.club, s.start.lat, s.start.lng, s.end.lat, s.end.lng, s.recorded_at]
+      );
+    }
     await client.query('COMMIT');
     res.json({
       success: true,
-      match_id: matchId,
       total_shots: allShots.length,
       clubs: Object.fromEntries(
         Object.entries(clubMedians).map(([k, v]) => [k.toLowerCase(), v])
@@ -312,6 +306,68 @@ router.post('/admin/seed-clubs', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('POST /premium/admin/seed-clubs failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Dev-only nuclear option — deletes ALL matches and everything that
+ * cascades from them (match_players, match_invites, match_results,
+ * rounds, pin_contributions, round_reactions, round_comments).
+ *
+ * Note: rows in the `shots` table SURVIVE this wipe — match_id and hole_id
+ * are ON DELETE SET NULL, so per-club stats and the heatmap remain intact
+ * after a match wipe. That was the whole point of moving shots out of the
+ * cascade-deleted JSONB blob.
+ *
+ * Optional `?resetStats=1` also zeroes out user ELO/win/match counters back
+ * to defaults, so the leaderboard goes blank too. Without that flag, user
+ * stats stay even though their underlying matches are gone (will look
+ * inconsistent until reset or replayed).
+ *
+ * Same admin-token gate as the other admin endpoints. Use sparingly.
+ *
+ *   curl -X DELETE 'https://YOUR_API/premium/admin/wipe-matches?resetStats=1' \
+ *        -H "x-admin-token: YOUR_PREMIUM_ADMIN_TOKEN"
+ */
+router.delete('/admin/wipe-matches', async (req, res) => {
+  const expected = process.env.PREMIUM_ADMIN_TOKEN;
+  const provided = req.header('x-admin-token');
+  if (!expected || !provided || provided !== expected) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const resetStats = req.query.resetStats === '1' || req.query.resetStats === 'true';
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // The matches table has ON DELETE CASCADE on most dependent tables, so
+    // a single DELETE handles match_players, match_invites, match_results,
+    // rounds, pin_contributions, round_reactions, etc. The `shots` table
+    // is intentionally ON DELETE SET NULL, so its rows persist (match_id
+    // becomes NULL) — per-club stats and the heatmap stay intact.
+    const { rowCount: matchesDeleted } = await client.query(`DELETE FROM matches`);
+    let usersReset = 0;
+    if (resetStats) {
+      const { rowCount } = await client.query(
+        `UPDATE users
+            SET elo = 1200,
+                total_matches = 0,
+                total_wins = 0,
+                total_ties = 0`
+      );
+      usersReset = rowCount ?? 0;
+    }
+    await client.query('COMMIT');
+    res.json({
+      success: true,
+      matches_deleted: matchesDeleted,
+      users_stats_reset: usersReset,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('DELETE /premium/admin/wipe-matches failed:', err);
     res.status(500).json({ error: 'Server error' });
   } finally {
     client.release();
