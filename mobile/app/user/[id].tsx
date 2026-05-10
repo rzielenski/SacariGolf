@@ -29,6 +29,7 @@ export default function UserProfileScreen() {
   const [courseRecords, setCourseRecords] = useState<any[]>([]);
   const [spectating, setSpectating] = useState(false);
   const [stats, setStats] = useState<any | null>(null);
+  const [insights, setInsights] = useState<any | null>(null);
 
   const openScorecard = (round: any) => {
     setScorecardEntry({
@@ -69,6 +70,7 @@ export default function UserProfileScreen() {
 
   useEffect(() => {
     api.users.stats(id).then(setStats).catch(() => { });
+    api.users.insights(id).then(setInsights).catch(() => { });
   }, [id]);
 
   // Poll the player's live in-progress round every 15s while the screen is open
@@ -248,6 +250,87 @@ export default function UserProfileScreen() {
         </>
       )}
 
+      {/* Insights — narrative coaching observations from the player's
+          history. Each tile is independent so the section degrades gracefully
+          when the player is too new for one of them (e.g. trend needs ≥6
+          rounds, hardest hole needs ≥2 plays of the same hole). */}
+      {insights && insights.rounds_analyzed > 0 && (
+        <>
+          <OrnamentTitle title="Insights" />
+          <View style={styles.insightsGrid}>
+            {/* Per-par scoring averages */}
+            {(['3', '4', '5'] as const).map((par) => {
+              const v = insights.avg_score_per_par?.[par];
+              if (v == null) return null;
+              const diff = v - Number(par);
+              return (
+                <View key={par} style={styles.insightTile}>
+                  <Text style={styles.insightLabel}>PAR {par}</Text>
+                  <Text style={styles.insightVal}>{v.toFixed(2)}</Text>
+                  <Text style={[styles.insightSub, { color: diff < 0 ? C.green : diff > 0 ? C.red : C.text }]}>
+                    {diff > 0 ? `+${diff.toFixed(2)}` : diff === 0 ? 'E' : diff.toFixed(2)}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* Trend strip */}
+          {insights.recent_trend?.delta != null && (
+            <View style={[styles.insightRow, { borderColor: insights.recent_trend.improving ? C.green : C.red }]}>
+              <Text style={styles.insightRowLabel}>RECENT TREND</Text>
+              <Text style={styles.insightRowText}>
+                {insights.recent_trend.improving
+                  ? `Improving — last 5 rounds avg ${insights.recent_trend.last5_avg_to_par > 0 ? '+' : ''}${insights.recent_trend.last5_avg_to_par} vs ${insights.recent_trend.prev5_avg_to_par > 0 ? '+' : ''}${insights.recent_trend.prev5_avg_to_par} prior 5 (${insights.recent_trend.delta > 0 ? '+' : ''}${insights.recent_trend.delta} strokes)`
+                  : insights.recent_trend.delta === 0
+                    ? 'Holding steady — last 5 vs previous 5 average is identical.'
+                    : `Slumping — last 5 rounds avg ${insights.recent_trend.last5_avg_to_par > 0 ? '+' : ''}${insights.recent_trend.last5_avg_to_par} vs ${insights.recent_trend.prev5_avg_to_par > 0 ? '+' : ''}${insights.recent_trend.prev5_avg_to_par} prior 5 (${insights.recent_trend.delta > 0 ? '+' : ''}${insights.recent_trend.delta} strokes)`}
+              </Text>
+            </View>
+          )}
+
+          {/* Hardest hole */}
+          {insights.hardest_hole && (
+            <TouchableOpacity
+              style={styles.insightRow}
+              onPress={() => router.push(`/course/${insights.hardest_hole.course_id}` as any)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.insightRowLabel}>HARDEST HOLE</Text>
+              <Text style={styles.insightRowText}>
+                {insights.hardest_hole.course_name} — Hole {insights.hardest_hole.hole_num} (Par {insights.hardest_hole.par}) — averages {insights.hardest_hole.avg_score} over {insights.hardest_hole.plays} plays
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Easiest hole */}
+          {insights.easiest_hole && insights.easiest_hole.hole_num !== insights.hardest_hole?.hole_num && (
+            <TouchableOpacity
+              style={styles.insightRow}
+              onPress={() => router.push(`/course/${insights.easiest_hole.course_id}` as any)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.insightRowLabel}>BEST HOLE</Text>
+              <Text style={styles.insightRowText}>
+                {insights.easiest_hole.course_name} — Hole {insights.easiest_hole.hole_num} (Par {insights.easiest_hole.par}) — averages {insights.easiest_hole.avg_score} over {insights.easiest_hole.plays} plays
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Score distribution */}
+          <View style={styles.insightRow}>
+            <Text style={styles.insightRowLabel}>SCORE DISTRIBUTION</Text>
+            <Text style={styles.insightRowText}>
+              {insights.score_distribution.eagles} Eagle{insights.score_distribution.eagles === 1 ? '' : 's'} ·{' '}
+              {insights.score_distribution.birdies} Birdie{insights.score_distribution.birdies === 1 ? '' : 's'} ·{' '}
+              {insights.score_distribution.pars} Par{insights.score_distribution.pars === 1 ? '' : 's'} ·{' '}
+              {insights.score_distribution.bogeys} Bogey{insights.score_distribution.bogeys === 1 ? '' : 's'} ·{' '}
+              {insights.score_distribution.doubles_or_worse} Double+
+            </Text>
+          </View>
+        </>
+      )}
+
       {/* Best round */}
       {profile.best_round && (
         <>
@@ -407,6 +490,22 @@ const styles = StyleSheet.create({
     color: C.textMuted, fontSize: 11, fontWeight: '800',
     letterSpacing: 1.5, marginBottom: 8, marginTop: 14,
   },
+
+  insightsGrid: { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  insightTile: {
+    flex: 1, backgroundColor: C.card, borderRadius: 8, padding: 12,
+    alignItems: 'center', borderWidth: 1, borderColor: C.border,
+  },
+  insightLabel: { color: C.textMuted, fontSize: 9, fontWeight: '900', letterSpacing: 1.5 },
+  insightVal: { color: C.text, fontSize: 22, fontWeight: '900', fontFamily: F.serif, marginTop: 4 },
+  insightSub: { fontSize: 11, fontWeight: '700', marginTop: 2 },
+  insightRow: {
+    backgroundColor: C.card, borderRadius: 8, padding: 12, marginBottom: 8,
+    borderWidth: 1, borderColor: C.border,
+  },
+  insightRowLabel: { color: C.gold, fontSize: 9, fontWeight: '900', letterSpacing: 1.5, marginBottom: 4 },
+  insightRowText: { color: C.text, fontSize: 13, lineHeight: 18 },
+
   roundCard: {
     backgroundColor: C.card, borderRadius: 8, padding: 12,
     flexDirection: 'row', alignItems: 'center', gap: 10,

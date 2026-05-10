@@ -70,6 +70,101 @@ router.get('/catalog', (_req, res) => {
 });
 
 /**
+ * RevenueCat webhook receiver. Configure in the RevenueCat dashboard:
+ *   URL:          https://YOUR_API/premium/revenuecat-webhook
+ *   Auth header:  Authorization: Bearer <REVENUECAT_WEBHOOK_SECRET>
+ *
+ * RevenueCat sends one POST per relevant event (purchase, renewal, cancel,
+ * expiration, refund...). We mirror their normalized event types:
+ *   • INITIAL_PURCHASE / RENEWAL / NON_RENEWING_PURCHASE → grant / extend
+ *   • CANCELLATION / EXPIRATION / REFUND                 → revoke
+ *
+ * The user's RevenueCat App User ID MUST match our user_id (the mobile
+ * client passes it via Purchases.logIn() — see lib/purchases.ts).
+ *
+ * IMPORTANT: keep this idempotent. RC retries on non-2xx for 72h.
+ */
+router.post('/revenuecat-webhook', async (req, res) => {
+  const expected = process.env.REVENUECAT_WEBHOOK_SECRET;
+  // Auth: shared bearer secret. Skip if not configured (lets devs run locally
+  // without the env var). In production you MUST set REVENUECAT_WEBHOOK_SECRET.
+  if (expected) {
+    const auth = req.header('authorization') ?? '';
+    if (auth !== `Bearer ${expected}`) {
+      return res.status(401).json({ error: 'Bad webhook secret' });
+    }
+  }
+  const event = req.body?.event ?? req.body;
+  if (!event) return res.status(400).json({ error: 'No event payload' });
+
+  const userId = event.app_user_id ?? event.original_app_user_id;
+  if (!userId) {
+    console.warn('RevenueCat webhook missing app_user_id', event);
+    return res.json({ ok: true, ignored: 'no_user_id' });
+  }
+
+  // Map RC product / period to our plan column.
+  const productId: string | null = event.product_id ?? null;
+  const planFromProduct =
+    productId?.includes('lifetime') ? 'lifetime'
+    : productId?.includes('year')   ? 'yearly'
+    : productId?.includes('month')  ? 'monthly'
+    : 'monthly';
+
+  // Expiration timestamp from RC ("expires_at" or "expiration_at_ms").
+  const untilMs = event.expiration_at_ms ?? null;
+  const until: Date | null = typeof untilMs === 'number' ? new Date(untilMs)
+    : event.expires_at ? new Date(event.expires_at)
+    : null;
+
+  const grantTypes = new Set([
+    'INITIAL_PURCHASE', 'RENEWAL', 'NON_RENEWING_PURCHASE',
+    'PRODUCT_CHANGE', 'UNCANCELLATION', 'TEMPORARY_ENTITLEMENT_GRANT',
+  ]);
+  const revokeTypes = new Set([
+    'CANCELLATION', 'EXPIRATION', 'REFUND', 'BILLING_ISSUE',
+    'SUBSCRIPTION_PAUSED', 'EXPIRED', 'REVOKE',
+  ]);
+
+  try {
+    if (grantTypes.has(event.type)) {
+      await pool.query(
+        `UPDATE users
+            SET is_premium    = TRUE,
+                premium_since = COALESCE(premium_since, NOW()),
+                premium_until = $2,
+                premium_plan  = $3
+          WHERE user_id = $1`,
+        [userId, until, planFromProduct]
+      );
+    } else if (revokeTypes.has(event.type)) {
+      // Don't immediately strip access on CANCELLATION — RC sends it on the
+      // moment the user toggles auto-renew off. They keep access until the
+      // current period ends. Set premium_until from the event so the next
+      // /users/me check (which honors expiry) handles cutoff naturally.
+      await pool.query(
+        `UPDATE users
+            SET premium_until = COALESCE($2, premium_until),
+                is_premium    = CASE
+                  WHEN $2::timestamptz IS NULL THEN FALSE                 -- no expiry sent → revoke now
+                  WHEN $2::timestamptz <= NOW() THEN FALSE                -- already expired
+                  ELSE is_premium                                          -- still in paid window
+                END
+          WHERE user_id = $1`,
+        [userId, until]
+      );
+    } else {
+      console.log('RevenueCat unhandled event type:', event.type);
+    }
+  } catch (err) {
+    console.error('RevenueCat webhook DB write failed:', err);
+    // Return 500 so RC retries — better than silently dropping a paid signal.
+    return res.status(500).json({ error: 'DB error' });
+  }
+  res.json({ ok: true });
+});
+
+/**
  * Promo-code redemption — interim gate while real payments aren't wired up.
  * Each accepted code grants premium according to its config (currently all
  * lifetime). Codes are matched case-insensitively after stripping whitespace.

@@ -15,6 +15,7 @@ import dmRouter from './routes/dm';
 import roundsRouter from './routes/rounds';
 import premiumRouter from './routes/premium';
 import weatherRouter from './routes/weather';
+import tournamentsRouter from './routes/tournaments';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
 
@@ -40,6 +41,7 @@ app.use('/dm', dmRouter);
 app.use('/rounds', roundsRouter);
 app.use('/premium', premiumRouter);
 app.use('/weather', weatherRouter);
+app.use('/tournaments', tournamentsRouter);
 
 // Catch unhandled errors so the server doesn't crash
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

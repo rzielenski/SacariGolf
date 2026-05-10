@@ -59,10 +59,26 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 }
 
 // Create match
+// Allowed match formats. `stroke` is the default (gross score wins). The new
+// formats only affect HOW the winner is decided + how the result UI reads —
+// the underlying score arrays / shot tracks / handicap math don't change.
+//   • stableford   — Modified Stableford: -2/-1/0/1/2/3+ → 5/2/0/-1/-3/-3 pts (higher wins)
+//   • match_play   — One point per hole won (lower stroke wins the hole; halves get nothing)
+//   • skins        — Like match play, but ties carry the skin to the next hole
+//   • scramble     — Existing team format (one final team score per side)
+const VALID_FORMATS = new Set(['stroke', 'stableford', 'match_play', 'skins', 'scramble']);
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset } = req.body;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
-  const resolvedFormat = (matchType === 'duo' || matchType === 'squad') && format === 'scramble' ? 'scramble' : 'stroke';
+  // Scramble remains team-only; the rest are open to any match type.
+  let resolvedFormat = 'stroke';
+  if (typeof format === 'string' && VALID_FORMATS.has(format)) {
+    if (format === 'scramble' && matchType !== 'duo' && matchType !== 'squad') {
+      resolvedFormat = 'stroke'; // silently downgrade — solo scramble doesn't make sense
+    } else {
+      resolvedFormat = format;
+    }
+  }
   const resolvedNumHoles = (numHoles === 9) ? 9 : 18;
   // Front vs back is only meaningful for 9-hole matches. 18-hole = 'full'.
   // Default to 'front' if the client picked 9 but didn't say which.
@@ -566,34 +582,45 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
 
-    // Pin-contribution reward: if a majority of the holes the player COULD have
-    // contributed to (still NULL, or filled by them) actually were filled by
-    // them, grant a 'lucky_round' perk. The feature only applies when at least
-    // one hole the player played was missing pin data — if every pin was
-    // already known, there was nothing to contribute and no perk possible.
+    // Contribution reward: if a majority of the holes the player played were
+    // contributed to via EITHER pin marking OR shot tracking, grant a
+    // 'lucky_round' perk. Two qualifying paths so a player who never marks
+    // pins (because they're filled already) can still earn through tracking,
+    // and vice-versa. Either path counts: pin-majority OR shot-majority.
     let perkAwarded = false;
     if (!matchRows[0].is_practice && Array.isArray(holeScores) && holeScores.length > 0 && resolvedTeeboxId) {
-      // Count "eligible" holes among the ones this player played:
-      //   - pin still NULL (they had the chance, missed it), OR
-      //   - pin_set_by = me (they took the chance and filled it)
-      // Rows where someone else filled the pin before the player arrived don't count.
+      const holesPlayed = holeScores.length;
+
+      // Path A: pin-mark contributions — only counts holes where the player
+      // had the chance (pin still null or filled by them).
       const { rows: opportunityRows } = await client.query(
         `SELECT COUNT(*)::int AS n FROM holes
          WHERE teebox_id = $1
            AND hole_num <= $2
            AND (pin_lat IS NULL OR pin_set_by = $3)`,
-        [resolvedTeeboxId, holeScores.length, req.userId]
+        [resolvedTeeboxId, holesPlayed, req.userId]
       );
-      const opportunityCount = opportunityRows[0]?.n ?? 0;
-
-      const { rows: contribRows } = await client.query(
+      const pinOpportunity = opportunityRows[0]?.n ?? 0;
+      const { rows: pinRows } = await client.query(
         `SELECT COUNT(*)::int AS n FROM pin_contributions
          WHERE user_id = $1 AND match_id = $2`,
         [req.userId, req.params.id]
       );
-      const contribCount = contribRows[0]?.n ?? 0;
+      const pinContribs = pinRows[0]?.n ?? 0;
+      const pinMajority = pinOpportunity > 0 && pinContribs * 2 > pinOpportunity;
 
-      if (opportunityCount > 0 && contribCount * 2 > opportunityCount) {
+      // Path B: shot-track contributions — distinct holes where this user
+      // recorded at least one shot in this match. Always available regardless
+      // of pin state, so a player on a fully-pinned course can still qualify.
+      const { rows: shotHoleRows } = await client.query(
+        `SELECT COUNT(DISTINCT hole_num)::int AS n FROM shots
+         WHERE user_id = $1 AND match_id = $2 AND hole_num IS NOT NULL`,
+        [req.userId, req.params.id]
+      );
+      const shotHoles = shotHoleRows[0]?.n ?? 0;
+      const shotMajority = shotHoles * 2 > holesPlayed;
+
+      if (pinMajority || shotMajority) {
         // Avoid double-awarding for the same match (duo/squad — multiple submitters)
         const { rows: alreadyRows } = await client.query(
           `SELECT 1 FROM user_perks WHERE user_id = $1 AND earned_match_id = $2`,
@@ -601,8 +628,13 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         );
         if (!alreadyRows.length) {
           await client.query(
-            `INSERT INTO user_perks (user_id, perk_type, earned_match_id) VALUES ($1, 'lucky_round', $2)`,
-            [req.userId, req.params.id]
+            `INSERT INTO user_perks (user_id, perk_type, earned_match_id, earned_reason)
+             VALUES ($1, 'lucky_round', $2, $3)`,
+            [
+              req.userId,
+              req.params.id,
+              pinMajority && shotMajority ? 'pins+shots' : pinMajority ? 'pins' : 'shots',
+            ]
           );
           perkAwarded = true;
         }
@@ -641,6 +673,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
               t.front_course_rating, t.front_slope_rating,
               t.back_course_rating,  t.back_slope_rating,
               t.num_holes AS teebox_num_holes,
+              r.hole_scores,
               COALESCE(array_length(r.hole_scores, 1), 18) AS holes_played,
               u.elo, u.total_matches
        FROM match_players mp
@@ -652,6 +685,92 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     );
 
     const holesSubsetForCalc: string = matchRows[0].holes_subset ?? 'full';
+
+    // Per-hole pars for the played holes, in hole order. Used by the
+    // hole-by-hole formats (stableford, match_play, skins) — stroke and
+    // scramble ignore this. We sample from the first player who has a teebox.
+    let parByHoleIdx: number[] = [];
+    {
+      const tbId = allPlayers.find((p: any) => p.teebox_id)?.teebox_id;
+      if (tbId) {
+        const { rows: holeRows } = await client.query(
+          `SELECT hole_num, par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`,
+          [tbId]
+        );
+        const offset = holesSubsetForCalc === 'back' ? 9 : 0;
+        const want = matchRows[0].num_holes ?? 18;
+        parByHoleIdx = holeRows.slice(offset, offset + want).map((r: any) => r.par);
+      }
+    }
+
+    // ── Format-specific scoring ───────────────────────────────────────────
+    // For non-stroke formats we compute a "performance number" per side where
+    // LOWER IS ALWAYS BETTER, so the existing tie/win logic in resolveElo
+    // works without branching. For stableford we negate (more points = lower
+    // perf). For match_play / skins we negate hole wins.
+    function modifiedStablefordPoints(score: number, par: number): number {
+      const d = score - par;
+      if (d <= -2) return 5;   // eagle or better
+      if (d === -1) return 2;  // birdie
+      if (d === 0)  return 0;  // par
+      if (d === 1)  return -1; // bogey
+      return -3;               // double or worse
+    }
+    function bestHoleScore(side: typeof allPlayers, idx: number): number | null {
+      let best: number | null = null;
+      for (const p of side) {
+        const s = (p.hole_scores as number[] | null)?.[idx];
+        if (typeof s !== 'number') continue;
+        if (best == null || s < best) best = s;
+      }
+      return best;
+    }
+    function computeFormatPerf(
+      format: string,
+      side1: typeof allPlayers,
+      side2: typeof allPlayers,
+    ): { side1Perf: number; side2Perf: number; details: any } | null {
+      const N = parByHoleIdx.length;
+      if (!N) return null;
+      if (format === 'stableford') {
+        // Sum of best-per-hole modified-stableford points per side.
+        let s1 = 0, s2 = 0;
+        for (let i = 0; i < N; i++) {
+          const a = bestHoleScore(side1, i);
+          const b = bestHoleScore(side2, i);
+          if (a != null) s1 += modifiedStablefordPoints(a, parByHoleIdx[i]);
+          if (b != null) s2 += modifiedStablefordPoints(b, parByHoleIdx[i]);
+        }
+        return { side1Perf: -s1, side2Perf: -s2, details: { s1Points: s1, s2Points: s2 } };
+      }
+      if (format === 'match_play') {
+        let s1Wins = 0, s2Wins = 0, halved = 0;
+        for (let i = 0; i < N; i++) {
+          const a = bestHoleScore(side1, i);
+          const b = bestHoleScore(side2, i);
+          if (a == null || b == null) continue;
+          if (a < b) s1Wins++;
+          else if (b < a) s2Wins++;
+          else halved++;
+        }
+        return { side1Perf: -s1Wins, side2Perf: -s2Wins, details: { s1Holes: s1Wins, s2Holes: s2Wins, halved } };
+      }
+      if (format === 'skins') {
+        // Each hole worth 1 skin. Halved holes carry the value into the next.
+        let s1Skins = 0, s2Skins = 0, carry = 1;
+        for (let i = 0; i < N; i++) {
+          const a = bestHoleScore(side1, i);
+          const b = bestHoleScore(side2, i);
+          if (a == null || b == null) { continue; }
+          const value = carry; // current hole worth this much
+          if (a < b)     { s1Skins += value; carry = 1; }
+          else if (b < a) { s2Skins += value; carry = 1; }
+          else            { carry += 1; }       // halved → roll over
+        }
+        return { side1Perf: -s1Skins, side2Perf: -s2Skins, details: { s1Skins, s2Skins } };
+      }
+      return null;
+    }
 
     const allDone = allPlayers.every((p) => p.strokes != null);
     let result: any = null;
@@ -689,8 +808,17 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       };
       // If team sizes differ, compare using the smaller team's count (best N scores)
       const compareCount = Math.min(side1Players.length, side2Players.length);
-      const side1Diff = getDiff(side1Players, compareCount);
-      const side2Diff = getDiff(side2Players, compareCount);
+      const strokeSide1Diff = getDiff(side1Players, compareCount);
+      const strokeSide2Diff = getDiff(side2Players, compareCount);
+
+      // Format override — for stableford / match_play / skins the winner is
+      // decided by the format-specific perf number (lower = better). When the
+      // helper returns null (missing pars or unknown format) we fall back to
+      // the standard stroke differential.
+      const formatPerf = computeFormatPerf(matchFormat, side1Players, side2Players);
+      const side1Diff = formatPerf ? formatPerf.side1Perf : strokeSide1Diff;
+      const side2Diff = formatPerf ? formatPerf.side2Perf : strokeSide2Diff;
+      const formatDetails = formatPerf?.details ?? null;
 
       // Tie when the two differentials are within 0.05 of each other (about
       // 1/20 of a stroke). Wider than the float-precision threshold so it
@@ -776,7 +904,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
             tied: isTie,
             side1DeltaSignedElo: side1Delta,
             side2DeltaSignedElo: side2Delta,
-            perks: perkApplications, // [{ user_id, original, adjusted, type }]
+            perks: perkApplications,
+            // Stableford / match_play / skins details so the result screen
+            // can render "12 to 9 in points" / "won 5&3" / "8 skins to 4" etc.
+            format: matchFormat,
+            formatDetails,
           }),
         ]
       );
@@ -936,6 +1068,55 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     }
 
     await client.query('COMMIT');
+
+    // ── Push: notify EACH participant of the resolved result. We do this
+    // post-commit so a push failure can't roll back the round, and outside
+    // the transaction so the network call doesn't hold a DB connection.
+    // Each user gets their personal narrative (you won / lost / tied + Δ).
+    if (result && (result.winnerSide != null || result.tied)) {
+      try {
+        const { rows: pushRows } = await pool.query(
+          `SELECT mp.user_id, mp.side, u.push_token, u.username,
+                  m.match_type, m.format
+           FROM match_players mp
+           JOIN users u ON u.user_id = mp.user_id
+           JOIN matches m ON m.match_id = mp.match_id
+           WHERE mp.match_id = $1 AND u.push_token IS NOT NULL`,
+          [req.params.id]
+        );
+        const detailsRow = await pool.query(
+          `SELECT details FROM match_results WHERE match_id = $1`,
+          [req.params.id]
+        );
+        const detailsBlob = detailsRow.rows[0]?.details ?? {};
+        const winnerSide: number | null = result.winnerSide ?? null;
+        for (const row of pushRows) {
+          const tied = winnerSide == null;
+          const won = !tied && row.side === winnerSide;
+          const key = row.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+          let delta: number = detailsBlob[key] ?? 0;
+          // Apply per-player perk override if any
+          const perk = (detailsBlob.perks ?? []).find((p: any) => p.user_id === row.user_id);
+          if (perk) delta = perk.adjusted;
+          const sign = delta > 0 ? '+' : '';
+          const title = tied ? 'Match drawn' : won ? 'You won!' : 'Match decided';
+          const body = tied
+            ? `Even round. ELO ${sign}${delta}.`
+            : won
+              ? `Nice round. ELO ${sign}${delta}.`
+              : `Better luck next time. ELO ${sign}${delta}.`;
+          // Fire-and-forget — sendPush already swallows network errors.
+          sendPush(
+            [row.push_token],
+            title, body,
+            { type: 'match_result', matchId: req.params.id, won, delta }
+          );
+        }
+      } catch (e) {
+        console.error('match_result push failed:', e);
+      }
+    }
+
     return res.json({ success: true, totalScore, result });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1430,6 +1611,56 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
     params
   );
   return res.json(rows);
+}));
+
+// Group-scoring endpoint: replace the match's guest_players list with whatever
+// the host sends. Guests are non-account players whose scorecards are tracked
+// alongside the real players' but never affect ELO or matchmaking — pure
+// "one phone, four people" use case.
+//
+// Only a participant in the match can edit the guest list (so randos can't
+// add ghost players). On every save we OVERWRITE the array so the client can
+// just send the current state without diffing.
+//
+// Body shape:
+//   { guests: [
+//       { name: string, scores: number[], teebox_id?: string | null }
+//     ]
+//   }
+//
+// Each entry's `scores` array is parallel to the host's hole_scores — index 0
+// is the first hole played (front-9 vs back-9 already factored in by the
+// match's holes_subset).
+router.put('/:id/guests', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { guests } = req.body ?? {};
+  if (!Array.isArray(guests)) return res.status(400).json({ error: 'guests array required' });
+
+  // Permission: must be a player in the match.
+  const { rows: meRows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!meRows.length) return res.status(403).json({ error: 'Not in this match' });
+
+  // Lightly validate each guest. We accept up to 7 guests (round of 8 max
+  // including the host); names get trimmed + truncated to 30 chars; scores
+  // are clamped to a sane stroke range so a typo doesn't break the UI.
+  const cleaned = guests.slice(0, 7).map((g: any) => ({
+    name: typeof g?.name === 'string' ? g.name.trim().slice(0, 30) : 'Guest',
+    scores: Array.isArray(g?.scores)
+      ? g.scores.map((s: any) => {
+          const n = Number(s);
+          return Number.isFinite(n) && n > 0 && n < 30 ? Math.round(n) : 0;
+        })
+      : [],
+    teebox_id: typeof g?.teebox_id === 'string' ? g.teebox_id : null,
+  })).filter((g: any) => g.name);
+
+  await pool.query(
+    `UPDATE matches SET guest_players = $1::jsonb WHERE match_id = $2`,
+    [JSON.stringify(cleaned), req.params.id]
+  );
+  return res.json({ success: true, count: cleaned.length });
 }));
 
 // Cancel / delete a match — only allowed if no player has submitted scores yet (no ELO penalty)

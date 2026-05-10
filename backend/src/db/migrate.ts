@@ -207,6 +207,142 @@ const MIGRATIONS: { name: string; sql: string }[] = [
          AND created_at < TIMESTAMP '2026-05-07 00:00:00';
     `,
   },
+  {
+    // Crowd-sourced course-data corrections. Players hit obviously-wrong
+    // course/teebox/hole data and tap "Report" — we collect their suggestion
+    // here for human review (Richard reviews the table periodically and
+    // updates the underlying course/teebox/hole row by hand).
+    //
+    // Kept simple — no auto-apply, no voting. The point is to surface bad
+    // data fast, not to build a moderation system.
+    name: 'course_corrections.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS course_corrections (
+        correction_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        course_id      UUID NOT NULL REFERENCES courses(course_id) ON DELETE CASCADE,
+        teebox_id      UUID REFERENCES teeboxes(teebox_id) ON DELETE CASCADE,
+        hole_id        UUID REFERENCES holes(hole_id) ON DELETE CASCADE,
+        user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        field          TEXT NOT NULL,        -- e.g. 'course_rating', 'slope', 'par', 'yardage'
+        current_value  TEXT,                 -- what's currently shown to the user
+        suggested_value TEXT NOT NULL,       -- what they say it should be
+        notes          TEXT,                 -- free-form comment
+        status         TEXT NOT NULL DEFAULT 'pending', -- pending | applied | rejected
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS course_corrections_status_idx ON course_corrections(status, created_at);
+      CREATE INDEX IF NOT EXISTS course_corrections_course_idx ON course_corrections(course_id);
+    `,
+  },
+  {
+    // Recurring tournaments / leagues. Either a fixed window of matches at a
+    // single course, or an open-ended weekly league across whatever course
+    // each player picks.
+    //   • match_filter: stores filter criteria as JSONB so we can extend
+    //     (course_id, format, num_holes, scoring rules) without migrations.
+    //   • is_open: anyone can join via shareable code; otherwise invite only.
+    name: 'tournaments.create_tables',
+    sql: `
+      CREATE TABLE IF NOT EXISTS tournaments (
+        tournament_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        owner_id       UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        clan_id        UUID REFERENCES clans(clan_id) ON DELETE SET NULL,
+        name           TEXT NOT NULL,
+        description    TEXT,
+        starts_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ends_at        TIMESTAMPTZ,
+        scoring        TEXT NOT NULL DEFAULT 'best_round', -- best_round | total_strokes | points | wins
+        format         TEXT NOT NULL DEFAULT 'stroke',     -- stroke | match | stableford | skins | scramble
+        course_id      UUID REFERENCES courses(course_id) ON DELETE SET NULL,
+        is_open        BOOLEAN NOT NULL DEFAULT TRUE,
+        join_code      TEXT UNIQUE,
+        status         TEXT NOT NULL DEFAULT 'active'  -- active | finished | cancelled
+      );
+      CREATE INDEX IF NOT EXISTS tournaments_owner_idx ON tournaments(owner_id);
+      CREATE INDEX IF NOT EXISTS tournaments_status_idx ON tournaments(status, ends_at);
+
+      CREATE TABLE IF NOT EXISTS tournament_players (
+        tournament_id  UUID NOT NULL REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+        user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        joined_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (tournament_id, user_id)
+      );
+
+      -- Link a match to a tournament so leaderboards can aggregate scores.
+      -- A single match counts toward at most one tournament.
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS tournament_id UUID REFERENCES tournaments(tournament_id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS matches_tournament_idx ON matches(tournament_id);
+    `,
+  },
+  {
+    // Match-format expansion: stableford, match play, skins.
+    // The matches.format column already exists as TEXT — no DDL change needed
+    // beyond expanding the conceptual enum. This migration is intentionally
+    // empty but kept here to document the conceptual change.
+    name: 'matches.format_enum_expanded',
+    sql: `SELECT 1;`, // no-op — TEXT column accepts any value
+  },
+  {
+    // Group scoring: when one phone records strokes for several players,
+    // we store the "ghost" players (no user account) as JSONB on the match.
+    // Each entry: { name: string, side: number, scores: number[], teebox_id?: string }
+    // Real users use match_players + rounds as before. Aggregate match results
+    // include both real-user side scores and ghost scores.
+    name: 'matches.guest_players',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS guest_players JSONB NOT NULL DEFAULT '[]';
+    `,
+  },
+  {
+    // Track WHY a perk was awarded so we can show "earned by tracking shots"
+    // / "earned by marking pins" on the perk banner. Optional — older perks
+    // get NULL and the UI just says "Lucky Round earned".
+    name: 'user_perks.earned_reason',
+    sql: `
+      ALTER TABLE user_perks
+        ADD COLUMN IF NOT EXISTS earned_reason TEXT;
+    `,
+  },
+  {
+    // Crowd-sourced relative-elevation grid per course. Phone barometers are
+    // very accurate at RELATIVE altitude on short timescales (sub-meter) but
+    // their absolute reading drifts up to 10–30m. By anchoring every point
+    // on a course to the FIRST player's first reading (course "origin = 0"),
+    // every subsequent sample stored here is a delta from that origin —
+    // accurate to a meter or two regardless of phone calibration.
+    //
+    // Grid bucketing collapses readings within ~5m to one row so we get
+    // multi-sample running averages without storing every wiggle. Lookups
+    // search the surrounding 3×3 buckets (≈15m) so we always find a nearby
+    // anchor when one exists.
+    //
+    //   lat_grid = round(lat * 20000)   → ~5.5m N/S grid
+    //   lng_grid = round(lng * 20000)   → narrows toward poles, fine in
+    //                                     the 24°–60° latitude band where
+    //                                     ~99% of golf is played.
+    //
+    // The course's "origin" doesn't need its own column — it's implicit:
+    // wherever the first cached point sits, its elevation_rel_m = 0.
+    name: 'course_elevation_points.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS course_elevation_points (
+        course_id        UUID NOT NULL REFERENCES courses(course_id) ON DELETE CASCADE,
+        lat_grid         INTEGER NOT NULL,
+        lng_grid         INTEGER NOT NULL,
+        lat              DOUBLE PRECISION NOT NULL,
+        lng              DOUBLE PRECISION NOT NULL,
+        elevation_rel_m  REAL NOT NULL,
+        samples          INTEGER NOT NULL DEFAULT 1,
+        last_updated     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (course_id, lat_grid, lng_grid)
+      );
+      CREATE INDEX IF NOT EXISTS course_elevation_points_course_idx
+        ON course_elevation_points(course_id);
+    `,
+  },
 ];
 
 export async function runMigrations() {

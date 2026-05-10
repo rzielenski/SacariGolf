@@ -40,7 +40,18 @@ function distMetres(lat1: number, lng1: number, lat2: number, lng2: number): num
 const ON_SITE_M = 1500; // ~1 mile — generous so a player parked nearby still gets the hero card
 
 type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
-type Format = 'stroke' | 'scramble';
+type Format = 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
+
+// Display config for the format picker. Adding a new format means: extend
+// the Format union, add a row here, and (if it's a hole-by-hole format)
+// add the math to backend matches.ts computeFormatPerf().
+const FORMAT_CARDS: { id: Format; name: string; mark: string; desc: string; teamOnly?: boolean }[] = [
+  { id: 'stroke',     name: 'Stroke Play', mark: 'STK', desc: 'Lowest gross score wins. Standard scoring used by ELO and handicap math.' },
+  { id: 'stableford', name: 'Stableford',  mark: 'STB', desc: 'Modified Stableford points: eagle 5, birdie 2, par 0, bogey −1, double or worse −3. Highest points wins — perfect for casual rounds where blow-ups matter less.' },
+  { id: 'match_play', name: 'Match Play',  mark: 'MP',  desc: 'Win each hole with the lowest score. Whoever wins more holes wins the match. Halved holes don\'t count.' },
+  { id: 'skins',      name: 'Skins',       mark: 'SKN', desc: 'One skin per hole won. Halved holes carry the skin to the next hole, so a single great moment can pay off big.' },
+  { id: 'scramble',   name: 'Scramble',    mark: 'SCR', desc: 'Everyone plays from the best shot each time. One final team score per side. Both teams must have equal players.', teamOnly: true },
+];
 type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
 const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'practice'];
@@ -250,7 +261,9 @@ export default function PlayScreen() {
         isPractice: matchType === 'practice',
         teeboxId: teebox.teebox_id,
         clanId: selectedClanId ?? undefined,
-        format: (matchType === 'duo' || matchType === 'squad') ? format : 'stroke',
+        // Practice ignores format (no ELO), team modes get their picked format,
+        // solo can pick stableford / match_play / skins for non-stroke ranked play.
+        format: matchType === 'practice' ? 'stroke' : format,
         numHoles,
         holesSubset: subsetForReq,
         // Friendly default name for challenge matches so the recipient
@@ -284,13 +297,20 @@ export default function PlayScreen() {
   const goToNextStep = () => {
     if (matchType === 'duo' || matchType === 'squad') {
       setStep('clan');
-    } else {
+    } else if (matchType === 'practice') {
+      // Practice doesn't track ELO, no point picking a fancy format
       setStep('course');
+    } else {
+      // Solo: let players pick stableford / match play / skins for variety
+      setStep('format');
     }
   };
 
   // Button label for next step
-  const nextStepLabel = matchType === 'duo' || matchType === 'squad' ? 'Select Team →' : 'Select Course →';
+  const nextStepLabel =
+    matchType === 'duo' || matchType === 'squad' ? 'Select Team →' :
+    matchType === 'practice' ? 'Select Course →' :
+    'Choose Format →';
 
   // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
@@ -449,52 +469,39 @@ export default function PlayScreen() {
 
   // ── Format selection ──────────────────────────────────────────────────────────
   if (step === 'format') {
+    const isTeam = matchType === 'duo' || matchType === 'squad';
+    // Solo / practice players don't see scramble (it requires a team).
+    const visibleCards = FORMAT_CARDS.filter((c) => isTeam || !c.teamOnly);
     return (
-      <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep('clan')}>
+      <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(isTeam ? 'clan' : 'type')}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Choose Format</Text>
-        <Text style={styles.subtitle}>How will your team play?</Text>
+        <Text style={styles.subtitle}>{isTeam ? 'How will your team play?' : 'Pick the scoring style for this round.'}</Text>
 
-        <TouchableOpacity
-          style={[styles.formatCard, format === 'stroke' && styles.formatCardActive]}
-          onPress={() => setFormat('stroke')}
-        >
-          <View style={styles.formatIcon}>
-            <Text style={[styles.formatIconText, format === 'stroke' && { color: C.gold }]}>STK</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.formatName, format === 'stroke' && { color: C.gold }]}>Stroke Play</Text>
-            <Text style={styles.formatDesc}>
-              Each player plays their own ball. Scores are averaged after course normalization.
-            </Text>
-          </View>
-          {format === 'stroke' && <Text style={{ color: C.gold, fontSize: 20 }}>✓</Text>}
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.formatCard, format === 'scramble' && styles.formatCardActive]}
-          onPress={() => setFormat('scramble')}
-        >
-          <View style={styles.formatIcon}>
-            <Text style={[styles.formatIconText, format === 'scramble' && { color: C.gold }]}>SCR</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.formatName, format === 'scramble' && { color: C.gold }]}>Scramble</Text>
-            <Text style={styles.formatDesc}>
-              Everyone plays from the best shot each time. One final team score per side.
-              {'\n'}
-              <Text style={{ color: C.gold }}>Both teams must have equal players.</Text>
-            </Text>
-          </View>
-          {format === 'scramble' && <Text style={{ color: C.gold, fontSize: 20 }}>✓</Text>}
-        </TouchableOpacity>
+        {visibleCards.map((card) => (
+          <TouchableOpacity
+            key={card.id}
+            style={[styles.formatCard, format === card.id && styles.formatCardActive]}
+            onPress={() => setFormat(card.id)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.formatIcon}>
+              <Text style={[styles.formatIconText, format === card.id && { color: C.gold }]}>{card.mark}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.formatName, format === card.id && { color: C.gold }]}>{card.name}</Text>
+              <Text style={styles.formatDesc}>{card.desc}</Text>
+            </View>
+            {format === card.id && <Text style={{ color: C.gold, fontSize: 20 }}>✓</Text>}
+          </TouchableOpacity>
+        ))}
 
         <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('course')}>
           <Text style={styles.nextBtnText}>Select Course →</Text>
         </TouchableOpacity>
-      </View>
+      </ScrollView>
     );
   }
 

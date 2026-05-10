@@ -80,7 +80,7 @@ export interface Hole {
 export interface Match {
   match_id: string;
   match_type: 'solo' | 'duo' | 'squad' | 'practice';
-  format: 'stroke' | 'scramble';
+  format: 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
   num_holes: number;
   name: string | null;
   completed: boolean;
@@ -93,6 +93,9 @@ export interface Match {
   winner_side?: number | null;
   delta_elo?: number;
   my_delta_elo?: number | null;
+  // Group scoring — non-account players whose strokes the host enters by hand.
+  // Each entry: { name, scores[], teebox_id? }. Pure tracking, no ELO impact.
+  guest_players?: { name: string; scores: number[]; teebox_id?: string | null }[];
 }
 
 export interface MatchPlayer {

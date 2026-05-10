@@ -139,6 +139,15 @@ export const api = {
       }[];
     }>('GET', `/users/${id}/club-stats`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
+    insights: (id: string) => request<{
+      rounds_analyzed: number;
+      avg_score_per_par: { '3'?: number | null; '4'?: number | null; '5'?: number | null };
+      score_distribution: { eagles: number; birdies: number; pars: number; bogeys: number; doubles_or_worse: number };
+      hardest_hole: { course_id: string; course_name: string; hole_num: number; par: number; avg_score: number; plays: number } | null;
+      easiest_hole: { course_id: string; course_name: string; hole_num: number; par: number; avg_score: number; plays: number } | null;
+      most_played_course: { course_id: string; course_name: string; n: number } | null;
+      recent_trend: { last5_avg_to_par: number | null; prev5_avg_to_par: number | null; delta: number | null; improving: boolean };
+    }>('GET', `/users/${id}/insights`),
     friends: () => request<any[]>('GET', '/users/me/friends'),
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
     sendRequest: (friendId: string) => request<any>('POST', '/users/me/friends/request', { friendId }),
@@ -204,6 +213,41 @@ export const api = {
     nearby: (lat: number, lng: number) => request<any[]>('GET', `/courses/nearby?lat=${lat}&lng=${lng}`),
     get: (id: string) => request<any>('GET', `/courses/${id}`),
     leaderboard: (id: string) => request<any[]>('GET', `/courses/${id}/leaderboard`),
+    reportCorrection: (id: string, body: {
+      field: string;
+      suggestedValue: string;
+      currentValue?: string;
+      teeboxId?: string;
+      holeId?: string;
+      notes?: string;
+    }) => request<{ success: true }>('POST', `/courses/${id}/corrections`, body),
+
+    // ── Relative-elevation crowdsourcing ──────────────────────────────────
+    // Establish per-round offset so the device's barometer-grade RELATIVE
+    // accuracy can be projected onto the course's shared origin = 0 frame.
+    elevationReference: (id: string, body: { lat: number; lng: number; deviceAltM: number }) =>
+      request<{ offsetM: number; mode: 'anchor' | 'global' | 'seed'; distM?: number }>(
+        'POST', `/courses/${id}/elevation-reference`, body
+      ),
+    // Batch upload of (lat, lng, elevation_relative_to_origin) samples.
+    elevationPoints: (id: string, samples: { lat: number; lng: number; elevationRelM: number }[]) =>
+      request<{ accepted: number }>('POST', `/courses/${id}/elevation-points`, { samples }),
+    // Nearest cached relative elevation at a point (or null if too far / empty).
+    elevationAt: (id: string, lat: number, lng: number, radiusM = 20) =>
+      request<{ elevationRelM: number; samples: number; distM: number; lat: number; lng: number } | null>(
+        'GET', `/courses/${id}/elevation-at?lat=${lat}&lng=${lng}&radiusM=${radiusM}`
+      ),
+    dataQuality: (id: string) => request<{
+      elevation_points: number;
+      elevation_samples: number;
+      total_holes: number;
+      holes_with_pins: number;
+      pin_coverage: number;
+      low_elevation: boolean;
+      low_pins: boolean;
+      low_data: boolean;
+      thresholds: { LOW_ELEV_POINTS: number; LOW_PIN_COVERAGE: number };
+    }>('GET', `/courses/${id}/data-quality`),
   },
 
   matches: {
@@ -239,6 +283,8 @@ export const api = {
         'GET', `/matches/${id}/shots${userId ? `?user=${encodeURIComponent(userId)}` : ''}`
       ),
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
+    setGuests: (id: string, guests: { name: string; scores: number[]; teebox_id?: string | null }[]) =>
+      request<{ success: true; count: number }>('PUT', `/matches/${id}/guests`, { guests }),
     // Tells the server "the VS intro animation has been shown to me on this
     // match, don't ever fire it again." Server uses COALESCE so the call is
     // safely idempotent — duplicate calls are no-ops.
@@ -261,6 +307,30 @@ export const api = {
     mine: () => request<{ finds: any[]; avgElo: number | null }>('GET', '/finds/mine'),
     delete: (id: string) => request<any>('DELETE', `/finds/${id}`),
     report: (id: string, reason: string) => request<any>('POST', `/finds/${id}/report`, { reason }),
+  },
+
+  tournaments: {
+    list: () => request<any[]>('GET', '/tournaments'),
+    discover: () => request<any[]>('GET', '/tournaments/discover'),
+    get: (id: string) => request<any>('GET', `/tournaments/${id}`),
+    create: (body: {
+      name: string;
+      description?: string;
+      scoring?: 'best_round' | 'total_strokes' | 'wins' | 'points';
+      format?: 'stroke' | 'match_play' | 'stableford' | 'skins' | 'scramble';
+      courseId?: string;
+      clanId?: string;
+      endsAt?: string;
+      isOpen?: boolean;
+    }) => request<any>('POST', '/tournaments', body),
+    join: (id: string, joinCode?: string) =>
+      request<{ success: true }>('POST', `/tournaments/${id}/join`, joinCode ? { joinCode } : {}),
+    joinByCode: (code: string) =>
+      request<{ success: true; tournament_id: string }>('POST', '/tournaments/join-by-code', { code }),
+    leave: (id: string) => request<{ success: true }>('POST', `/tournaments/${id}/leave`, {}),
+    delete: (id: string) => request<{ success: true }>('DELETE', `/tournaments/${id}`),
+    linkMatch: (tournamentId: string, matchId: string) =>
+      request<{ success: true }>('POST', `/tournaments/${tournamentId}/link-match`, { matchId }),
   },
 
   rounds: {

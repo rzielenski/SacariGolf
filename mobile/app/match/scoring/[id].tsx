@@ -276,6 +276,29 @@ export default function ScoringScreen() {
   const [following, setFollowing] = useState(true);
   const [locGranted, setLocGranted] = useState(false);
 
+  // ── Relative-elevation crowdsourcing ───────────────────────────────────
+  // Phone barometers are sub-meter accurate at *relative* altitude over short
+  // timescales, but their *absolute* reading drifts. We anchor every reading
+  // this round to a per-course origin (= 0m at the first contributor's
+  // first teebox), so cached points become barometer-grade.
+  //
+  //   elevOffsetM:          device altitude that corresponds to course origin = 0m
+  //   userRelElevationM:    derived from (userCoord.altitude - elevOffsetM) in slope math
+  //   pinRelElevM:          looked up from server cache when on a hole
+  //
+  // The buffer accumulates per-watchPositionAsync samples; a debounced
+  // flusher batch-uploads every 15s so a typical round contributes ~15
+  // points without hammering the API.
+  const [elevOffsetM, setElevOffsetM] = useState<number | null>(null);
+  const [elevOffsetMode, setElevOffsetMode] = useState<'anchor' | 'global' | 'seed' | null>(null);
+  const [pinRelElevM, setPinRelElevM] = useState<number | null>(null);
+  const elevSampleBuf = useRef<{ lat: number; lng: number; elevationRelM: number }[]>([]);
+  const elevFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastElevSampleAtRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Show the "this course is underdocumented" popup at most once per scoring-
+  // screen instance so leaving and re-entering doesn't re-nag.
+  const dataQualityShownRef = useRef(false);
+
   // Score panel
   const [panelExpanded, setPanelExpanded] = useState(false);
   const panelAnim = useRef(new Animated.Value(COLLAPSED_H)).current;
@@ -773,6 +796,122 @@ export default function ScoringScreen() {
     return () => { cancelled = true; };
   }, [userCoord?.latitude, userCoord?.longitude]);
 
+  // ── Relative-elevation: establish per-round offset ─────────────────────
+  // Run once when we first have a fix at a known course. Aligns the
+  // device's barometer/altimeter to the course's origin = 0m frame so
+  // every later sample is a meaningful delta. Re-fires only if we lost
+  // and re-acquired a fix (offset becomes null only on hard reset).
+  useEffect(() => {
+    if (elevOffsetM != null) return;
+    if (!course?.course_id || !userCoord) return;
+    if (typeof userCoord.altitude !== 'number') return;
+    let cancelled = false;
+    api.courses.elevationReference(course.course_id, {
+      lat: userCoord.latitude,
+      lng: userCoord.longitude,
+      deviceAltM: userCoord.altitude,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setElevOffsetM(res.offsetM);
+        setElevOffsetMode(res.mode);
+      })
+      .catch(() => { /* slope falls back to DEM path — non-fatal */ });
+    return () => { cancelled = true; };
+  }, [course?.course_id, userCoord?.altitude != null, elevOffsetM != null]);
+
+  // ── Data-quality warning popup ─────────────────────────────────────────
+  // Fired once per scoring-screen mount when the course is underdocumented.
+  // Tells the player slope / distances may be off, and dangles the Lucky
+  // Round perk so contributing pins + tracking shots feels worth the tap.
+  // Skipped on practice rounds (no perk possible there).
+  useEffect(() => {
+    if (selectingCourse) return;
+    if (!course?.course_id) return;
+    if (dataQualityShownRef.current) return;
+    if (match?.is_practice) return;
+    dataQualityShownRef.current = true;
+    api.courses.dataQuality(course.course_id)
+      .then((dq) => {
+        if (!dq.low_data) return;
+        const lines: string[] = [];
+        if (dq.low_pins) {
+          const pct = Math.round(dq.pin_coverage * 100);
+          lines.push(`Pin locations: ${dq.holes_with_pins}/${dq.total_holes} holes mapped${dq.total_holes ? ` (${pct}%)` : ''}.`);
+        }
+        if (dq.low_elevation) {
+          lines.push(`Elevation: only ${dq.elevation_points} reference point${dq.elevation_points === 1 ? '' : 's'} on file.`);
+        }
+        lines.push('');
+        lines.push('Distances and slope may be less accurate until more rounds are played here.');
+        lines.push('');
+        lines.push('Earn a LUCKY ROUND perk this match by:');
+        lines.push('  • Marking the pin location on most holes you play');
+        lines.push('  • OR tagging shots on most holes you play');
+        lines.push('');
+        lines.push('Lucky Round = next ranked match doubles a win OR cancels a loss.');
+        Alert.alert(
+          'Course needs more data',
+          lines.join('\n'),
+          [{ text: 'Got it' }],
+          { cancelable: true }
+        );
+      })
+      .catch(() => { /* non-fatal */ });
+  }, [selectingCourse, course?.course_id, match?.is_practice]);
+
+  // ── Relative-elevation: collect samples + batch flush ──────────────────
+  // Buffers each watchPositionAsync fix (skip repeats within ~3m horizontal).
+  // Every 15s of activity the buffer flushes to the server, where points
+  // get bucketed and averaged into the course's shared elevation map.
+  useEffect(() => {
+    if (!course?.course_id || elevOffsetM == null || !userCoord) return;
+    if (typeof userCoord.altitude !== 'number') return;
+    // Throttle by movement so a stationary phone doesn't spam-overwrite the
+    // same grid cell with hundreds of identical samples.
+    const last = lastElevSampleAtRef.current;
+    if (last && distMetres(last.lat, last.lng, userCoord.latitude, userCoord.longitude) < 3) return;
+    lastElevSampleAtRef.current = { lat: userCoord.latitude, lng: userCoord.longitude };
+
+    elevSampleBuf.current.push({
+      lat: userCoord.latitude,
+      lng: userCoord.longitude,
+      elevationRelM: userCoord.altitude - elevOffsetM,
+    });
+
+    if (!elevFlushTimer.current) {
+      elevFlushTimer.current = setTimeout(() => {
+        const courseId = course?.course_id;
+        const batch = elevSampleBuf.current;
+        elevSampleBuf.current = [];
+        elevFlushTimer.current = null;
+        if (batch.length && courseId) {
+          api.courses.elevationPoints(courseId, batch).catch(() => { /* silent */ });
+        }
+      }, 15_000);
+    }
+    // Cleanup is handled by the flush itself; clearing the timer on unmount
+    // would drop the final samples, so we let it fire and the closure's
+    // null-checks handle any race.
+  }, [course?.course_id, elevOffsetM, userCoord?.latitude, userCoord?.longitude, userCoord?.altitude]);
+
+  // Final flush on unmount so the last few samples aren't lost.
+  useEffect(() => {
+    return () => {
+      const courseId = course?.course_id;
+      const batch = elevSampleBuf.current;
+      if (batch.length && courseId) {
+        api.courses.elevationPoints(courseId, batch).catch(() => { /* silent */ });
+      }
+      elevSampleBuf.current = [];
+      if (elevFlushTimer.current) {
+        clearTimeout(elevFlushTimer.current);
+        elevFlushTimer.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Weather fetching ───────────────────────────────────────────────────
   // Premium-only — non-premium users get the upgrade prompt instead, so we
   // don't bother hitting the upstream for them. Refreshes every 15 min.
@@ -876,6 +1015,19 @@ export default function ScoringScreen() {
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
     : null;
 
+  // ── Relative-elevation: pin lookup ─────────────────────────────────────
+  // Pulls the cached relative elevation at the current hole's pin, if any
+  // contributor has been close enough. Refreshes when the pin changes; null
+  // when no point is within 25m of the pin (slope falls back to DEM).
+  useEffect(() => {
+    if (!course?.course_id || !knownPin) { setPinRelElevM(null); return; }
+    let cancelled = false;
+    api.courses.elevationAt(course.course_id, knownPin.lat, knownPin.lng, 25)
+      .then((res) => { if (!cancelled) setPinRelElevM(res?.elevationRelM ?? null); })
+      .catch(() => { if (!cancelled) setPinRelElevM(null); });
+    return () => { cancelled = true; };
+  }, [course?.course_id, knownPin?.lat, knownPin?.lng]);
+
   // Slope adjustment: each metre of elevation gain adds ~1.09 yards to the
   // play distance (downhill plays shorter, conversely).
   //
@@ -889,6 +1041,29 @@ export default function ScoringScreen() {
   // back to GPS altimeter only when DEM lookup hasn't completed yet.
   const slopeAdjustment = (() => {
     if (!knownPin || !userCoord || yardsToPin == null) return null;
+
+    // PREFERRED PATH — crowdsourced relative elevation. Both endpoints come
+    // from the same per-course origin frame, so phone barometer drift cancels
+    // out and we get sub-meter precision regardless of device calibration.
+    // Triggers when:
+    //   • we've established the player's per-round offset (anchor or seed)
+    //   • the pin sits within 25m of a cached contributor point
+    //   • the device reported an altitude on the latest fix
+    if (
+      pinRelElevM != null
+      && elevOffsetM != null
+      && typeof userCoord.altitude === 'number'
+    ) {
+      const userRelM = userCoord.altitude - elevOffsetM;
+      const elevDiffM = pinRelElevM - userRelM;
+      const adj = Math.round(elevDiffM * 1.09);
+      // Sub-yard noise floor — even barometer reads jitter slightly.
+      if (Math.abs(adj) < 1) return null;
+      return { adj, playsLike: yardsToPin + adj, uphill: adj > 0, source: 'relative' as const };
+    }
+
+    // FALLBACK — DEM path (USGS 3DEP / Copernicus). Used until the course's
+    // relative cache fills in around this player or this pin.
     const pinElevM = knownPin.elevation_m;
     if (typeof pinElevM !== 'number') return null;
 
@@ -909,7 +1084,7 @@ export default function ScoringScreen() {
     // threshold on GPS fallback to avoid surfacing pure noise.
     const minSurface = isDem ? 1 : 3;
     if (Math.abs(adj) < minSurface) return null;
-    return { adj, playsLike: yardsToPin + adj, uphill: adj > 0 };
+    return { adj, playsLike: yardsToPin + adj, uphill: adj > 0, source: isDem ? 'dem' as const : 'gps' as const };
   })();
 
   // ── Auto-suggest the most likely club from yardsToPin ─────────────────
@@ -1850,27 +2025,34 @@ export default function ScoringScreen() {
             })()}
           </TouchableOpacity>
         ) : (
+          // No known pin yet on this hole — make the contribute CTA hard to
+          // miss. Pin coverage is what unlocks distance, slope, weather, and
+          // heatmap features for everyone, so we lean hard into it visually
+          // and dangle the Lucky Round perk so it feels worth the tap.
           <TouchableOpacity
-            style={[styles.markPinBtnSmall, !userCoord && { opacity: 0.4 }]}
+            style={[styles.dropPinBtn, !userCoord && { opacity: 0.4 }]}
             onPress={() => {
               if (!userCoord) {
                 Alert.alert('No GPS', 'Wait for a GPS lock before marking the pin.');
                 return;
               }
               Alert.alert(
-                'Confirm Pin Location',
-                'Are you standing at the cup right now? This GPS reading will become the pin location for everyone playing this hole.',
+                'Drop Pin Here?',
+                'Are you standing at the cup right now? This GPS reading becomes the pin location for everyone playing this hole. Contribute pins on the majority of your holes to earn a Lucky Round perk.',
                 [
                   { text: 'Cancel', style: 'cancel' },
-                  { text: 'Yes, mark it', style: 'default', onPress: markPin },
+                  { text: 'Drop Pin', style: 'default', onPress: markPin },
                 ],
               );
             }}
             disabled={!userCoord}
-            activeOpacity={0.7}
+            activeOpacity={0.85}
           >
-            <Text style={styles.markPinLabelSmall}>MARK</Text>
-            <Text style={styles.markPinLabelSmall}>PIN</Text>
+            <View style={styles.dropPinDot} />
+            <View>
+              <Text style={styles.dropPinLabel}>DROP PIN</Text>
+              <Text style={styles.dropPinSub}>tap at the cup</Text>
+            </View>
           </TouchableOpacity>
         )}
       </Animated.View>
@@ -2438,6 +2620,24 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   markPinLabelSmall: { color: C.green, fontWeight: '900', fontSize: 12, letterSpacing: 1.5, lineHeight: 14 },
+
+  // Bigger, more inviting drop-pin CTA used when no pin exists on this hole.
+  // Keeps the gold-accent treatment consistent with other primary CTAs (e.g.
+  // the "Start Round" button) so players read it as "do this thing".
+  dropPinBtn: {
+    backgroundColor: C.gold + 'cc',
+    borderRadius: 10, borderWidth: 1.5, borderColor: C.gold,
+    paddingHorizontal: 14, paddingVertical: 10,
+    minWidth: 132, flexDirection: 'row', alignItems: 'center', gap: 10,
+    shadowColor: C.gold, shadowOpacity: 0.45, shadowRadius: 8, shadowOffset: { width: 0, height: 2 },
+    elevation: 8,
+  },
+  dropPinDot: {
+    width: 10, height: 10, borderRadius: 5,
+    backgroundColor: '#fff', borderWidth: 2, borderColor: '#000',
+  },
+  dropPinLabel: { color: '#000', fontWeight: '900', fontSize: 13, letterSpacing: 1.5 },
+  dropPinSub:   { color: '#000', fontWeight: '600', fontSize: 9, opacity: 0.75, marginTop: 1 },
 
   // Pin marker on the map (small red flag)
   pinMarker: { width: 18, height: 24, alignItems: 'center' },

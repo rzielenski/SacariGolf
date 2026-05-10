@@ -4,6 +4,9 @@ import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { isPremium, premiumDaysLeft } from '../lib/premium';
+import {
+  purchaseStatus, getOfferings, purchasePackage, restorePurchases,
+} from '../lib/purchases';
 import { C, F } from '../lib/colors';
 import { OrnamentTitle } from '../components/Flourish';
 
@@ -27,13 +30,58 @@ export default function PremiumScreen() {
   const [selectedPlan, setSelectedPlan] = useState<string>('yearly');
   const [code, setCode] = useState('');
   const [redeeming, setRedeeming] = useState(false);
+  // RevenueCat offerings — populated when the SDK is installed and a fetch
+  // succeeds. Each offering exposes `availablePackages` (per-product details).
+  const [offerings, setOfferings] = useState<any | null>(null);
+  const [purchasing, setPurchasing] = useState(false);
+  const iapAvailable = purchaseStatus() === 'available';
 
   useEffect(() => {
     api.premium.catalog()
       .then(setCatalog)
       .catch(() => { })
       .finally(() => setLoading(false));
-  }, []);
+    // Pull RC offerings if the SDK is installed. Failures are silent — we
+    // fall back to the promo-code path automatically.
+    if (iapAvailable) getOfferings().then(setOfferings).catch(() => { });
+  }, [iapAvailable]);
+
+  // Pick a package matching the selected plan id, prefer a substring match
+  // (RC products usually look like "sg_yearly_999" etc).
+  const findPackageFor = (planId: string) => {
+    const pkgs = (offerings?.current?.availablePackages ?? []) as any[];
+    return pkgs.find((p) => (p.product?.identifier ?? '').toLowerCase().includes(planId.toLowerCase()))
+        ?? pkgs.find((p) => (p.identifier ?? '').toLowerCase().includes(planId.toLowerCase()))
+        ?? null;
+  };
+
+  const onPurchase = async () => {
+    const pkg = findPackageFor(selectedPlan);
+    if (!pkg) {
+      Alert.alert('Plan unavailable', 'That plan isn\'t configured in the App Store yet — try a promo code below.');
+      return;
+    }
+    setPurchasing(true);
+    try {
+      const res = await purchasePackage(pkg);
+      if (res.entitled) {
+        await refreshUser?.();
+        Alert.alert('Welcome to Premium 👑', 'Your purchase was successful.');
+      } else if (res.error && res.error !== 'Cancelled') {
+        Alert.alert('Purchase failed', res.error);
+      }
+    } finally { setPurchasing(false); }
+  };
+
+  const onRestore = async () => {
+    const res = await restorePurchases();
+    if (res.entitled) {
+      await refreshUser?.();
+      Alert.alert('Restored', 'Premium has been restored to this device.');
+    } else {
+      Alert.alert('Nothing to restore', res.error ?? 'No prior purchase found for this account.');
+    }
+  };
 
   const active = isPremium(user);
   const daysLeft = premiumDaysLeft(user);
@@ -129,6 +177,27 @@ export default function PremiumScreen() {
             })}
           </View>
 
+          {/* Native IAP subscribe button — only when the RC SDK is installed
+              AND offerings loaded successfully. Otherwise we silently fall
+              through to the promo-code path below. */}
+          {!active && iapAvailable && offerings?.current?.availablePackages?.length > 0 && (
+            <TouchableOpacity
+              style={[s.upgradeBtn, purchasing && { opacity: 0.6 }]}
+              onPress={onPurchase}
+              disabled={purchasing}
+              activeOpacity={0.85}
+            >
+              {purchasing
+                ? <ActivityIndicator color={C.bg} />
+                : <Text style={s.upgradeBtnLabel}>UPGRADE NOW</Text>}
+            </TouchableOpacity>
+          )}
+          {!active && iapAvailable && (
+            <TouchableOpacity onPress={onRestore} style={{ alignSelf: 'center', padding: 10 }}>
+              <Text style={{ color: C.textMuted, fontSize: 12 }}>Restore previous purchase</Text>
+            </TouchableOpacity>
+          )}
+
           {/* Promo-code redemption — interim unlock until payments ship.
               The plan picker above is preserved for layout/preview but
               has no effect on redemption today. */}
@@ -169,8 +238,9 @@ export default function PremiumScreen() {
           )}
 
           <Text style={s.fineprint}>
-            Subscriptions aren't on sale yet — promo codes are the only way
-            to unlock for now. Real plans coming soon.
+            {iapAvailable
+              ? 'Subscriptions auto-renew until cancelled. Manage from your App Store / Play settings.'
+              : 'Subscriptions aren\'t on sale yet — promo codes are the only way to unlock for now.'}
           </Text>
 
           <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>

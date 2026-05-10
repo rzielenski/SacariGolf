@@ -2,8 +2,30 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { sendPush } from '../utils/notify';
 
 const router = Router();
+
+// Resolve the recipient (round owner) + reactor name + course name for a push.
+// Returns null when there's nothing actionable (round not found, you're
+// reacting on your own round, or the owner has no push token).
+async function pushTargetFor(roundId: string, actorUserId: string) {
+  const { rows } = await pool.query(
+    `SELECT r.user_id AS owner_id, u.push_token, u.username AS owner_name,
+            actor.username AS actor_name,
+            c.course_name
+     FROM rounds r
+     JOIN users u ON u.user_id = r.user_id
+     JOIN users actor ON actor.user_id = $2
+     LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     WHERE r.round_id = $1`,
+    [roundId, actorUserId]
+  );
+  const row = rows[0];
+  if (!row || row.owner_id === actorUserId || !row.push_token) return null;
+  return row;
+}
 
 // Allowed reaction tokens (text labels — no emoji glyphs).
 // Adding more here is the only place to extend the set.
@@ -58,6 +80,20 @@ router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, re
     `INSERT INTO round_reactions (user_id, round_id, reaction) VALUES ($1, $2, $3)`,
     [req.userId, req.params.roundId, reaction]
   );
+
+  // Notify the round owner — fire-and-forget so a flaky push doesn't break
+  // the API call. Skipped silently if you reacted on your own round or the
+  // owner has no push token.
+  pushTargetFor(req.params.roundId, req.userId!).then((tgt) => {
+    if (!tgt) return;
+    return sendPush(
+      [tgt.push_token],
+      `${tgt.actor_name} said ${reaction.toUpperCase()}`,
+      tgt.course_name ? `On your round at ${tgt.course_name}` : 'On your round',
+      { type: 'round_reaction', roundId: req.params.roundId, reaction, fromUserId: req.userId }
+    );
+  }).catch(() => { /* swallow */ });
+
   return res.json({ added: true });
 }));
 
@@ -75,6 +111,20 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
      VALUES ($1, $2, $3) RETURNING comment_id, created_at`,
     [req.userId, req.params.roundId, body]
   );
+
+  // Push to round owner (fire-and-forget). Truncate body in the push so a
+  // long comment doesn't make the notification overflow on lock screens.
+  pushTargetFor(req.params.roundId, req.userId!).then((tgt) => {
+    if (!tgt) return;
+    const preview = body.length > 100 ? body.slice(0, 97) + '…' : body;
+    return sendPush(
+      [tgt.push_token],
+      `${tgt.actor_name} commented on your round`,
+      preview,
+      { type: 'round_comment', roundId: req.params.roundId, commentId: rows[0].comment_id, fromUserId: req.userId }
+    );
+  }).catch(() => { /* swallow */ });
+
   return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
 }));
 

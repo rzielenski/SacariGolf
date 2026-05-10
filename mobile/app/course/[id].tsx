@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator, RefreshControl, Modal, TextInput, Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../lib/api';
@@ -16,6 +16,31 @@ export default function CourseInfoScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [lbTab, setLbTab] = useState<'stroke' | 'scramble'>('stroke');
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportField, setReportField] = useState('course_rating');
+  const [reportSuggested, setReportSuggested] = useState('');
+  const [reportNotes, setReportNotes] = useState('');
+  const [reportSubmitting, setReportSubmitting] = useState(false);
+
+  const submitCorrection = async () => {
+    if (!reportSuggested.trim()) { Alert.alert('Missing', 'Please describe the correction.'); return; }
+    setReportSubmitting(true);
+    try {
+      await api.courses.reportCorrection(id, {
+        field: reportField,
+        suggestedValue: reportSuggested.trim(),
+        notes: reportNotes.trim() || undefined,
+      });
+      Alert.alert('Thank you!', 'Submitted for review. We typically apply valid corrections within a day or two.');
+      setReportOpen(false);
+      setReportSuggested('');
+      setReportNotes('');
+    } catch (e: any) {
+      Alert.alert('Error', e.message);
+    } finally {
+      setReportSubmitting(false);
+    }
+  };
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -168,6 +193,13 @@ export default function CourseInfoScreen() {
       )}
       {displayLb.length > 0 && <Text style={styles.tapHint}>Tap a row to view scorecard · Hold for profile</Text>}
 
+      {/* Report incorrect data — quietly tucked at the bottom so the picker
+          UX isn't cluttered, but discoverable when a player notices a wrong
+          rating/slope/par/yardage. */}
+      <TouchableOpacity style={styles.reportBtn} onPress={() => setReportOpen(true)} activeOpacity={0.7}>
+        <Text style={styles.reportBtnText}>Report incorrect course data</Text>
+      </TouchableOpacity>
+
       <ScorecardModal
         visible={!!scorecardEntry}
         entry={scorecardEntry}
@@ -178,6 +210,79 @@ export default function CourseInfoScreen() {
           if (userId) router.push(`/user/${userId}` as any);
         }}
       />
+
+      <Modal
+        visible={reportOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setReportOpen(false)}
+      >
+        <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 20, paddingTop: 30 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+            <Text style={{ color: C.text, fontSize: 20, fontWeight: '900' }}>Report Incorrect Data</Text>
+            <TouchableOpacity onPress={() => setReportOpen(false)}>
+              <Text style={{ color: C.textMuted, fontSize: 15 }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={{ color: C.textMuted, fontSize: 13, marginBottom: 14 }}>
+            For: {course.course_name}
+          </Text>
+
+          <Text style={styles.reportLabel}>What's wrong?</Text>
+          <View style={styles.reportFieldRow}>
+            {[
+              ['course_rating', 'Course Rating'],
+              ['slope_rating', 'Slope'],
+              ['par', 'Par'],
+              ['yardage', 'Yardage'],
+              ['tee_name', 'Tee name'],
+              ['pin_location', 'Pin location'],
+              ['course_name', 'Course name'],
+              ['address', 'Address'],
+              ['other', 'Other'],
+            ].map(([k, label]) => (
+              <TouchableOpacity
+                key={k}
+                style={[styles.reportChip, reportField === k && styles.reportChipActive]}
+                onPress={() => setReportField(k)}
+              >
+                <Text style={[styles.reportChipText, reportField === k && { color: C.bg }]}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Text style={styles.reportLabel}>What should it be?</Text>
+          <TextInput
+            style={styles.reportInput}
+            value={reportSuggested}
+            onChangeText={setReportSuggested}
+            placeholder="e.g. 70.4, or describe in plain English"
+            placeholderTextColor={C.textMuted}
+            autoCapitalize="none"
+            multiline
+          />
+
+          <Text style={styles.reportLabel}>Notes (optional)</Text>
+          <TextInput
+            style={[styles.reportInput, { minHeight: 80 }]}
+            value={reportNotes}
+            onChangeText={setReportNotes}
+            placeholder="Anything else we should know? Source for the correction?"
+            placeholderTextColor={C.textMuted}
+            multiline
+          />
+
+          <TouchableOpacity
+            style={[styles.reportSubmit, reportSubmitting && { opacity: 0.6 }]}
+            onPress={submitCorrection}
+            disabled={reportSubmitting}
+          >
+            {reportSubmitting
+              ? <ActivityIndicator color="#000" />
+              : <Text style={styles.reportSubmitText}>Submit Correction</Text>}
+          </TouchableOpacity>
+        </ScrollView>
+      </Modal>
     </ScrollView>
   );
 }
@@ -251,6 +356,26 @@ const styles = StyleSheet.create({
 
   empty: { color: C.textMuted, fontSize: 13, paddingHorizontal: 20, paddingVertical: 12 },
   tapHint: { color: C.textDim, fontSize: 11, textAlign: 'center', paddingVertical: 12, paddingHorizontal: 20 },
+
+  reportBtn: {
+    marginTop: 24, marginHorizontal: 20, paddingVertical: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: C.border, borderRadius: 8, backgroundColor: C.card,
+  },
+  reportBtnText: { color: C.textMuted, fontSize: 12, fontWeight: '600', letterSpacing: 0.5 },
+  reportLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: 16, marginBottom: 8 },
+  reportFieldRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  reportChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: C.border, backgroundColor: C.card },
+  reportChipActive: { backgroundColor: C.gold, borderColor: C.gold },
+  reportChipText: { color: C.text, fontSize: 12, fontWeight: '700' },
+  reportInput: {
+    backgroundColor: C.card, color: C.text, borderRadius: 6,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15,
+    borderWidth: 1, borderColor: C.border, minHeight: 44, textAlignVertical: 'top',
+  },
+  reportSubmit: {
+    marginTop: 22, backgroundColor: C.gold, borderRadius: 8, paddingVertical: 14, alignItems: 'center',
+  },
+  reportSubmitText: { color: '#000', fontSize: 15, fontWeight: '900' },
   recordBadge: { backgroundColor: C.gold + '33', borderRadius: 3, paddingHorizontal: 5, paddingVertical: 1, borderWidth: 1, borderColor: C.gold },
   recordBadgeText: { color: C.gold, fontWeight: '900', fontSize: 9, letterSpacing: 1 },
 

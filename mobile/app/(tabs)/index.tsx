@@ -29,13 +29,30 @@ export default function HomeScreen() {
   const [handicapModal, setHandicapModal] = useState(false);
   const [handicapInput, setHandicapInput] = useState('');
   const [perkCount, setPerkCount] = useState(0);
+  // Resumable round: an in-progress match where the player has saved local
+  // scoring progress (via "Save & Leave") but hasn't submitted yet. Showing
+  // a top-of-home banner makes coming back to it a single tap.
+  const [resumable, setResumable] = useState<Match | null>(null);
 
   const load = useCallback(async () => {
     try {
       const [m] = await Promise.all([api.matches.list(), refreshUser()]);
       // Guard against the API returning a non-array (server error / proxy
       // returning HTML, etc.) so we don't crash on .slice
-      setMatches(Array.isArray(m) ? m.slice(0, 5) : []);
+      const list = Array.isArray(m) ? m : [];
+      setMatches(list.slice(0, 5));
+      // Find any not-yet-completed match the user has local progress for.
+      // The scoring screen writes `scores_${userId}_${matchId}` on Save & Leave.
+      // We only show ONE banner at a time — the most recent in-progress one wins.
+      try {
+        const keys = await AsyncStorage.getAllKeys();
+        const myPrefix = `scores_${user?.user_id ?? ''}_`;
+        const ids = keys.filter((k) => k.startsWith(myPrefix)).map((k) => k.slice(myPrefix.length));
+        const open = list
+          .filter((row) => !row.completed && ids.includes(row.match_id))
+          .sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
+        setResumable(open[0] ?? null);
+      } catch { setResumable(null); }
     } catch { /* silent */ } finally {
       setLoading(false);
       setRefreshing(false);
@@ -44,7 +61,7 @@ export default function HomeScreen() {
     api.users.perks()
       .then((rows) => setPerkCount(Array.isArray(rows) ? rows.length : 0))
       .catch(() => { });
-  }, [refreshUser]);
+  }, [refreshUser, user?.user_id]);
 
   const deleteMatch = useCallback(async (matchId: string) => {
     try {
@@ -133,6 +150,28 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      {/* Continue-in-progress-round banner — top priority because finishing
+          a started round is the single highest-value action a player can take.
+          Tapping jumps straight to the match lobby where the "Continue Match"
+          button is already wired. */}
+      {resumable && (
+        <TouchableOpacity
+          style={styles.resumeBanner}
+          onPress={() => router.push(`/match/${resumable.match_id}` as any)}
+          activeOpacity={0.85}
+        >
+          <View style={styles.resumeDot} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.resumeLabel}>ROUND IN PROGRESS</Text>
+            <Text style={styles.resumeMsg} numberOfLines={1}>
+              {resumable.name ?? `${resumable.match_type[0].toUpperCase()}${resumable.match_type.slice(1)} match`}
+              {' · '}tap to continue
+            </Text>
+          </View>
+          <Text style={styles.resumeChev}>›</Text>
+        </TouchableOpacity>
+      )}
+
       {/* Email-verification banner — only while user hasn't confirmed yet */}
       {user.email_verified === false && (
         <TouchableOpacity
@@ -198,9 +237,13 @@ export default function HomeScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Leaderboard shortcut */}
+      {/* Leaderboard + Tournaments shortcuts */}
       <TouchableOpacity style={styles.leaderboardBtn} onPress={() => router.push('/leaderboard' as any)}>
         <Text style={styles.leaderboardBtnText}>Global Leaderboard</Text>
+        <Text style={styles.leaderboardArrow}>→</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.leaderboardBtn} onPress={() => router.push('/tournaments' as any)}>
+        <Text style={styles.leaderboardBtnText}>Tournaments &amp; Leagues</Text>
         <Text style={styles.leaderboardArrow}>→</Text>
       </TouchableOpacity>
 
@@ -449,6 +492,16 @@ const styles = StyleSheet.create({
   },
   perkBannerLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
   perkBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
+
+  resumeBanner: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: C.green + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 12,
+    borderWidth: 1, borderColor: C.green, marginBottom: 14, gap: 10,
+  },
+  resumeDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.green },
+  resumeLabel: { color: C.green, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
+  resumeMsg: { color: C.text, fontSize: 13, marginTop: 2 },
+  resumeChev: { color: C.green, fontSize: 24, fontWeight: '300' },
 
   verifyBanner: {
     flexDirection: 'row', alignItems: 'center',

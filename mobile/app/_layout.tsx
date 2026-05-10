@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Platform, AppState, Keyboard } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -6,6 +6,7 @@ import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { init as initPurchases } from '../lib/purchases';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
 import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
 
@@ -21,16 +22,32 @@ function AuthGuard() {
   const { user, loading } = useAuth();
   const segments = useSegments();
   const router = useRouter();
+  // Onboarding gate: shown to authenticated users who haven't yet completed
+  // the four-card intro on this device. Lives in AsyncStorage (per-device,
+  // not per-user) so reinstalls show it again. Loaded once per mount and
+  // updated when the onboarding screen finishes.
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    require('@react-native-async-storage/async-storage').default
+      .getItem('sacari.onboarded.v1')
+      .then((v: string | null) => { if (!cancelled) setOnboarded(!!v); })
+      .catch(() => { if (!cancelled) setOnboarded(true); /* fail open */ });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || onboarded === null) return;
     const inAuthGroup = segments[0] === '(auth)';
+    const onOnboarding = (segments[0] as string) === 'onboarding';
     if (!user && !inAuthGroup) {
       router.replace('/(auth)/login');
     } else if (user && inAuthGroup) {
-      router.replace('/(tabs)/');
+      router.replace(onboarded ? '/(tabs)/' as any : '/onboarding' as any);
+    } else if (user && !onboarded && !onOnboarding) {
+      router.replace('/onboarding' as any);
     }
-  }, [user, loading, segments]);
+  }, [user, loading, segments, onboarded]);
 
   // Register push token once user is logged in
   useEffect(() => {
@@ -57,6 +74,13 @@ function AuthGuard() {
         await api.users.update({ pushToken: token });
       } catch { /* push notifications are non-fatal */ }
     })();
+  }, [user?.user_id]);
+
+  // Initialize RevenueCat for the current user. No-op when the SDK isn't
+  // installed (free-tier builds) so the rest of the app keeps working.
+  useEffect(() => {
+    if (!user?.user_id) return;
+    initPurchases(user.user_id).catch(() => { /* non-fatal */ });
   }, [user?.user_id]);
 
   // Pre-warm map tiles for the user's home course so the next round there
@@ -103,6 +127,9 @@ export default function RootLayout() {
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
+        <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
+        <Stack.Screen name="tournaments" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="tournament/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/scoring/[id]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="chat/[type]/[id]" options={{ animation: 'slide_from_right' }} />

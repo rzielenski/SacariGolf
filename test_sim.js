@@ -735,6 +735,88 @@ async function suiteEdgeCases() {
 
 // ─── 11. Weather + premium admin (optional) ──────────────────────────────────
 
+// ─── 12. Relative-elevation crowdsourcing ────────────────────────────────────
+
+async function suiteRelativeElevation() {
+  if (!shouldRun('elevation')) return;
+  head('RELATIVE ELEVATION CROWDSOURCING');
+
+  const a = await register('ElevA');
+  const b = await register('ElevB');
+  if (!a || !b) return;
+
+  const found = await pickCourse(a.token);
+  if (!found) return;
+  const { course } = found;
+
+  // Player A is the first contributor — seeds origin = 0 at their teebox.
+  const aRef = await req('POST', `/courses/${course.course_id}/elevation-reference`,
+    { lat: 40.0001, lng: -74.0001, deviceAltM: 102 }, a.token);
+  if (aRef.status !== 200) bug(`A reference failed: ${aRef.data?.error}`);
+  else if (aRef.data.mode !== 'seed' && aRef.data.mode !== 'anchor') bug(`unexpected mode ${aRef.data.mode}`);
+  else ok(`A seeded course at (40.0001, -74.0001), offset=${aRef.data.offsetM}m mode=${aRef.data.mode}`);
+
+  // Player A walks 50m east and uphill 5m: device alt 107m → rel = 5m.
+  // We also drop a few samples around them.
+  const aSamples = [
+    { lat: 40.0001, lng: -74.0001, elevationRelM: 0 },
+    { lat: 40.0002, lng: -74.0001, elevationRelM: 1.2 },
+    { lat: 40.0003, lng: -74.0001, elevationRelM: 2.8 },
+    { lat: 40.0004, lng: -74.0001, elevationRelM: 4.5 },
+    { lat: 40.0005, lng: -74.0001, elevationRelM: 5.0 }, // pin is here, ~55m away, +5m uphill
+  ];
+  const upload = await req('POST', `/courses/${course.course_id}/elevation-points`,
+    { samples: aSamples }, a.token);
+  if (upload.status !== 200) bug(`A upload failed: ${upload.data?.error}`);
+  else if (upload.data.accepted !== aSamples.length) bug(`expected ${aSamples.length} accepted, got ${upload.data.accepted}`);
+  else ok(`A uploaded ${upload.data.accepted} elevation samples`);
+
+  // Lookup A's pin location — should hit one of the cached points.
+  const lookup = await req('GET',
+    `/courses/${course.course_id}/elevation-at?lat=40.0005&lng=-74.0001&radiusM=20`,
+    null, a.token);
+  if (lookup.status !== 200 || !lookup.data) bug(`pin lookup empty/failed`);
+  else if (Math.abs(lookup.data.elevationRelM - 5.0) > 0.1) bug(`expected ~5.0m, got ${lookup.data.elevationRelM}`);
+  else ok(`pin lookup returned ${lookup.data.elevationRelM}m (sample size ${lookup.data.samples})`);
+
+  // Player B arrives — different barometer reading. Their actual altitude
+  // at the same teebox is 250m (drifted barometer / different device).
+  // The reference endpoint should return offset = 250 - 0 = 250 (anchor mode).
+  const bRef = await req('POST', `/courses/${course.course_id}/elevation-reference`,
+    { lat: 40.0001, lng: -74.0001, deviceAltM: 250 }, b.token);
+  if (bRef.status !== 200) bug(`B reference failed: ${bRef.data?.error}`);
+  else if (bRef.data.mode !== 'anchor') bug(`B expected 'anchor' mode, got '${bRef.data.mode}'`);
+  else if (Math.abs(bRef.data.offsetM - 250) > 0.5) bug(`B offset wrong: expected ~250, got ${bRef.data.offsetM}`);
+  else ok(`B aligned to A's frame: offset=${bRef.data.offsetM}m, mode=${bRef.data.mode}, distM=${bRef.data.distM ?? '—'}`);
+
+  // B at the pin (250 + 5 = 255 in their frame) — converting to relative
+  // gives 255 - 250 = 5m. Same result as A despite the 150m absolute drift.
+  const bAtPin = 255 - bRef.data.offsetM;
+  if (Math.abs(bAtPin - 5.0) > 0.5) bug(`B's calibration produced ${bAtPin}m at pin, expected ~5m`);
+  else ok(`B's relative reading at pin = ${bAtPin}m (matches A's ${5.0}m)`);
+
+  // Bad input rejected
+  const bad = await req('POST', `/courses/${course.course_id}/elevation-points`,
+    { samples: [{ lat: 999, lng: 999, elevationRelM: 5 }] }, a.token);
+  if (bad.status === 200 && bad.data.accepted > 0) bug('elevation accepted out-of-range coords');
+  else ok('elevation rejected out-of-range coords');
+
+  // Out-of-radius lookup → null
+  const far = await req('GET',
+    `/courses/${course.course_id}/elevation-at?lat=41.5&lng=-72.5&radiusM=20`,
+    null, a.token);
+  if (far.status !== 200) bug(`far lookup failed: ${far.data?.error}`);
+  else if (far.data !== null) bug('expected null for far lookup, got data');
+  else ok('far lookup correctly returns null');
+
+  // Data-quality endpoint — fresh course should look low-data
+  const dq = await req('GET', `/courses/${course.course_id}/data-quality`, null, a.token);
+  if (dq.status !== 200) bug(`data-quality failed: ${dq.data?.error}`);
+  else if (typeof dq.data.low_data !== 'boolean') bug('data-quality missing low_data flag');
+  else if (typeof dq.data.elevation_points !== 'number' || typeof dq.data.holes_with_pins !== 'number') bug('data-quality missing counts');
+  else ok(`data-quality: low_data=${dq.data.low_data} (${dq.data.elevation_points} elev pts, ${dq.data.holes_with_pins}/${dq.data.total_holes} pins)`);
+}
+
 async function suiteWeather() {
   if (!shouldRun('weather')) return;
   head('WEATHER');
@@ -778,6 +860,7 @@ async function main() {
   await suiteNotifications();
   await suitePremium();
   await suiteWeather();
+  await suiteRelativeElevation();
   await suiteEdgeCases();
 
   console.log('\n' + '═'.repeat(64));

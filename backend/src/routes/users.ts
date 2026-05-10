@@ -759,6 +759,162 @@ router.get('/:id/course-records', requireAuth, wrap(async (req: AuthRequest, res
 }));
 
 // Active (unused) perks for the requesting user
+// Player insights — narrative stats derived from rounds + hole_scores.
+// Cheap aggregations meant to feel like coaching observations: scoring
+// average per par-N, trend across recent rounds, hardest hole on home
+// course, total eagles/birdies, and most-played course.
+//
+// Filtered to completed, non-practice rounds with hole_scores populated.
+router.get('/:id/insights', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const userId = req.params.id;
+
+  // Pull every completed round with its hole-score array + per-hole pars.
+  // We unnest with WITH ORDINALITY so we get parallel scores + pars without
+  // shipping the holes table over the wire per row.
+  const { rows: holeRows } = await pool.query(
+    `WITH src AS (
+       SELECT r.round_id, r.created_at, r.total_score, r.hole_scores,
+              t.teebox_id, t.par AS teebox_par, t.num_holes,
+              c.course_id, c.course_name
+       FROM rounds r
+       JOIN matches m ON m.match_id = r.match_id
+       LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+       LEFT JOIN courses c ON c.course_id = t.course_id
+       WHERE r.user_id = $1
+         AND r.total_score IS NOT NULL
+         AND m.completed = true
+         AND m.is_practice = false
+         AND array_length(r.hole_scores, 1) > 0
+       ORDER BY r.created_at DESC
+       LIMIT 100
+     )
+     SELECT s.round_id, s.created_at, s.total_score, s.teebox_par, s.num_holes,
+            s.course_id, s.course_name,
+            scored.hole_num, scored.score, h.par AS hole_par
+     FROM src s,
+          LATERAL unnest(s.hole_scores) WITH ORDINALITY AS scored(score, hole_num)
+          LEFT JOIN holes h ON h.teebox_id = s.teebox_id AND h.hole_num = scored.hole_num`,
+    [userId]
+  );
+
+  // Aggregate in JS — cheap, the LIMIT keeps row count bounded.
+  const parBuckets: Record<3 | 4 | 5, { total: number; n: number }> = {
+    3: { total: 0, n: 0 }, 4: { total: 0, n: 0 }, 5: { total: 0, n: 0 },
+  };
+  // Hardest hole at each course = highest avg score-to-par over the player's rounds there.
+  const holeAgg: Record<string, { course_id: string; course_name: string; hole_num: number; total: number; n: number; par: number }> = {};
+  const courseRoundCount: Record<string, { course_id: string; course_name: string; n: number }> = {};
+  const seenRounds = new Set<string>();
+  let eagles = 0, birdies = 0, pars = 0, bogeys = 0, doubles = 0;
+
+  for (const row of holeRows) {
+    if (!row.hole_par || !row.score) continue;
+    const par = row.hole_par as 3 | 4 | 5;
+    if (parBuckets[par]) {
+      parBuckets[par].total += row.score;
+      parBuckets[par].n += 1;
+    }
+    const diff = row.score - par;
+    if (diff <= -2) eagles++;
+    else if (diff === -1) birdies++;
+    else if (diff === 0) pars++;
+    else if (diff === 1) bogeys++;
+    else doubles++;
+
+    // Hole-level aggregation per course
+    if (row.course_id) {
+      const key = `${row.course_id}|${row.hole_num}`;
+      if (!holeAgg[key]) {
+        holeAgg[key] = {
+          course_id: row.course_id,
+          course_name: row.course_name ?? 'Unknown',
+          hole_num: row.hole_num,
+          total: 0, n: 0, par,
+        };
+      }
+      holeAgg[key].total += row.score;
+      holeAgg[key].n += 1;
+
+      if (!seenRounds.has(row.round_id)) {
+        seenRounds.add(row.round_id);
+        if (!courseRoundCount[row.course_id]) {
+          courseRoundCount[row.course_id] = {
+            course_id: row.course_id, course_name: row.course_name ?? 'Unknown', n: 0,
+          };
+        }
+        courseRoundCount[row.course_id].n += 1;
+      }
+    }
+  }
+
+  const avgPerPar = (Object.entries(parBuckets) as [string, { total: number; n: number }][]).reduce<Record<string, number | null>>((acc, [par, b]) => {
+    acc[par] = b.n ? Math.round((b.total / b.n) * 100) / 100 : null;
+    return acc;
+  }, {});
+
+  // Hardest hole = max avg-to-par with at least 2 plays
+  const eligible = Object.values(holeAgg).filter((h) => h.n >= 2);
+  eligible.sort((a, b) => (b.total / b.n - b.par) - (a.total / a.n - a.par));
+  const hardest = eligible[0] ?? null;
+  const easiest = eligible[eligible.length - 1] ?? null;
+
+  // Most-played course
+  const mostPlayed = Object.values(courseRoundCount).sort((a, b) => b.n - a.n)[0] ?? null;
+
+  // Recent trend: avg score-to-par for the last 5 vs the previous 5 rounds.
+  const { rows: trendRows } = await pool.query(
+    `SELECT r.round_id, r.total_score - t.par AS to_par, r.created_at
+     FROM rounds r
+     JOIN matches m ON m.match_id = r.match_id
+     JOIN teeboxes t ON t.teebox_id = r.teebox_id
+     WHERE r.user_id = $1
+       AND r.total_score IS NOT NULL
+       AND m.completed = true
+       AND m.is_practice = false
+       AND t.par IS NOT NULL
+     ORDER BY r.created_at DESC
+     LIMIT 10`,
+    [userId]
+  );
+  const last5 = trendRows.slice(0, 5).map((r) => r.to_par);
+  const prev5 = trendRows.slice(5, 10).map((r) => r.to_par);
+  const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+  const last5Avg = avg(last5);
+  const prev5Avg = avg(prev5);
+  const trendDelta = (last5Avg != null && prev5Avg != null)
+    ? Math.round((last5Avg - prev5Avg) * 100) / 100
+    : null;
+
+  return res.json({
+    rounds_analyzed: seenRounds.size,
+    avg_score_per_par: avgPerPar,             // { '3': 3.4, '4': 4.6, '5': 5.2 }
+    score_distribution: { eagles, birdies, pars, bogeys, doubles_or_worse: doubles },
+    hardest_hole: hardest ? {
+      course_id: hardest.course_id,
+      course_name: hardest.course_name,
+      hole_num: hardest.hole_num,
+      par: hardest.par,
+      avg_score: Math.round((hardest.total / hardest.n) * 100) / 100,
+      plays: hardest.n,
+    } : null,
+    easiest_hole: easiest ? {
+      course_id: easiest.course_id,
+      course_name: easiest.course_name,
+      hole_num: easiest.hole_num,
+      par: easiest.par,
+      avg_score: Math.round((easiest.total / easiest.n) * 100) / 100,
+      plays: easiest.n,
+    } : null,
+    most_played_course: mostPlayed,
+    recent_trend: {
+      last5_avg_to_par: last5Avg != null ? Math.round(last5Avg * 100) / 100 : null,
+      prev5_avg_to_par: prev5Avg != null ? Math.round(prev5Avg * 100) / 100 : null,
+      delta: trendDelta,                    // negative = improving (lower scores)
+      improving: trendDelta != null && trendDelta < 0,
+    },
+  });
+}));
+
 router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT perk_id, perk_type, earned_at, earned_match_id
