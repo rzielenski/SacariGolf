@@ -247,40 +247,48 @@ function VoteTab() {
   const [loading, setLoading] = useState(true);
   const [voting, setVoting] = useState(false);
   const [result, setResult] = useState<{ delta: number; winnerId: string } | null>(null);
+  // True when every find currently in the pool has already been voted on
+  // this session. Renders a dedicated "no more finds" empty state with a
+  // "Start over" button rather than silently re-showing a stale matchup.
+  const [exhausted, setExhausted] = useState(false);
   const seenIdsRef = useRef<Set<string>>(new Set());
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
   const loadPair = useCallback(async (attempt = 0) => {
     setLoading(true);
     setResult(null);
+    setExhausted(false);
     try {
       // Tell the server which finds we've recently shown so it can pick
-      // a fresh pair. We cap at 30 to keep the query string short and
-      // give the rotation a chance to recycle once the user has voted
-      // on a meaningful chunk of the pool.
-      const exclude = Array.from(seenIdsRef.current).slice(-30);
+      // a fresh pair. Capped at 50 server-side so we don't blow the query.
+      const exclude = Array.from(seenIdsRef.current).slice(-50);
       const p = await api.finds.pair(exclude);
-      // Retry if EITHER find has already been seen this session — prevents
-      // the "same photo keeps winning the random draw" loop on tiny pools.
-      // After 4 attempts the pool is genuinely small and we just accept it
-      // (resetting seenIdsRef so the next vote can keep things varied).
+      // Retry if EITHER find has already been seen — prevents the "same
+      // photo keeps winning the random draw" loop on tiny pools.
       if (
         attempt < 4 && p.length === 2 &&
         (seenIdsRef.current.has(p[0].find_id) || seenIdsRef.current.has(p[1].find_id))
       ) {
         return loadPair(attempt + 1);
       }
-      // If we exhausted retries, partially clear the seen set so the next
-      // load isn't predestined to fail the same way. Keep the last 5 so
-      // the IMMEDIATELY preceding matchup doesn't recur.
-      if (attempt >= 4) {
-        const keep = Array.from(seenIdsRef.current).slice(-5);
-        seenIdsRef.current = new Set(keep);
+      // Exhausted retries AND still got an already-seen find — the user
+      // has voted on everything available. Show the "no more finds" empty
+      // state instead of looping a stale matchup.
+      if (
+        attempt >= 4 && p.length === 2 &&
+        (seenIdsRef.current.has(p[0].find_id) || seenIdsRef.current.has(p[1].find_id))
+      ) {
+        setPair([]);
+        setExhausted(true);
+        return;
       }
       setPair(p);
     } catch (e: any) {
       if (e.message === 'not_enough') {
+        // Server-side pool is empty (or every find is from blocked / self).
+        // Distinct from "exhausted" so the messaging can differ.
         setPair([]);
+        setExhausted(false);
       } else if (e.message === 'Missing token' || e.message === 'Invalid token') {
         // Token issue — silently show empty state; AuthGuard will redirect if truly logged out
         setPair([]);
@@ -291,6 +299,7 @@ function VoteTab() {
       setLoading(false);
     }
   }, []);
+
 
   useEffect(() => { loadPair(); }, [loadPair]);
 
@@ -316,6 +325,20 @@ function VoteTab() {
   };
 
   if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
+
+  // "Voted on everything in the pool" — distinct from "pool is empty".
+  // No re-vote affordance: each find gets one vote from each viewer per
+  // session, so the rotation just ends until new finds are uploaded.
+  if (exhausted) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.emptyTitle}>No more finds remaining to rank</Text>
+        <Text style={styles.emptySub}>
+          You've voted on every find available right now. Check back when more get uploaded.
+        </Text>
+      </View>
+    );
+  }
 
   if (pair.length < 2) {
     return (
