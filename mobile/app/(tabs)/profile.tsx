@@ -36,7 +36,7 @@ const pb = StyleSheet.create({
 });
 
 export default function ProfileScreen() {
-  const { user, logout, refreshUser } = useAuth();
+  const { user, logout, refreshUser, deleteAccount } = useAuth();
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
@@ -331,6 +331,15 @@ export default function ProfileScreen() {
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
         </View>
+        {/* Open-beta note — small enough not to compete with the rank badge.
+            Shown only while is_premium = true via the server-side OPEN_BETA
+            override (premium_plan === 'open_beta'). Disappears automatically
+            once we flip the flag off in backend/src/utils/openBeta.ts. */}
+        {(user as any)?.premium_plan === 'open_beta' && (
+          <Text style={styles.openBetaNote}>
+            ★ Premium is free for everyone while we collect course data — thanks for testing.
+          </Text>
+        )}
       </View>
 
       {/* Bio */}
@@ -578,8 +587,39 @@ export default function ProfileScreen() {
         Joined {new Date(user.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
       </Text>
 
-      <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
-        <Text style={styles.logoutText}>Log Out</Text>
+      {/* Account section — discoverable Log Out / Blocked Users / Delete.
+          Apple expects the deletion flow to live somewhere obvious like a
+          settings screen, not a tiny footer link. */}
+      <Text style={[styles.editableLabel, { marginTop: 24, marginBottom: 8 }]}>ACCOUNT</Text>
+
+      <TouchableOpacity
+        style={styles.acctRow}
+        onPress={() => router.push('/blocked-users' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.acctRowText}>Blocked Users</Text>
+        <Text style={styles.acctRowChev}>›</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity style={styles.acctRow} onPress={handleLogout} activeOpacity={0.7}>
+        <Text style={[styles.acctRowText, { color: C.text }]}>Log Out</Text>
+        <Text style={styles.acctRowChev}>›</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[styles.acctRow, { borderColor: C.red + '55' }]}
+        onPress={() => Alert.alert(
+          'Delete Account',
+          'This permanently deletes your account, all match history, finds, and any data we have on you. This cannot be undone.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Delete Forever', style: 'destructive', onPress: deleteAccount },
+          ]
+        )}
+        activeOpacity={0.7}
+      >
+        <Text style={[styles.acctRowText, { color: C.red }]}>Delete Account</Text>
+        <Text style={[styles.acctRowChev, { color: C.red }]}>›</Text>
       </TouchableOpacity>
 
       {/* Notifications Modal */}
@@ -926,6 +966,10 @@ const styles = StyleSheet.create({
   email: { color: C.textMuted, fontSize: 13, marginTop: 2 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5, marginTop: 10 },
   rankLabel: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  openBetaNote: {
+    color: C.gold, fontSize: 10, marginTop: 10, textAlign: 'center',
+    paddingHorizontal: 24, lineHeight: 14, fontStyle: 'italic', opacity: 0.85,
+  },
 
   card: { backgroundColor: C.card, borderRadius: 16, padding: 18, marginBottom: 14, borderWidth: 1, borderColor: C.border, gap: 10 },
 
@@ -1000,6 +1044,14 @@ const styles = StyleSheet.create({
   joinedText: { color: C.textMuted, textAlign: 'center', fontSize: 13, marginBottom: 24 },
   logoutBtn: { borderRadius: 12, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: C.red + '66' },
   logoutText: { color: C.red, fontWeight: '700', fontSize: 15 },
+  acctRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: C.card, borderRadius: 8,
+    paddingVertical: 14, paddingHorizontal: 16,
+    marginBottom: 6, borderWidth: 1, borderColor: C.border,
+  },
+  acctRowText: { color: C.text, fontWeight: '600', fontSize: 14 },
+  acctRowChev: { color: C.textDim, fontSize: 18 },
 
   // Notifications modal
   notifContainer: { flex: 1, backgroundColor: C.bg },

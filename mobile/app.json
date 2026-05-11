@@ -4,12 +4,12 @@
     "slug": "sacari",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.jpg",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "scheme": "sacari",
     "splash": {
-      "image": "./assets/sacari-logo.jpg",
+      "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
@@ -18,20 +18,26 @@
       "bundleIdentifier": "com.sacari.app",
       "buildNumber": "1",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Sacari uses your location to center the course map and measure shot distances.",
+        "NSLocationWhenInUseUsageDescription": "Sacari uses your location to center the course map, measure shot distances, and contribute pin / elevation data to courses you play.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Sacari uses your location while a round is in progress so distance-to-pin, slope adjustment, and live spectator views stay accurate as you walk the course.",
+        "NSPhotoLibraryUsageDescription": "Sacari needs photo access so you can pick a profile picture, upload a 'Find' photo, and set a clan banner.",
+        "NSPhotoLibraryAddUsageDescription": "Sacari saves the round summary card to your camera roll so you can share it.",
+        "NSCameraUsageDescription": "Sacari uses the camera so you can snap a 'Find' photo without leaving the app.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.jpg",
+        "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#000000"
       },
       "package": "com.sacari.app",
       "versionCode": 1,
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.CAMERA"
       ]
     },
     "plugins": [
@@ -47,6 +53,13 @@
         "expo-notifications",
         {
           "iosDisplayInForeground": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Sacari needs photo access so you can pick a profile picture, upload a 'Find' photo, and set a clan banner.",
+          "cameraPermission": "Sacari uses the camera so you can snap a 'Find' photo without leaving the app."
         }
       ]
     ],

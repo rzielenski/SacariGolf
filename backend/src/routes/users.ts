@@ -6,6 +6,7 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
+import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -29,7 +30,16 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     [req.userId]
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
-  return res.json(rows[0]);
+  const row = rows[0];
+  // Open-beta override — see backend/src/utils/openBeta.ts. The DB column is
+  // left untouched (so a real future purchase / lifetime code is preserved),
+  // but the API response reports premium = true so the client gates open.
+  if (OPEN_BETA_PREMIUM) {
+    row.is_premium = true;
+    row.premium_plan = row.premium_plan ?? 'open_beta';
+    row.premium_until = null; // null = lifetime / no expiry for client purposes
+  }
+  return res.json(row);
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
@@ -111,9 +121,17 @@ router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) 
   // trigger an expensive scan.
   const q = raw.slice(0, 50).replace(/[%_]/g, '');
   if (!q) return res.json([]);
+  // Apple Guideline 1.2: blocked users must be invisible to the blocker
+  // across all UGC surfaces. Search is the primary discovery path so this
+  // filter matters most here.
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, avatar_url FROM users
-     WHERE username ILIKE $1 AND user_id != $2 LIMIT 20`,
+     WHERE username ILIKE $1
+       AND user_id != $2
+       AND user_id NOT IN (
+         SELECT blocked_id FROM blocked_users WHERE blocker_id = $2
+       )
+     LIMIT 20`,
     [`${q}%`, req.userId]
   );
   return res.json(rows);
@@ -915,6 +933,70 @@ router.get('/:id/insights', requireAuth, wrap(async (req: AuthRequest, res: Resp
   });
 }));
 
+// ─── User blocking ──────────────────────────────────────────────────────────
+// Apple Guideline 1.2 (and Play Console's UGC rules) require any app with
+// user-generated content to let users block other users. Block is one-way and
+// silent — the blocked user is never notified.
+//
+// `getBlockedIds(userId)` returns the list of user_ids the caller has blocked,
+// so other routes (search, leaderboard, finds pair, DMs, etc.) can filter.
+
+export async function getBlockedIds(userId: string): Promise<string[]> {
+  if (!userId) return [];
+  const { rows } = await pool.query(
+    `SELECT blocked_id FROM blocked_users WHERE blocker_id = $1`,
+    [userId]
+  );
+  return rows.map((r: any) => r.blocked_id);
+}
+
+// List my blocks — used by a "Blocked users" settings screen.
+router.get('/me/blocks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT b.blocked_id, b.created_at, b.reason,
+            u.username, u.elo, u.avatar_url
+     FROM blocked_users b
+     JOIN users u ON u.user_id = b.blocked_id
+     WHERE b.blocker_id = $1
+     ORDER BY b.created_at DESC`,
+    [req.userId]
+  );
+  return res.json(rows);
+}));
+
+// Block a user. Idempotent — re-blocking is a no-op. Also auto-removes any
+// pending or accepted friendship so they can't slide back in via friends.
+router.post('/me/blocks/:userId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  if (req.params.userId === req.userId) {
+    return res.status(400).json({ error: "Can't block yourself" });
+  }
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 300) : null;
+  await pool.query(
+    `INSERT INTO blocked_users (blocker_id, blocked_id, reason)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (blocker_id, blocked_id) DO UPDATE SET reason = EXCLUDED.reason`,
+    [req.userId, req.params.userId, reason]
+  );
+  // Tear down any existing friendship (either direction) so the blocked user
+  // can't continue to see the blocker as a friend.
+  await pool.query(
+    `DELETE FROM friends
+     WHERE (user_id = $1 AND friend_id = $2)
+        OR (user_id = $2 AND friend_id = $1)`,
+    [req.userId, req.params.userId]
+  );
+  return res.json({ success: true });
+}));
+
+// Unblock — also idempotent.
+router.delete('/me/blocks/:userId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  await pool.query(
+    `DELETE FROM blocked_users WHERE blocker_id = $1 AND blocked_id = $2`,
+    [req.userId, req.params.userId]
+  );
+  return res.json({ success: true });
+}));
+
 router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT perk_id, perk_type, earned_at, earned_match_id
@@ -947,9 +1029,16 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
     );
     return res.json(rows);
   }
+  // Apple Guideline 1.2: hide blocked users everywhere, including the
+  // global leaderboard. Blocker only — blocked users still see the blocker.
   const { rows } = await pool.query(
     `SELECT user_id, username, elo, total_matches, total_wins, avatar_url
-     FROM users ORDER BY elo DESC LIMIT 100`
+     FROM users
+     WHERE user_id NOT IN (
+       SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
+     )
+     ORDER BY elo DESC LIMIT 100`,
+    [req.userId]
   );
   return res.json(rows);
 }));
@@ -967,6 +1056,9 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
   const userInfo = rows[0];
+  // Open-beta override — public profile reports premium too so the badge
+  // shows on the user/[id] screen. See backend/src/utils/openBeta.ts.
+  if (OPEN_BETA_PREMIUM) userInfo.is_premium = true;
 
   // Recent completed rounds (last 5)
   const { rows: recentRounds } = await pool.query(

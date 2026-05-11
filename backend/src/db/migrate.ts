@@ -297,6 +297,28 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // User-blocking — required by Apple Guideline 1.2 for any app with
+    // user-generated content. Each row means: blocker has hidden blocked
+    // from their feeds (friend search, finds pair, leaderboard, DMs, etc.).
+    // The relationship is one-directional — the blocked user is not notified
+    // and can't tell. To "unblock" simply delete the row.
+    //
+    // Filters live close to each query; a helper in routes/users.ts exposes
+    // a single getBlockedIds(userId) function so every reader can apply it.
+    name: 'blocked_users.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS blocked_users (
+        blocker_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        blocked_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        reason      TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (blocker_id, blocked_id)
+      );
+      CREATE INDEX IF NOT EXISTS blocked_users_blocker_idx ON blocked_users(blocker_id);
+      CREATE INDEX IF NOT EXISTS blocked_users_blocked_idx ON blocked_users(blocked_id);
+    `,
+  },
+  {
     // Track WHY a perk was awarded so we can show "earned by tracking shots"
     // / "earned by marking pins" on the perk banner. Optional — older perks
     // get NULL and the UI just says "Lucky Round earned".

@@ -5,6 +5,7 @@ import {
   PanResponder,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -150,10 +151,49 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
 }
 
 // ── Upload button ───────────────────────────────────────────────────────────
+// One-time EULA acceptance for Finds. Required by Apple Guideline 1.2:
+// users must agree to content rules before posting UGC. Lives in AsyncStorage
+// so each device asks once and remembers forever (or until app reinstall).
+const FINDS_EULA_KEY = 'sacari.finds.eula_v1';
+
+async function ensureFindsEulaAccepted(): Promise<boolean> {
+  try {
+    const v = await AsyncStorage.getItem(FINDS_EULA_KEY);
+    if (v === '1') return true;
+  } catch { /* fall through and re-ask */ }
+  return new Promise<boolean>((resolve) => {
+    Alert.alert(
+      'Finds Community Rules',
+      'By posting a Find you agree NOT to upload:\n\n' +
+      '  • Nudity, sexual content, or violence\n' +
+      '  • Hate speech, harassment, or threats\n' +
+      '  • Illegal content or copyright violations\n' +
+      '  • Personal information about other people\n\n' +
+      'Reports are reviewed within 24 hours and abusive accounts are removed. ' +
+      'You can report any Find from the ··· menu on the viewer.',
+      [
+        { text: "I don't agree", style: 'cancel', onPress: () => resolve(false) },
+        {
+          text: 'I agree',
+          onPress: async () => {
+            try { await AsyncStorage.setItem(FINDS_EULA_KEY, '1'); } catch { /* non-fatal */ }
+            resolve(true);
+          },
+        },
+      ],
+      { cancelable: false }
+    );
+  });
+}
+
 function UploadButton() {
   const [uploading, setUploading] = useState(false);
 
   const pick = async () => {
+    // Gate: one-time community-rules acceptance.
+    const accepted = await ensureFindsEulaAccepted();
+    if (!accepted) return;
+
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       Alert.alert('Permission needed', 'Allow photo access to upload a find.');

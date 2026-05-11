@@ -130,9 +130,15 @@ export default function PremiumScreen() {
 
           {active && (
             <View style={s.activeBanner}>
-              <Text style={s.activeTitle}>You're a member.</Text>
+              <Text style={s.activeTitle}>
+                {(user as any)?.premium_plan === 'open_beta'
+                  ? '★  Premium is on us  ★'
+                  : "You're a member."}
+              </Text>
               <Text style={s.activeSub}>
-                {daysLeft != null ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining` : 'Lifetime access'}
+                {(user as any)?.premium_plan === 'open_beta'
+                  ? "Every paid feature below is unlocked for free during open beta. It's a gift from Richard while we collect course data — no card, no expiry. Enjoy."
+                  : (daysLeft != null ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining` : 'Lifetime access')}
               </Text>
             </View>
           )}
@@ -151,31 +157,38 @@ export default function PremiumScreen() {
             ))}
           </View>
 
-          {/* Plan picker */}
-          <OrnamentTitle title="Choose Plan" align="center" />
-          <View style={s.planRow}>
-            {catalog?.plans.map((p) => {
-              const selected = selectedPlan === p.id;
-              const dollars = (p.price_cents / 100).toFixed(p.price_cents % 100 === 0 ? 0 : 2);
-              return (
-                <TouchableOpacity
-                  key={p.id}
-                  style={[s.planBox, selected && s.planBoxSelected]}
-                  onPress={() => setSelectedPlan(p.id)}
-                  activeOpacity={0.7}
-                >
-                  {p.savings_pct != null && (
-                    <View style={s.saveTag}>
-                      <Text style={s.saveTagText}>SAVE {p.savings_pct}%</Text>
-                    </View>
-                  )}
-                  <Text style={[s.planName, selected && { color: C.gold }]}>{p.name}</Text>
-                  <Text style={[s.planPrice, selected && { color: C.gold }]}>${dollars}</Text>
-                  <Text style={s.planPeriod}>per {p.period}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          {/* Plan picker — hidden during open beta so reviewers don't see
+              priced subscriptions that aren't actually purchasable yet
+              (App Store Guideline 2.1 / 3.1.1). Re-enabled automatically
+              when OPEN_BETA_PREMIUM flips off server-side. */}
+          {(user as any)?.premium_plan !== 'open_beta' && (
+            <>
+              <OrnamentTitle title="Choose Plan" align="center" />
+              <View style={s.planRow}>
+                {catalog?.plans.map((p) => {
+                  const selected = selectedPlan === p.id;
+                  const dollars = (p.price_cents / 100).toFixed(p.price_cents % 100 === 0 ? 0 : 2);
+                  return (
+                    <TouchableOpacity
+                      key={p.id}
+                      style={[s.planBox, selected && s.planBoxSelected]}
+                      onPress={() => setSelectedPlan(p.id)}
+                      activeOpacity={0.7}
+                    >
+                      {p.savings_pct != null && (
+                        <View style={s.saveTag}>
+                          <Text style={s.saveTagText}>SAVE {p.savings_pct}%</Text>
+                        </View>
+                      )}
+                      <Text style={[s.planName, selected && { color: C.gold }]}>{p.name}</Text>
+                      <Text style={[s.planPrice, selected && { color: C.gold }]}>${dollars}</Text>
+                      <Text style={s.planPeriod}>per {p.period}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          )}
 
           {/* Native IAP subscribe button — only when the RC SDK is installed
               AND offerings loaded successfully. Otherwise we silently fall

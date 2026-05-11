@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import pool from '../db/pool';
+import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 
 export interface AuthRequest extends Request {
   userId?: string;
@@ -33,6 +34,9 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
  */
 export async function requirePremium(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // Open-beta override — everyone passes through until we start charging.
+  // See backend/src/utils/openBeta.ts for the rationale + how to revert.
+  if (OPEN_BETA_PREMIUM) return next();
   try {
     const { rows } = await pool.query(
       `SELECT is_premium, premium_until

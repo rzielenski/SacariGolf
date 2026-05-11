@@ -189,6 +189,23 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Open-beta premium banner — visible while OPEN_BETA_PREMIUM is on
+          server-side. We detect it by checking the special premium_plan
+          marker the server stamps on /users/me. Tapping opens the premium
+          page so the user can see the full feature list they have access to. */}
+      {(user as any)?.premium_plan === 'open_beta' && (
+        <TouchableOpacity
+          style={styles.openBetaBanner}
+          onPress={() => router.push('/premium' as any)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.openBetaLabel}>★  PREMIUM UNLOCKED  ★</Text>
+          <Text style={styles.openBetaMsg}>
+            Every paid feature is free for you during open beta — a gift from Richard while we collect course data. Tap to see what's included.
+          </Text>
+        </TouchableOpacity>
+      )}
+
       {/* Lucky Round perk banner — applies automatically to next ranked match */}
       {perkCount > 0 && (
         <View style={styles.perkBanner}>
@@ -492,6 +509,17 @@ const styles = StyleSheet.create({
   },
   perkBannerLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
   perkBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
+
+  openBetaBanner: {
+    backgroundColor: C.gold + '33', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 14,
+    borderWidth: 1.5, borderColor: C.gold, marginBottom: 14,
+    shadowColor: C.gold, shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 0 },
+  },
+  openBetaLabel: {
+    color: C.gold, fontSize: 12, fontWeight: '900', letterSpacing: 2,
+    fontFamily: F.serif, textAlign: 'center',
+  },
+  openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
 
   resumeBanner: {
     flexDirection: 'row', alignItems: 'center',

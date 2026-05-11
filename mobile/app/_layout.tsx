@@ -130,6 +130,7 @@ export default function RootLayout() {
         <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
         <Stack.Screen name="tournaments" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="tournament/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="blocked-users" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/scoring/[id]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="chat/[type]/[id]" options={{ animation: 'slide_from_right' }} />

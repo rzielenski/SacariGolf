@@ -18,7 +18,7 @@ import { Diamond, Divider } from '../components/Flourish';
  */
 export const ONBOARDING_KEY = 'sacari.onboarded.v1';
 
-const SLIDES: { mark: string; title: string; body: string }[] = [
+const SLIDES: { mark: string; title: string; body: string; emphasis?: boolean }[] = [
   {
     mark: 'I',
     title: 'Play Real Rounds',
@@ -38,6 +38,12 @@ const SLIDES: { mark: string; title: string; body: string }[] = [
     mark: 'IV',
     title: 'Drop Pins, Earn Perks',
     body: 'When you finish a hole, tap DROP PIN at the cup. Contribute on most of your holes in a round and you earn a Lucky Round perk — protects a loss or doubles a win.',
+  },
+  {
+    mark: 'V',
+    title: 'Premium is on the House',
+    body: "Every paid feature is unlocked for free during open beta — heatmaps, weather-adjusted distances, deep stats, the works. It's Richard's way of saying thanks while we build out the course data. Have fun.",
+    emphasis: true,
   },
 ];
 
@@ -78,12 +84,17 @@ export default function OnboardingScreen() {
       >
         {SLIDES.map((slide, i) => (
           <View key={i} style={[s.slide, { width: W }]}>
-            <View style={s.markBadge}>
+            <View style={[s.markBadge, slide.emphasis && s.markBadgeEmphasis]}>
               <Text style={s.markText}>{slide.mark}</Text>
             </View>
             <Divider style={{ marginTop: 8, width: 220 }} />
             <Text style={s.title}>{slide.title}</Text>
             <Text style={s.body}>{slide.body}</Text>
+            {slide.emphasis && (
+              <View style={s.giftRibbon}>
+                <Text style={s.giftRibbonText}>★  OPEN BETA  ★</Text>
+              </View>
+            )}
           </View>
         ))}
       </ScrollView>
@@ -123,6 +134,15 @@ const s = StyleSheet.create({
     shadowColor: C.gold, shadowOpacity: 0.4, shadowRadius: 18,
   },
   markText: { color: C.gold, fontFamily: F.serif, fontSize: 38, fontWeight: '900' },
+  markBadgeEmphasis: {
+    shadowColor: C.gold, shadowOpacity: 0.95, shadowRadius: 28,
+    borderWidth: 3, backgroundColor: C.gold + '22',
+  },
+  giftRibbon: {
+    marginTop: 18, paddingHorizontal: 16, paddingVertical: 8,
+    backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold, borderRadius: 6,
+  },
+  giftRibbonText: { color: C.gold, fontSize: 12, fontWeight: '900', letterSpacing: 3, fontFamily: F.serif },
   title: { color: C.text, fontFamily: F.serif, fontSize: 28, fontWeight: '900', marginTop: 18, textAlign: 'center' },
   body:  { color: C.textMuted, fontSize: 15, lineHeight: 22, marginTop: 14, textAlign: 'center' },
 

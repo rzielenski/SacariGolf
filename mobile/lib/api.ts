@@ -139,6 +139,14 @@ export const api = {
       }[];
     }>('GET', `/users/${id}/club-stats`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
+    blocks: () => request<{
+      blocked_id: string; username: string; elo: number;
+      avatar_url: string | null; created_at: string; reason: string | null;
+    }[]>('GET', '/users/me/blocks'),
+    block: (userId: string, reason?: string) =>
+      request<{ success: true }>('POST', `/users/me/blocks/${userId}`, reason ? { reason } : {}),
+    unblock: (userId: string) =>
+      request<{ success: true }>('DELETE', `/users/me/blocks/${userId}`),
     insights: (id: string) => request<{
       rounds_analyzed: number;
       avg_score_per_par: { '3'?: number | null; '4'?: number | null; '5'?: number | null };

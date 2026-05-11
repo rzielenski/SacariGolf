@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator, RefreshControl, Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
+import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
@@ -20,6 +21,7 @@ function EloRank(elo: number): { label: string; color: string } {
 
 export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -399,6 +401,40 @@ export default function UserProfileScreen() {
         ))
       )}
 
+      {/* Block button — required by App Store Guideline 1.2 for UGC apps.
+          Hidden when viewing your own profile. Confirmation prompt before
+          firing so an accidental tap doesn't silently nuke the relationship. */}
+      {user && user.user_id !== profile.user_id && (
+        <TouchableOpacity
+          style={styles.blockBtn}
+          onPress={() => {
+            Alert.alert(
+              `Block ${profile.username}?`,
+              `You won't see them in search, on the leaderboard, or in finds. They won't be notified.`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Block',
+                  style: 'destructive',
+                  onPress: async () => {
+                    try {
+                      await api.users.block(profile.user_id);
+                      Alert.alert('Blocked', `${profile.username} is blocked. You can unblock from Profile → Blocked Users.`);
+                      router.back();
+                    } catch (e: any) {
+                      Alert.alert('Error', e.message);
+                    }
+                  },
+                },
+              ]
+            );
+          }}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.blockBtnText}>Block this user</Text>
+        </TouchableOpacity>
+      )}
+
       <Text style={styles.joined}>Joined {joined}</Text>
 
       <ScorecardModal
@@ -520,6 +556,11 @@ const styles = StyleSheet.create({
 
   empty: { color: C.textMuted, fontSize: 13, paddingVertical: 12 },
   joined: { color: C.textDim, textAlign: 'center', fontSize: 12, marginTop: 24 },
+  blockBtn: {
+    alignSelf: 'center', marginTop: 28, paddingVertical: 10, paddingHorizontal: 22,
+    borderRadius: 8, borderWidth: 1, borderColor: C.red + '88',
+  },
+  blockBtnText: { color: C.red, fontSize: 13, fontWeight: '700' },
 
   liveBadgeRow: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
