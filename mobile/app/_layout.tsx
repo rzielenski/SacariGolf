@@ -7,6 +7,7 @@ import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { init as initPurchases } from '../lib/purchases';
+import { ONBOARDING_KEY, setOnboardedState, subscribeOnboardedState } from '../lib/onboardingState';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
 import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
 
@@ -24,16 +25,29 @@ function AuthGuard() {
   const router = useRouter();
   // Onboarding gate: shown to authenticated users who haven't yet completed
   // the four-card intro on this device. Lives in AsyncStorage (per-device,
-  // not per-user) so reinstalls show it again. Loaded once per mount and
-  // updated when the onboarding screen finishes.
+  // not per-user) so reinstalls show it again.
+  //
+  // CRITICAL: we ALSO subscribe to the shared `onboardingState` module so
+  // when the user finishes onboarding, AuthGuard's local flag flips
+  // synchronously — otherwise this effect's segment-change handler races
+  // ahead and bounces the user right back to /onboarding, infinite loop.
   const [onboarded, setOnboarded] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
+    // Subscribe FIRST so a setOnboardedState() call during the AsyncStorage
+    // read (unlikely but possible) isn't dropped.
+    const unsub = subscribeOnboardedState((v) => { if (!cancelled) setOnboarded(v); });
     require('@react-native-async-storage/async-storage').default
-      .getItem('sacari.onboarded.v1')
-      .then((v: string | null) => { if (!cancelled) setOnboarded(!!v); })
-      .catch(() => { if (!cancelled) setOnboarded(true); /* fail open */ });
-    return () => { cancelled = true; };
+      .getItem(ONBOARDING_KEY)
+      .then((v: string | null) => {
+        if (cancelled) return;
+        const flag = !!v;
+        // Seed both local state AND the shared module so future subscribers
+        // get the initial value immediately.
+        setOnboardedState(flag);
+      })
+      .catch(() => { if (!cancelled) setOnboardedState(true); /* fail open */ });
+    return () => { cancelled = true; unsub(); };
   }, []);
 
   useEffect(() => {

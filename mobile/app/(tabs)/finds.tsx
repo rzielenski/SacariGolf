@@ -254,10 +254,28 @@ function VoteTab() {
     setLoading(true);
     setResult(null);
     try {
-      const p = await api.finds.pair();
-      // If we've already seen both, try again (up to 3 attempts)
-      if (attempt < 3 && p.length === 2 && seenIdsRef.current.has(p[0].find_id) && seenIdsRef.current.has(p[1].find_id)) {
+      // Tell the server which finds we've recently shown so it can pick
+      // a fresh pair. We cap at 30 to keep the query string short and
+      // give the rotation a chance to recycle once the user has voted
+      // on a meaningful chunk of the pool.
+      const exclude = Array.from(seenIdsRef.current).slice(-30);
+      const p = await api.finds.pair(exclude);
+      // Retry if EITHER find has already been seen this session — prevents
+      // the "same photo keeps winning the random draw" loop on tiny pools.
+      // After 4 attempts the pool is genuinely small and we just accept it
+      // (resetting seenIdsRef so the next vote can keep things varied).
+      if (
+        attempt < 4 && p.length === 2 &&
+        (seenIdsRef.current.has(p[0].find_id) || seenIdsRef.current.has(p[1].find_id))
+      ) {
         return loadPair(attempt + 1);
+      }
+      // If we exhausted retries, partially clear the seen set so the next
+      // load isn't predestined to fail the same way. Keep the last 5 so
+      // the IMMEDIATELY preceding matchup doesn't recur.
+      if (attempt >= 4) {
+        const keep = Array.from(seenIdsRef.current).slice(-5);
+        seenIdsRef.current = new Set(keep);
       }
       setPair(p);
     } catch (e: any) {

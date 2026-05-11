@@ -7,16 +7,19 @@ import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { C, F } from '../lib/colors';
 import { Diamond, Divider } from '../components/Flourish';
+import { ONBOARDING_KEY, setOnboardedState } from '../lib/onboardingState';
 
 /**
  * First-launch onboarding. Four swipeable cards introducing the app's core
- * loop. Shown once per device — gates on AsyncStorage('sacari.onboarded') so
- * we don't spam returning users.
+ * loop. Shown once per device — gates on AsyncStorage('sacari.onboarded.v1')
+ * so we don't spam returning users.
  *
  * Mark complete via the button on the final card OR a "Skip" link in the
- * header. Either path writes the flag and replaces with the home tab.
+ * header. Either path writes the flag, broadcasts the change to AuthGuard
+ * via setOnboardedState(true), then routes to the home tab.
  */
-export const ONBOARDING_KEY = 'sacari.onboarded.v1';
+// Re-export so any older imports of `from './onboarding'` keep working.
+export { ONBOARDING_KEY };
 
 const SLIDES: { mark: string; title: string; body: string; emphasis?: boolean }[] = [
   {
@@ -52,7 +55,13 @@ export default function OnboardingScreen() {
   const [page, setPage] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
 
+  // CRITICAL: order matters. Update the in-memory module FIRST so AuthGuard's
+  // subscriber flips `onboarded=true` synchronously — otherwise its segment-
+  // change effect fires after router.replace() and bounces us right back here
+  // (infinite loop). Persist to AsyncStorage in parallel so the next cold
+  // boot also remembers.
   const finish = async () => {
+    setOnboardedState(true);
     try { await AsyncStorage.setItem(ONBOARDING_KEY, '1'); } catch { /* non-fatal */ }
     router.replace('/(tabs)/' as any);
   };

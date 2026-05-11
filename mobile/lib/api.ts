@@ -308,7 +308,10 @@ export const api = {
   finds: {
     upload: (imageBase64: string, mimeType: string, description: string) =>
       request<any>('POST', '/finds', { imageBase64, mimeType, description }),
-    pair: () => request<any[]>('GET', '/finds/pair'),
+    pair: (excludeIds?: string[]) => request<any[]>(
+      'GET',
+      `/finds/pair${excludeIds && excludeIds.length ? `?exclude=${encodeURIComponent(excludeIds.join(','))}` : ''}`
+    ),
     vote: (winnerId: string, loserId: string) =>
       request<any>('POST', '/finds/vote', { winnerId, loserId }),
     leaderboard: () => request<any[]>('GET', '/finds/leaderboard'),

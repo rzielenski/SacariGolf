@@ -61,15 +61,51 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.get('/pair', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Client passes a comma-separated list of recently-shown find_ids so we
+  // can avoid serving the same matchup three times in a row. Capped at 50
+  // so a malicious / runaway client can't blow the query parameter list.
+  const excludeRaw = String(req.query.exclude ?? '').trim();
+  const exclude = excludeRaw
+    ? excludeRaw.split(',').map((s) => s.trim()).filter((s) => /^[0-9a-f-]{8,}$/i.test(s)).slice(0, 50)
+    : [];
+
+  // Apple Guideline 1.2: blocked users' finds must not appear to the blocker.
+  // Same query also drops the caller's own finds (existing behavior).
   const { rows } = await pool.query(
     `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes,
             u.username, u.user_id
-     FROM finds f JOIN users u ON u.user_id = f.user_id
+     FROM finds f
+     JOIN users u ON u.user_id = f.user_id
      WHERE f.user_id != $1
+       AND f.find_id <> ALL($2::uuid[])
+       AND u.user_id NOT IN (
+         SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
+       )
      ORDER BY RANDOM()
      LIMIT 2`,
-    [req.userId]
+    [req.userId, exclude]
   );
+
+  // If the exclude list has emptied the pool, retry without it so we
+  // gracefully restart the rotation instead of dead-ending the UI.
+  if (rows.length < 2 && exclude.length > 0) {
+    const { rows: fallback } = await pool.query(
+      `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes,
+              u.username, u.user_id
+       FROM finds f
+       JOIN users u ON u.user_id = f.user_id
+       WHERE f.user_id != $1
+         AND u.user_id NOT IN (
+           SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
+         )
+       ORDER BY RANDOM()
+       LIMIT 2`,
+      [req.userId]
+    );
+    if (fallback.length < 2) return res.status(404).json({ error: 'not_enough' });
+    return res.json(fallback);
+  }
+
   if (rows.length < 2) return res.status(404).json({ error: 'not_enough' });
   return res.json(rows);
 }));
