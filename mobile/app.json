@@ -4,12 +4,12 @@
     "slug": "sacari",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icon.jpg",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "scheme": "sacari",
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/sacari-logo.jpg",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
@@ -28,7 +28,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/adaptive-icon.jpg",
         "backgroundColor": "#000000"
       },
       "package": "com.sacari.app",

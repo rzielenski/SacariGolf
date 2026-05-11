@@ -56,40 +56,13 @@ export default function MatchLobbyScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color={C.gold} />
-      </View>
-    );
-  }
-
-  if (!match) return null;
-
-  const myPlayer = match.players?.find((p) => p.user_id === user?.user_id);
-  const opponents = match.players?.filter((p) => p.user_id !== user?.user_id) ?? [];
-  const allReady = match.players && match.players.length >= 2;
-  const isCompleted = match.completed;
-
-  const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
-  const isPractice = match.is_practice;
-
-  const handleStartScoring = () => {
-    const holeCount = match.num_holes ?? 18;
-    router.push(`/match/scoring/${id}?holes=${holeCount}` as any);
-  };
-
-  const handleShare = async () => {
-    await Share.share({ message: `Join my Sacari Golf match! Match ID: ${id}` });
-  };
-
-  // Build a text summary of the completed round for sharing to social apps.
-  // Once `react-native-view-shot` is installed we can capture a styled image
-  // here too, but the text version stands on its own and works without any
-  // extra deps. Format detection mirrors what the result card renders so the
-  // shared blurb describes Stableford / Match Play / Skins correctly.
-  // Open the guest-scorecards modal — seed the draft from existing data.
-  // Strings (not numbers) so the inputs behave naturally; we coerce on save.
+  // ── ALL HOOKS MUST BE DECLARED BEFORE THE EARLY RETURNS BELOW. ───────────
+  // React hooks count must stay identical across renders. The three
+  // useCallbacks below USED to live further down, but a `match` null check
+  // returned early on first render — skipping them — and then included them
+  // on a later render once `match` loaded. That mismatch is the classic
+  // "Rendered fewer hooks than expected" crash that took out the entire
+  // start-of-round flow. Keep them up here.
   const openGuestModal = useCallback(() => {
     const N = match?.num_holes ?? 18;
     const existing = match?.guest_players ?? [];
@@ -104,8 +77,6 @@ export default function MatchLobbyScreen() {
     setGuestModalOpen(true);
   }, [match]);
 
-  // Save guests back to the server. Empty cells become 0 so the row keeps
-  // its length — backend treats 0 as "no score recorded" when rendering.
   const saveGuests = useCallback(async () => {
     setSavingGuests(true);
     try {
@@ -119,7 +90,6 @@ export default function MatchLobbyScreen() {
           }),
         }));
       await api.matches.setGuests(id, cleaned);
-      // Refresh the lobby so the new cards render
       await load();
       setGuestModalOpen(false);
     } catch (e: any) {
@@ -157,7 +127,6 @@ export default function MatchLobbyScreen() {
     if (!match.is_practice && myDelta !== 0) {
       lines.push(`ELO ${myDelta > 0 ? '+' : ''}${myDelta}`);
     }
-    // Best moments from hole_scores when available
     if (me?.hole_scores?.length && me.course_id) {
       try {
         const courseDetails = await api.courses.get(me.course_id);
@@ -181,6 +150,33 @@ export default function MatchLobbyScreen() {
     lines.push('Track your rounds, ELO, and shot dispersion at sacarigolf.com');
     await Share.share({ message: lines.join('\n') });
   }, [match, user]);
+
+  if (loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color={C.gold} />
+      </View>
+    );
+  }
+
+  if (!match) return null;
+
+  const myPlayer = match.players?.find((p) => p.user_id === user?.user_id);
+  const opponents = match.players?.filter((p) => p.user_id !== user?.user_id) ?? [];
+  const allReady = match.players && match.players.length >= 2;
+  const isCompleted = match.completed;
+
+  const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
+  const isPractice = match.is_practice;
+
+  const handleStartScoring = () => {
+    const holeCount = match.num_holes ?? 18;
+    router.push(`/match/scoring/${id}?holes=${holeCount}` as any);
+  };
+
+  const handleShare = async () => {
+    await Share.share({ message: `Join my Sacari Golf match! Match ID: ${id}` });
+  };
 
   const openInvite = async () => {
     setInviteVisible(true);
