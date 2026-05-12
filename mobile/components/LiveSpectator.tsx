@@ -3,20 +3,11 @@ import { View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator } fr
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
+import { distYards, SHOT_COLORS } from '../lib/golfMath';
 
-// High-contrast palette tuned to stand out against satellite-imagery green.
-const SHOT_COLORS = ['#4a9eff', '#e63946', '#ff66c4', '#ff9f1c', '#00bbf9', '#9d4edd', '#ffd60a'];
+// Local narrower types — see comment in ShotMap.tsx for rationale.
 type Pt = { lat: number; lng: number };
 type Shot = { start: Pt; end: Pt; club?: string };
-
-function distYards(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 1.09361;
-}
 
 /**
  * Live spectator view. Polls the active-round endpoint for the current hole,

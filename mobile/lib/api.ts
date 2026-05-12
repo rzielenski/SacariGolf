@@ -8,10 +8,89 @@ async function getToken(): Promise<string | null> {
   return AsyncStorage.getItem('coc_token');
 }
 
+/** Admin token (matches PREMIUM_ADMIN_TOKEN env var on the backend). Stored
+ *  locally only — never echoed in API responses. Set via the in-app admin
+ *  screen; absent on regular installs. */
+export async function getAdminToken(): Promise<string | null> {
+  return AsyncStorage.getItem('coc_admin_token');
+}
+export async function setAdminToken(token: string | null): Promise<void> {
+  if (token) await AsyncStorage.setItem('coc_admin_token', token);
+  else await AsyncStorage.removeItem('coc_admin_token');
+}
+
 // Sentinel error so callers can distinguish "no token at all / session ended"
 // from a real server error and silently bail rather than alerting the user.
 export class NotAuthenticatedError extends Error {
   constructor(message = 'Not signed in') { super(message); this.name = 'NotAuthenticatedError'; }
+}
+
+/** Thrown when every retry of a network-class failure has been exhausted.
+ *  Callers can catch this specifically to queue an outbox write rather than
+ *  surfacing a scary "Network error" alert to the user. */
+export class OfflineError extends Error {
+  constructor(message = 'No internet connection') { super(message); this.name = 'OfflineError'; }
+}
+
+// ── Connectivity singleton ────────────────────────────────────────────────
+// We don't pull in @react-native-community/netinfo (extra dep, native build
+// implications). Instead, every API call updates a small state machine:
+//   • Any 2xx/4xx response → mark online
+//   • Three consecutive fetch failures → mark offline
+// Subscribers (the offline banner, the outbox drainer) get notified on
+// transitions. Pretty accurate in practice — the only way to flip back to
+// online is for SOMETHING to succeed, which is the test the user cares
+// about anyway.
+
+type ConnState = 'online' | 'offline';
+let connState: ConnState = 'online';
+let consecutiveFails = 0;
+const FAILS_TO_OFFLINE = 3;
+const connListeners = new Set<(s: ConnState) => void>();
+
+export function getConnState(): ConnState { return connState; }
+export function subscribeConn(fn: (s: ConnState) => void): () => void {
+  connListeners.add(fn);
+  fn(connState);
+  return () => { connListeners.delete(fn); };
+}
+function setConnState(next: ConnState) {
+  if (next === connState) return;
+  connState = next;
+  for (const fn of connListeners) fn(next);
+}
+function noteFetchSuccess() {
+  consecutiveFails = 0;
+  setConnState('online');
+}
+function noteFetchFailure() {
+  consecutiveFails += 1;
+  if (consecutiveFails >= FAILS_TO_OFFLINE) setConnState('offline');
+}
+
+/** True if an error is a network-class failure (offline, timeout, DNS,
+ *  connection reset). These are retried; 4xx/5xx are not. */
+function isNetworkError(e: unknown): boolean {
+  if (e instanceof OfflineError) return true;
+  if (!(e instanceof Error)) return false;
+  // RN fetch throws TypeError with this message string on connectivity loss.
+  // Also matches "Network request failed", AbortError (timeout).
+  return e.name === 'AbortError'
+      || e.name === 'TypeError'
+      || /Network request failed|network/i.test(e.message);
+}
+
+const RETRY_DELAYS_MS = [400, 1200, 3000];   // 3 attempts total beyond the first
+
+/** Race a promise against a timeout. RN's fetch has no built-in timeout,
+ *  which on cellular dead-zones can leave a request pending for 60+ seconds
+ *  before failing. We bail at 15s so retries can actually fire. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(Object.assign(new Error('Request timed out'), { name: 'AbortError' })), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); },
+           (e) => { clearTimeout(t); reject(e); });
+  });
 }
 
 // AuthProvider registers a callback so api.ts can ask it to clear state when
@@ -21,27 +100,28 @@ export function setSessionInvalidHandler(fn: (() => void) | null) {
   onSessionInvalid = fn;
 }
 
-async function request<T>(
+async function singleAttempt<T>(
   method: string,
   path: string,
-  body?: object,
-  auth = true
+  body: object | undefined,
+  auth: boolean,
 ): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (auth) {
     const token = await getToken();
     if (!token) {
-      // Fail fast client-side rather than firing an unauthenticated request
-      // that the server will reject with a confusing "Missing token" error.
       throw new NotAuthenticatedError();
     }
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const res = await withTimeout(
+    fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+    15000,
+  );
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
     // Server returned HTML (e.g. 404 page or crash) — surface a clean message
@@ -49,15 +129,64 @@ async function request<T>(
   }
   const data = await res.json();
   if (!res.ok) {
-    // Backend says our token is bad → trigger global logout so AuthGuard
-    // routes to login. Throw NotAuthenticated so callers can bail quietly.
     if (res.status === 401 && (data?.error === 'Missing token' || data?.error === 'Invalid token')) {
       if (onSessionInvalid) onSessionInvalid();
       throw new NotAuthenticatedError(data.error);
     }
+    // 5xx is retryable — wrap with the network-error name so the retry loop
+    // catches it. 4xx is a real error and propagates immediately.
+    if (res.status >= 500) {
+      const err = new Error(data?.error || 'Server error');
+      err.name = 'TypeError';
+      throw err;
+    }
     throw new Error(data.error || 'Request failed');
   }
   return data as T;
+}
+
+/**
+ * Public request entry point — wraps singleAttempt with:
+ *   • 15s per-attempt timeout (RN fetch has no native timeout)
+ *   • Up to 3 retries with backoff for network-class errors and 5xx
+ *   • Connectivity state tracking — feeds the offline banner
+ *
+ * After all retries are exhausted on a network error, throws OfflineError
+ * (not the raw fetch TypeError) so callers can distinguish "user is offline,
+ * try again later / queue it" from "the server said no".
+ */
+async function request<T>(
+  method: string,
+  path: string,
+  body?: object,
+  auth = true,
+): Promise<T> {
+  let lastErr: unknown = null;
+  // Total attempts = 1 + RETRY_DELAYS_MS.length. Each retry waits longer.
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const out = await singleAttempt<T>(method, path, body, auth);
+      noteFetchSuccess();
+      return out;
+    } catch (e) {
+      lastErr = e;
+      // Real, non-retryable errors — propagate immediately.
+      if (e instanceof NotAuthenticatedError) throw e;
+      if (!isNetworkError(e)) {
+        // Server-side 4xx / parse error — still counts as a successful
+        // connection (the server answered us), so flip back to online.
+        noteFetchSuccess();
+        throw e;
+      }
+      // Retryable: wait and try again unless we've burned all attempts.
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+    }
+  }
+  noteFetchFailure();
+  throw new OfflineError(lastErr instanceof Error ? lastErr.message : 'No internet connection');
 }
 
 export const api = {
@@ -92,7 +221,14 @@ export const api = {
       theme?: { trackId: string; title: string; artist: string; artworkUrl?: string; previewUrl: string } | null;
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
-    notifications: () => request<{ notifications: any[]; unread_count: number }>('GET', '/users/me/notifications'),
+    notifications: () => request<{
+      notifications: any[];
+      unread_count: number;
+      /** Subset of unread_count that comes from chats with unread messages.
+       *  Tapping the bell only clears the non-chat portion — chat unreads
+       *  only drop when the user actually opens the chat. */
+      chat_unread_count?: number;
+    }>('GET', '/users/me/notifications'),
     perks: () => request<{ perk_id: string; perk_type: string; earned_at: string }[]>('GET', '/users/me/perks'),
     courseRecords: (id: string) => request<{ course_id: string; course_name: string; teebox_name: string; total_score: number; created_at: string }[]>('GET', `/users/${id}/course-records`),
     markNotificationsSeen: () => request<any>('POST', '/users/me/notifications/seen', {}),
@@ -135,9 +271,18 @@ export const api = {
         shots: number;
         avg_yds: number;
         median_yds: number;
-        dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+        dispersion: {
+          shot_id: string | null;
+          recorded_at: string | null;
+          lateral_yds: number;
+          long_yds: number;
+          dist_yds: number;
+        }[];
       }[];
     }>('GET', `/users/${id}/club-stats`),
+    /** Delete a single tracked shot from the current user's stats. */
+    deleteShot: (shotId: string) =>
+      request<{ success: true }>('DELETE', `/users/me/shots/${shotId}`),
     activeRound: (id: string) => request<any | null>('GET', `/users/${id}/active-round`),
     blocks: () => request<{
       blocked_id: string; username: string; elo: number;
@@ -204,9 +349,30 @@ export const api = {
       const q = params.matchId ? `matchId=${params.matchId}` : params.clanId ? `clanId=${params.clanId}` : `toUserId=${params.toUserId}`;
       return request<any[]>('GET', `/messages?${q}`);
     },
-    send: (body: { matchId?: string; clanId?: string; toUserId?: string; body: string }) =>
-      request<any>('POST', '/messages', body),
+    send: (body: {
+      matchId?: string; clanId?: string; toUserId?: string;
+      body?: string;
+      /** Base64-encoded audio (typically AAC/m4a from expo-av). */
+      voiceBase64?: string;
+      /** MIME type — defaults server-side to audio/m4a. */
+      voiceMime?: string;
+      /** Clip length in ms, captured at record time. Server clamps to 60s. */
+      voiceDurationMs?: number;
+    }) => request<any>('POST', '/messages', body),
+    /** Report a message for abuse. Both DMs and channel messages route
+     *  here via the `kind` discriminator. Idempotent — repeat reports
+     *  from the same user collapse via DB unique constraint. */
+    report: (kind: 'channel' | 'dm', messageId: string, reason?: string) =>
+      request<{ success: true }>('POST', '/messages/report', { kind, messageId, reason }),
     conversations: () => request<any[]>('GET', '/messages/conversations'),
+    /** Match + clan chat ids with unread messages for the current user. */
+    unreadSummary: () => request<{ matches: string[]; clans: string[] }>(
+      'GET', '/messages/unread-summary'
+    ),
+    /** Mark a chat read — call when opening a chat screen so the social
+     *  tab's unread badge clears on next refresh. */
+    markRead: (kind: 'dm' | 'match' | 'clan', key: string) =>
+      request<{ success: true }>('POST', '/messages/read', { kind, key }),
   },
 
   invites: {
@@ -229,6 +395,30 @@ export const api = {
       holeId?: string;
       notes?: string;
     }) => request<{ success: true }>('POST', `/courses/${id}/corrections`, body),
+
+    /**
+     * Admin-only: batch-set pin coordinates for a course's holes from
+     * anywhere (no need to be on-site). Gated by the same admin token as
+     * the premium grant endpoint — stored client-side under
+     * `coc_admin_token` via the helpers below.
+     *
+     * Pins are applied to every teebox row sharing the same hole_num.
+     */
+    adminSetPins: async (
+      id: string,
+      pins: { holeNum: number; lat: number; lng: number; elevation_m?: number | null }[],
+    ) => {
+      const token = await AsyncStorage.getItem('coc_admin_token');
+      if (!token) throw new Error('Admin token not set on this device');
+      const res = await fetch(`${API_BASE}/courses/admin/set-pins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
+        body: JSON.stringify({ courseId: id, pins }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? 'Admin set-pins failed');
+      return data as { updated: number; missing_hole_nums: number[] };
+    },
 
     // ── Relative-elevation crowdsourcing ──────────────────────────────────
     // Establish per-round offset so the device's barometer-grade RELATIVE

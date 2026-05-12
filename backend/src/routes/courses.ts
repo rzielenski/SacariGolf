@@ -404,4 +404,81 @@ router.get('/:id/elevation-at', requireAuth, wrap(async (req: any, res: Response
   });
 }));
 
+/**
+ * Admin: set pin coordinates for one or more holes of a course remotely.
+ *
+ * Avoids the "must be physically at the course to crowdsource a pin" loop
+ * for course owners / operators seeding data ahead of launch. Same admin
+ * token gate as the premium grant/revoke endpoints (PREMIUM_ADMIN_TOKEN).
+ *
+ *   POST /courses/admin/set-pins
+ *   header:  x-admin-token: <PREMIUM_ADMIN_TOKEN>
+ *   body: {
+ *     courseId: UUID,
+ *     // Pins are applied to EVERY teebox row that shares the same
+ *     // hole_num within the course — the holes table has one row per
+ *     // (teebox, hole_num) but the pin is a physical-world property
+ *     // that should be identical across teeboxes.
+ *     pins: [
+ *       { holeNum: 1, lat: 40.7128, lng: -74.0060, elevation_m?: number },
+ *       { holeNum: 2, lat: ...,     lng: ... },
+ *       ...
+ *     ]
+ *   }
+ *
+ * Response: { updated: N, missing_hole_nums: [...] }
+ */
+router.post('/admin/set-pins', wrap(async (req: Request, res: Response) => {
+  const expected = process.env.PREMIUM_ADMIN_TOKEN;
+  const provided = req.header('x-admin-token');
+  if (!expected || !provided || provided !== expected) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const { courseId, pins } = req.body ?? {};
+  if (typeof courseId !== 'string' || !courseId) {
+    return res.status(400).json({ error: 'courseId required' });
+  }
+  if (!Array.isArray(pins) || pins.length === 0) {
+    return res.status(400).json({ error: 'pins array required' });
+  }
+
+  // Quick course-exists check so a typo'd ID gives a clean 404 instead
+  // of a silent no-op update count of 0.
+  const { rows: cRows } = await pool.query(
+    `SELECT course_id FROM courses WHERE course_id = $1`, [courseId]
+  );
+  if (!cRows.length) return res.status(404).json({ error: 'Course not found' });
+
+  let updated = 0;
+  const missing: number[] = [];
+  for (const p of pins) {
+    const holeNum = Number(p?.holeNum);
+    const lat = Number(p?.lat);
+    const lng = Number(p?.lng);
+    if (!Number.isInteger(holeNum) || holeNum < 1 || holeNum > 18) {
+      missing.push(p?.holeNum); continue;
+    }
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) { missing.push(holeNum); continue; }
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180)      { missing.push(holeNum); continue; }
+    const elev = Number.isFinite(p?.elevation_m) ? Number(p.elevation_m) : null;
+    // Apply to every teebox's copy of this hole_num within the course.
+    const { rowCount } = await pool.query(
+      `UPDATE holes h
+          SET pin_lat = $3,
+              pin_lng = $4,
+              pin_elevation_m = COALESCE($5, h.pin_elevation_m),
+              pin_set_by = NULL
+        FROM teeboxes t
+       WHERE h.teebox_id = t.teebox_id
+         AND t.course_id = $1
+         AND h.hole_num = $2`,
+      [courseId, holeNum, lat, lng, elev]
+    );
+    const n = rowCount ?? 0;
+    if (n === 0) missing.push(holeNum);
+    else updated += n;
+  }
+  return res.json({ updated, missing_hole_nums: missing });
+}));
+
 export default router;

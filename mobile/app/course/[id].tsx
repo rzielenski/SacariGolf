@@ -4,7 +4,7 @@ import {
   ActivityIndicator, RefreshControl, Modal, TextInput, Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '../../lib/api';
+import { api, getAdminToken, setAdminToken } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 
@@ -21,6 +21,43 @@ export default function CourseInfoScreen() {
   const [reportSuggested, setReportSuggested] = useState('');
   const [reportNotes, setReportNotes] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
+  // Admin token presence drives whether the "Place Pins (Admin)" entry is
+  // visible. Hidden by default so end-users never see it; admins paste their
+  // token once via the long-press entry below and it sticks across launches.
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => { getAdminToken().then((t) => setIsAdmin(!!t)); }, []);
+
+  /** Long-press hook on the report button reveals a hidden flow to enter
+   *  (or clear) the admin token. Keeps the surface clean for normal users
+   *  while giving the operator a way to bootstrap admin features on a new
+   *  device without shipping a separate screen. */
+  const promptAdminToken = () => {
+    const A = require('react-native').Alert;
+    if (typeof A.prompt !== 'function') {
+      A.alert('Admin Token', 'Admin token entry from the UI is iOS-only. Use the dev shell on Android.');
+      return;
+    }
+    A.prompt(
+      'Admin Token',
+      isAdmin
+        ? 'Paste a new PREMIUM_ADMIN_TOKEN to replace the stored one, or leave blank to clear.'
+        : 'Paste your PREMIUM_ADMIN_TOKEN to unlock admin features on this device.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Save',
+          onPress: async (val?: string) => {
+            const t = (val ?? '').trim();
+            await setAdminToken(t || null);
+            setIsAdmin(!!t);
+          },
+        },
+      ],
+      'plain-text',
+      '',
+      'default',
+    );
+  };
 
   const submitCorrection = async () => {
     if (!reportSuggested.trim()) { Alert.alert('Missing', 'Please describe the correction.'); return; }
@@ -195,10 +232,30 @@ export default function CourseInfoScreen() {
 
       {/* Report incorrect data — quietly tucked at the bottom so the picker
           UX isn't cluttered, but discoverable when a player notices a wrong
-          rating/slope/par/yardage. */}
-      <TouchableOpacity style={styles.reportBtn} onPress={() => setReportOpen(true)} activeOpacity={0.7}>
+          rating/slope/par/yardage. Long-press the report button to access
+          the hidden admin-token entry — gives operators a no-extra-screen
+          way to unlock the pin-placement editor on a new device. */}
+      <TouchableOpacity
+        style={styles.reportBtn}
+        onPress={() => setReportOpen(true)}
+        onLongPress={promptAdminToken}
+        delayLongPress={1200}
+        activeOpacity={0.7}
+      >
         <Text style={styles.reportBtnText}>Report incorrect course data</Text>
       </TouchableOpacity>
+
+      {/* Admin-only entry — only rendered when the admin token is set on
+          this device. Routes to the satellite-map pin editor. */}
+      {isAdmin && (
+        <TouchableOpacity
+          style={styles.adminBtn}
+          onPress={() => router.push(`/course/admin-pins/${id}` as any)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.adminBtnText}>★ Place Pins (Admin)</Text>
+        </TouchableOpacity>
+      )}
 
       <ScorecardModal
         visible={!!scorecardEntry}
@@ -362,6 +419,17 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.border, borderRadius: 8, backgroundColor: C.card,
   },
   reportBtnText: { color: C.textMuted, fontSize: 12, fontWeight: '600', letterSpacing: 0.5 },
+
+  // Admin-only entry — visually distinct so the operator can spot it but
+  // not flashy enough to imply "tap here" to regular users (it's hidden
+  // entirely without the admin token).
+  adminBtn: {
+    marginTop: 10, marginHorizontal: 20, paddingVertical: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: C.gold + '88', borderRadius: 8,
+    backgroundColor: C.gold + '11',
+  },
+  adminBtnText: { color: C.gold, fontSize: 12, fontWeight: '800', letterSpacing: 0.8 },
+
   reportLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: 16, marginBottom: 8 },
   reportFieldRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   reportChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: C.border, backgroundColor: C.card },

@@ -2,74 +2,30 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Alert, ActivityIndicator, Animated, Dimensions, TextInput, Modal,
-  PanResponder,
+  PanResponder, AppState,
 } from 'react-native';
 import MapView, { Marker, Polyline, Circle, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '../../../lib/api';
+import { api, OfflineError } from '../../../lib/api';
+import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
 import { isPremium } from '../../../lib/premium';
 import { adjustDistance, windComponents, metersToFeet } from '../../../lib/weatherAdjust';
 import { C, F } from '../../../lib/colors';
+import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS } from '../../../lib/golfMath';
+import { useScorePanel } from './hooks/useScorePanel';
+import { useShotTracking } from './hooks/useShotTracking';
+import { useLocation } from './hooks/useLocation';
+import { useGhostPlayer, GHOST_NAME } from './hooks/useGhostPlayer';
+import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
 import { Hole, Teebox, Course } from '../../../types';
+import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const COLLAPSED_H = 110;
 const EXPANDED_H = 380;
-const ON_COURSE_METRES = 3 * 1609.34;
-
-// Per-shot color palette — each successive shot on a hole renders in the next color.
-// High-contrast palette tuned to stand out against satellite-imagery green
-// (fairway/rough) and brown (sand/dirt). Avoids any greens/yellow-greens
-// that would blend with grass.
-const SHOT_COLORS = [
-  '#4a9eff', // bright blue
-  '#e63946', // crimson
-  '#ff66c4', // magenta
-  '#ff9f1c', // orange
-  '#00bbf9', // cyan
-  '#9d4edd', // violet
-  '#ffd60a', // school-bus yellow
-];
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-function distMetres(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function distYards(lat1: number, lon1: number, lat2: number, lon2: number) {
-  return distMetres(lat1, lon1, lat2, lon2) * 1.09361;
-}
-
-function scoreLabel(strokes: number, par: number) {
-  const diff = strokes - par;
-  if (strokes === 1) return { label: 'Hole in One!', color: '#FFD700' };
-  if (diff <= -3) return { label: 'Albatross', color: '#FF00FF' };
-  if (diff === -2) return { label: 'Eagle', color: '#4CAF50' };
-  if (diff === -1) return { label: 'Birdie', color: '#81C784' };
-  if (diff === 0) return { label: 'Par', color: C.text };
-  if (diff === 1) return { label: 'Bogey', color: '#FF9800' };
-  if (diff === 2) return { label: 'Double Bogey', color: '#F44336' };
-  if (diff === 3) return { label: 'Triple Bogey', color: '#B71C1C' };
-  return { label: `+${diff}`, color: '#7B1FA2' };
-}
-
-function scoreColor(score: number, par: number) {
-  const d = score - par;
-  if (d <= -2) return '#4CAF50';
-  if (d === -1) return '#81C784';
-  if (d === 0) return C.text;
-  if (d === 1) return '#FF9800';
-  return '#F44336';
-}
 
 // ── Small stepper for per-hole stats (putts / chips) ───────────────────────
 function StatStepper({ label, value, onChange }: {
@@ -133,31 +89,14 @@ export default function ScoringScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
+  // In-round invite modal — only used for practice rounds, where the host can
+  // pull in up to 8 friends to play the same course/teebox together (each on
+  // their own scorecard, no ELO).
+  const [inviteVisible, setInviteVisible] = useState(false);
 
-  // Per-hole shot tracking. Each shot is a SEGMENT with a start point (where
-  // the player struck the ball) and an end point (where the ball came to
-  // rest, recorded when the player walks to it and taps STOP). Drawn as a
-  // colored polyline on the map for the current hole AND for spectators.
-  //
-  // Recording flow: pick club → tap TRACK (records start) → walk to ball →
-  // tap TRACK again (records end). Repeat.
-  type Pt = { lat: number; lng: number; elevation_m?: number };
-  type Shot = {
-    club: string;
-    lie?: string;
-    start: Pt;
-    end: Pt;
-    recorded_at?: string;
-  };
-  const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
-  // The shot currently being recorded (TRACK pressed once, not yet stopped).
-  // null = idle. Only one shot at a time per hole.
-  type ActiveShot = { club: string; lie?: string; start: Pt; startedAt: string };
-  const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
-  // Pre-selected club for the next shot. Cleared after each recorded shot
-  // and on hole change so the player must consciously pick again.
-  const [pendingClub, setPendingClub] = useState<string | null>(null);
-  const [clubPickerVisible, setClubPickerVisible] = useState(false);
+  // Shot tracking — state machine in hooks/useShotTracking.ts. Recording flow:
+  // pick club → tap TRACK (records start) → walk to ball → tap TRACK again
+  // (records end). Long-press undoes the last shot.
   // Advanced detail entry modal — miss directions + per-putt distance sliders
   const [advancedVisible, setAdvancedVisible] = useState(false);
 
@@ -259,8 +198,6 @@ export default function ScoringScreen() {
 
   // Map / location
   const mapRef = useRef<MapView>(null);
-  const watchRef = useRef<Location.LocationSubscription | null>(null);
-  const [userCoord, setUserCoord] = useState<{ latitude: number; longitude: number; altitude?: number | null } | null>(null);
   const [measurePin, setMeasurePin] = useState<{ latitude: number; longitude: number } | null>(null);
   // DEM elevation at the tapped measure point. Looked up once per pin set
   // and cached locally — terrain doesn't move.
@@ -272,9 +209,13 @@ export default function ScoringScreen() {
   // record the moment Clear was tapped and ignore map-onPress events that
   // happen within ~300ms after.
   const ignoreMapTapUntil = useRef(0);
-  const [onCourse, setOnCourse] = useState(true);
   const [following, setFollowing] = useState(true);
-  const [locGranted, setLocGranted] = useState(false);
+  const { userCoord, onCourse, locGranted } = useLocation({
+    enabled: !selectingCourse,
+    courseLat: course?.latitude,
+    courseLng: course?.longitude,
+    onOffCourse: () => setFollowing(false),
+  });
 
   // ── Relative-elevation crowdsourcing ───────────────────────────────────
   // Phone barometers are sub-meter accurate at *relative* altitude over short
@@ -299,13 +240,67 @@ export default function ScoringScreen() {
   // screen instance so leaving and re-entering doesn't re-nag.
   const dataQualityShownRef = useRef(false);
 
-  // Score panel
-  const [panelExpanded, setPanelExpanded] = useState(false);
-  const panelAnim = useRef(new Animated.Value(COLLAPSED_H)).current;
+  // Score panel — animated height + drag handler. See hooks/useScorePanel.ts
+  const { panelAnim, panResponder, panelExpanded, snapPanel } = useScorePanel(COLLAPSED_H, EXPANDED_H);
 
   // Namespace saved progress by user so logging into a different account on
   // the same device doesn't pick up the previous user's in-progress round.
   const SAVE_KEY = `scores_${user?.user_id ?? 'anon'}_${id}`;
+
+  /**
+   * Persist the current round's score/stat draft to AsyncStorage.
+   *
+   * Called from three places:
+   *   • The autosave effect below — whenever scores/holeStats/currentHole
+   *     change, debounced ~400ms so rapid +/- taps don't hammer disk.
+   *   • The AppState listener — IMMEDIATELY when the app moves to
+   *     background or inactive, no debounce. iOS suspends JS within a
+   *     few hundred ms of backgrounding, so this beats the debounce.
+   *   • The unmount cleanup — last-chance flush when the player backs out.
+   *
+   * Bug history: previously only `saveAndLeave` wrote here. If the player
+   * killed the app mid-round (multitasking swipe), every hole they'd
+   * entered was lost because the in-memory state never touched disk.
+   */
+  const persistDraft = useCallback(async () => {
+    if (!teebox || !course) return;
+    try {
+      await AsyncStorage.setItem(SAVE_KEY, JSON.stringify({
+        scores,
+        holeStats,
+        currentHole,
+        teeboxId: teebox?.teebox_id,
+        courseId: course?.course_id,
+        savedAt: Date.now(),
+      }));
+    } catch { /* best-effort — disk full, etc. */ }
+  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course]);
+
+  // Debounced autosave whenever a tracked field changes. The 400ms window
+  // smooths out rapid stroke +/- taps and stat slider drags. Crucially, the
+  // AppState listener below short-circuits this debounce — backgrounding
+  // the app flushes immediately so even a sub-debounce kill survives.
+  useEffect(() => {
+    if (loading || selectingCourse) return;
+    const t = setTimeout(() => { persistDraft(); }, 400);
+    return () => clearTimeout(t);
+  }, [scores, holeStats, currentHole, loading, selectingCourse, persistDraft]);
+
+  // Background flush + unmount flush. iOS gives JS a small window between
+  // 'inactive' and 'background' to finish work — writing synchronously here
+  // means the round draft is on disk before the OS suspends the runtime.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'inactive' || state === 'background') {
+        persistDraft();
+      }
+    });
+    return () => {
+      sub.remove();
+      // Final flush on unmount so a navigation away always saves.
+      persistDraft();
+    };
+  }, [persistDraft]);
 
   // ── Live progress upload (so friends can watch) ─────────────────────────────
   // First update fires immediately when scoring starts (so the backend's
@@ -334,25 +329,72 @@ export default function ScoringScreen() {
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
+  // Cache key for the full match snapshot — separate from SAVE_KEY (which
+  // stores the in-progress score draft). Lets a player who opened a match
+  // online once resume scoring later even without a signal.
+  const MATCH_CACHE_KEY = `match_cache_${id}`;
+
+  /** Apply a loaded match/course/teebox to component state, restoring any
+   *  in-progress scoring draft from SAVE_KEY on top. Shared between the
+   *  online fetch path and the offline cache-hit path so the resume UX
+   *  is identical either way. */
+  const applyMatchData = useCallback(async (
+    m: any,
+    courseDetails: Course,
+    tb: Teebox,
+  ) => {
+    const effectiveHoles = (m as any)?.num_holes ?? numHoles;
+    if (effectiveHoles !== numHoles) setNumHoles(effectiveHoles);
+    const matchSubset = (m as any)?.holes_subset as ('front' | 'back' | 'full' | undefined);
+    const effSubset: 'front' | 'back' | 'full' = matchSubset ?? holesSubset ?? 'full';
+    if (effSubset !== holesSubset) setHolesSubset(effSubset);
+
+    const allSorted = [...(tb.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num);
+    const offset = effSubset === 'back' ? 9 : 0;
+    const sorted = allSorted.slice(offset, offset + effectiveHoles);
+
+    // Restore any saved in-progress draft on top of the fresh par defaults.
+    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
+    try {
+      const raw = await AsyncStorage.getItem(SAVE_KEY);
+      if (raw) saved = JSON.parse(raw);
+    } catch { /* ignore */ }
+
+    setMatch(m);
+    setCourse(courseDetails);
+    setTeebox(tb);
+    setHoles(sorted);
+    setScores(saved?.scores ?? sorted.map((h) => h.par));
+    setHoleStats(
+      saved?.holeStats && Array.isArray(saved.holeStats)
+        ? saved.holeStats
+        : sorted.map(() => ({}))
+    );
+    setCurrentHole(saved?.currentHole ?? 0);
+    setSelectingCourse(false);
+  }, [SAVE_KEY, numHoles, holesSubset]);
+
   const load = useCallback(async () => {
     try {
       const m = await api.matches.get(id);
-      setMatch(m);
-
-      // Read any saved local progress (scores + course/teebox the player previously chose)
-      let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
-      try {
-        const raw = await AsyncStorage.getItem(SAVE_KEY);
-        if (raw) saved = JSON.parse(raw);
-      } catch { /* ignore */ }
 
       // Resolve which course/teebox to load — only look at THIS user's player row,
       // because every player in a match can pick their own course/teebox.
+      const myPlayer = m.players?.find((p: any) => p.user_id === user?.user_id);
+      let courseIdToLoad = myPlayer?.course_id;
+      let teeboxIdToLoad = myPlayer?.teebox_id;
       // Falls back to locally-saved choice if I haven't picked yet (challenge
       // matches don't persist teebox to match_players until scores submit).
-      const myPlayer = m.players?.find((p: any) => p.user_id === user?.user_id);
-      const courseIdToLoad = myPlayer?.course_id ?? saved?.courseId;
-      const teeboxIdToLoad = myPlayer?.teebox_id ?? saved?.teeboxId;
+      if (!courseIdToLoad || !teeboxIdToLoad) {
+        try {
+          const raw = await AsyncStorage.getItem(SAVE_KEY);
+          if (raw) {
+            const s = JSON.parse(raw);
+            courseIdToLoad = courseIdToLoad ?? s.courseId;
+            teeboxIdToLoad = teeboxIdToLoad ?? s.teeboxId;
+          }
+        } catch { /* ignore */ }
+      }
 
       if (courseIdToLoad && teeboxIdToLoad) {
         const courseDetails: Course = await api.courses.get(courseIdToLoad);
@@ -360,68 +402,44 @@ export default function ScoringScreen() {
           (t) => t.teebox_id === teeboxIdToLoad
         );
         if (tb && tb.holes?.length > 0) {
-          // Use the match's own num_holes as ground truth (fixes 9-hole
-          // matches opened via the match lobby which may not have ?holes=
-          // in the URL). `m` is the match record loaded above.
-          const effectiveHoles = (m as any)?.num_holes ?? numHoles;
-          if (effectiveHoles !== numHoles) setNumHoles(effectiveHoles);
-
-          // Determine which subset (front/back/full). Prefer the match's
-          // stored value over the URL param so a resumed round always
-          // matches what was saved.
-          const matchSubset = (m as any)?.holes_subset as ('front' | 'back' | 'full' | undefined);
-          const effSubset: 'front' | 'back' | 'full' = matchSubset ?? holesSubset ?? 'full';
-          if (effSubset !== holesSubset) setHolesSubset(effSubset);
-
-          // Slice the teebox's full hole list to the right window.
-          const allSorted = [...tb.holes].sort((a, b) => a.hole_num - b.hole_num);
-          const offset = effSubset === 'back' ? 9 : 0;
-          const sorted = allSorted.slice(offset, offset + effectiveHoles);
-          setCourse(courseDetails);
-          setTeebox(tb);
-          setHoles(sorted);
-          setScores(saved?.scores ?? sorted.map((h) => h.par));
-          setHoleStats(
-            saved?.holeStats && Array.isArray(saved.holeStats)
-              ? saved.holeStats
-              : sorted.map(() => ({}))
-          );
-          setCurrentHole(saved?.currentHole ?? 0);
-          setSelectingCourse(false);
+          await applyMatchData(m, courseDetails, tb);
+          // Snapshot the resolved state so a future offline cold-start can
+          // resume scoring without ever talking to the server.
+          AsyncStorage.setItem(MATCH_CACHE_KEY, JSON.stringify({
+            match: m, course: courseDetails, teebox: tb,
+            cachedAt: Date.now(),
+          })).catch(() => { });
           // Notify friends a round has started (idempotent — backend only fires once)
           api.matches.started(id).catch(() => { });
-          // Hydrate any previously-saved shot tracks for this round.
-          // Backward compat: older rounds stored shots as flat point arrays
-          // ([{lat, lng, club?}]); newer rounds use segment objects
-          // ({start, end, club}). Convert legacy data on the fly so resumed
-          // rounds keep their tracks visible.
-          api.matches.listShotTracks(id, user?.user_id).then((rows) => {
-            const byHole: Record<number, Shot[]> = {};
-            for (const r of rows) {
-              const raw = (r.shots as any[]) ?? [];
-              if (!raw.length) { byHole[r.hole_num] = []; continue; }
-              if (raw[0]?.start && raw[0]?.end) {
-                byHole[r.hole_num] = raw as Shot[];
-              } else {
-                // Legacy: pair consecutive points into segments
-                const segs: Shot[] = [];
-                for (let i = 0; i < raw.length - 1; i++) {
-                  segs.push({
-                    club: raw[i]?.club ?? 'unknown',
-                    lie: raw[i]?.lie,
-                    start: { lat: raw[i].lat, lng: raw[i].lng, elevation_m: raw[i].elevation_m },
-                    end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng, elevation_m: raw[i + 1].elevation_m },
-                  });
-                }
-                byHole[r.hole_num] = segs;
-              }
-            }
-            setShotsByHole(byHole);
-          }).catch(() => { });
+          // Hydrate any previously-saved shot tracks. The hook handles
+          // legacy-format conversion (flat point arrays → segment pairs).
+          api.matches.listShotTracks(id, user?.user_id)
+            .then((rows) => tracking.hydrate(rows))
+            .catch(() => { });
         }
+      } else {
+        // No course chosen yet — the existing course-picker flow handles it.
+        setMatch(m);
       }
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      // Offline cold-start: pull the last cached match snapshot from disk
+      // and let the player keep scoring. ShotTracking hydrates from its own
+      // local cache via the hook's mount effect, score draft from SAVE_KEY.
+      // Submit-on-offline pushes to the outbox (already wired). The whole
+      // round can be played + finalised without service.
+      if (e instanceof OfflineError) {
+        try {
+          const raw = await AsyncStorage.getItem(MATCH_CACHE_KEY);
+          if (raw) {
+            const cached = JSON.parse(raw);
+            if (cached?.match && cached?.course && cached?.teebox) {
+              await applyMatchData(cached.match, cached.course, cached.teebox);
+            }
+          }
+        } catch { /* nothing to fall back to — selectingCourse stays true */ }
+      } else {
+        Alert.alert('Error', e.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -446,55 +464,7 @@ export default function ScoringScreen() {
     })();
   }, [selectingCourse]);
 
-  // ── Location tracking ───────────────────────────────────────────────────────
-
-  useEffect(() => {
-    if (selectingCourse) return;
-    let active = true;
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      setLocGranted(true);
-
-      // maximumAge: 0 forces a fresh GPS fix (prevents stale cached position bug)
-      const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-        maximumAge: 0,
-      } as any);
-      if (!active) return;
-      const coord = {
-        latitude: pos.coords.latitude,
-        longitude: pos.coords.longitude,
-        altitude: pos.coords.altitude, // meters, may be null on some devices
-      };
-      const cLat = course?.latitude ?? 0;
-      const cLng = course?.longitude ?? 0;
-      const near = !cLat || distMetres(coord.latitude, coord.longitude, cLat, cLng) <= ON_COURSE_METRES;
-      setOnCourse(near);
-      setUserCoord(coord);
-      if (!near) setFollowing(false);
-
-      watchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 2 },
-        (loc) => {
-          if (!active) return;
-          const c = {
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-            altitude: loc.coords.altitude,
-          };
-          const near2 = !cLat || distMetres(c.latitude, c.longitude, cLat, cLng) <= ON_COURSE_METRES;
-          setOnCourse(near2);
-          if (!near2) setFollowing(false);
-          setUserCoord(c);
-        },
-      );
-    })();
-    return () => {
-      active = false;
-      watchRef.current?.remove();
-    };
-  }, [selectingCourse, course]);
+  // Location tracking handled by useLocation hook (declared above).
 
   // Follow user on map
   useEffect(() => {
@@ -505,39 +475,6 @@ export default function ScoringScreen() {
       );
     }
   }, [userCoord, following, onCourse]);
-
-  // ── Panel gesture ────────────────────────────────────────────────────────────
-
-  const dragStartHeight = useRef(COLLAPSED_H);
-
-  const snapPanel = (toExpanded: boolean) => {
-    setPanelExpanded(toExpanded);
-    Animated.spring(panelAnim, {
-      toValue: toExpanded ? EXPANDED_H : COLLAPSED_H,
-      useNativeDriver: false,
-      friction: 12,
-      tension: 120,
-    }).start();
-  };
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onMoveShouldSetPanResponder: (_, { dy }) => Math.abs(dy) > 6,
-      onPanResponderGrant: () => {
-        panelAnim.stopAnimation((val) => { dragStartHeight.current = val; });
-      },
-      onPanResponderMove: (_, { dy }) => {
-        const next = Math.max(COLLAPSED_H, Math.min(EXPANDED_H, dragStartHeight.current - dy));
-        panelAnim.setValue(next);
-      },
-      onPanResponderRelease: (_, { dy, vy }) => {
-        const endH = Math.max(COLLAPSED_H, Math.min(EXPANDED_H, dragStartHeight.current - dy));
-        const mid = (COLLAPSED_H + EXPANDED_H) / 2;
-        const toExpanded = vy < -0.3 || (Math.abs(vy) <= 0.3 && endH > mid);
-        snapPanel(toExpanded);
-      },
-    })
-  ).current;
 
   // ── Course selection helpers ─────────────────────────────────────────────────
 
@@ -580,93 +517,64 @@ export default function ScoringScreen() {
   // ── Shot tracking ───────────────────────────────────────────────────────────
 
   const currentHoleNum = holes[currentHole]?.hole_num;
-  const currentShots = currentHoleNum != null ? (shotsByHole[currentHoleNum] ?? []) : [];
 
-  const persistShots = (holeNum: number, next: Shot[]) => {
-    api.matches.saveShotTrack(id, holeNum, next).catch(() => { /* best-effort */ });
-  };
+  /** Compute a *normalized* (neutral-conditions) yardage for a finalised shot.
+   *  Stored alongside the shot so per-club stats reflect the player's true
+   *  club capability rather than what happened to land under that day's wind
+   *  / slope / temperature.
+   *
+   *  Convention (see weatherAdjust.ts):
+   *    adjustDistance(base, w).plays_like_yds  ≈  base + bonusFromConditions
+   *  We have the GPS-measured distance (what actually landed) and need the
+   *  neutral-capability x such that x + bonus ≈ GPS. Linearising:
+   *    normalized = 2*GPS − plays_like_weather(GPS) + slope_yds
+   *  where slope_yds is positive for uphill (an uphill GPS shot implies a
+   *  longer-capable swing) and negative for downhill. */
+  const computePlaysLike = (start: Pt, end: Pt): number | null => {
+    if (!weather || weather.temperature_f == null) return null;
+    const gpsYds = distYards(start.lat, start.lng, end.lat, end.lng);
+    if (gpsYds < 5 || gpsYds > 500) return null;   // skip GPS noise / putts
 
-  /** Snapshot the player's current GPS into a Pt. */
-  const ptFromCoord = (): Pt | null => {
-    if (!userCoord) return null;
-    const p: Pt = { lat: userCoord.latitude, lng: userCoord.longitude };
-    if (typeof userCoord.altitude === 'number') p.elevation_m = userCoord.altitude;
-    return p;
-  };
+    // Slope: elevation gain (m) converted to yards. Uphill = positive.
+    const slopeYds =
+      typeof start.elevation_m === 'number' && typeof end.elevation_m === 'number'
+        ? (end.elevation_m - start.elevation_m) * 1.0936
+        : 0;
 
-  /**
-   * Toggle shot tracking. Three states:
-   *   • Idle, no club        → prompt to pick one, open picker
-   *   • Idle, club selected  → start tracking (record start point)
-   *   • Tracking             → stop, finalize the shot, persist
-   */
-  const onTrackPress = () => {
-    if (!userCoord || currentHoleNum == null) {
-      Alert.alert('No GPS', 'Wait for a GPS lock before tracking shots.');
-      return;
+    // Wind along the shot line (start → end bearing).
+    let along = 0;
+    if (weather.wind_speed_mph && weather.wind_from_bearing != null) {
+      const shotBearingDeg = bearingDeg(start.lat, start.lng, end.lat, end.lng);
+      along = windComponents(weather.wind_speed_mph, weather.wind_from_bearing, shotBearingDeg).along_mph;
     }
-    // STOP tracking — finalize the active shot.
-    if (activeShot) {
-      const end = ptFromCoord();
-      if (!end) return;
-      const newShot: Shot = {
-        club: activeShot.club,
-        lie: activeShot.lie,
-        start: activeShot.start,
-        end,
-        recorded_at: new Date().toISOString(),
-      };
-      setShotsByHole((prev) => {
-        const cur = prev[currentHoleNum] ?? [];
-        const next = [...cur, newShot];
-        persistShots(currentHoleNum, next);
-        return { ...prev, [currentHoleNum]: next };
-      });
-      setActiveShot(null);
-      // Reset the club so the next shot's suggestion takes effect (or so the
-      // player can consciously override). Clear the manual-flag too — fresh
-      // shot, fresh decision.
-      setPendingClub(null);
-      pendingClubManualRef.current = false;
-      return;
-    }
-    // START tracking — but only if a club has been picked first.
-    if (!pendingClub) {
-      Alert.alert(
-        'Pick a club first',
-        'Tap CLUB to choose what you\'re hitting before tracking the shot.',
-        [{ text: 'OK', onPress: () => setClubPickerVisible(true) }],
-      );
-      return;
-    }
-    const start = ptFromCoord();
-    if (!start) return;
-    setActiveShot({
-      club: pendingClub,
-      start,
-      startedAt: new Date().toISOString(),
+
+    // Altitude effect is relative to the player's calibration baseline
+    // (home course elevation) when one is known.
+    const courseAltFt = weather.elevation_ft
+      ?? (typeof userCoord?.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
+    const altDeltaFt = homeElevationFt != null ? courseAltFt - homeElevationFt : courseAltFt;
+
+    const adj = adjustDistance(gpsYds, {
+      altitudeFt:   altDeltaFt,
+      temperatureF: weather.temperature_f,
+      windAlongMph: along,
+      rain:         weather.rain,
     });
+    // Invert weather bonus, add slope bonus (uphill swing capability > GPS).
+    const normalized = 2 * gpsYds - adj.plays_like_yds + slopeYds;
+    if (normalized <= 0 || normalized > 1000) return null;
+    return normalized;
   };
 
-  /** Cancel the in-progress shot without recording it. */
-  const cancelActiveShot = () => {
-    if (!activeShot) return;
-    setActiveShot(null);
-  };
+  const tracking = useShotTracking({
+    matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
+  });
+  const {
+    shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
+    setClubPickerVisible, pickClubManual, pickClubAuto, isManualPick,
+    onTrackPress, onTrackLongPress, cancelActiveShot,
+  } = tracking;
 
-  /** Long-press the TRACK button to undo: cancel active shot, OR remove the
-   *  most recently recorded shot if idle. */
-  const onTrackLongPress = () => {
-    if (activeShot) { cancelActiveShot(); return; }
-    if (currentHoleNum == null) return;
-    setShotsByHole((prev) => {
-      const cur = prev[currentHoleNum] ?? [];
-      if (!cur.length) return prev;
-      const next = cur.slice(0, -1);
-      persistShots(currentHoleNum, next);
-      return { ...prev, [currentHoleNum]: next };
-    });
-  };
   // ── Past shots at this hole — premium ghost-shot overlay ──────────────
   // Pulls every tracked shot this user has landed on the current course +
   // hole in prior rounds. Only refetches when the hole or course changes.
@@ -974,21 +882,9 @@ export default function ScoringScreen() {
     currentShots[currentShots.length - 1]?.end?.lng,
   ]);
 
-  /** Pick a club. If a shot is currently being tracked (start already
-   *  recorded), the active shot's club is updated. Otherwise the choice
-   *  is held in pendingClub for the next TRACK press.
-   *
-   *  Manual picks "stick": once the player taps a club, we mark the
-   *  pendingClub as user-owned so subsequent auto-suggestions (distance
-   *  changes as they walk closer) don't overwrite it. */
-  const pendingClubManualRef = useRef(false);
-  const pickClub = (club: string | null) => {
-    pendingClubManualRef.current = club !== null;
-    setPendingClub(club);
-    if (activeShot && club) {
-      setActiveShot({ ...activeShot, club });
-    }
-  };
+  // Club picking — see hooks/useShotTracking.ts. `pickClubManual` is what
+  // the UI calls; `pickClubAuto` is used by the auto-suggest effect below.
+  const pickClub = pickClubManual;
 
   // ── Pin (center of green) — community-contributed location & distance ──────
 
@@ -1014,6 +910,17 @@ export default function ScoringScreen() {
   const yardsToPin = (knownPin && userCoord)
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
     : null;
+
+  // Ghost player — procedurally generated "slightly better" opponent whose
+  // path appears faintly on the map for the player to chase. Pure visual,
+  // no scoring impact. See hooks/useGhostPlayer.ts.
+  const ghost = useGhostPlayer({
+    holeId: currentHoleObj?.hole_id ?? null,
+    holePar: currentHoleObj?.par ?? null,
+    knownPin: knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null,
+    userCoord,
+    userHandicap: user?.handicap_index,
+  });
 
   // ── Relative-elevation: pin lookup ─────────────────────────────────────
   // Pulls the cached relative elevation at the current hole's pin, if any
@@ -1090,35 +997,65 @@ export default function ScoringScreen() {
   // ── Auto-suggest the most likely club from yardsToPin ─────────────────
   // Picks the bag club whose median distance is closest to the current
   // remaining yardage. Putter chosen automatically when very close to the
-  // pin. Premium-gated: matches "smart caddie" features in commercial apps.
+  // pin. Free for everyone — a default suggestion makes the CLUB chip feel
+  // alive even before the player has tracked enough shots to build personal
+  // medians. Personal data wins when present; otherwise we fall back to
+  // baseline amateur distances per club.
+  //
+  // DEFAULT_CLUB_YDS: average distance for a typical mid-handicap amateur.
+  // Used when the user has no `clubStats` entry for a club yet — the chip
+  // still has to suggest *something* on shot 1 of round 1. Personal medians
+  // override these the moment the user has tracked even a single shot per
+  // club.
+  const DEFAULT_CLUB_YDS: Record<string, number> = useMemo(() => ({
+    driver: 220, '3w': 200, '5w': 185, '7w': 170, hybrid: 175,
+    '2i': 195, '3i': 185, '4i': 170, '5i': 160, '6i': 150,
+    '7i': 140, '8i': 130, '9i': 120,
+    pw: 110, gw: 90, sw: 70, lw: 55,
+  }), []);
+
   const suggestedClub = useMemo<string | null>(() => {
-    if (!userIsPremium || !clubStats?.length || yardsToPin == null) return null;
-    if (yardsToPin <= 5) {
-      // Tap-in range — putter if it's in the bag.
-      return clubStats.some((c) => c.club === 'putter') ? 'putter' : null;
+    // Premium-gated "smart caddie" feature. Everyone is currently flagged
+    // premium so this is a no-op in practice; flip the flag at the user
+    // level when the paywall ships.
+    if (!userIsPremium) return null;
+    if (yardsToPin == null) return null;
+    // Tap-in range — recommend the putter regardless of personal data.
+    if (yardsToPin <= 5) return 'putter';
+
+    // Build a map of club → expected_yds, preferring the player's personal
+    // median when we have one, falling back to DEFAULT_CLUB_YDS otherwise.
+    // We iterate the DEFAULT list so even a brand-new player sees the full
+    // bag considered — not just the clubs they've already used once.
+    const expectedYds: Record<string, number> = { ...DEFAULT_CLUB_YDS };
+    if (clubStats?.length) {
+      for (const c of clubStats) {
+        if (c.median_yds > 0 && c.club !== 'putter') {
+          expectedYds[c.club] = c.median_yds;
+        }
+      }
     }
+
     let best: { club: string; diff: number } | null = null;
-    for (const c of clubStats) {
-      if (c.median_yds <= 0) continue;
-      // Skip the putter for full-shot suggestions — players don't putt 100 yds.
-      if (c.club === 'putter') continue;
-      const diff = Math.abs(c.median_yds - yardsToPin);
-      if (!best || diff < best.diff) best = { club: c.club, diff };
+    for (const club of Object.keys(expectedYds)) {
+      const yds = expectedYds[club];
+      const diff = Math.abs(yds - yardsToPin);
+      if (!best || diff < best.diff) best = { club, diff };
     }
     return best?.club ?? null;
-  }, [userIsPremium, clubStats, yardsToPin]);
+  }, [userIsPremium, clubStats, yardsToPin, DEFAULT_CLUB_YDS]);
 
-  // Push the suggestion into pendingClub when the player hasn't manually
-  // picked one. Re-runs on yardage change so as you walk to your ball, the
-  // recommendation updates if the right club changes.
+  // Auto-suggest the most-likely club as the player walks. Takes effect
+  // whenever the user hasn't manually picked one (pickClubAuto respects
+  // manualPickRef inside the hook). Premium-gated via suggestedClub.
   useEffect(() => {
     if (!userIsPremium) return;
-    if (activeShot) return;                    // tracking — don't disturb the active club
-    if (pendingClubManualRef.current) return;  // user chose manually — respect it
+    if (activeShot) return;
     if (!suggestedClub) return;
-    if (pendingClub === suggestedClub) return;
-    setPendingClub(suggestedClub);
-  }, [userIsPremium, activeShot, suggestedClub, pendingClub]);
+    pickClubAuto(suggestedClub);
+    // pickClubAuto is stable from the hook; suggestedClub re-runs the effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userIsPremium, activeShot, suggestedClub]);
 
   // ── Past shots near my current spot ───────────────────────────────────
   // Pulls past rounds at this hole and keeps only the segments whose START
@@ -1163,7 +1100,12 @@ export default function ScoringScreen() {
 
   // ── Heatmap overlay: project dispersion of the active/pending club onto
   // the map, anchored at the player's current position with "forward" =
-  // bearing toward the known pin. Premium-only.
+  // bearing toward the known pin. Premium-gated (currently everyone is
+  // flagged premium). Requires:
+  //   • a known pin (so we have an aim bearing — without it the rotation is
+  //     meaningless and we'd just plot a generic blob)
+  //   • a club currently selected (active or pending)
+  //   • at least one tracked shot for that club (otherwise dispersion is [])
   type LL = { latitude: number; longitude: number };
   const heatmapPoints = useMemo<LL[]>(() => {
     if (!userIsPremium || !userCoord || !knownPin || !clubStats?.length) return [];
@@ -1279,8 +1221,20 @@ export default function ScoringScreen() {
         }
       })
       .catch((e: any) => {
-        // Roll back local override so the user can retry rather than silently
-        // believing the pin was saved.
+        // Offline = queue and KEEP the local pin override so the player can
+        // continue using their just-marked pin for distances + heatmap. The
+        // outbox will upload the contribution when service returns. Only
+        // genuine server errors roll back + alert.
+        if (e instanceof OfflineError) {
+          queueContributePin({
+            matchId: id,
+            holeId: currentHoleObj.hole_id,
+            lat: point.lat,
+            lng: point.lng,
+            elevation_m,
+          }).catch(() => { });
+          return;
+        }
         setPinByHole((prev) => {
           const next = { ...prev };
           delete next[currentHoleObj.hole_id];
@@ -1321,6 +1275,12 @@ export default function ScoringScreen() {
     try {
       await api.matches.cancel(id);
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
+      // Also clear the per-match shot cache so a future match with the same
+      // id (impossible, but defensive) doesn't resurrect stale shots or a
+      // stranded in-progress activeShot.
+      try { await AsyncStorage.removeItem(`shots_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
       router.replace('/(tabs)/' as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -1335,6 +1295,12 @@ export default function ScoringScreen() {
       await api.matches.forfeit(id);
       // Clear any saved progress
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
+      // Also clear the per-match shot cache so a future match with the same
+      // id (impossible, but defensive) doesn't resurrect stale shots or a
+      // stranded in-progress activeShot.
+      try { await AsyncStorage.removeItem(`shots_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
       router.replace(`/match/${id}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
@@ -1407,17 +1373,15 @@ export default function ScoringScreen() {
     const next = currentHole + dir;
     if (next < 0 || next >= holes.length) return;
     setCurrentHole(next);
-    setPendingClub(null);    // each hole picks its own club fresh
-    pendingClubManualRef.current = false;
-    setActiveShot(null);     // discard any in-progress shot
+    pickClubManual(null);   // each hole picks its own club fresh
+    cancelActiveShot();     // discard any in-progress shot
   };
 
   const jumpToHole = (index: number) => {
     setScorecardVisible(false);
     setCurrentHole(index);
-    setPendingClub(null);
-    pendingClubManualRef.current = false;
-    setActiveShot(null);
+    pickClubManual(null);
+    cancelActiveShot();
   };
 
   const handleSubmit = () => {
@@ -1433,15 +1397,22 @@ export default function ScoringScreen() {
 
   const doSubmit = async () => {
     setSubmitting(true);
+    const submitBody = {
+      holeScores: scores,
+      holeStats,
+      courseId: course?.course_id,
+      teeboxId: teebox?.teebox_id,
+    };
     try {
-      const result = await api.matches.submitScores(id, {
-        holeScores: scores,
-        holeStats,
-        courseId: course?.course_id,
-        teeboxId: teebox?.teebox_id,
-      });
+      const result = await api.matches.submitScores(id, submitBody);
       // Clear saved progress on successful submit
       try { await AsyncStorage.removeItem(SAVE_KEY); } catch { }
+      // Also clear the per-match shot cache so a future match with the same
+      // id (impossible, but defensive) doesn't resurrect stale shots or a
+      // stranded in-progress activeShot.
+      try { await AsyncStorage.removeItem(`shots_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
+      try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
       const perkEarned = result?.result?.perkAwarded === 'lucky_round';
       if (result.result && !result.result.perkAwarded) {
         // Match fully resolved — go straight to the post-match page where
@@ -1464,7 +1435,20 @@ export default function ScoringScreen() {
         );
       }
     } catch (e: any) {
-      Alert.alert('Error', e.message);
+      // Offline = queue for replay rather than lose the round. We keep the
+      // local score draft (SAVE_KEY + shot caches) on disk so a relaunch
+      // still rehydrates the in-progress state, and the outbox will replay
+      // the submit the moment we're back online.
+      if (e instanceof OfflineError) {
+        try { await queueSubmitScores({ matchId: id, body: submitBody }); } catch { /* disk full → fall through to alert */ }
+        Alert.alert(
+          'Saved — Will Sync',
+          "You're offline. Your scores are saved on this device and will submit automatically the moment you have a connection.",
+          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }],
+        );
+      } else {
+        Alert.alert('Error', e?.message ?? 'Submission failed');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -1641,7 +1625,17 @@ export default function ScoringScreen() {
       >
         {measurePin && (
           <>
-            <Marker coordinate={measurePin} anchor={{ x: 0.5, y: 0.5 }}>
+            {/* tracksViewChanges={false} avoids the well-known react-native-maps
+                bug where iOS Markers can swallow the next map tap when their
+                content view re-renders. tappable={false} ensures a tap near
+                the existing pin always falls through to MapView.onPress so
+                the user can reposition the pin without first clearing it. */}
+            <Marker
+              coordinate={measurePin}
+              anchor={{ x: 0.5, y: 0.5 }}
+              tappable={false}
+              tracksViewChanges={false}
+            >
               <View style={styles.pinOuter}>
                 <View style={styles.pinInner} />
               </View>
@@ -1719,9 +1713,13 @@ export default function ScoringScreen() {
           <Circle
             key={`heat-${i}`}
             center={p}
-            radius={2.5}            // metres — small enough to "stack" visually
-            fillColor={heatmapColor + '55'}    // ~33% alpha
-            strokeColor={heatmapColor + '88'}  // slightly stronger stroke
+            // 4 m ≈ 4.4 yds. 2.5 m was barely visible at the zoom levels
+            // most players use during a round; bumping to 4 m + higher
+            // alpha makes the cluster actually readable on the satellite
+            // map without losing the "stacking density" effect.
+            radius={4}
+            fillColor={heatmapColor + '77'}    // ~47% alpha
+            strokeColor={heatmapColor + 'cc'}
             strokeWidth={0.5}
           />
         ))}
@@ -1738,6 +1736,46 @@ export default function ScoringScreen() {
             </View>
           </Marker>
         )}
+
+        {/* Ghost player path — slightly-better fictional opponent, rendered
+            faintly behind the user's real shots. No interaction. Drawn as
+            a dashed silver polyline ending with a small "GHOST_NAME" label. */}
+        {ghost?.shots.length ? (
+          <>
+            {ghost.shots.map((g, i) => (
+              <Polyline
+                key={`ghost-${i}`}
+                coordinates={[
+                  { latitude: g.start.lat, longitude: g.start.lng },
+                  { latitude: g.end.lat,   longitude: g.end.lng },
+                ]}
+                strokeColor={g.isPutt ? '#d8d8d855' : '#d8d8d8aa'}
+                strokeWidth={g.isPutt ? 2 : 3}
+                lineDashPattern={[6, 6]}
+                lineCap="round"
+              />
+            ))}
+            {/* Endpoint marker — small silver dot with the ghost's name. */}
+            <Marker
+              coordinate={{
+                latitude:  ghost.shots[ghost.shots.length - 1].end.lat,
+                longitude: ghost.shots[ghost.shots.length - 1].end.lng,
+              }}
+              anchor={{ x: 0.5, y: 1 }}
+              tappable={false}
+              tracksViewChanges={false}
+            >
+              <View style={styles.ghostLabel}>
+                <Text style={styles.ghostLabelText}>{GHOST_NAME}</Text>
+                <Text style={styles.ghostLabelScore}>
+                  {ghost.targetScore === (currentHoleObj?.par ?? 0)
+                    ? 'par'
+                    : `+${ghost.targetScore - (currentHoleObj?.par ?? 0)}`}
+                </Text>
+              </View>
+            </Marker>
+          </>
+        ) : null}
 
         {/* Saved shots for the current hole — each as a colored start→end
             polyline, with a numbered start dot and end dot. */}
@@ -1820,6 +1858,17 @@ export default function ScoringScreen() {
           <TouchableOpacity style={styles.topBarBtn} onPress={() => setScorecardVisible(true)}>
             <Text style={styles.topBarBtnText}>Card</Text>
           </TouchableOpacity>
+          {/* Practice rounds only: invite up to 8 friends to play the same
+              course alongside you. They each get their own scorecard. */}
+          {match?.is_practice && (
+            <TouchableOpacity
+              style={styles.topBarBtn}
+              onPress={() => setInviteVisible(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.topBarBtnText, { color: C.gold }]}>+ Invite</Text>
+            </TouchableOpacity>
+          )}
           {onCourse ? (
             <TouchableOpacity
               style={[styles.topBarBtn, following && styles.topBarBtnActive]}
@@ -1905,7 +1954,7 @@ export default function ScoringScreen() {
           activeOpacity={0.7}
         >
           <Text style={styles.topChipLabel}>
-            CLUB{userIsPremium && pendingClub && !pendingClubManualRef.current ? ' · AUTO' : ''}
+            CLUB{userIsPremium && pendingClub && !isManualPick() ? ' · AUTO' : ''}
           </Text>
           <Text style={styles.topChipValue}>
             {(activeShot?.club ?? pendingClub)?.toUpperCase() ?? '—'}
@@ -1968,6 +2017,20 @@ export default function ScoringScreen() {
           });
         }}
       />
+
+      {/* In-round invite modal — practice only. The host (creator) adds friends
+          mid-round; accepters get a notification and can join the same
+          practice match (up to 8 friends total via SIDE_CAPS on the backend). */}
+      {match?.is_practice && (
+        <InviteFriendsModal
+          visible={inviteVisible}
+          matchId={id}
+          onClose={() => setInviteVisible(false)}
+          title="Invite to Practice"
+          subtitle="Up to 8 friends can join your practice round. They'll each track their own scorecard."
+          maxAdditional={8}
+        />
+      )}
 
       {/* ── Pin distance / Mark Pin — bottom-right, lifts with the score panel ── */}
       <Animated.View style={[
@@ -2547,6 +2610,31 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
   },
   shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
+
+  // Ghost player endpoint label — silver, low-contrast so it sits behind
+  // the real shot markers. Italic + lowercase for the wizardly vibe.
+  ghostLabel: {
+    backgroundColor: '#1a1a1ad9',
+    borderColor: '#d8d8d8',
+    borderWidth: 1,
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    alignItems: 'center',
+  },
+  ghostLabelText: {
+    color: '#e8e8e8',
+    fontSize: 9,
+    fontWeight: '700',
+    fontStyle: 'italic',
+    letterSpacing: 0.3,
+  },
+  ghostLabelScore: {
+    color: '#c8c8c8',
+    fontSize: 8,
+    fontWeight: '600',
+    marginTop: 1,
+  },
   shotEndDot: {
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: '#fff', borderWidth: 3,

@@ -2,7 +2,12 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert } from 'react-native';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
+import { scoreColor } from '../lib/golfMath';
+import type { HoleStat } from '../lib/scoringTypes';
 import { ShotMapModal } from './ShotMap';
+
+// Re-export so existing importers of HoleStat from Scorecard keep working.
+export type { HoleStat };
 
 const REACTION_OPTIONS = [
   { id: 'fire', label: 'FIRE' },
@@ -12,16 +17,6 @@ const REACTION_OPTIONS = [
   { id: 'respect', label: 'RESPECT' },
   { id: 'oof', label: 'OOF' },
 ];
-
-export type HoleStat = {
-  putts?: number;
-  chips?: number;
-  gir?: boolean | null;
-  fairwayHit?: boolean | null;
-  fairwayMiss?: 'left' | 'right' | null;
-  greenMiss?: 'left' | 'right' | 'short' | 'long' | null;
-  puttDistances?: number[];
-};
 
 export type ScorecardEntry = {
   username?: string;
@@ -41,17 +36,35 @@ export type ScorecardEntry = {
   // 'front' = 1-9, 'back' = 10-18. When 'back', the score array represents
   // holes 10-18 and the grid should render with those hole numbers.
   holes_subset?: 'front' | 'back' | 'full' | null;
+  /** Player's handicap index — used as the SG skill baseline. When omitted
+   *  (e.g. legacy callers, or a player with no rounds yet) the SG math
+   *  falls back to scratch (par) baseline. */
+  handicap_index?: number | null;
 };
 
-/** Compute 4-category strokes-gained totals and the per-hole sample size. */
+/** Compute 4-category strokes-gained totals and the per-hole sample size.
+ *
+ * SG is measured against the player's *handicap-adjusted* expectation, not
+ * against par. A 20-cap shooting their handicap on par 72 should see ~0 SG
+ * total. Mirrors the backend basic-SG model in users.ts so the in-app
+ * scorecard preview matches the profile-stats numbers.
+ *
+ *   expected_strokes_per_hole = par + (handicap_index / 18)
+ *
+ * Short-game baselines (putting/around-green/approach) stay absolute —
+ * they measure short-game skill in absolute terms regardless of handicap.
+ * The handicap shift is absorbed entirely by the Off-the-Tee residual.
+ */
 function computeRoundSG(
   scores: number[],
   stats: HoleStat[] | null | undefined,
   holes: { par: number }[],
+  handicapIndex: number = 0,
 ) {
   let off_tee = 0, approach = 0, around_green = 0, putting = 0, total = 0;
   let sgHoles = 0;
   if (!stats || !stats.length) return null;
+  const expectedExtraPerHole = (handicapIndex || 0) / 18;
   for (let i = 0; i < scores.length; i++) {
     const par = holes[i]?.par;
     const strokes = scores[i];
@@ -67,12 +80,13 @@ function computeRoundSG(
     const putt = puttBaseline - putts;
     const around = chips > 0 ? 1 - chips : 0;
     const appr = gir ? 0 : -1;
-    const tee = (par - strokes) - putt - around - appr;
+    const expectedStrokes = par + expectedExtraPerHole;
+    const tee = (expectedStrokes - strokes) - putt - around - appr;
     putting += putt;
     around_green += around;
     approach += appr;
     off_tee += tee;
-    total += (par - strokes);
+    total += (expectedStrokes - strokes);
     sgHoles += 1;
   }
   if (sgHoles === 0) return null;
@@ -81,7 +95,10 @@ function computeRoundSG(
 
 /** Inline strokes-gained summary row — renders nothing if no SG-eligible holes. */
 function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] }) {
-  const sg = computeRoundSG(entry.hole_scores ?? [], entry.hole_stats ?? null, holes);
+  const sg = computeRoundSG(
+    entry.hole_scores ?? [], entry.hole_stats ?? null, holes,
+    entry.handicap_index ?? 0,
+  );
   if (!sg) return null;
   const fmt = (n: number) => (n > 0 ? `+${n.toFixed(1)}` : n.toFixed(1));
   const color = (n: number) => (n > 0.05 ? C.green : n < -0.05 ? C.red : C.text);
@@ -97,15 +114,6 @@ function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] 
       </View>
     </View>
   );
-}
-
-function scoreColor(score: number, par: number) {
-  const d = score - par;
-  if (d <= -2) return '#4CAF50';
-  if (d === -1) return '#81C784';
-  if (d === 0) return C.text;
-  if (d === 1) return '#FF9800';
-  return '#F44336';
 }
 
 function useTeeboxHoles(courseId?: string | null, teeboxId?: string | null) {

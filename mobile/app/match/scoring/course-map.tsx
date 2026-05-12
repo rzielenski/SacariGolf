@@ -6,27 +6,10 @@ import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { useLocalSearchParams, router } from 'expo-router';
 import { C, F } from '../../../lib/colors';
+import { distMetres, distYards } from '../../../lib/golfMath';
 
 const ON_COURSE_MILES = 3;
 const ON_COURSE_METRES = ON_COURSE_MILES * 1609.34;
-
-function distMetres(
-  lat1: number, lon1: number,
-  lat2: number, lon2: number,
-): number {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function distYards(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  return distMetres(lat1, lon1, lat2, lon2) * 1.09361;
-}
 
 function isOnCourse(userLat: number, userLng: number, cLat: number, cLng: number): boolean {
   return distMetres(userLat, userLng, cLat, cLng) <= ON_COURSE_METRES;
@@ -197,7 +180,14 @@ export default function CourseMapScreen() {
         {/* Measure pin */}
         {measurePin && (
           <>
-            <Marker coordinate={measurePin} anchor={{ x: 0.5, y: 0.5 }}>
+            {/* tappable + tracksViewChanges off: prevents the marker from
+                swallowing nearby re-taps (a react-native-maps iOS gotcha). */}
+            <Marker
+              coordinate={measurePin}
+              anchor={{ x: 0.5, y: 0.5 }}
+              tappable={false}
+              tracksViewChanges={false}
+            >
               <View style={styles.pinOuter}>
                 <View style={styles.pinInner} />
               </View>

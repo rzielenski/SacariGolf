@@ -30,6 +30,12 @@ export interface ChatMessage {
   body: string;
   user_id: string;
   username: string;
+  /** Server-relative URL to a voice clip (e.g. `/uploads/voice/abc.m4a`)
+   *  if this message is audio. Body becomes a "🎤 Voice message" preview
+   *  string in that case (used for push + conversations-list previews). */
+  voice_url?: string | null;
+  /** Clip duration in ms — present iff voice_url is present. */
+  voice_duration_ms?: number | null;
 }
 
 export interface MatchInvite {

@@ -23,6 +23,7 @@
         "NSPhotoLibraryUsageDescription": "Sacari needs photo access so you can pick a profile picture, upload a 'Find' photo, and set a clan banner.",
         "NSPhotoLibraryAddUsageDescription": "Sacari saves the round summary card to your camera roll so you can share it.",
         "NSCameraUsageDescription": "Sacari uses the camera so you can snap a 'Find' photo without leaving the app.",
+        "NSMicrophoneUsageDescription": "Sacari uses the microphone so you can send voice messages in chats with friends, teammates, and opponents.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -37,7 +38,8 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ]
     },
     "plugins": [

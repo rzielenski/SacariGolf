@@ -74,7 +74,11 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   let resolvedFormat = 'stroke';
   if (typeof format === 'string' && VALID_FORMATS.has(format)) {
     if (format === 'scramble' && matchType !== 'duo' && matchType !== 'squad') {
-      resolvedFormat = 'stroke'; // silently downgrade — solo scramble doesn't make sense
+      resolvedFormat = 'stroke'; // silently downgrade — solo/ffa scramble doesn't make sense
+    } else if ((format === 'match_play' || format === 'skins') && matchType === 'ffa') {
+      // match_play / skins are inherently 1v1 — for arena (3+ players) we
+      // fall back to stroke. Stableford works fine for N players (sum points).
+      resolvedFormat = 'stroke';
     } else {
       resolvedFormat = format;
     }
@@ -161,7 +165,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     // yet migrated) only skips pairing instead of failing match creation.
     let autoPairedOpponentMatchId: string | null = null;
     try {
-    if (!isPractice) {
+    // Arena (ffa) matches are invite-only — never auto-paired against
+    // strangers. The host invites friends; accepters join as new sides.
+    if (!isPractice && matchType !== 'ffa') {
       // Find candidate opponent matches:
       //   • same match_type, format, num_holes
       //   • still open (not completed, not cancelled, not superseded)
@@ -300,7 +306,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 
   const { rows: players } = await pool.query(
     `SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
-            u.username, u.elo, u.avatar_url,
+            u.username, u.elo, u.avatar_url, u.handicap_index,
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
             t.course_id, t.num_holes,
             c.course_name,
@@ -365,7 +371,33 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     }
   }
 
-  return res.json({ ...matchRows[0], players, result: resultRows[0] || null, my_delta_elo, my_perk });
+  // ── Anti-cheat: hide opponent per-hole detail while the match is live ──
+  // Even if my opponent is my friend, I shouldn't be able to scout their
+  // round before mine is in. Redact hole_scores / hole_stats / strokes /
+  // round_id on any player whose side differs from mine until the match
+  // is completed. For Arena (ffa) every other player is a different side,
+  // so they're all hidden. Same-side teammates (duo/squad) stay visible —
+  // we're on the same team, our scores need to combine.
+  // NOTE: we ALWAYS leave the array length intact via a sanitized stub so
+  // the UI can still show "thru hole N" without leaking actual scores.
+  const matchCompleted = !!matchRows[0].completed;
+  const me = players.find((p: any) => p.user_id === req.userId);
+  const mySide = me?.side ?? null;
+  const redactedPlayers = players.map((p: any) => {
+    if (matchCompleted) return p;
+    if (p.user_id === req.userId) return p;
+    if (mySide != null && p.side === mySide) return p;
+    const playedLen = Array.isArray(p.hole_scores) ? p.hole_scores.length : 0;
+    return {
+      ...p,
+      hole_scores: playedLen > 0 ? new Array(playedLen).fill(null) : [],
+      hole_stats: null,
+      strokes: null,
+      round_id: null,
+    };
+  });
+
+  return res.json({ ...matchRows[0], players: redactedPlayers, result: resultRows[0] || null, my_delta_elo, my_perk });
 }));
 
 // List my matches
@@ -923,14 +955,209 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       };
     };
 
+    /**
+     * Arena (free-for-all) ELO resolution. Each player is on their own side.
+     * For N players we run N×(N−1)/2 virtual 1v1s and average each player's
+     * cumulative delta by (N−1) so the per-match ELO magnitude stays
+     * comparable to a regular 1v1. Mathematically equivalent to "every player
+     * plays every other player and we count the average outcome."
+     *
+     * Tie handling: differentials within 0.05 strokes of each other count as
+     * a draw for that pair (each gets 0.5). Standard chess-Elo tie semantics.
+     *
+     * Stableford support: when the match format is stableford we use the
+     * negated points sum as the "differential" so lower = better, matching
+     * the existing 1v1 path's convention.
+     */
+    const resolveEloFFA = async (players: typeof allPlayers, matchId: string) => {
+      // Compute each player's standard 18-hole score differential.
+      type Entry = { p: typeof allPlayers[number]; diff: number; rawPoints?: number };
+      const N = players.length;
+      const useStableford = matchFormat === 'stableford' && parByHoleIdx.length > 0;
+
+      const entries: Entry[] = players.map((p) => {
+        if (useStableford) {
+          // Sum of modified-stableford points across holes. Higher = better,
+          // so we negate so the same "lower = better" comparator works.
+          let pts = 0;
+          const scores = (p.hole_scores as number[] | null) ?? [];
+          for (let i = 0; i < parByHoleIdx.length; i++) {
+            const s = scores[i];
+            if (typeof s !== 'number') continue;
+            pts += modifiedStablefordPoints(s, parByHoleIdx[i]);
+          }
+          return { p, diff: -pts, rawPoints: pts };
+        }
+        if (!p.course_rating || !p.slope_rating) return { p, diff: p.strokes };
+        const subset = holesSubsetForCalc;
+        const overrideRating =
+          subset === 'front' ? p.front_course_rating
+          : subset === 'back'  ? p.back_course_rating
+          : null;
+        const overrideSlope =
+          subset === 'front' ? p.front_slope_rating
+          : subset === 'back'  ? p.back_slope_rating
+          : null;
+        return {
+          p,
+          diff: diff18(
+            p.strokes, p.course_rating, p.slope_rating,
+            p.holes_played, p.teebox_num_holes || p.holes_played,
+            overrideRating, overrideSlope,
+          ),
+        };
+      });
+
+      // Per-player accumulators
+      const deltaByUser = new Map<string, number>(entries.map(e => [e.p.user_id, 0]));
+      const winsByUser  = new Map<string, number>(entries.map(e => [e.p.user_id, 0]));
+      const tiesByUser  = new Map<string, number>(entries.map(e => [e.p.user_id, 0]));
+
+      // Every unordered pair plays a "virtual 1v1". K factor uses the
+      // individual player's tenure / ELO (same as the existing path).
+      for (let i = 0; i < N; i++) {
+        for (let j = i + 1; j < N; j++) {
+          const a = entries[i], b = entries[j];
+          const tie = Math.abs(a.diff - b.diff) < 0.05;
+          const aWins = !tie && a.diff < b.diff;
+          const expA = expectedScore(a.p.elo, b.p.elo);
+          const expB = 1 - expA;
+          const kA = kFactor(a.p.total_matches, a.p.elo);
+          const kB = kFactor(b.p.total_matches, b.p.elo);
+          const actualA = tie ? 0.5 : (aWins ? 1 : 0);
+          const actualB = 1 - actualA;
+          deltaByUser.set(a.p.user_id, (deltaByUser.get(a.p.user_id) ?? 0) + kA * (actualA - expA));
+          deltaByUser.set(b.p.user_id, (deltaByUser.get(b.p.user_id) ?? 0) + kB * (actualB - expB));
+          if (tie) {
+            tiesByUser.set(a.p.user_id, (tiesByUser.get(a.p.user_id) ?? 0) + 1);
+            tiesByUser.set(b.p.user_id, (tiesByUser.get(b.p.user_id) ?? 0) + 1);
+          } else if (aWins) {
+            winsByUser.set(a.p.user_id, (winsByUser.get(a.p.user_id) ?? 0) + 1);
+          } else {
+            winsByUser.set(b.p.user_id, (winsByUser.get(b.p.user_id) ?? 0) + 1);
+          }
+        }
+      }
+
+      // Normalise so a tournament-of-N gives roughly the same per-match ELO
+      // swing as a 1v1 (avoids 8-player arenas blowing your rating by ±100).
+      const divisor = Math.max(1, N - 1);
+
+      // Sort entries by differential (best → worst) to compute placements.
+      const placement = [...entries].sort((a, b) => a.diff - b.diff);
+      const placementByUser = new Map<string, number>();
+      placement.forEach((e, idx) => placementByUser.set(e.p.user_id, idx + 1));
+
+      // Perks: same as 1v1 — a 'lucky_round' perk converts a net-negative
+      // result into 0 and doubles a net-positive result.
+      const allPlayerIds = players.map(p => p.user_id);
+      const { rows: perkRows } = await client.query(
+        `SELECT DISTINCT ON (user_id) user_id, perk_id
+         FROM user_perks
+         WHERE user_id = ANY($1)
+           AND consumed_at IS NULL
+           AND (earned_match_id IS NULL OR earned_match_id != $2)
+         ORDER BY user_id, earned_at ASC`,
+        [allPlayerIds, matchId]
+      );
+      const perkByUser = new Map<string, string>(perkRows.map((r: any) => [r.user_id, r.perk_id]));
+      const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
+
+      for (const e of entries) {
+        const baseRaw = (deltaByUser.get(e.p.user_id) ?? 0) / divisor;
+        const baseChange = Math.round(baseRaw);
+        let eloChange = baseChange;
+        const perkId = perkByUser.get(e.p.user_id);
+        if (perkId && baseChange !== 0) {
+          if (eloChange < 0) eloChange = 0;
+          else eloChange = eloChange * 2;
+          await client.query(
+            `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+            [perkId, matchId]
+          );
+          perkApplications.push({ user_id: e.p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+        }
+
+        const place = placementByUser.get(e.p.user_id) ?? 0;
+        const isWinner = place === 1;
+        const tiedForFirst = placement.filter(x => Math.abs(x.diff - placement[0].diff) < 0.05).length > 1;
+        await client.query(
+          `UPDATE users
+           SET elo = GREATEST(100, elo + $1),
+               total_matches = total_matches + 1,
+               total_wins = total_wins + $2,
+               total_ties = total_ties + $3
+           WHERE user_id = $4`,
+          [
+            eloChange,
+            isWinner && !tiedForFirst ? 1 : 0,
+            isWinner && tiedForFirst ? 1 : 0,
+            e.p.user_id,
+          ]
+        );
+      }
+
+      // Build a placements array for the result UI: { user_id, side, place,
+      // strokes, diff }, sorted by placement.
+      const placements = placement.map((e) => ({
+        user_id: e.p.user_id,
+        side: e.p.side,
+        place: placementByUser.get(e.p.user_id) ?? 0,
+        strokes: e.p.strokes,
+        diff: e.diff,
+        delta_elo_signed: Math.round((deltaByUser.get(e.p.user_id) ?? 0) / divisor),
+        stableford_points: e.rawPoints,
+      }));
+
+      // For the match_results row we record the winner's side; rendering code
+      // that needs the full ordering reads `details.placements`.
+      const winnerSide = placement[0].p.side;
+      const isOverallTie = placements.length > 1
+        && Math.abs(placements[0].diff - placements[1].diff) < 0.05;
+
+      await client.query(
+        `INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+         side2_score_differential, delta_elo, details)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          matchId,
+          'ffa',
+          isOverallTie ? null : winnerSide,
+          placements[0]?.diff ?? null,
+          placements[1]?.diff ?? null,
+          // Biggest single ELO swing in the field — used as the "this match
+          // was worth ±X" headline.
+          Math.max(...placements.map(p => Math.abs(p.delta_elo_signed))),
+          JSON.stringify({
+            ffa: true,
+            placements,
+            tied: isOverallTie,
+            perks: perkApplications,
+            format: matchFormat,
+          }),
+        ]
+      );
+      await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
+      return {
+        ffa: true,
+        winnerSide: isOverallTie ? null : winnerSide,
+        tied: isOverallTie,
+        placements,
+        perks: perkApplications,
+      };
+    };
+
     if (allDone && !matchRows[0].is_practice && allPlayers.length >= 2) {
-      // Multiple players already in match — resolve normally
+      // Multiple players already in match — resolve normally.
       const sides: Record<number, typeof allPlayers> = {};
       for (const p of allPlayers) {
         if (!sides[p.side]) sides[p.side] = [];
         sides[p.side].push(p);
       }
-      if (Object.keys(sides).length >= 2) {
+      if (matchRows[0].match_type === 'ffa') {
+        // Arena — every player on their own side, N-way ranked resolution.
+        result = await resolveEloFFA(allPlayers, req.params.id);
+      } else if (Object.keys(sides).length >= 2) {
         result = await resolveElo(sides[1], sides[2], req.params.id, matchRows[0].match_type);
       }
 
@@ -1513,6 +1740,13 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
         out.lie = s.lie.toLowerCase();
       }
       if (typeof s.recorded_at === 'string') out.recorded_at = s.recorded_at;
+      // Plays-like yardage: client-computed at finalize time using the
+      // current weather snapshot + slope. Optional — older clients omit it.
+      if (typeof s.plays_like_yds === 'number'
+          && s.plays_like_yds >= 0
+          && s.plays_like_yds < 1000) {
+        out.plays_like_yds = s.plays_like_yds;
+      }
       return out;
     }
     // Legacy point format
@@ -1558,14 +1792,15 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
            club, lie,
            start_lat, start_lng, start_elevation_m,
            end_lat,   end_lng,   end_elevation_m,
-           recorded_at, source
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps')`,
+           recorded_at, source, plays_like_yds
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14)`,
         [
           req.userId, req.params.id, holeNum, i,
           s.club ?? 'unknown', s.lie ?? null,
           start.lat, start.lng, start.elevation_m ?? null,
           end.lat,   end.lng,   end.elevation_m ?? null,
           s.recorded_at ?? new Date().toISOString(),
+          s.plays_like_yds ?? null,
         ]
       );
     }
@@ -1600,7 +1835,8 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
                 'end',   json_build_object(
                   'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
                 ),
-                'recorded_at', recorded_at
+                'recorded_at', recorded_at,
+                'plays_like_yds', plays_like_yds
               )
               ORDER BY shot_index
             ) AS shots

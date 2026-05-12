@@ -142,13 +142,18 @@ export default function ProfileScreen() {
   const openNotifications = useCallback(async () => {
     setNotifVisible(true);
     setLoadingNotifs(true);
-    // Persist "seen" state on the server so the badge stays cleared across reloads
+    // Persist "seen" state on the server so the badge stays cleared across reloads.
+    // BUT — chat unreads aren't cleared by the bell tap; they only drop when the
+    // user opens the chat itself. So we re-fetch right after marking seen to
+    // pull back any chat-driven unread count.
     api.users.markNotificationsSeen().catch(() => { });
-    setNotifCount(0);
     try {
       const res = await api.users.notifications();
       setNotifications(res.notifications ?? []);
-    } catch { /* silent */ } finally {
+      setNotifCount(res.chat_unread_count ?? 0);
+    } catch {
+      setNotifCount(0);
+    } finally {
       setLoadingNotifs(false);
     }
   }, []);

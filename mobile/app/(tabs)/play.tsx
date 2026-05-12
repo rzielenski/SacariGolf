@@ -8,6 +8,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
+import { distMetres } from '../../lib/golfMath';
 import { Course, Teebox } from '../../types';
 import { Divider } from '../../components/Flourish';
 
@@ -28,18 +29,9 @@ function teeColor(name: string | null | undefined): string {
   return C.gold;
 }
 
-// Haversine in metres — used for the "you're at <course>" hero detection.
-function distMetres(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371000;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLng = ((lng2 - lng1) * Math.PI) / 180;
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
 const ON_SITE_M = 1500; // ~1 mile — generous so a player parked nearby still gets the hero card
 
-type MatchType = 'solo' | 'duo' | 'squad' | 'practice';
+type MatchType = 'solo' | 'duo' | 'squad' | 'ffa' | 'practice';
 type Format = 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
 
 // Display config for the format picker. Adding a new format means: extend
@@ -54,7 +46,7 @@ const FORMAT_CARDS: { id: Format; name: string; mark: string; desc: string; team
 ];
 type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
-const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'practice'];
+const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'ffa', 'practice'];
 
 export default function PlayScreen() {
   const { user } = useAuth();
@@ -301,7 +293,8 @@ export default function PlayScreen() {
       // Practice doesn't track ELO, no point picking a fancy format
       setStep('course');
     } else {
-      // Solo: let players pick stableford / match play / skins for variety
+      // Solo + Arena: pick a format (Arena restricts to stroke/stableford —
+      // match play and skins are inherently 1v1, scramble is team-only).
       setStep('format');
     }
   };
@@ -328,7 +321,7 @@ export default function PlayScreen() {
 
         {/* Type cards are hidden in challenge mode — the type is locked to
             solo and there's no value in showing the other options. */}
-        {!challengeUserId && (['solo', 'duo', 'squad', 'practice'] as MatchType[]).map((t) => (
+        {!challengeUserId && (['solo', 'duo', 'squad', 'ffa', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -336,17 +329,18 @@ export default function PlayScreen() {
           >
             <View style={styles.typeMark}>
               <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : 'PRC'}
+                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'ffa' ? 'ARN' : 'PRC'}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : 'Practice'}
+                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'ffa' ? 'Arena' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
                 {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
                   : t === 'duo' ? 'Ranked 2v2 — stroke play or scramble'
                   : t === 'squad' ? 'Ranked 4v4 — stroke play or scramble'
+                  : t === 'ffa' ? 'Ranked free-for-all — invite up to 15 friends, lowest score wins'
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>
@@ -470,8 +464,15 @@ export default function PlayScreen() {
   // ── Format selection ──────────────────────────────────────────────────────────
   if (step === 'format') {
     const isTeam = matchType === 'duo' || matchType === 'squad';
-    // Solo / practice players don't see scramble (it requires a team).
-    const visibleCards = FORMAT_CARDS.filter((c) => isTeam || !c.teamOnly);
+    const isFFA = matchType === 'ffa';
+    // Solo / practice players don't see scramble (team-only). Arena hides
+    // scramble too AND hides match_play / skins, which are inherently 1v1
+    // and don't generalise to N-player free-for-all.
+    const visibleCards = FORMAT_CARDS.filter((c) => {
+      if (c.teamOnly) return isTeam;
+      if (isFFA && (c.id === 'match_play' || c.id === 'skins')) return false;
+      return true;
+    });
     return (
       <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep(isTeam ? 'clan' : 'type')}>

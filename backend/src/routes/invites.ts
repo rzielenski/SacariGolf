@@ -116,7 +116,11 @@ router.post('/:id/accept', requireAuth, wrap(async (req: AuthRequest, res: Respo
     }
 
     // Player-count caps so resolveElo never sees an invalid match shape.
-    const SIDE_CAPS: Record<string, number> = { solo: 2, duo: 4, squad: 8 };
+    //   • ffa (Arena) — each player on their own side, ranked free-for-all
+    //   • practice    — host + up to 8 friends playing together unranked
+    const SIDE_CAPS: Record<string, number> = {
+      solo: 2, duo: 4, squad: 8, ffa: 16, practice: 9,
+    };
     const cap = SIDE_CAPS[matchType] ?? 2;
     const { rows: countRows } = await client.query(
       `SELECT COUNT(*)::int AS n FROM match_players WHERE match_id = $1`, [matchId]
@@ -128,17 +132,35 @@ router.post('/:id/accept', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
     let side: number;
     if (matchType === 'duo' || matchType === 'squad') {
+      // Team matches — accepter joins the inviter's side.
       const { rows: sideRows } = await client.query(
         `SELECT side FROM match_players WHERE match_id = $1 AND user_id = $2`,
         [matchId, fromUserId]
       );
       side = sideRows[0]?.side ?? 1;
-    } else {
+    } else if (matchType === 'ffa') {
+      // Arena — every player on their own numbered side (1..N), no cap on
+      // the side number other than the player count cap above.
       const { rows: maxRows } = await client.query(
         `SELECT COALESCE(MAX(side), 0) + 1 AS next FROM match_players WHERE match_id = $1`,
         [matchId]
       );
-      side = Math.min(maxRows[0].next, 2); // solo never goes above side 2
+      side = maxRows[0].next;
+    } else if (matchType === 'practice') {
+      // Multiplayer practice — sides don't really matter (no ELO), but give
+      // each player their own so the scorecard / spectator view can split.
+      const { rows: maxRows } = await client.query(
+        `SELECT COALESCE(MAX(side), 0) + 1 AS next FROM match_players WHERE match_id = $1`,
+        [matchId]
+      );
+      side = maxRows[0].next;
+    } else {
+      // Solo: never goes above side 2.
+      const { rows: maxRows } = await client.query(
+        `SELECT COALESCE(MAX(side), 0) + 1 AS next FROM match_players WHERE match_id = $1`,
+        [matchId]
+      );
+      side = Math.min(maxRows[0].next, 2);
     }
 
     await client.query(

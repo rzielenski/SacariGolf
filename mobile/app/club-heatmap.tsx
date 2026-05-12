@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity, Alert } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
@@ -16,16 +16,30 @@ import { OrnamentTitle } from '../components/Flourish';
  * No rendering library required — we just compute a coarse 2D histogram and
  * draw it with absolutely-positioned Views. Keeps the bundle small.
  */
+/** Single row in the dispersion array — the API may attach a shot_id +
+ *  recorded_at when the source row is a GPS-tracked shot (vs. legacy /
+ *  imported launch-monitor data which carry no row identity). */
+type DispersionEntry = {
+  shot_id: string | null;
+  recorded_at: string | null;
+  lateral_yds: number;
+  long_yds: number;
+  dist_yds: number;
+};
+
+type ClubsData = {
+  clubs: {
+    club: string; shots: number; avg_yds: number; median_yds: number;
+    dispersion: DispersionEntry[];
+  }[];
+};
+
 export default function ClubHeatmapScreen() {
   const { user } = useAuth();
-  const [data, setData] = useState<{
-    clubs: {
-      club: string; shots: number; avg_yds: number; median_yds: number;
-      dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
-    }[];
-  } | null>(null);
+  const [data, setData] = useState<ClubsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -41,6 +55,56 @@ export default function ClubHeatmapScreen() {
   if (!user) return null;
 
   const club = data?.clubs.find(c => c.club === selected) ?? null;
+
+  /** Optimistically drop the shot from local state, fire DELETE, and roll
+   *  back on failure. Refetching club-stats after every delete would feel
+   *  janky on a 100-shot list — the median/avg are recomputed below. */
+  const handleDelete = (shotId: string) => {
+    Alert.alert(
+      'Delete shot?',
+      'This removes the shot from your stats and heatmap. It cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingId(shotId);
+            const prev = data;
+            // Optimistic: remove the matching dispersion entry from every club
+            // (a shot belongs to exactly one club, but locating it that way is
+            // O(C·N)) and decrement the count.
+            if (prev) {
+              const next: ClubsData = {
+                clubs: prev.clubs.map(c => {
+                  const filtered = c.dispersion.filter(d => d.shot_id !== shotId);
+                  if (filtered.length === c.dispersion.length) return c;
+                  const dists = filtered.map(d => d.dist_yds);
+                  const median = dists.length
+                    ? Math.round([...dists].sort((a, b) => a - b)[Math.floor(dists.length / 2)])
+                    : 0;
+                  const avg = dists.length
+                    ? Math.round(dists.reduce((a, b) => a + b, 0) / dists.length)
+                    : 0;
+                  return { ...c, dispersion: filtered, shots: filtered.length, median_yds: median, avg_yds: avg };
+                }).filter(c => c.shots > 0),
+              };
+              setData(next);
+            }
+            try {
+              await api.users.deleteShot(shotId);
+            } catch (e: any) {
+              // Roll back on failure.
+              setData(prev);
+              Alert.alert('Could not delete', e?.message ?? 'Try again.');
+            } finally {
+              setDeletingId(null);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.content}>
@@ -104,6 +168,20 @@ export default function ClubHeatmapScreen() {
                 <Text style={{ color: '#ff2d55', fontWeight: '900' }}>◯ </Text>
                 2σ (~95%)
               </Text>
+
+              {/* Per-shot list — lets the player remove mistracked shots so
+                  bad GPS readings don't poison their averages. */}
+              <View style={{ height: 18 }} />
+              <OrnamentTitle title="Shots" align="center" />
+              <Text style={s.subtitle}>
+                Distances are normalized to neutral conditions (wind / slope / temp factored out).
+                Tap × to remove a mistracked shot.
+              </Text>
+              <ShotList
+                dispersion={club.dispersion}
+                deletingId={deletingId}
+                onDelete={handleDelete}
+              />
             </>
           )}
 
@@ -132,7 +210,7 @@ function RangeHeatmap({
   dispersion,
   medianYds,
 }: {
-  dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+  dispersion: DispersionEntry[];
   medianYds: number;
 }) {
   // Range surface dimensions. Portrait — longer than wide, like a real range.
@@ -572,6 +650,81 @@ function densityColor(t: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
+/** Vertically-scrolling list of every shot for the selected club. Entries
+ *  that came from a tracked GPS round carry a `shot_id` and get a delete
+ *  button; legacy/imported rows have no row identity and render read-only.
+ *  Outer ScrollView already handles vertical scroll — capping at maxHeight
+ *  keeps a long list from pushing the heatmap off-screen. */
+function ShotList({
+  dispersion,
+  deletingId,
+  onDelete,
+}: {
+  dispersion: DispersionEntry[];
+  deletingId: string | null;
+  onDelete: (shotId: string) => void;
+}) {
+  // Newest first — the recorded_at field is null for legacy rows, sort those
+  // to the bottom.
+  const ordered = useMemo(() => {
+    return [...dispersion].sort((a, b) => {
+      if (a.recorded_at && b.recorded_at) return b.recorded_at.localeCompare(a.recorded_at);
+      if (a.recorded_at) return -1;
+      if (b.recorded_at) return 1;
+      return 0;
+    });
+  }, [dispersion]);
+
+  if (!ordered.length) {
+    return <Text style={s.shotEmpty}>No shots in this club yet.</Text>;
+  }
+
+  return (
+    <ScrollView
+      style={s.shotListBox}
+      nestedScrollEnabled
+      showsVerticalScrollIndicator
+    >
+      {ordered.map((sh, i) => {
+        const dateLabel = sh.recorded_at
+          ? new Date(sh.recorded_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })
+          : 'imported';
+        const lateral = sh.lateral_yds;
+        const latLabel =
+          lateral === 0 ? 'on line'
+          : lateral > 0 ? `${lateral}R`
+          : `${-lateral}L`;
+        const canDelete = !!sh.shot_id;
+        const deleting = sh.shot_id != null && deletingId === sh.shot_id;
+        return (
+          <View key={sh.shot_id ?? `legacy-${i}`} style={s.shotRow}>
+            <Text style={s.shotDist}>{sh.dist_yds}<Text style={s.shotDistUnit}> yds</Text></Text>
+            <View style={{ flex: 1 }}>
+              <Text style={s.shotMeta}>{dateLabel}</Text>
+              <Text style={s.shotMetaSub}>{latLabel}</Text>
+            </View>
+            {canDelete ? (
+              <TouchableOpacity
+                style={s.shotDelBtn}
+                onPress={() => sh.shot_id && onDelete(sh.shot_id)}
+                disabled={deleting}
+                activeOpacity={0.6}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                {deleting
+                  ? <ActivityIndicator size="small" color={C.textMuted} />
+                  : <Text style={s.shotDelBtnText}>×</Text>}
+              </TouchableOpacity>
+            ) : (
+              <View style={s.shotDelPlaceholder} />
+            )}
+          </View>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
 function SumCell({ label, value }: { label: string; value: string }) {
   return (
     <View style={s.sumCell}>
@@ -638,4 +791,31 @@ const s = StyleSheet.create({
     position: 'absolute',
     left: 0, right: 0,
   },
+
+  // Per-shot list
+  shotListBox: {
+    maxHeight: 320, marginTop: 10,
+    borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    backgroundColor: C.card,
+  },
+  shotRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 10, paddingHorizontal: 14,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  shotDist: {
+    color: C.gold, fontFamily: F.serif, fontSize: 20, fontWeight: '800',
+    minWidth: 80,
+  },
+  shotDistUnit: { color: C.textMuted, fontFamily: F.serif, fontSize: 12, fontWeight: '600' },
+  shotMeta: { color: C.text, fontSize: 12, fontWeight: '700' },
+  shotMetaSub: { color: C.textMuted, fontSize: 11, marginTop: 1 },
+  shotDelBtn: {
+    width: 32, height: 32, borderRadius: 16,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  shotDelBtnText: { color: C.textMuted, fontSize: 20, fontWeight: '800', lineHeight: 22 },
+  shotDelPlaceholder: { width: 32, height: 32 },
+  shotEmpty: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 12, fontStyle: 'italic' },
 });

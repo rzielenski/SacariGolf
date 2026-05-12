@@ -246,6 +246,24 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     [req.params.id]
   );
 
+  // Skill baseline: instead of measuring SG vs. scratch (par), we measure
+  // vs. the player's own handicap-adjusted expectation. A 20-cap shooting
+  // 92 on par 72 should see "+0 SG" — they played to their level — not
+  // "−20 SG". Course-specific scoring averages would be better but we
+  // don't have enough rounds per course to estimate one, so handicap is
+  // the cleanest skill-level generalization.
+  //
+  // Per-hole expected strokes = par + (handicap_index / 18). Players with
+  // no stored handicap (brand new accounts) fall back to scratch baseline.
+  const { rows: userRows } = await pool.query(
+    `SELECT handicap_index FROM users WHERE user_id = $1`,
+    [req.params.id]
+  );
+  const handicapIndex: number = typeof userRows[0]?.handicap_index === 'number'
+    ? userRows[0].handicap_index
+    : 0;
+  const expectedExtraPerHole = handicapIndex / 18;
+
   // Aggregators
   let roundsCount = 0;
   let holesPlayed = 0;
@@ -312,25 +330,37 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
       }
 
       // 4-category basic SG — needs putts, chips AND gir tracked.
-      // Baselines (Shotscope-style simplified):
+      // Baselines (Shotscope-style simplified) measured against the
+      // player's HANDICAP-ADJUSTED expectation, not raw par. This means a
+      // 20-cap who plays to their handicap sees ~0 SG total, and a tour-
+      // pro-level player would see +20 SG on the same scorecard.
+      //
       //   • Putting baseline = 2 if the player reached the green (GIR), else 1.
       //     If the player chipped on, they're effectively in 1-putt territory, so
       //     2-putting a chip = 0 SG (par for that recovery), 1-putt = +1, 3-putt = −1.
       //   • Around-Green baseline = 1 chip (when chips > 0).
       //   • Approach baseline = GIR (gir = 0 SG, missed green = −1).
-      //   • Off-the-Tee = residual so the four sum to (par − strokes).
+      //   • Off-the-Tee = residual so the four sum to (expected − strokes),
+      //     where expected = par + (handicap_index / 18).
+      //
+      // We keep the putting / around / approach baselines unchanged — they
+      // measure short-game skill in absolute terms (a 1-putt is a 1-putt
+      // regardless of handicap). The handicap shift is absorbed entirely
+      // by the Off-the-Tee residual, which is by far the noisiest signal
+      // anyway. That keeps the short-game categories interpretable.
       if (putts !== null && chips !== null && gir !== null) {
         sgHoles += 1;
+        const expectedStrokes = par + expectedExtraPerHole;
         const puttBaseline = chips > 0 ? 1 : 2;
         const putt = puttBaseline - putts;
         const around = chips > 0 ? (1 - chips) : 0;
         const approach = gir ? 0 : -1;
-        const tee = (par - strokes) - putt - around - approach;
+        const tee = (expectedStrokes - strokes) - putt - around - approach;
         sgPutting += putt;
         sgAroundGreen += around;
         sgApproach += approach;
         sgOffTee += tee;
-        sgTotal += (par - strokes);
+        sgTotal += (expectedStrokes - strokes);
       }
     }
   }
@@ -452,7 +482,8 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // to a generous cap so a power user with thousands of shots doesn't
   // blow up memory; the most recent 5000 are plenty for stats.
   const { rows: shotRows } = await pool.query(
-    `SELECT club, start_lat, start_lng, end_lat, end_lng
+    `SELECT shot_id, club, start_lat, start_lng, end_lat, end_lng,
+            plays_like_yds, recorded_at
        FROM shots
       WHERE user_id = $1
         AND club IS NOT NULL
@@ -464,15 +495,27 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // Wrap in the shape the existing aggregator expects.
   const rows: { shots: any[] }[] = [{
     shots: shotRows.map((s: any) => ({
+      shot_id: s.shot_id,
       club: s.club,
       start: { lat: s.start_lat, lng: s.start_lng },
       end:   { lat: s.end_lat,   lng: s.end_lng },
+      plays_like_yds: s.plays_like_yds,
+      recorded_at: s.recorded_at,
     })),
   }];
 
   // Per-club bucket: collect every shot's (distance_m, bearing_rad) pair,
-  // plus the raw start/end so we can normalise.
-  type ShotVec = { dist_m: number; bearing: number };
+  // plus the raw start/end so we can normalise. shot_id + recorded_at are
+  // carried through so the client can offer per-shot delete + show dates.
+  // plays_like_yds (client-computed plays-like distance using weather + slope
+  // at recording time) is preferred for distance metrics when present.
+  type ShotVec = {
+    dist_m: number;
+    bearing: number;
+    plays_like_yds: number | null;
+    shot_id: string | null;
+    recorded_at: string | null;
+  };
   const byClub = new Map<string, ShotVec[]>();
 
   // Haversine — meters between two lat/lng points
@@ -495,23 +538,36 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   }
 
   /** Walk the per-hole shot list, normalising both the new segment format
-   *  and the legacy point format into (start, end, club) triples. */
-  const eachShotSegment = (rawShots: any[]): { start: any; end: any; club: string }[] => {
+   *  and the legacy point format into (start, end, club, shot_id?, ...) tuples. */
+  type Segment = {
+    start: any; end: any; club: string;
+    shot_id: string | null;
+    plays_like_yds: number | null;
+    recorded_at: string | null;
+  };
+  const eachShotSegment = (rawShots: any[]): Segment[] => {
     if (!rawShots.length) return [];
     if (rawShots[0]?.start && rawShots[0]?.end) {
-      // New segment format
       return rawShots
         .filter((s: any) => s?.start && s?.end && typeof s.club === 'string')
-        .map((s: any) => ({ start: s.start, end: s.end, club: s.club }));
+        .map((s: any) => ({
+          start: s.start, end: s.end, club: s.club,
+          shot_id: s.shot_id ?? null,
+          plays_like_yds: typeof s.plays_like_yds === 'number' ? s.plays_like_yds : null,
+          recorded_at: s.recorded_at ?? null,
+        }));
     }
     // Legacy: points where shots[i] = "where shot i+1 was hit FROM"
-    const out: { start: any; end: any; club: string }[] = [];
+    const out: Segment[] = [];
     for (let i = 0; i < rawShots.length - 1; i++) {
       const cur = rawShots[i];
       const nxt = rawShots[i + 1];
       if (typeof cur?.lat !== 'number' || typeof nxt?.lat !== 'number') continue;
       if (typeof cur.club !== 'string') continue;
-      out.push({ start: cur, end: nxt, club: cur.club });
+      out.push({
+        start: cur, end: nxt, club: cur.club,
+        shot_id: null, plays_like_yds: null, recorded_at: null,
+      });
     }
     return out;
   };
@@ -523,7 +579,12 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       if (dist_m < 1 || dist_m > 500) continue; // sanity: drop GPS noise / impossibly long
       const b = bearing(seg.start, seg.end);
       const arr = byClub.get(seg.club) ?? [];
-      arr.push({ dist_m, bearing: b });
+      arr.push({
+        dist_m, bearing: b,
+        plays_like_yds: seg.plays_like_yds,
+        shot_id: seg.shot_id,
+        recorded_at: seg.recorded_at,
+      });
       byClub.set(seg.club, arr);
     }
   }
@@ -537,18 +598,30 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
   };
 
+  /** Distance for stat aggregation: plays-like if the client computed it
+   *  at recording time, else raw GPS distance. */
+  const ydsFor = (v: ShotVec) =>
+    v.plays_like_yds != null ? v.plays_like_yds : v.dist_m * M_TO_YDS;
+
   const clubs: any[] = [];
   for (const [club, vecs] of byClub.entries()) {
     if (vecs.length < 2) {
       // Not enough samples to call a "median direction"; still report distance.
-      const yds = vecs.map(v => v.dist_m * M_TO_YDS);
+      const yds = vecs.map(ydsFor);
       clubs.push({
         club,
         shots: vecs.length,
         avg_yds:    Math.round(yds.reduce((a, b) => a + b, 0) / yds.length),
         median_yds: Math.round(median(yds)),
-        // Dispersion needs ≥2 samples to define a frame.
-        dispersion: [],
+        // Dispersion needs ≥2 samples to define a frame, but we still
+        // surface the individual shots so the client can list + delete them.
+        dispersion: vecs.map(v => ({
+          shot_id: v.shot_id,
+          recorded_at: v.recorded_at,
+          dist_yds: Math.round(ydsFor(v)),
+          lateral_yds: 0,
+          long_yds: 0,
+        })),
       });
       continue;
     }
@@ -565,14 +638,16 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     });
     const medB = refB + median(offsets);
 
-    const yds = vecs.map(v => v.dist_m * M_TO_YDS);
-    const medYds = median(yds);
+    // For stat aggregates we use plays-like yds when present; for the
+    // heatmap projection we still use raw GPS geometry so the dispersion
+    // pattern reflects WHERE shots actually landed (plays-like is a
+    // distance-only adjustment, not a position).
+    const statYds = vecs.map(ydsFor);
+    const medYds = median(statYds);
 
-    // Dispersion frame: forward axis = median bearing.
-    // For each shot, project (dx_m, dy_m) onto the median frame:
-    //   forward  =  dist * cos(bearing − medB)
-    //   lateral  =  dist * sin(bearing − medB)   (positive = right of target line)
-    // Then offsets relative to median distance: longitudinal = forward − medDist
+    // Dispersion frame: forward axis = median bearing. The lateral/long
+    // numbers are pure GPS geometry; dist_yds is the plays-like value
+    // (when available) so the list view shows the normalized distance.
     const dispersion = vecs.map(v => {
       let off = v.bearing - medB;
       while (off > Math.PI) off -= 2 * Math.PI;
@@ -581,18 +656,20 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       const lat_m  = v.dist_m * Math.sin(off);
       const fwd_yds = fwd_m * M_TO_YDS;
       const lat_yds = lat_m * M_TO_YDS;
+      const distOut = v.plays_like_yds != null ? v.plays_like_yds : fwd_yds;
       return {
-        // Round to whole yards for compactness
+        shot_id: v.shot_id,
+        recorded_at: v.recorded_at,
         lateral_yds: Math.round(lat_yds),
-        long_yds:    Math.round(fwd_yds - medYds), // signed: + = long, − = short
-        dist_yds:    Math.round(fwd_yds),
+        long_yds:    Math.round(distOut - medYds), // signed: + = long, − = short
+        dist_yds:    Math.round(distOut),
       };
     });
 
     clubs.push({
       club,
       shots: vecs.length,
-      avg_yds:    Math.round(yds.reduce((a, b) => a + b, 0) / yds.length),
+      avg_yds:    Math.round(statYds.reduce((a, b) => a + b, 0) / statYds.length),
       median_yds: Math.round(medYds),
       dispersion,
     });
@@ -601,6 +678,22 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // Stable order: longest median distance first (driver → wedges → putter)
   clubs.sort((a, b) => (b.median_yds || 0) - (a.median_yds || 0));
   return res.json({ clubs });
+}));
+
+/**
+ * Delete a single shot owned by the authenticated user. Used from the club
+ * heatmap / advanced stats screen when the player wants to drop a mistracked
+ * shot from their stats. Restricted to the shot's owner — no admin override.
+ */
+router.delete('/me/shots/:shotId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { shotId } = req.params;
+  if (!shotId) return res.status(400).json({ error: 'shotId required' });
+  const { rowCount } = await pool.query(
+    `DELETE FROM shots WHERE shot_id = $1 AND user_id = $2`,
+    [shotId, req.userId]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'Shot not found' });
+  return res.json({ success: true });
 }));
 
 /**
@@ -1507,8 +1600,58 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
 
   notes.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-  const unreadCount = notes.filter((n) => new Date(n.created_at) > new Date(seenAt)).length;
-  return res.json({ notifications: notes, unread_count: unreadCount });
+  // Chat unreads — fold into the bell badge so the user sees an alert when a
+  // chat push notification arrived for a conversation they haven't opened.
+  // These are NOT cleared by the "mark notifications seen" action (the bell
+  // tap) — only by actually opening the chat. Hence the separate count.
+  let chatUnreadCount = 0;
+  try {
+    const { rows: chatRows } = await pool.query(
+      `WITH dm_unread AS (
+         SELECT 1 AS n
+         FROM direct_messages dm
+         LEFT JOIN chat_reads cr
+                ON cr.user_id = $1 AND cr.kind = 'dm' AND cr.chat_key = dm.from_user_id
+         WHERE dm.to_user_id = $1
+           AND (cr.last_read_at IS NULL OR dm.created_at > cr.last_read_at)
+         GROUP BY dm.from_user_id
+       ),
+       match_unread AS (
+         SELECT 1 AS n
+         FROM match_players mp
+         JOIN messages m ON m.match_id = mp.match_id AND m.user_id != $1
+         LEFT JOIN chat_reads cr
+                ON cr.user_id = $1 AND cr.kind = 'match' AND cr.chat_key = mp.match_id
+         WHERE mp.user_id = $1
+         GROUP BY mp.match_id, cr.last_read_at
+         HAVING MAX(m.created_at) > COALESCE(MAX(cr.last_read_at), 'epoch')
+       ),
+       clan_unread AS (
+         SELECT 1 AS n
+         FROM clan_members cm
+         JOIN messages m ON m.clan_id = cm.clan_id AND m.user_id != $1
+         LEFT JOIN chat_reads cr
+                ON cr.user_id = $1 AND cr.kind = 'clan' AND cr.chat_key = cm.clan_id
+         WHERE cm.user_id = $1
+         GROUP BY cm.clan_id, cr.last_read_at
+         HAVING MAX(m.created_at) > COALESCE(MAX(cr.last_read_at), 'epoch')
+       )
+       SELECT
+         (SELECT COUNT(*) FROM dm_unread)::int +
+         (SELECT COUNT(*) FROM match_unread)::int +
+         (SELECT COUNT(*) FROM clan_unread)::int
+         AS total`,
+      [req.userId]
+    );
+    chatUnreadCount = chatRows[0]?.total ?? 0;
+  } catch { /* chat_reads table may not exist yet on older deployments */ }
+
+  const baseUnread = notes.filter((n) => new Date(n.created_at) > new Date(seenAt)).length;
+  return res.json({
+    notifications: notes,
+    unread_count: baseUnread + chatUnreadCount,
+    chat_unread_count: chatUnreadCount,
+  });
 }));
 
 // Mark notifications as seen (resets the unread badge)

@@ -396,18 +396,26 @@ function ChatsTab() {
   const [dms, setDms] = useState<any[]>([]);
   const [matches, setMatches] = useState<any[]>([]);
   const [clans, setClans] = useState<any[]>([]);
+  // Unread tracking — DM unread comes inline on `conversations`; match + clan
+  // unread come from the separate /messages/unread-summary endpoint so we
+  // don't bloat the matches.list / clans.mine responses everyone else uses.
+  const [unreadMatchIds, setUnreadMatchIds] = useState<Set<string>>(new Set());
+  const [unreadClanIds, setUnreadClanIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [convs, allMatches, myClans] = await Promise.all([
+      const [convs, allMatches, myClans, unread] = await Promise.all([
         api.messages.conversations(),
         api.matches.list(),
         api.clans.mine(),
+        api.messages.unreadSummary().catch(() => ({ matches: [], clans: [] })),
       ]);
       setDms(convs);
       setMatches(allMatches.filter((m: any) => !m.completed));
       setClans(myClans);
+      setUnreadMatchIds(new Set(unread.matches));
+      setUnreadClanIds(new Set(unread.clans));
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
 
@@ -415,63 +423,116 @@ function ChatsTab() {
 
   if (loading) return <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />;
 
+  // Sort each list: unread first (preserving their relative order), then read.
+  // Stable partition keeps server-side ordering (most-recent-first) intact
+  // within each bucket so newest unread floats to the top.
+  const sortByUnread = <T,>(arr: T[], isUnread: (x: T) => boolean): T[] => {
+    const u: T[] = [], r: T[] = [];
+    for (const x of arr) (isUnread(x) ? u : r).push(x);
+    return [...u, ...r];
+  };
+  const dmsSorted     = sortByUnread(dms,     (c: any) => !!c.unread);
+  const matchesSorted = sortByUnread(matches, (m: any) => unreadMatchIds.has(m.match_id));
+  const clansSorted   = sortByUnread(clans,   (c: any) => unreadClanIds.has(c.clan_id));
+
   return (
     <ScrollView style={{ flex: 1 }}>
       <Text style={styles.sectionTitle}>Direct Messages</Text>
-      {dms.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No conversations yet</Text>}
-      {dms.map((conv) => (
+      {dmsSorted.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No conversations yet</Text>}
+      {dmsSorted.map((conv) => (
         <TouchableOpacity
           key={conv.other_id}
-          style={styles.userRow}
-          onPress={() => router.push(`/chat/dm/${conv.other_id}?name=${encodeURIComponent(conv.other_username)}` as any)}
+          style={[styles.userRow, conv.unread && styles.userRowUnread]}
+          onPress={() => {
+            // Optimistically clear the local dot so it disappears before
+            // the chat screen even loads. Server mark happens in chat/[id].
+            if (conv.unread) {
+              setDms((prev) => prev.map((c: any) => c.other_id === conv.other_id ? { ...c, unread: false } : c));
+            }
+            router.push(`/chat/dm/${conv.other_id}?name=${encodeURIComponent(conv.other_username)}` as any);
+          }}
         >
           <View style={styles.userAvatar}>
             <Text style={styles.avatarText}>{conv.other_username[0].toUpperCase()}</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.userName}>{conv.other_username}</Text>
-            {conv.last_message ? <Text style={styles.userElo} numberOfLines={1}>{conv.last_message}</Text> : null}
+            <Text style={[styles.userName, conv.unread && styles.userNameUnread]}>{conv.other_username}</Text>
+            {conv.last_message ? (
+              <Text
+                style={[styles.userElo, conv.unread && styles.userMsgUnread]}
+                numberOfLines={1}
+              >
+                {conv.last_message}
+              </Text>
+            ) : null}
           </View>
+          {conv.unread && <View style={styles.unreadDot} />}
         </TouchableOpacity>
       ))}
 
       <Text style={styles.sectionTitle}>Match Chats</Text>
-      {matches.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No active matches</Text>}
-      {matches.map((m) => (
-        <TouchableOpacity
-          key={m.match_id}
-          style={styles.userRow}
-          onPress={() => router.push(`/chat/match/${m.match_id}` as any)}
-        >
-          <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-            <Text style={[styles.avatarText, { fontSize: 12 }]}>
-              {m.match_type === 'solo' ? '1v1' : m.match_type === 'duo' ? '2v2' : m.match_type === 'squad' ? '4v4' : 'PRC'}
-            </Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.userName}>{m.name || m.match_type}</Text>
-            <Text style={styles.userElo}>Match ID: {m.match_id.slice(0, 8)}…</Text>
-          </View>
-        </TouchableOpacity>
-      ))}
+      {matchesSorted.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No active matches</Text>}
+      {matchesSorted.map((m) => {
+        const unread = unreadMatchIds.has(m.match_id);
+        return (
+          <TouchableOpacity
+            key={m.match_id}
+            style={[styles.userRow, unread && styles.userRowUnread]}
+            onPress={() => {
+              if (unread) {
+                setUnreadMatchIds((prev) => {
+                  const next = new Set(prev); next.delete(m.match_id); return next;
+                });
+              }
+              router.push(`/chat/match/${m.match_id}` as any);
+            }}
+          >
+            <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
+              <Text style={[styles.avatarText, { fontSize: 12 }]}>
+                {m.match_type === 'solo' ? '1v1'
+                  : m.match_type === 'duo' ? '2v2'
+                  : m.match_type === 'squad' ? '4v4'
+                  : m.match_type === 'ffa' ? 'ARN'
+                  : 'PRC'}
+              </Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.userName, unread && styles.userNameUnread]}>{m.name || m.match_type}</Text>
+              <Text style={styles.userElo}>Match ID: {m.match_id.slice(0, 8)}…</Text>
+            </View>
+            {unread && <View style={styles.unreadDot} />}
+          </TouchableOpacity>
+        );
+      })}
 
       <Text style={styles.sectionTitle}>Team Chats</Text>
-      {clans.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No clans joined</Text>}
-      {clans.map((c) => (
-        <TouchableOpacity
-          key={c.clan_id}
-          style={styles.userRow}
-          onPress={() => router.push(`/chat/clan/${c.clan_id}` as any)}
-        >
-          <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-            <Text style={styles.avatarText}>{c.name[0].toUpperCase()}</Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.userName}>{c.name}</Text>
-            <Text style={styles.userElo}>{c.clan_mode.toUpperCase()} · {c.member_count} members</Text>
-          </View>
-        </TouchableOpacity>
-      ))}
+      {clansSorted.length === 0 && <Text style={[styles.emptySubText, { marginLeft: 16, marginBottom: 8 }]}>No clans joined</Text>}
+      {clansSorted.map((c) => {
+        const unread = unreadClanIds.has(c.clan_id);
+        return (
+          <TouchableOpacity
+            key={c.clan_id}
+            style={[styles.userRow, unread && styles.userRowUnread]}
+            onPress={() => {
+              if (unread) {
+                setUnreadClanIds((prev) => {
+                  const next = new Set(prev); next.delete(c.clan_id); return next;
+                });
+              }
+              router.push(`/chat/clan/${c.clan_id}` as any);
+            }}
+          >
+            <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
+              <Text style={styles.avatarText}>{c.name[0].toUpperCase()}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.userName, unread && styles.userNameUnread]}>{c.name}</Text>
+              <Text style={styles.userElo}>{c.clan_mode.toUpperCase()} · {c.member_count} members</Text>
+            </View>
+            {unread && <View style={styles.unreadDot} />}
+          </TouchableOpacity>
+        );
+      })}
     </ScrollView>
   );
 }
@@ -499,6 +560,16 @@ const styles = StyleSheet.create({
   avatarText: { color: C.gold, fontWeight: '800', fontSize: 16 },
   userName: { color: C.text, fontWeight: '700', fontSize: 15 },
   userElo: { color: C.textMuted, fontSize: 12 },
+  // Unread states — a brighter row border + a gold dot on the right. The
+  // last-message preview also pops from muted to full-text so a quick glance
+  // separates "new message" from "old conversation".
+  userRowUnread: { borderColor: C.gold, backgroundColor: C.gold + '0d' },
+  userNameUnread: { color: C.gold },
+  userMsgUnread: { color: C.text, fontWeight: '600' },
+  unreadDot: {
+    width: 10, height: 10, borderRadius: 5, backgroundColor: C.gold,
+    marginLeft: 6,
+  },
   addBtn: { borderRadius: 4, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold },
   addBtnText: { color: C.gold, fontWeight: '700', fontSize: 12 },
   inviteRow: {

@@ -10,6 +10,9 @@ import { init as initPurchases } from '../lib/purchases';
 import { ONBOARDING_KEY, setOnboardedState, subscribeOnboardedState } from '../lib/onboardingState';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
 import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
+import { AppErrorBoundary } from '../components/AppErrorBoundary';
+import { OfflineBanner } from '../components/OfflineBanner';
+import { installOutboxDrainTriggers } from '../lib/outbox';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -97,6 +100,30 @@ function AuthGuard() {
     initPurchases(user.user_id).catch(() => { /* non-fatal */ });
   }, [user?.user_id]);
 
+  // Route notification taps. The backend tags every push with a `data.type`
+  // — match invites carry `type: 'invite'` (see `invites.ts`). When the user
+  // taps the system notification we route them to where they can act on it:
+  //   • invite        → social tab (invites list at the top of the screen)
+  //   • matchFound    → match lobby (already covered by MatchFoundWatcher,
+  //                     but the explicit tap is a nicer UX than waiting for
+  //                     the poll)
+  // Other types are left for their own handlers / no-op.
+  useEffect(() => {
+    if (!user) return;
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification?.request?.content?.data as any;
+      if (!data) return;
+      if (data.type === 'invite') {
+        // Social tab houses the pending-invites list at the top — landing
+        // here gives the player a one-tap accept/decline UI.
+        router.push('/(tabs)/social' as any);
+      } else if (data.type === 'matchFound' && typeof data.matchId === 'string') {
+        router.push(`/match/${data.matchId}` as any);
+      }
+    });
+    return () => sub.remove();
+  }, [user?.user_id]);
+
   // Pre-warm map tiles for the user's home course so the next round there
   // loads instantly even on a flaky connection.
   return (
@@ -132,13 +159,19 @@ function KeyboardDismissOnBackground() {
   return null;
 }
 
+// Boot-time outbox installer — wires up auto-drain on connectivity restore
+// + app foreground. Idempotent so re-mounts during HMR don't double-bind.
+installOutboxDrainTriggers();
+
 export default function RootLayout() {
   return (
-    <AuthProvider>
-      <StatusBar style="light" />
-      <KeyboardDismissOnBackground />
-      <AuthGuard />
-      <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
+    <AppErrorBoundary>
+      <AuthProvider>
+        <StatusBar style="light" />
+        <KeyboardDismissOnBackground />
+        <OfflineBanner />
+        <AuthGuard />
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
@@ -150,12 +183,14 @@ export default function RootLayout() {
         <Stack.Screen name="chat/[type]/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="leaderboard" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="course/admin-pins/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="user/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="stats" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="premium" options={{ animation: 'slide_from_bottom', headerShown: true, presentation: 'modal' }} />
         <Stack.Screen name="club-heatmap" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
-    </AuthProvider>
+      </AuthProvider>
+    </AppErrorBoundary>
   );
 }

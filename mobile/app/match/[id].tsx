@@ -358,15 +358,42 @@ export default function MatchLobbyScreen() {
       )}
 
       {/* Auto-rendered scorecards — appear as soon as any player submits scores,
-          so per-round strokes-gained shows up without waiting on opponents. */}
-      {match.players?.some((p) => p.hole_scores?.length) && (
+          so per-round strokes-gained shows up without waiting on opponents.
+          ANTI-SCOUT: until the match is completed, only the player and their
+          same-side teammates can see scorecards. Opponents (even friends) are
+          hidden so nobody can pace themselves to a known target. The backend
+          additionally redacts hole_scores/hole_stats on those rows. */}
+      {(() => {
+        const matchCompleted = !!match.completed;
+        const me = match.players?.find((p) => p.user_id === user?.user_id);
+        const mySide = me?.side ?? null;
+        const visiblePlayers = (match.players ?? []).filter((p) => {
+          if (!p.hole_scores?.length) return false;
+          if (matchCompleted) return true;
+          if (p.user_id === user?.user_id) return true;
+          // Same-side teammates (duo/squad) — fine to see during play.
+          // Different side (solo opponent, Arena rival) — hidden until done.
+          return mySide != null && p.side === mySide;
+        });
+        if (!visiblePlayers.length && !(match.guest_players ?? []).some((g) => g.scores?.length)) {
+          return null;
+        }
+        return (
         <>
           <Divider style={{ marginTop: 24 }} />
           <OrnamentTitle title="Scorecards" align="center" />
-          {match.players?.filter((p) => p.hole_scores?.length).map((p) => {
+          {!matchCompleted && visiblePlayers.length < (match.players?.filter((p) => p.hole_scores?.length).length ?? 0) && (
+            <Text style={styles.scoutHint}>
+              Opponent scorecards unlock when the match is final.
+            </Text>
+          )}
+          {visiblePlayers.map((p) => {
             const entry: ScorecardEntry = {
               username: p.username,
               user_id: p.user_id,
+              // Threading the player's handicap so the in-card SG widget
+              // uses the same skill baseline as the profile stats page.
+              handicap_index: (p as any).handicap_index ?? null,
               teebox_name: p.teebox_name,
               hole_scores: p.hole_scores,
               hole_stats: (p as any).hole_stats,
@@ -406,7 +433,8 @@ export default function MatchLobbyScreen() {
             );
           })}
         </>
-      )}
+        );
+      })()}
 
       {/* Add / edit guest scorecards — open a modal where the host enters
           strokes for non-account players (e.g. four buddies, one phone). */}
@@ -739,6 +767,11 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '22',
   },
   inviteBtnText: { color: C.gold, fontWeight: '700', fontSize: 14 },
+
+  scoutHint: {
+    color: C.textMuted, fontSize: 11, textAlign: 'center', fontStyle: 'italic',
+    marginTop: 6, marginBottom: 4, paddingHorizontal: 20,
+  },
 
   modalContainer: { flex: 1, backgroundColor: C.bg },
   modalHeader: {

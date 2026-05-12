@@ -365,6 +365,77 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON course_elevation_points(course_id);
     `,
   },
+  {
+    // Plays-like (normalized) yardage captured at recording time so per-club
+    // stats reflect what the shot WOULD have gone in neutral conditions.
+    // Snapshots wind/slope/temp/altitude/rain effects into a single number
+    // — the club-stats aggregator prefers this when present, falling back
+    // to raw GPS distance for legacy rows and imported launch-monitor data.
+    name: 'shots.plays_like_yds',
+    sql: `
+      ALTER TABLE shots
+        ADD COLUMN IF NOT EXISTS plays_like_yds REAL;
+    `,
+  },
+  {
+    // Per-user, per-chat read tracking so the social tab can surface an
+    // "unread" indicator and sort unread chats to the top. One row per
+    // (user, kind, key) tuple — updated to NOW() whenever the user opens
+    // that chat. A chat is "unread" iff its newest message's created_at
+    // is > the corresponding chat_reads.last_read_at (or no row exists).
+    //
+    //   kind = 'dm' | 'match' | 'clan'
+    //   key  = other_user_id | match_id | clan_id (stored as UUID text)
+    name: 'chat_reads.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS chat_reads (
+        user_id      UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind         TEXT NOT NULL,
+        chat_key     UUID NOT NULL,
+        last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, kind, chat_key)
+      );
+      CREATE INDEX IF NOT EXISTS chat_reads_user_idx
+        ON chat_reads(user_id);
+    `,
+  },
+  {
+    // Voice messages — file is on disk under /uploads/voice/<message_id>.m4a,
+    // duration_ms captured client-side at record time so the bubble can show
+    // length without decoding the audio on the server. Body text remains
+    // present so quoting / push-notification preview still works.
+    name: 'messages.voice_fields',
+    sql: `
+      ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS voice_url      TEXT,
+        ADD COLUMN IF NOT EXISTS voice_duration_ms INTEGER;
+      ALTER TABLE direct_messages
+        ADD COLUMN IF NOT EXISTS voice_url      TEXT,
+        ADD COLUMN IF NOT EXISTS voice_duration_ms INTEGER;
+    `,
+  },
+  {
+    // Cross-table message reporting. `kind` discriminates whether the
+    // message_id refers to messages.message_id (channel) or
+    // direct_messages.dm_id (dm). Status starts 'pending'; admins can flip
+    // to 'reviewed' / 'dismissed' off-app. UNIQUE prevents one reporter
+    // from spamming the same message.
+    name: 'message_reports.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS message_reports (
+        report_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind         TEXT NOT NULL CHECK (kind IN ('channel', 'dm')),
+        message_id   UUID NOT NULL,
+        reporter_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        reason       TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (kind, message_id, reporter_id)
+      );
+      CREATE INDEX IF NOT EXISTS message_reports_status_idx
+        ON message_reports(status, created_at);
+    `,
+  },
 ];
 
 export async function runMigrations() {

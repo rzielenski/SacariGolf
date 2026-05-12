@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { MatchFoundIntro, SidePlayer } from './MatchFoundIntro';
@@ -27,6 +28,15 @@ import { MatchFoundIntro, SidePlayer } from './MatchFoundIntro';
  * the intro then.
  */
 const POLL_INTERVAL_MS = 30 * 1000;
+/** Defensive cap: don't replay a stale intro for a match older than this.
+ *  If the server's intro_shown_at flag somehow stayed null on an old match
+ *  (e.g. a markIntroShown call lost to the network), we'd rather silently
+ *  skip than play a "match found" animation for a match the player has
+ *  already moved past. */
+const MAX_INTRO_AGE_MS = 48 * 60 * 60 * 1000;
+/** Local-backup key for matches we've already fired the intro on. Belt-and-
+ *  suspenders against the server `mark-intro-shown` call failing silently. */
+const SHOWN_KEY = 'coc_intro_shown_match_ids';
 
 export function MatchFoundWatcher() {
   const { user, token } = useAuth();
@@ -42,6 +52,11 @@ export function MatchFoundWatcher() {
   // queuing the same animation while the server-side mark is in flight.
   // Server is the persistent source of truth; this is just a fast-path.
   const triggeredThisSession = useRef<Set<string>>(new Set());
+  // Cross-session backup: server `intro_shown_at` is the source of truth, but
+  // if markIntroShown ever fails to land (offline, 5xx) we'd otherwise replay
+  // the intro on the next launch. Persisting locally as well makes the
+  // "shown once" guarantee robust to API flakes. Hydrated on mount.
+  const shownLocallyRef = useRef<Set<string>>(new Set());
   // Mirror of `intro` in a ref so the tick closure always sees the CURRENT
   // value, not whatever was captured at effect-mount time. Without this
   // mirror, dismissing a stale intro and waiting for a real one to fire
@@ -53,6 +68,24 @@ export function MatchFoundWatcher() {
     if (!user || !token) return;
     let cancelled = false;
 
+    // Hydrate the local "already-shown" backup once per mount. This is a
+    // best-effort cache — if AsyncStorage is empty (fresh install) we fall
+    // back to the server's intro_shown_at flag, which is the real truth.
+    AsyncStorage.getItem(SHOWN_KEY).then((raw) => {
+      if (cancelled || !raw) return;
+      try {
+        const ids = JSON.parse(raw);
+        if (Array.isArray(ids)) shownLocallyRef.current = new Set(ids);
+      } catch { /* corrupt cache → ignore, server flag will catch us up */ }
+    });
+
+    const persistShown = (matchId: string) => {
+      shownLocallyRef.current.add(matchId);
+      // Keep the on-disk list bounded — only the most recent 200 matter.
+      const arr = Array.from(shownLocallyRef.current).slice(-200);
+      AsyncStorage.setItem(SHOWN_KEY, JSON.stringify(arr)).catch(() => { });
+    };
+
     const tick = async () => {
       if (cancelled || showingRef.current) return;   // one intro at a time
       try {
@@ -61,10 +94,28 @@ export function MatchFoundWatcher() {
         for (const m of matches as any[]) {
           if (m.completed) continue;
           if (m.cancelled) continue;
+          // Practice rounds are inherently solo — they should never trigger
+          // a VS intro. Filtered here as defense-in-depth in case a backend
+          // edge case ever leaves a stale player row on the other side.
+          if (m.is_practice) continue;
           if (!m.has_opponent) continue;
           // Server already recorded that this user has seen the intro.
           if (m.intro_shown_at) continue;
           if (triggeredThisSession.current.has(m.match_id)) continue;
+          if (shownLocallyRef.current.has(m.match_id)) continue;
+          // Stale safety net: if a match is older than MAX_INTRO_AGE_MS and
+          // we still don't have an intro_shown_at flag, treat it as
+          // already-seen rather than firing a "match found" animation for a
+          // match the player has long since moved past. Likely cause: a
+          // markIntroShown POST that never landed; the player has been
+          // playing without ever needing the intro replay.
+          const createdAt = m.created_at ? new Date(m.created_at).getTime() : 0;
+          if (createdAt && Date.now() - createdAt > MAX_INTRO_AGE_MS) {
+            // Persist locally so we don't keep checking this row every tick.
+            persistShown(m.match_id);
+            api.matches.markIntroShown(m.match_id).catch(() => { });
+            continue;
+          }
 
           // Reserve the slot in this session BEFORE doing anything async,
           // so a second tick that fires while we're still fetching detail
@@ -74,7 +125,9 @@ export function MatchFoundWatcher() {
           // Tell the server immediately. Doing this BEFORE the animation
           // renders means a crash mid-animation can't trigger a replay on
           // the next launch. The server uses COALESCE so duplicate calls
-          // from racing devices are safe.
+          // from racing devices are safe. Also persist locally — if the
+          // server call drops, the local cache still prevents a replay.
+          persistShown(m.match_id);
           api.matches.markIntroShown(m.match_id).catch(() => { });
 
           // Fetch the full match for clan info / theme previews / avatars.
