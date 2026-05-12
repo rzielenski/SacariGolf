@@ -8,9 +8,9 @@ async function getToken(): Promise<string | null> {
   return AsyncStorage.getItem('coc_token');
 }
 
-/** Admin token (matches PREMIUM_ADMIN_TOKEN env var on the backend). Stored
- *  locally only — never echoed in API responses. Set via the in-app admin
- *  screen; absent on regular installs. */
+/** Admin "code" — either the 6-digit ADMIN_PIN or the long PREMIUM_ADMIN_TOKEN
+ *  env var on the backend, whichever the user entered. Both unlock the same
+ *  endpoints (see backend/src/utils/adminAuth.ts). Stored locally only. */
 export async function getAdminToken(): Promise<string | null> {
   return AsyncStorage.getItem('coc_admin_token');
 }
@@ -397,27 +397,23 @@ export const api = {
     }) => request<{ success: true }>('POST', `/courses/${id}/corrections`, body),
 
     /**
-     * Admin-only: batch-set pin coordinates for a course's holes from
-     * anywhere (no need to be on-site). Gated by the same admin token as
-     * the premium grant endpoint — stored client-side under
-     * `coc_admin_token` via the helpers below.
+     * Batch-set pin coordinates for a course's holes from anywhere (no
+     * need to be on-site). Open to any authenticated user — crowdsourced
+     * with last-write-wins semantics. The server records `pin_set_by`
+     * so we can audit / roll back if a course's pins get vandalised.
      *
      * Pins are applied to every teebox row sharing the same hole_num.
      */
-    adminSetPins: async (
+    setPins: async (
       id: string,
       pins: { holeNum: number; lat: number; lng: number; elevation_m?: number | null }[],
     ) => {
-      const token = await AsyncStorage.getItem('coc_admin_token');
-      if (!token) throw new Error('Admin token not set on this device');
-      const res = await fetch(`${API_BASE}/courses/admin/set-pins`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
-        body: JSON.stringify({ courseId: id, pins }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? 'Admin set-pins failed');
-      return data as { updated: number; missing_hole_nums: number[] };
+      // URL is `/courses/admin/set-pins` for historical reasons — used to
+      // be gated by an admin token. Path didn't change to avoid a breaking
+      // rename across deployed clients.
+      return request<{ updated: number; missing_hole_nums: number[] }>(
+        'POST', '/courses/admin/set-pins', { courseId: id, pins },
+      );
     },
 
     // ── Relative-elevation crowdsourcing ──────────────────────────────────

@@ -405,14 +405,12 @@ router.get('/:id/elevation-at', requireAuth, wrap(async (req: any, res: Response
 }));
 
 /**
- * Admin: set pin coordinates for one or more holes of a course remotely.
- *
- * Avoids the "must be physically at the course to crowdsource a pin" loop
- * for course owners / operators seeding data ahead of launch. Same admin
- * token gate as the premium grant/revoke endpoints (PREMIUM_ADMIN_TOKEN).
+ * Set pin coordinates for one or more holes of a course remotely. Open to
+ * any authenticated user — crowdsourced, last-write-wins. If someone places
+ * pins in the wrong spot the next player can correct them; we can also
+ * audit / roll back via `pin_set_by` and `pin_set_at` if abuse appears.
  *
  *   POST /courses/admin/set-pins
- *   header:  x-admin-token: <PREMIUM_ADMIN_TOKEN>
  *   body: {
  *     courseId: UUID,
  *     // Pins are applied to EVERY teebox row that shares the same
@@ -427,13 +425,11 @@ router.get('/:id/elevation-at', requireAuth, wrap(async (req: any, res: Response
  *   }
  *
  * Response: { updated: N, missing_hole_nums: [...] }
+ *
+ * NOTE: the URL still says `/admin/set-pins` to avoid breaking the existing
+ * curl runbook + admin client cache key. It's not actually gated anymore.
  */
-router.post('/admin/set-pins', wrap(async (req: Request, res: Response) => {
-  const expected = process.env.PREMIUM_ADMIN_TOKEN;
-  const provided = req.header('x-admin-token');
-  if (!expected || !provided || provided !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response) => {
   const { courseId, pins } = req.body ?? {};
   if (typeof courseId !== 'string' || !courseId) {
     return res.status(400).json({ error: 'courseId required' });
@@ -462,17 +458,21 @@ router.post('/admin/set-pins', wrap(async (req: Request, res: Response) => {
     if (Math.abs(lat) > 90 || Math.abs(lng) > 180)      { missing.push(holeNum); continue; }
     const elev = Number.isFinite(p?.elevation_m) ? Number(p.elevation_m) : null;
     // Apply to every teebox's copy of this hole_num within the course.
+    // Stamp pin_set_by with the actual contributor so we can audit who
+    // placed which pin if a course's data goes off the rails. pin_set_at
+    // is also bumped so the most-recent placement wins when ordering.
     const { rowCount } = await pool.query(
       `UPDATE holes h
           SET pin_lat = $3,
               pin_lng = $4,
               pin_elevation_m = COALESCE($5, h.pin_elevation_m),
-              pin_set_by = NULL
+              pin_set_by = $6,
+              pin_set_at = NOW()
         FROM teeboxes t
        WHERE h.teebox_id = t.teebox_id
          AND t.course_id = $1
          AND h.hole_num = $2`,
-      [courseId, holeNum, lat, lng, elev]
+      [courseId, holeNum, lat, lng, elev, req.userId]
     );
     const n = rowCount ?? 0;
     if (n === 0) missing.push(holeNum);

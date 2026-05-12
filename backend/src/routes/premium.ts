@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
+import { isAdminAuthed } from '../utils/adminAuth';
 
 /**
  * Premium tier scaffolding.
@@ -225,11 +226,7 @@ router.post('/redeem', requireAuth, async (req: AuthRequest, res: Response) => {
  *   body:    { userId, plan?, days? }   // days = null/omit for lifetime
  */
 router.post('/admin/grant', async (req, res) => {
-  const expected = process.env.PREMIUM_ADMIN_TOKEN;
-  const provided = req.header('x-admin-token');
-  if (!expected || !provided || provided !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  if (!isAdminAuthed(req, res)) return;
   const { userId, plan, days } = req.body ?? {};
   if (!userId || typeof userId !== 'string') {
     return res.status(400).json({ error: 'userId required' });
@@ -258,11 +255,7 @@ router.post('/admin/grant', async (req, res) => {
 
 /** Dev-only manual revoke — same auth model as grant. */
 router.post('/admin/revoke', async (req, res) => {
-  const expected = process.env.PREMIUM_ADMIN_TOKEN;
-  const provided = req.header('x-admin-token');
-  if (!expected || !provided || provided !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  if (!isAdminAuthed(req, res)) return;
   const { userId } = req.body ?? {};
   if (!userId) return res.status(400).json({ error: 'userId required' });
   try {
@@ -297,11 +290,7 @@ router.post('/admin/revoke', async (req, res) => {
  * `source = 'manual'` so they're easy to identify / clean up later.
  */
 router.post('/admin/seed-clubs', async (req, res) => {
-  const expected = process.env.PREMIUM_ADMIN_TOKEN;
-  const provided = req.header('x-admin-token');
-  if (!expected || !provided || provided !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  if (!isAdminAuthed(req, res)) return;
   const { email, clubMedians, shotsPerClub = 25 } = req.body ?? {};
   if (typeof email !== 'string' || !clubMedians || typeof clubMedians !== 'object') {
     return res.status(400).json({ error: 'email and clubMedians required' });
@@ -428,11 +417,7 @@ router.post('/admin/seed-clubs', async (req, res) => {
  *        -H "x-admin-token: YOUR_PREMIUM_ADMIN_TOKEN"
  */
 router.delete('/admin/wipe-matches', async (req, res) => {
-  const expected = process.env.PREMIUM_ADMIN_TOKEN;
-  const provided = req.header('x-admin-token');
-  if (!expected || !provided || provided !== expected) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+  if (!isAdminAuthed(req, res)) return;
   const resetStats = req.query.resetStats === '1' || req.query.resetStats === 'true';
   const client = await pool.connect();
   try {

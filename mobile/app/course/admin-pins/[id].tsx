@@ -1,16 +1,15 @@
 /**
- * Admin: place pin (cup) coordinates for every hole of a course remotely.
+ * Place / correct pin (cup) coordinates for every hole of a course remotely.
  *
- * Same satellite-map UX as the in-match course-map: tap a green to drop the
- * pin for the currently-selected hole, then auto-advance to the next hole.
- * Long-press any existing pin to re-select that hole and reposition it.
+ * Open to any authenticated player — last-write-wins crowdsourcing. Same
+ * satellite-map UX as the in-match course-map: tap a green to drop the pin
+ * for the currently-selected hole, then auto-advance to the next hole. Tap
+ * an existing pin to re-select that hole and reposition it.
  *
- * On Save → POSTs all placed pins to /courses/admin/set-pins (which applies
- * each pin across every teebox row sharing the same hole_num).
- *
- * Gated by an admin token stored under `coc_admin_token` in AsyncStorage.
- * First entry to the screen prompts to paste the token; thereafter it's
- * remembered until cleared.
+ * On Save → POSTs all placed pins to /courses/admin/set-pins. The URL still
+ * says "admin" for legacy compatibility but the endpoint is now ungated.
+ * Server stamps `pin_set_by` with the contributing user so we can audit
+ * or roll back if a course's data gets vandalised.
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
@@ -20,86 +19,31 @@ import {
 } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api, getAdminToken, setAdminToken } from '../../../lib/api';
-import { C, F } from '../../../lib/colors';
+import { api } from '../../../lib/api';
+import { C } from '../../../lib/colors';
 
 type Pin = { lat: number; lng: number };
 type HoleRow = { hole_num: number; par: number; pin_lat?: number | null; pin_lng?: number | null };
 
-export default function AdminPinsScreen() {
+export default function PlacePinsScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [course, setCourse] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [hasAdminToken, setHasAdminToken] = useState<boolean | null>(null);
   // Local working copy of pin positions, keyed by hole_num. Seeded from the
   // course's existing pins on load; mutations only commit to the server on
   // Save tap.
   const [pins, setPins] = useState<Record<number, Pin>>({});
   const [currentHole, setCurrentHole] = useState(1);
-  // Snapshot of the loaded pin coords so we can show a "modified" badge per
-  // hole without reloading the course.
+  // Snapshot of the loaded pin coords so we can compute a `dirty` flag
+  // without reloading the course.
   const [serverPins, setServerPins] = useState<Record<number, Pin>>({});
 
-  // Permission check on mount — if no token, prompt once. The user can paste
-  // their PREMIUM_ADMIN_TOKEN value in the resulting alert. Token is persisted
-  // so the prompt only appears the first time on a new device.
   useEffect(() => {
-    (async () => {
-      const tok = await getAdminToken();
-      setHasAdminToken(!!tok);
-      if (!tok) {
-        // We can't use Alert.prompt cleanly cross-platform; route to a
-        // dedicated paste screen would be cleaner, but for an admin-only
-        // edge case the alert prompt suffices on iOS. Android falls back
-        // to the manual-set-token instructions.
-        promptForToken();
-      }
-    })();
-  }, []);
-
-  const promptForToken = () => {
-    // Alert.prompt is iOS-only. On Android we display the instruction and
-    // expect the user to paste via dev console or share-extension flow.
-    const A = require('react-native').Alert;
-    if (typeof A.prompt === 'function') {
-      A.prompt(
-        'Admin Token',
-        'Paste your PREMIUM_ADMIN_TOKEN value. Saved on this device until you sign out.',
-        [
-          { text: 'Cancel', style: 'cancel', onPress: () => router.back() },
-          {
-            text: 'Save',
-            onPress: async (val?: string) => {
-              const t = (val ?? '').trim();
-              if (!t) { router.back(); return; }
-              await setAdminToken(t);
-              setHasAdminToken(true);
-            },
-          },
-        ],
-        'plain-text',
-        '',
-        'default',
-      );
-    } else {
-      A.alert(
-        'Admin Token Required',
-        'This screen needs your PREMIUM_ADMIN_TOKEN. Paste it via the dev shell or use an iOS device for in-app entry.',
-        [{ text: 'OK', onPress: () => router.back() }],
-      );
-    }
-  };
-
-  useEffect(() => {
-    if (!hasAdminToken) return;
     (async () => {
       try {
         const c = await api.courses.get(id);
         setCourse(c);
-        // Use whichever teebox has the most holes for the editor — the
-        // admin-set-pins endpoint applies updates across every teebox by
-        // hole_num so it doesn't matter which one we source from.
         const teebox = pickWidestTeebox(c?.teeboxes ?? []);
         const seeded: Record<number, Pin> = {};
         for (const h of (teebox?.holes ?? []) as HoleRow[]) {
@@ -115,7 +59,7 @@ export default function AdminPinsScreen() {
         setLoading(false);
       }
     })();
-  }, [id, hasAdminToken]);
+  }, [id]);
 
   const widestTeebox = useMemo(
     () => pickWidestTeebox(course?.teeboxes ?? []),
@@ -151,7 +95,7 @@ export default function AdminPinsScreen() {
     setPins((prev) => ({ ...prev, [currentHole]: { lat: latitude, lng: longitude } }));
     // Auto-advance — speeds up the "walk the course in your head" workflow.
     // Stops at the last hole so a re-tap on the same hole still re-positions
-    // rather than rolling around to hole 1.
+    // rather than wrapping around to hole 1.
     if (currentHole < holes.length) setCurrentHole(currentHole + 1);
   };
 
@@ -166,24 +110,18 @@ export default function AdminPinsScreen() {
         .map((k) => Number(k))
         .sort((a, b) => a - b)
         .map((holeNum) => ({ holeNum, lat: pins[holeNum].lat, lng: pins[holeNum].lng }));
-      const res = await api.courses.adminSetPins(id, payload);
+      const res = await api.courses.setPins(id, payload);
       if (res.missing_hole_nums?.length) {
         Alert.alert(
           'Partial save',
           `Saved ${res.updated} row${res.updated === 1 ? '' : 's'}. These hole numbers had no matching rows: ${res.missing_hole_nums.join(', ')}.`,
         );
       } else {
-        Alert.alert('Saved', `Updated ${res.updated} row${res.updated === 1 ? '' : 's'} across all teeboxes.`);
+        Alert.alert('Saved', `Updated ${res.updated} row${res.updated === 1 ? '' : 's'} across all teeboxes. Thanks for the contribution!`);
       }
       setServerPins({ ...pins });
     } catch (e: any) {
-      if (/forbidden/i.test(e?.message ?? '')) {
-        Alert.alert('Bad token', 'The admin token isn\'t valid. Re-enter it.', [
-          { text: 'OK', onPress: async () => { await setAdminToken(null); setHasAdminToken(false); promptForToken(); } },
-        ]);
-      } else {
-        Alert.alert('Save failed', e?.message ?? 'Try again.');
-      }
+      Alert.alert('Save failed', e?.message ?? 'Try again.');
     } finally {
       setSaving(false);
     }
@@ -193,7 +131,7 @@ export default function AdminPinsScreen() {
     if (!pins[currentHole]) return;
     Alert.alert(
       `Clear pin for hole ${currentHole}?`,
-      'Removes the pin from this hole. You can re-place it by tapping the map.',
+      'Removes the pin from this hole locally. Tap Save to commit. Other contributors\' pins for this hole on the server are unaffected unless you save with this hole cleared and someone re-places it.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -208,7 +146,7 @@ export default function AdminPinsScreen() {
     );
   };
 
-  if (hasAdminToken === null || loading) {
+  if (loading) {
     return (
       <View style={s.centered}>
         <ActivityIndicator color={C.gold} size="large" />
@@ -316,8 +254,8 @@ export default function AdminPinsScreen() {
   );
 }
 
-/** Pick the teebox with the most holes — admins typically want the full
- *  18-hole picture even if 9-hole tees also exist. Falls back to whatever
+/** Pick the teebox with the most holes — we want the full 18-hole picture
+ *  even when 9-hole tees exist on the same course. Falls back to whatever
  *  the first teebox is when all are the same size. */
 function pickWidestTeebox(teeboxes: any[]): any | null {
   if (!Array.isArray(teeboxes) || !teeboxes.length) return null;
