@@ -9,14 +9,26 @@ import { ShotMapModal } from './ShotMap';
 // Re-export so existing importers of HoleStat from Scorecard keep working.
 export type { HoleStat };
 
-const REACTION_OPTIONS = [
-  { id: 'fire', label: 'FIRE' },
-  { id: 'pure', label: 'PURE' },
-  { id: 'goat', label: 'GOAT' },
-  { id: 'clutch', label: 'CLUTCH' },
-  { id: 'respect', label: 'RESPECT' },
-  { id: 'oof', label: 'OOF' },
-];
+/** Default emoji reactions — shown as quick-pick chips. The user can also
+ *  type any emoji via the "+" button which opens an inline input. Reactions
+ *  are now stored as the raw emoji string on the server. */
+const DEFAULT_REACTION_EMOJIS = ['🔥', '👏', '💪', '😂', '🤯', '🐐'] as const;
+
+/** Back-compat: map historical text-token reactions ('fire', 'pure', etc.)
+ *  to their emoji equivalents so legacy rows render nicely alongside new
+ *  emoji-style reactions. Toggling one of these still sends the original
+ *  token to the server (back-compat path through isValidReaction). */
+const LEGACY_TOKEN_TO_EMOJI: Record<string, string> = {
+  fire: '🔥',
+  pure: '🎯',
+  goat: '🐐',
+  clutch: '💪',
+  respect: '🙌',
+  oof: '😬',
+};
+function displayReaction(stored: string): string {
+  return LEGACY_TOKEN_TO_EMOJI[stored] ?? stored;
+}
 
 export type ScorecardEntry = {
   username?: string;
@@ -398,23 +410,10 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
         {entry.round_id && (
           <>
             <Text style={s.shotsTitle}>REACTIONS</Text>
-            <View style={s.reactionRow}>
-              {REACTION_OPTIONS.map((opt) => {
-                const r = reactions.find((rx) => rx.reaction === opt.id);
-                const count = r?.count ?? 0;
-                const mine = r?.mine ?? false;
-                return (
-                  <TouchableOpacity
-                    key={opt.id}
-                    style={[s.reactionBtn, mine && s.reactionBtnActive]}
-                    onPress={() => toggleReaction(opt.id)}
-                  >
-                    <Text style={[s.reactionLabel, mine && { color: C.gold }]}>{opt.label}</Text>
-                    {count > 0 && <Text style={[s.reactionCount, mine && { color: C.gold }]}>{count}</Text>}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            <ReactionsRow
+              reactions={reactions}
+              onToggle={toggleReaction}
+            />
 
             <Text style={s.shotsTitle}>COMMENTS</Text>
             {comments.length === 0 ? (
@@ -471,6 +470,109 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
           onClose={() => setShotHole(null)}
         />
       </ScrollView>
+    </View>
+  );
+}
+
+/**
+ * Reactions row — quick-pick default emojis + every server-stored reaction
+ * (so legacy tokens and custom emojis other viewers added still appear) +
+ * a "+" button that opens an inline TextInput for any emoji.
+ *
+ * Stored vs displayed: the server keeps the raw string (emoji or legacy
+ * token). For display we map legacy tokens to emojis via displayReaction.
+ * For toggle, we always send the raw stored string back to the server so
+ * back-compat keeps working.
+ */
+function ReactionsRow({
+  reactions,
+  onToggle,
+}: {
+  reactions: { reaction: string; count: number; mine: boolean }[];
+  onToggle: (raw: string) => void;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  // Union of: server-stored reactions (with counts) + default emoji presets
+  // that have no count yet (so the quick-picks always show as "tappable").
+  // Dedup by stored key so a default that's also stored doesn't double-render.
+  const present = new Map<string, { count: number; mine: boolean }>();
+  for (const r of reactions) present.set(r.reaction, { count: r.count, mine: r.mine });
+
+  const ordered: { stored: string; count: number; mine: boolean; isDefault: boolean }[] = [];
+  // Defaults first so the UX stays consistent across reloads.
+  for (const e of DEFAULT_REACTION_EMOJIS) {
+    const p = present.get(e);
+    ordered.push({ stored: e, count: p?.count ?? 0, mine: p?.mine ?? false, isDefault: true });
+    if (p) present.delete(e);
+  }
+  // Then any other server reactions (legacy tokens + custom emojis).
+  for (const [stored, info] of present.entries()) {
+    ordered.push({ stored, count: info.count, mine: info.mine, isDefault: false });
+  }
+
+  const submitCustom = () => {
+    const v = draft.trim();
+    // Server validates further (length, non-ASCII), but a quick local check
+    // avoids a pointless round-trip on empty/whitespace input.
+    if (!v || v.length > 16) return;
+    if (/^[\x00-\x7F]+$/.test(v)) {
+      Alert.alert('Use an emoji', 'Reactions must include at least one emoji character.');
+      return;
+    }
+    onToggle(v);
+    setDraft('');
+    setPickerOpen(false);
+  };
+
+  return (
+    <View>
+      <View style={s.reactionRow}>
+        {ordered.map((o) => (
+          <TouchableOpacity
+            key={o.stored}
+            style={[s.reactionBtn, o.mine && s.reactionBtnActive]}
+            onPress={() => onToggle(o.stored)}
+          >
+            <Text style={[s.reactionLabel, o.mine && { color: C.gold }]}>
+              {displayReaction(o.stored)}
+            </Text>
+            {o.count > 0 && (
+              <Text style={[s.reactionCount, o.mine && { color: C.gold }]}>{o.count}</Text>
+            )}
+          </TouchableOpacity>
+        ))}
+        <TouchableOpacity
+          style={[s.reactionBtn, pickerOpen && s.reactionBtnActive]}
+          onPress={() => setPickerOpen((v) => !v)}
+        >
+          <Text style={[s.reactionLabel, pickerOpen && { color: C.gold }]}>+</Text>
+        </TouchableOpacity>
+      </View>
+
+      {pickerOpen && (
+        <View style={s.customReactionRow}>
+          <TextInput
+            style={s.customReactionInput}
+            value={draft}
+            onChangeText={(t) => setDraft(t.slice(0, 16))}
+            placeholder="Tap 🌐 on your keyboard for emojis"
+            placeholderTextColor={C.textMuted}
+            maxLength={16}
+            autoFocus
+            autoCorrect={false}
+            autoCapitalize="none"
+          />
+          <TouchableOpacity
+            style={[s.customReactionAdd, !draft.trim() && { opacity: 0.4 }]}
+            onPress={submitCustom}
+            disabled={!draft.trim()}
+          >
+            <Text style={s.customReactionAddText}>Add</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -543,8 +645,26 @@ const s = StyleSheet.create({
     backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
   },
   reactionBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
-  reactionLabel: { color: C.textMuted, fontWeight: '800', fontSize: 11, letterSpacing: 0.8, fontFamily: F.serif },
+  // Emojis render at a slightly bigger font than the old text labels so the
+  // glyph reads clearly. Drop the serif font + letter-spacing — both are
+  // text-only typographic flourishes that hurt emoji rendering.
+  reactionLabel: { color: C.text, fontWeight: '800', fontSize: 16 },
   reactionCount: { color: C.textMuted, fontWeight: '800', fontSize: 11 },
+
+  customReactionRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginTop: 8,
+  },
+  customReactionInput: {
+    flex: 1, backgroundColor: C.card, color: C.text,
+    borderRadius: 6, paddingHorizontal: 12, paddingVertical: 8, fontSize: 16,
+    borderWidth: 1, borderColor: C.border,
+  },
+  customReactionAdd: {
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 6,
+    backgroundColor: C.gold,
+  },
+  customReactionAddText: { color: '#000', fontWeight: '900', fontSize: 13 },
 
   emptyComment: { color: C.textDim, fontStyle: 'italic', fontSize: 12, paddingVertical: 8 },
   commentRow: {

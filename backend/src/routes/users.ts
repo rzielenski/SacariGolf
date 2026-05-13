@@ -22,6 +22,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview,
+            u.clubs_in_bag,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -43,7 +44,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -101,6 +102,51 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
       values.push(previewUrl.slice(0, 500)); updates.push(`theme_track_preview = $${values.length}`);
     } else {
       return res.status(400).json({ error: 'theme must be an object or null' });
+    }
+  }
+
+  // Clubs-in-bag — array of `{ code, label? }` entries. Each `code` must
+  // be in the ALLOWED_CLUBS whitelist (so analytics never sees a phantom
+  // category); `label` is optional free-form display text (e.g. "TaylorMade
+  // Stealth" or "Vokey 56°") up to 30 chars. Null clears the override
+  // (back to "all clubs eligible").
+  //
+  // Backwards-compatible: also accepts the legacy `string[]` form (just
+  // codes) from older clients — auto-converted to `{code}` entries server-side.
+  if (clubsInBag !== undefined) {
+    if (clubsInBag === null) {
+      updates.push(`clubs_in_bag = NULL`);
+    } else if (Array.isArray(clubsInBag)) {
+      const ALLOWED = new Set([
+        'driver', '3w', '5w', '7w', 'hybrid',
+        '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
+        'pw', 'gw', 'sw', 'lw', 'putter',
+      ]);
+      const cleaned: { code: string; label?: string }[] = [];
+      for (const raw of clubsInBag) {
+        let code: string | null = null;
+        let label: string | undefined;
+        if (typeof raw === 'string') {
+          code = raw.toLowerCase();
+        } else if (raw && typeof raw === 'object' && typeof raw.code === 'string') {
+          code = raw.code.toLowerCase();
+          if (typeof raw.label === 'string') {
+            const trimmed = raw.label.trim().slice(0, 30);
+            if (trimmed) label = trimmed;
+          }
+        }
+        if (!code || !ALLOWED.has(code)) continue;
+        cleaned.push(label ? { code, label } : { code });
+      }
+      // USGA cap is 14 clubs — enforce so a malicious client can't store
+      // a 1000-element array. Saving fewer than 14 is fine.
+      if (cleaned.length > 14) {
+        return res.status(400).json({ error: 'Max 14 clubs in the bag (USGA limit)' });
+      }
+      values.push(JSON.stringify(cleaned));
+      updates.push(`clubs_in_bag = $${values.length}::jsonb`);
+    } else {
+      return res.status(400).json({ error: 'clubsInBag must be an array of {code,label?} entries or null' });
     }
   }
 
@@ -1243,10 +1289,17 @@ router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =
 // can show "PLAYING NOW" right when they pick a teebox.
 router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT mp.match_id, mp.teebox_id,
-            r.hole_scores, r.created_at AS round_started_at,
+    `SELECT mp.match_id, mp.user_id, mp.teebox_id, mp.side,
+            r.round_id, r.hole_scores, r.hole_stats, r.created_at AS round_started_at,
             t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
+            t.course_id AS teebox_course_id,
             c.course_id, c.course_name,
+            m.holes_subset,
+            ARRAY(
+              SELECT h.par FROM holes h
+              WHERE h.teebox_id = mp.teebox_id
+              ORDER BY h.hole_num ASC
+            ) AS hole_pars,
             -- Last meaningful activity for this user on this match — pick
             -- the most recent of: round start, score updates (rounds.created_at),
             -- and shot tracking saves. Powers the 4h staleness gate.
@@ -1286,17 +1339,56 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
 
   const active = rows[0];
 
-  // Anti-cheat: hide the live scorecard from anyone in the same match
+  // Anti-cheat: hide the live scorecard from OPPONENTS in the same match
+  // (different side). Same-side teammates pass through — they already
+  // collaborate, and the match-lobby scorecard view already shows them
+  // each other's progress, so spectator parity makes sense. Solo matches
+  // (sides 1 and 2) and Arena (every player on their own side) both block
+  // cleanly via the same-side check.
   if (req.userId !== req.params.id) {
     const { rows: shareRows } = await pool.query(
-      `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+      `SELECT side FROM match_players WHERE match_id = $1 AND user_id = $2`,
       [active.match_id, req.userId]
     );
-    if (shareRows.length) return res.json(null);
+    if (shareRows.length && shareRows[0].side !== active.side) {
+      return res.json(null);
+    }
   }
 
-  // Normalise empty arrays to [] so frontend can safely call .length on them
+  // Normalise empty arrays so the frontend can safely call .length on them.
   if (!active.hole_scores) active.hole_scores = [];
+  if (!active.hole_stats)  active.hole_stats = [];
+  if (!active.hole_pars)   active.hole_pars  = [];
+
+  // Lazy-create a `rounds` row so live spectators get a stable round_id to
+  // attach reactions + comments to mid-round. Existing submitScores logic
+  // upserts the same row on completion (UNIQUE on match_id+user_id), so the
+  // placeholder graduates to a real round on submit without duplication.
+  // Skip if we already have a row (round_id present) or if the viewer is the
+  // owner themselves — the spectator path is what needs the id; the owner's
+  // own client is happy reading hole_scores from the rounds table directly.
+  if (!active.round_id && active.match_id && active.user_id && active.teebox_course_id) {
+    try {
+      const { rows: created } = await pool.query(
+        `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, round_type)
+         VALUES ($1, $2, $3, $4, '{}', 'live')
+         ON CONFLICT (match_id, user_id) DO UPDATE SET match_id = EXCLUDED.match_id
+         RETURNING round_id, created_at`,
+        [active.match_id, active.user_id, active.teebox_course_id, active.teebox_id]
+      );
+      if (created.length) {
+        active.round_id = created[0].round_id;
+        // If we just created it, populate round_started_at from the new row.
+        if (!active.round_started_at) active.round_started_at = created[0].created_at;
+      }
+    } catch { /* placeholder-create is best-effort — reactions/comments
+                   simply stay disabled if it fails */ }
+  }
+
+  // teebox_course_id was an internal helper; don't surface it in the
+  // response shape clients consume.
+  delete active.teebox_course_id;
+
   return res.json(active);
 }));
 

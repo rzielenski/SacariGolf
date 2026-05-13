@@ -39,6 +39,12 @@ export default function UserProfileScreen() {
       user_id: profile?.user_id,
       teebox_name: round.teebox_name,
       hole_scores: round.hole_scores,
+      // hole_stats and holes_subset come through from the active-round endpoint
+      // too — they let the modal render putts/chips/GIR alongside the running
+      // hole-by-hole grid even for in-progress rounds.
+      hole_stats: round.hole_stats,
+      holes_subset: round.holes_subset,
+      handicap_index: profile?.handicap_index ?? null,
       course_id: round.course_id,
       course_name: round.course_name,
       teebox_id: round.teebox_id,
@@ -220,9 +226,25 @@ export default function UserProfileScreen() {
             <View style={styles.liveDot} />
             <Text style={styles.liveLabel}>PLAYING NOW</Text>
           </View>
+          {/* Tap → opens the friend's live scorecard (per-hole breakdown
+              using the same ScorecardModal as completed rounds). Long-press
+              → drops into the satellite shot-map spectator view for watching
+              shots arrive in real time. Anti-cheat: the backend already
+              returns null for opposing-side viewers in the same match,
+              so this card simply won't appear in that case. */}
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.green }]}
-            onPress={() => setSpectating(true)}
+            onPress={() => openScorecard({
+              ...activeRound,
+              // total_score isn't populated until submit — derive on the fly so
+              // the modal header shows the running total.
+              total_score: Array.isArray(activeRound.hole_scores)
+                ? activeRound.hole_scores.reduce((a: number, b: number) => a + b, 0)
+                : 0,
+              created_at: activeRound.round_started_at,
+            })}
+            onLongPress={() => setSpectating(true)}
+            delayLongPress={350}
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.roundCourseName}>{activeRound.course_name ?? 'Unknown course'}</Text>
@@ -233,7 +255,7 @@ export default function UserProfileScreen() {
                   : ' · Just started'}
               </Text>
               <Text style={styles.roundDate}>
-                Tap to spectate live
+                Tap for scorecard · Hold for shot map
               </Text>
             </View>
             <View style={styles.roundScoreBox}>

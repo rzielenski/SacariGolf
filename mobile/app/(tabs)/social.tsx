@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, FlatList, Alert, ActivityIndicator, RefreshControl,
+  Animated, Easing,
 } from 'react-native';
 import { router } from 'expo-router';
 import { api } from '../../lib/api';
@@ -10,6 +11,41 @@ import { C } from '../../lib/colors';
 import { Clan } from '../../types';
 
 type Tab = 'friends' | 'clans' | 'chats';
+
+/**
+ * Shared pulse driver for the unread indicators. One Animated.Value at module
+ * scope means every unread chat across DMs / matches / clans beats in sync —
+ * cheaper than per-row timers and visually feels intentional rather than
+ * chaotic. Started lazily on first subscribe; never stopped since it costs
+ * essentially nothing while the social tab is open and pauses naturally when
+ * the screen unmounts.
+ */
+const unreadPulse = new Animated.Value(0);
+let unreadPulseStarted = false;
+function startUnreadPulse() {
+  if (unreadPulseStarted) return;
+  unreadPulseStarted = true;
+  Animated.loop(
+    Animated.sequence([
+      Animated.timing(unreadPulse, { toValue: 1, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(unreadPulse, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]),
+  ).start();
+}
+
+/** The actual unread dot — slightly bigger than the old static dot and pulses
+ *  opacity + scale from the shared driver. Wrapped in a glow halo (separate
+ *  View since RN can't animate shadow on a borderless circle directly). */
+function UnreadDot() {
+  useEffect(() => { startUnreadPulse(); }, []);
+  const opacity = unreadPulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
+  const scale   = unreadPulse.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.15] });
+  return (
+    <Animated.View style={[styles.unreadDotGlow, { opacity, transform: [{ scale }] }]}>
+      <View style={styles.unreadDotCore} />
+    </Animated.View>
+  );
+}
 
 export default function SocialScreen() {
   const [tab, setTab] = useState<Tab>('friends');
@@ -466,7 +502,7 @@ function ChatsTab() {
               </Text>
             ) : null}
           </View>
-          {conv.unread && <View style={styles.unreadDot} />}
+          {conv.unread && <UnreadDot />}
         </TouchableOpacity>
       ))}
 
@@ -500,7 +536,7 @@ function ChatsTab() {
               <Text style={[styles.userName, unread && styles.userNameUnread]}>{m.name || m.match_type}</Text>
               <Text style={styles.userElo}>Match ID: {m.match_id.slice(0, 8)}…</Text>
             </View>
-            {unread && <View style={styles.unreadDot} />}
+            {unread && <UnreadDot />}
           </TouchableOpacity>
         );
       })}
@@ -529,7 +565,7 @@ function ChatsTab() {
               <Text style={[styles.userName, unread && styles.userNameUnread]}>{c.name}</Text>
               <Text style={styles.userElo}>{c.clan_mode.toUpperCase()} · {c.member_count} members</Text>
             </View>
-            {unread && <View style={styles.unreadDot} />}
+            {unread && <UnreadDot />}
           </TouchableOpacity>
         );
       })}
@@ -560,15 +596,41 @@ const styles = StyleSheet.create({
   avatarText: { color: C.gold, fontWeight: '800', fontSize: 16 },
   userName: { color: C.text, fontWeight: '700', fontSize: 15 },
   userElo: { color: C.textMuted, fontSize: 12 },
-  // Unread states — a brighter row border + a gold dot on the right. The
-  // last-message preview also pops from muted to full-text so a quick glance
-  // separates "new message" from "old conversation".
-  userRowUnread: { borderColor: C.gold, backgroundColor: C.gold + '0d' },
+  // Unread states — brighter border + tinted fill + a soft gold glow that
+  // hangs around the row. iOS uses the shadow props; Android picks up
+  // `elevation` (the colour is approximate on Android since elevation
+  // shadows are always greyscale natively, but it still gives depth so the
+  // unread rows visibly lift off the page).
+  userRowUnread: {
+    borderColor: C.gold,
+    backgroundColor: C.gold + '14',
+    shadowColor: C.gold,
+    shadowOpacity: 0.55,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 6,
+  },
   userNameUnread: { color: C.gold },
   userMsgUnread: { color: C.text, fontWeight: '600' },
-  unreadDot: {
-    width: 10, height: 10, borderRadius: 5, backgroundColor: C.gold,
+
+  // Pulsing unread dot — bigger than the old static circle, with its own
+  // gold glow halo. The Animated wrapper handles opacity + scale; the inner
+  // solid dot keeps the colour saturated at the centre regardless of the
+  // outer halo's alpha animation.
+  unreadDotGlow: {
+    width: 16, height: 16, borderRadius: 8,
+    backgroundColor: C.gold + 'aa',
+    alignItems: 'center', justifyContent: 'center',
     marginLeft: 6,
+    shadowColor: C.gold,
+    shadowOpacity: 0.9,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 4,
+  },
+  unreadDotCore: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: C.gold,
   },
   addBtn: { borderRadius: 4, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold },
   addBtnText: { color: C.gold, fontWeight: '700', fontSize: 12 },

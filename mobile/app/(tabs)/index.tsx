@@ -226,6 +226,18 @@ export default function HomeScreen() {
         </Text>
       </TouchableOpacity>
 
+      {/* My Bag — same row style as handicap. The club picker + auto-suggest
+          filter to this subset on every shot, so it's worth keeping current.
+          Bag entries are now {code,label?} objects; just count them. */}
+      <TouchableOpacity style={styles.handicapRow} onPress={() => router.push('/bag' as any)}>
+        <Text style={styles.handicapLabel}>My Bag</Text>
+        <Text style={styles.handicapValue}>
+          {Array.isArray(user.clubs_in_bag) && user.clubs_in_bag.length > 0
+            ? `${user.clubs_in_bag.length} club${user.clubs_in_bag.length === 1 ? '' : 's'}`
+            : 'Edit'}
+        </Text>
+      </TouchableOpacity>
+
       {/* Quick actions — each one drops the user straight into the play
           wizard with the match type pre-selected, so taking the home-tab
           shortcut is one tap fewer than tapping Play and then the type

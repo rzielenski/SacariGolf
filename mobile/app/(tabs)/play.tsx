@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, FlatList, ActivityIndicator, Alert,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -308,7 +309,11 @@ export default function PlayScreen() {
   // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
     return (
-      <View style={styles.container}>
+      <ScrollView
+        style={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
         <Text style={styles.title}>
           {challengeUserId ? 'Challenge a Friend' : 'Start a Round'}
         </Text>
@@ -400,14 +405,18 @@ export default function PlayScreen() {
             </TouchableOpacity>
           </>
         )}
-      </View>
+      </ScrollView>
     );
   }
 
   // ── Clan selection ────────────────────────────────────────────────────────────
   if (step === 'clan') {
     return (
-      <View style={styles.container}>
+      <ScrollView
+        style={styles.scrollContainer}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
@@ -457,7 +466,7 @@ export default function PlayScreen() {
             <Text style={styles.nextBtnText}>Choose Format →</Text>
           </TouchableOpacity>
         )}
-      </View>
+      </ScrollView>
     );
   }
 
@@ -509,29 +518,38 @@ export default function PlayScreen() {
   // ── Join by ID ────────────────────────────────────────────────────────────────
   if (step === 'join') {
     return (
-      <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
-          <Text style={styles.backBtnText}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Join a Match</Text>
-        <Text style={styles.subtitle}>Enter the Match ID shared by your friend</Text>
-        <TextInput
-          style={styles.searchInput}
-          value={joinId}
-          onChangeText={setJoinId}
-          placeholder="Paste Match ID here..."
-          placeholderTextColor={C.textMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <TouchableOpacity
-          style={[styles.nextBtn, joining && { opacity: 0.6 }]}
-          onPress={handleJoinById}
-          disabled={joining}
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <ScrollView
+          style={styles.scrollContainer}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
         >
-          {joining ? <ActivityIndicator color="#000" /> : <Text style={styles.nextBtnText}>Join Match →</Text>}
-        </TouchableOpacity>
-      </View>
+          <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
+            <Text style={styles.backBtnText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.title}>Join a Match</Text>
+          <Text style={styles.subtitle}>Enter the Match ID shared by your friend</Text>
+          <TextInput
+            style={styles.searchInput}
+            value={joinId}
+            onChangeText={setJoinId}
+            placeholder="Paste Match ID here..."
+            placeholderTextColor={C.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TouchableOpacity
+            style={[styles.nextBtn, joining && { opacity: 0.6 }]}
+            onPress={handleJoinById}
+            disabled={joining}
+          >
+            {joining ? <ActivityIndicator color="#000" /> : <Text style={styles.nextBtnText}>Join Match →</Text>}
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -546,6 +564,10 @@ export default function PlayScreen() {
     const nearbyToShow = nearbyCourses.filter((c) => !pinnedIds.has(c.course_id));
 
     return (
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
       <View style={styles.container}>
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'format' : 'type')} >
           <Text style={styles.backBtnText}>← Back</Text>
@@ -568,6 +590,8 @@ export default function PlayScreen() {
             renderItem={({ item }) => <CourseRow course={item} onPress={() => selectCourse(item)} />}
             ListEmptyComponent={<Text style={styles.emptyMsg}>No courses match "{query}"</Text>}
             style={{ marginTop: 4 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
           />
         )}
 
@@ -650,6 +674,7 @@ export default function PlayScreen() {
           </ScrollView>
         )}
       </View>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -767,6 +792,12 @@ function CourseRow({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg, padding: 20, paddingTop: 60 },
+  // Scrollable variant for steps with stacked content (type / clan / join /
+  // course). Style applies to the ScrollView itself; `scrollContent` is the
+  // inner padding so child layout matches the static container. `paddingBottom`
+  // is generous so the last button clears the home-indicator + keyboard.
+  scrollContainer: { flex: 1, backgroundColor: C.bg },
+  scrollContent: { padding: 20, paddingTop: 60, paddingBottom: 80 },
   title: { color: C.text, fontSize: 26, fontWeight: '900', marginBottom: 4 },
   subtitle: { color: C.textMuted, fontSize: 14, marginBottom: 24 },
   backBtn: { marginBottom: 12 },

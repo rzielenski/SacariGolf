@@ -157,6 +157,14 @@ export default function ChatScreen() {
   })).current;
 
   const title = type === 'dm' ? (name ?? 'Direct Message') : type === 'match' ? 'Match Chat' : 'Team Chat';
+  // Subtitle clarifies the audience. Easy to miss that match chat reaches
+  // OPPONENTS too — team/clan chat is the teammates-only room. Making this
+  // explicit avoids the "I thought my opponent couldn't see this" surprise.
+  const subtitle = type === 'match'
+    ? 'Everyone in this match'
+    : type === 'clan'
+    ? 'Your team only'
+    : null;
 
   const reportMessage = (msg: ChatMessage) => {
     if (msg.user_id === user?.user_id) return; // can't report your own
@@ -225,7 +233,10 @@ export default function ChatScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>{title}</Text>
+        <View style={styles.headerTitleWrap}>
+          <Text style={styles.headerTitle}>{title}</Text>
+          {subtitle && <Text style={styles.headerSubtitle}>{subtitle}</Text>}
+        </View>
         <View style={{ width: 60 }} />
       </View>
 
@@ -250,6 +261,17 @@ export default function ChatScreen() {
               <Text style={styles.emptySub}>Say hello!</Text>
             </View>
           }
+          // Keep taps on message rows (e.g. long-press → Report) working even
+          // when the input keyboard is open. Default RN behaviour dismisses
+          // the keyboard on first tap and swallows the second; "handled" lets
+          // child Touchables fire first, dragging the list still dismisses.
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          // Auto-scroll to the latest message when the layout changes —
+          // covers the case where the keyboard opens and shrinks the list
+          // viewport (without this, the most recent message gets pushed
+          // behind the keyboard until the next manual scroll).
+          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
         />
       )}
 
@@ -347,7 +369,9 @@ const styles = StyleSheet.create({
   },
   backBtn: { width: 60 },
   backText: { color: C.gold, fontSize: 15, fontWeight: '600' },
+  headerTitleWrap: { alignItems: 'center', flex: 1 },
   headerTitle: { color: C.text, fontSize: 16, fontWeight: '800' },
+  headerSubtitle: { color: C.textMuted, fontSize: 10, fontWeight: '600', marginTop: 2, letterSpacing: 0.5 },
 
   listContent: { padding: 16, paddingBottom: 8, flexGrow: 1 },
 

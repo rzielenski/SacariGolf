@@ -436,6 +436,35 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON message_reports(status, created_at);
     `,
   },
+  {
+    // Per-user bag — the subset of ALLOWED_CLUBS the player actually
+    // carries. NULL (the default) means "all clubs are eligible" so
+    // existing users aren't silently constrained until they save a custom
+    // bag. The club picker + auto-suggest both filter their pool by this
+    // when present.
+    name: 'users.clubs_in_bag',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS clubs_in_bag TEXT[];
+    `,
+  },
+  {
+    // Bag entries get free-text labels alongside the canonical code, so a
+    // player can carry e.g. "Vokey 56°" and "Vokey 60°" both mapped to
+    // the canonical 'sw' / 'lw' codes for analytics. Migrating in place:
+    //   • Drop the TEXT[] form
+    //   • Re-add as JSONB array of {code, label?} objects
+    // Existing data was rare enough (the bag feature only shipped recently)
+    // that destructive migration is the simplest path. Users whose bag was
+    // wiped just fall back to "all clubs eligible" until they re-save.
+    name: 'users.clubs_in_bag.to_jsonb',
+    sql: `
+      ALTER TABLE users
+        DROP COLUMN IF EXISTS clubs_in_bag;
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS clubs_in_bag JSONB;
+    `,
+  },
 ];
 
 export async function runMigrations() {

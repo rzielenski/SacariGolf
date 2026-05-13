@@ -4,7 +4,7 @@ import {
   Alert, ActivityIndicator, Animated, Dimensions, TextInput, Modal,
   PanResponder, AppState,
 } from 'react-native';
-import MapView, { Marker, Polyline, Circle, Region } from 'react-native-maps';
+import MapView, { Marker, Polyline, Polygon, Circle, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
@@ -1020,17 +1020,31 @@ export default function ScoringScreen() {
     // level when the paywall ships.
     if (!userIsPremium) return null;
     if (yardsToPin == null) return null;
-    // Tap-in range — recommend the putter regardless of personal data.
-    if (yardsToPin <= 5) return 'putter';
+
+    // Restrict the suggestion pool to the user's bag (when set). Bag now
+    // stores `{code,label?}` entries — extract just the codes for the
+    // filter set. Backward-compat: still accepts the legacy `string[]`
+    // shape in case a cached user object hasn't refreshed.
+    const bag = user?.clubs_in_bag;
+    const bagCodes = (Array.isArray(bag) && bag.length > 0)
+      ? bag.map((e: any) => typeof e === 'string' ? e : e?.code).filter(Boolean) as string[]
+      : null;
+    const bagSet = bagCodes ? new Set(bagCodes) : null;
+    const inBag = (club: string) => !bagSet || bagSet.has(club);
+
+    if (yardsToPin <= 5 && inBag('putter')) return 'putter';
 
     // Build a map of club → expected_yds, preferring the player's personal
     // median when we have one, falling back to DEFAULT_CLUB_YDS otherwise.
-    // We iterate the DEFAULT list so even a brand-new player sees the full
-    // bag considered — not just the clubs they've already used once.
-    const expectedYds: Record<string, number> = { ...DEFAULT_CLUB_YDS };
+    // Filtered to the user's bag so an auto-suggest never proposes a club
+    // they aren't actually carrying.
+    const expectedYds: Record<string, number> = {};
+    for (const club of Object.keys(DEFAULT_CLUB_YDS)) {
+      if (inBag(club)) expectedYds[club] = DEFAULT_CLUB_YDS[club];
+    }
     if (clubStats?.length) {
       for (const c of clubStats) {
-        if (c.median_yds > 0 && c.club !== 'putter') {
+        if (c.median_yds > 0 && c.club !== 'putter' && inBag(c.club)) {
           expectedYds[c.club] = c.median_yds;
         }
       }
@@ -1043,7 +1057,7 @@ export default function ScoringScreen() {
       if (!best || diff < best.diff) best = { club, diff };
     }
     return best?.club ?? null;
-  }, [userIsPremium, clubStats, yardsToPin, DEFAULT_CLUB_YDS]);
+  }, [userIsPremium, clubStats, yardsToPin, DEFAULT_CLUB_YDS, user?.clubs_in_bag]);
 
   // Auto-suggest the most-likely club as the player walks. Takes effect
   // whenever the user hasn't manually picked one (pickClubAuto respects
@@ -1107,14 +1121,34 @@ export default function ScoringScreen() {
   //   • a club currently selected (active or pending)
   //   • at least one tracked shot for that club (otherwise dispersion is [])
   type LL = { latitude: number; longitude: number };
-  const heatmapPoints = useMemo<LL[]>(() => {
-    if (!userIsPremium || !userCoord || !knownPin || !clubStats?.length) return [];
+  /**
+   * Confidence ellipses for the active/pending club, projected onto the map.
+   *
+   * Mirrors the profile-stats heatmap exactly: a 1σ inner ellipse (~68% of
+   * shots fall inside) and a 2σ outer ellipse (~95%), tilted by the
+   * eigenvectors of the per-club covariance so a hook/fade pattern visibly
+   * leans the right way.
+   *
+   * Anchoring:
+   *   • Center at userCoord + (median_yds + meanLong) along player→pin bearing
+   *     + meanLat perpendicular. I.e. "where my average shot of this club lands
+   *     if I aim at the pin from here." Works on-course AND when testing from
+   *     home — the rings appear at median distance in the pin's direction
+   *     from wherever the user is.
+   *   • The lateral/long frame is rotated by the aim bearing so the ellipses
+   *     line up visually with the player→pin vector regardless of compass
+   *     orientation on the map.
+   */
+  const heatmapRings = useMemo<{ sigma1: LL[]; sigma2: LL[]; center: LL } | null>(() => {
+    if (!userIsPremium || !userCoord || !knownPin || !clubStats?.length) return null;
     const club = activeShot?.club ?? pendingClub;
-    if (!club) return [];
+    if (!club) return null;
     const cs = clubStats.find((c) => c.club === club);
-    if (!cs?.dispersion?.length || !cs.median_yds) return [];
+    // Need at least 2 shots to define any kind of "dispersion" — a single
+    // shot has zero variance and would render as a degenerate ellipse.
+    if (!cs?.dispersion || cs.dispersion.length < 2 || !cs.median_yds) return null;
 
-    // Bearing from player to pin, in radians (0 = N, clockwise).
+    // Aim bearing (player → pin), radians, 0 = N, clockwise.
     const lat1 = userCoord.latitude * Math.PI / 180;
     const lat2 = knownPin.lat * Math.PI / 180;
     const dLng = (knownPin.lng - userCoord.longitude) * Math.PI / 180;
@@ -1122,10 +1156,38 @@ export default function ScoringScreen() {
     const xB = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
     const aimBearing = Math.atan2(yB, xB);
 
-    // Walk a fixed bearing + distance from a start coord. Standard great-circle.
+    // Mean + covariance of the dispersion data, in the (lateral, long) yds frame.
+    const N = cs.dispersion.length;
+    const meanLat  = cs.dispersion.reduce((a, d) => a + d.lateral_yds, 0) / N;
+    const meanLong = cs.dispersion.reduce((a, d) => a + d.long_yds,    0) / N;
+    let cxx = 0, cyy = 0, cxy = 0;
+    for (const d of cs.dispersion) {
+      const dx = d.lateral_yds - meanLat;
+      const dy = d.long_yds    - meanLong;
+      cxx += dx * dx;
+      cyy += dy * dy;
+      cxy += dx * dy;
+    }
+    cxx /= N; cyy /= N; cxy /= N;
+
+    // 2×2 symmetric eigen-decomp. λ₁ ≥ λ₂ ≥ 0. Floor λ₂ so a perfectly
+    // collinear pair of shots still renders a thin (but visible) minor axis.
+    const trace = cxx + cyy;
+    const det   = cxx * cyy - cxy * cxy;
+    const disc  = Math.sqrt(Math.max(0, (trace / 2) ** 2 - det));
+    const lambda1 = trace / 2 + disc;
+    const lambda2 = Math.max(1, trace / 2 - disc);
+    // θ = rotation of the major axis WITHIN the (lateral, long) frame.
+    // The lateral axis itself is rotated by aimBearing+π/2 in world space.
+    const thetaLocal = 0.5 * Math.atan2(2 * cxy, cxx - cyy);
+    const sigmaMajor = Math.sqrt(lambda1);
+    const sigmaMinor = Math.sqrt(Math.max(1, lambda2));
+
+    // Walk forward + lateral from a start coord. Standard great-circle.
     const R = 6371000;
     const YDS_TO_M = 0.9144;
     const project = (start: LL, bearingRad: number, distYds: number): LL => {
+      if (distYds === 0) return start;
       const distM = distYds * YDS_TO_M;
       const sLat = start.latitude * Math.PI / 180;
       const sLng = start.longitude * Math.PI / 180;
@@ -1139,24 +1201,41 @@ export default function ScoringScreen() {
       );
       return { latitude: eLat * 180 / Math.PI, longitude: eLng * 180 / Math.PI };
     };
+    /** Project a (forward, lateral) yards pair from userCoord. */
+    const place = (start: LL, forwardYds: number, lateralYds: number): LL => {
+      const a = project(start, aimBearing, forwardYds);
+      return project(a, aimBearing + Math.PI / 2, lateralYds);
+    };
 
     const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
-    return cs.dispersion.map((d) => {
-      // Step 1: forward along aim bearing by (median + long_yds).
-      const forward = project(start, aimBearing, cs.median_yds + d.long_yds);
-      // Step 2: lateral perpendicular to aim. Positive lateral_yds = right.
-      return project(forward, aimBearing + Math.PI / 2, d.lateral_yds);
-    });
-  }, [userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub]);
+    // Ellipse center = mean shot landing point = median + meanLong forward,
+    // meanLat lateral.
+    const center = place(start, cs.median_yds + meanLong, meanLat);
 
-  // Color for the overlay — track the same palette as the saved-shot lines
-  // so a quick glance ties the lines and the heat together.
-  const heatmapColor = (() => {
-    const club = activeShot?.club ?? pendingClub;
-    if (!club || !clubStats?.length) return SHOT_COLORS[0];
-    const idx = clubStats.findIndex((c) => c.club === club);
-    return SHOT_COLORS[(Math.max(0, idx)) % SHOT_COLORS.length];
-  })();
+    // Sample 60 points around each σ ellipse perimeter. In the (lateral,
+    // long) frame relative to the ELLIPSE CENTER:
+    //   local_lat  = mult * sigmaMajor * cos(t) * cos(thetaLocal)
+    //              - mult * sigmaMinor * sin(t) * sin(thetaLocal)
+    //   local_long = mult * sigmaMajor * cos(t) * sin(thetaLocal)
+    //              + mult * sigmaMinor * sin(t) * cos(thetaLocal)
+    // i.e. parametric ellipse in local frame rotated by thetaLocal.
+    const STEPS = 60;
+    const buildRing = (mult: number): LL[] => {
+      const out: LL[] = [];
+      for (let i = 0; i < STEPS; i++) {
+        const t = (i / STEPS) * Math.PI * 2;
+        const lx = mult * sigmaMajor * Math.cos(t);
+        const ly = mult * sigmaMinor * Math.sin(t);
+        const rotLat  = lx * Math.cos(thetaLocal) - ly * Math.sin(thetaLocal);
+        const rotLong = lx * Math.sin(thetaLocal) + ly * Math.cos(thetaLocal);
+        // Project from ELLIPSE CENTER, not from start, so the perimeter
+        // points are positioned relative to the mean shot landing.
+        out.push(place(start, cs.median_yds + meanLong + rotLong, meanLat + rotLat));
+      }
+      return out;
+    };
+    return { sigma1: buildRing(1), sigma2: buildRing(2), center };
+  }, [userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub]);
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
   // temperature, wind, and rain on top of the slope-adjusted yardage.
@@ -1706,23 +1785,35 @@ export default function ScoringScreen() {
           </React.Fragment>
         ))}
 
-        {/* Heatmap overlay — projects past shots with the active/pending club
-            onto the map, anchored at the player and aimed at the pin. Many
-            overlapping translucent circles approximate density visually. */}
-        {heatmapPoints.length > 0 && heatmapPoints.map((p, i) => (
-          <Circle
-            key={`heat-${i}`}
-            center={p}
-            // 4 m ≈ 4.4 yds. 2.5 m was barely visible at the zoom levels
-            // most players use during a round; bumping to 4 m + higher
-            // alpha makes the cluster actually readable on the satellite
-            // map without losing the "stacking density" effect.
-            radius={4}
-            fillColor={heatmapColor + '77'}    // ~47% alpha
-            strokeColor={heatmapColor + 'cc'}
-            strokeWidth={0.5}
-          />
-        ))}
+        {/* Heatmap overlay — 1σ / 2σ confidence ellipses for the active
+            club's shot dispersion, projected from the player toward the pin.
+            Mirrors the profile-stats heatmap styling (neon yellow inner ring
+            covers ~68% of shots, neon red outer ring ~95%) so the on-map
+            preview and the profile view tell the same story. */}
+        {heatmapRings && (
+          <>
+            <Polygon
+              coordinates={heatmapRings.sigma2}
+              strokeColor="#ff2d55"            // neon red — 2σ ≈ 95%
+              strokeWidth={2}
+              fillColor="rgba(255,45,85,0.08)"
+            />
+            <Polygon
+              coordinates={heatmapRings.sigma1}
+              strokeColor="#fff200"            // neon yellow — 1σ ≈ 68%
+              strokeWidth={2}
+              fillColor="rgba(255,242,0,0.12)"
+            />
+            <Marker
+              coordinate={heatmapRings.center}
+              anchor={{ x: 0.5, y: 0.5 }}
+              tappable={false}
+              tracksViewChanges={false}
+            >
+              <View style={styles.heatmapCenterDot} />
+            </Marker>
+          </>
+        )}
 
         {/* Pin marker (center of green) for the current hole */}
         {knownPin && (
@@ -1858,6 +1949,19 @@ export default function ScoringScreen() {
           <TouchableOpacity style={styles.topBarBtn} onPress={() => setScorecardVisible(true)}>
             <Text style={styles.topBarBtnText}>Card</Text>
           </TouchableOpacity>
+          {/* Match chat — cross-team room for everyone in this match. Hidden
+              for practice rounds when nobody else has joined yet (chat would
+              be a soliloquy). Routes to the same chat screen the lobby uses
+              so the message list stays continuous. */}
+          {(!match?.is_practice || (match?.players?.length ?? 0) > 1) && (
+            <TouchableOpacity
+              style={styles.topBarBtn}
+              onPress={() => router.push(`/chat/match/${id}` as any)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.topBarBtnText}>Chat</Text>
+            </TouchableOpacity>
+          )}
           {/* Practice rounds only: invite up to 8 friends to play the same
               course alongside you. They each get their own scorecard. */}
           {match?.is_practice && (
@@ -1982,22 +2086,53 @@ export default function ScoringScreen() {
                 : 'Required before you start tracking'}
             </Text>
             <View style={styles.clubGrid}>
-              {(['driver','3w','5w','7w','hybrid','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const).map(c => {
-                const active = (activeShot?.club ?? pendingClub) === c;
-                return (
-                  <TouchableOpacity
-                    key={c}
-                    style={[styles.clubBtn, active && styles.clubBtnActive]}
-                    onPress={() => { pickClub(c); setClubPickerVisible(false); }}
-                  >
-                    <Text style={[styles.clubBtnText, active && { color: C.bg }]}>{c.toUpperCase()}</Text>
-                  </TouchableOpacity>
-                );
-              })}
+              {/* Render the user's bag entries — preserving order so a
+                  player who likes their wedges grouped at the bottom keeps
+                  that layout. Each chip shows the entry's custom label
+                  when set, else the canonical code. Falls back to the
+                  full ALL list when no bag is saved so a fresh account
+                  isn't forced through the bag editor on first use. */}
+              {(() => {
+                const ALL = ['driver','3w','5w','7w','hybrid','2i','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const;
+                const bag = user?.clubs_in_bag;
+                type Vis = { code: string; label?: string; key: string };
+                let visible: Vis[];
+                if (Array.isArray(bag) && bag.length > 0) {
+                  visible = bag
+                    .map((e: any, i: number): Vis | null =>
+                      typeof e === 'string'
+                        ? { code: e, key: `${e}-${i}` }
+                        : (typeof e?.code === 'string'
+                            ? { code: e.code, label: typeof e.label === 'string' ? e.label : undefined, key: `${e.code}-${i}` }
+                            : null))
+                    .filter((v): v is Vis => v != null);
+                } else {
+                  visible = ALL.map((c, i) => ({ code: c, key: `${c}-${i}` }));
+                }
+                return visible.map((v) => {
+                  const active = (activeShot?.club ?? pendingClub) === v.code;
+                  return (
+                    <TouchableOpacity
+                      key={v.key}
+                      style={[styles.clubBtn, active && styles.clubBtnActive]}
+                      onPress={() => { pickClub(v.code); setClubPickerVisible(false); }}
+                    >
+                      <Text style={[styles.clubBtnText, active && { color: C.bg }]}>
+                        {(v.label ?? v.code).toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                });
+              })()}
             </View>
-            <TouchableOpacity style={styles.clubClearBtn} onPress={() => { pickClub(null); setClubPickerVisible(false); }}>
-              <Text style={styles.clubClearText}>Clear</Text>
-            </TouchableOpacity>
+            <View style={styles.clubPickerFooter}>
+              <TouchableOpacity onPress={() => { setClubPickerVisible(false); router.push('/bag' as any); }}>
+                <Text style={styles.clubPickerEditBag}>Edit my bag →</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { pickClub(null); setClubPickerVisible(false); }}>
+                <Text style={styles.clubClearText}>Clear</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -2603,6 +2738,11 @@ const styles = StyleSheet.create({
   clubBtnText: { color: C.text, fontWeight: '800', fontSize: 12, textAlign: 'center', letterSpacing: 0.6 },
   clubClearBtn: { marginTop: 14, alignSelf: 'center', padding: 8 },
   clubClearText: { color: C.textMuted, fontSize: 12 },
+  clubPickerFooter: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginTop: 14, paddingHorizontal: 8,
+  },
+  clubPickerEditBag: { color: C.gold, fontSize: 12, fontWeight: '700' },
   shotDot: {
     width: 22, height: 22, borderRadius: 11,
     justifyContent: 'center', alignItems: 'center',
@@ -2610,6 +2750,15 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
   },
   shotDotText: { color: '#fff', fontWeight: '900', fontSize: 11 },
+
+  // Tiny dot at the center of the σ ellipses — marks the player's mean
+  // landing point for the selected club. Neon yellow to match the 1σ ring.
+  heatmapCenterDot: {
+    width: 8, height: 8, borderRadius: 4,
+    backgroundColor: '#fff200',
+    borderWidth: 1, borderColor: '#000',
+    shadowColor: '#fff200', shadowOpacity: 0.8, shadowRadius: 4,
+  },
 
   // Ghost player endpoint label — silver, low-contrast so it sits behind
   // the real shot markers. Italic + lowercase for the wizardly vibe.

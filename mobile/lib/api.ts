@@ -219,6 +219,11 @@ export const api = {
       bio?: string | null;
       homeCourseId?: string | null;
       theme?: { trackId: string; title: string; artist: string; artworkUrl?: string; previewUrl: string } | null;
+      /** Pass an array of `{ code, label? }` entries to save a bag; pass
+       *  null to clear (back to "all clubs eligible"). Server enforces
+       *  ≤14 entries + whitelisted codes + ≤30-char labels. Plain
+       *  `string[]` (just codes) is also accepted for backward compat. */
+      clubsInBag?: ({ code: string; label?: string } | string)[] | null;
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<{

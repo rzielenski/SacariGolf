@@ -1,3 +1,12 @@
+/** A single bag entry — canonical category code + optional display label.
+ *  `code` is one of the canonical ALLOWED_CLUBS strings (driver/3w/7i/etc.)
+ *  so shot-tracking + heatmap analytics still aggregate cleanly. `label` is
+ *  free-form (≤ 30 chars) for personality ("TaylorMade Stealth", "Vokey 56°"). */
+export interface BagEntry {
+  code: string;
+  label?: string;
+}
+
 export interface User {
   user_id: string;
   username: string;
@@ -17,6 +26,10 @@ export interface User {
   home_course_state?: string | null;
   home_course_lat?: number | null;
   home_course_lng?: number | null;
+  /** Per-user bag — entries combining a canonical club code (drives
+   *  analytics) with an optional free-text label (display only). Null /
+   *  missing means "no bag set — all clubs eligible." */
+  clubs_in_bag?: BagEntry[] | null;
   // Premium tier — populated by /users/me. Mirrors the columns on `users`.
   is_premium?: boolean;
   premium_since?: string | null;

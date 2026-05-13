@@ -27,9 +27,24 @@ async function pushTargetFor(roundId: string, actorUserId: string) {
   return row;
 }
 
-// Allowed reaction tokens (text labels — no emoji glyphs).
-// Adding more here is the only place to extend the set.
-const REACTIONS = new Set(['fire', 'pure', 'respect', 'oof', 'goat', 'clutch']);
+// Reactions are now free-form emojis. Old token-style values ('fire',
+// 'pure', etc.) remain valid for back-compat with previously stored rows.
+// New reactions just need to be a short emoji-like string — see
+// isValidReaction below.
+const LEGACY_TOKENS = new Set(['fire', 'pure', 'respect', 'oof', 'goat', 'clutch']);
+
+/** Accept any short string that's either a legacy token (back-compat) or
+ *  contains at least one non-ASCII character (almost certainly an emoji).
+ *  Cap length so an attacker can't fill a row with a megabyte of unicode.
+ *  16 chars covers even multi-codepoint ZWJ family emojis with skin-tone
+ *  modifiers (e.g. 👨‍👩‍👧‍👦 is 11 code units). */
+function isValidReaction(s: string): boolean {
+  if (typeof s !== 'string') return false;
+  if (s.length < 1 || s.length > 16) return false;
+  if (LEGACY_TOKENS.has(s)) return true;
+  // At least one non-ASCII codepoint = treat as emoji. Plain "lol" rejects.
+  return /[^\x00-\x7F]/.test(s);
+}
 
 // GET reactions + comments for a round
 //   Returns { reactions: [{ reaction, count, mine }], comments: [{ comment_id, user_id, username, body, created_at, mine }] }
@@ -58,8 +73,12 @@ router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: R
 // Toggle a reaction on a round (add if absent, remove if present)
 //   body: { reaction: 'fire' }
 router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const reaction = (req.body?.reaction ?? '').toString().toLowerCase().trim();
-  if (!REACTIONS.has(reaction)) return res.status(400).json({ error: 'invalid reaction' });
+  // Don't lowercase — emojis are case-irrelevant but lowercasing would
+  // mangle multi-codepoint sequences in some edge cases. Just trim.
+  const reaction = (req.body?.reaction ?? '').toString().trim();
+  if (!isValidReaction(reaction)) {
+    return res.status(400).json({ error: 'reaction must be an emoji (1–16 chars)' });
+  }
 
   // Verify round exists
   const { rows } = await pool.query(`SELECT 1 FROM rounds WHERE round_id = $1`, [req.params.roundId]);
@@ -88,7 +107,11 @@ router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, re
     if (!tgt) return;
     return sendPush(
       [tgt.push_token],
-      `${tgt.actor_name} said ${reaction.toUpperCase()}`,
+      // Push title: emoji reactions show the emoji directly; legacy
+      // tokens get uppercased to match the historical phrasing.
+      LEGACY_TOKENS.has(reaction)
+        ? `${tgt.actor_name} said ${reaction.toUpperCase()}`
+        : `${tgt.actor_name} ${reaction}`,
       tgt.course_name ? `On your round at ${tgt.course_name}` : 'On your round',
       { type: 'round_reaction', roundId: req.params.roundId, reaction, fromUserId: req.userId }
     );
