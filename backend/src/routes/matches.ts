@@ -945,16 +945,16 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         ]
       );
       await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
-      // Auto-post a 'round' card to each player's feed. One post per player
-      // (not one per match) so each friend's wall shows their own ELO swing
-      // / score line. Best-effort — if this fails we still want the result
-      // recorded, so swallow errors at the catch site below.
-      for (const p of [...side1Players, ...side2Players]) {
-        await client.query(
-          `INSERT INTO posts (user_id, kind, match_id) VALUES ($1, 'round', $2)`,
-          [p.user_id, matchId]
-        );
-      }
+      // Auto-post a 'round' card to each player's feed in one batch INSERT
+      // (one row per player, all in one round-trip). Each friend's wall
+      // shows their own ELO swing / score line via the joined match row.
+      // Reuses the same allPlayerIds list we built earlier for the perk
+      // lookup so we don't re-traverse the two side arrays.
+      await client.query(
+        `INSERT INTO posts (user_id, kind, match_id)
+         SELECT unnest($1::uuid[]), 'round', $2`,
+        [allPlayerIds, matchId]
+      );
       return {
         winnerSide: isTie ? null : (side1Wins ? 1 : 2),
         tied: isTie,
@@ -1148,14 +1148,13 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         ]
       );
       await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
-      // Auto-post a 'round' card to each Arena player's feed. Same shape
-      // as the 1v1/team path — one post per player.
-      for (const p of players) {
-        await client.query(
-          `INSERT INTO posts (user_id, kind, match_id) VALUES ($1, 'round', $2)`,
-          [p.user_id, matchId]
-        );
-      }
+      // Auto-post a 'round' card to each Arena player's feed — one batch
+      // INSERT to keep round-trip count flat regardless of field size.
+      await client.query(
+        `INSERT INTO posts (user_id, kind, match_id)
+         SELECT unnest($1::uuid[]), 'round', $2`,
+        [players.map((p) => p.user_id), matchId]
+      );
       return {
         ffa: true,
         winnerSide: isOverallTie ? null : winnerSide,

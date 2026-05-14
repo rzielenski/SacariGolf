@@ -61,52 +61,89 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.get('/pair', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  // Client passes a comma-separated list of recently-shown find_ids so we
-  // can avoid serving the same matchup three times in a row. Capped at 50
-  // so a malicious / runaway client can't blow the query parameter list.
-  const excludeRaw = String(req.query.exclude ?? '').trim();
-  const exclude = excludeRaw
-    ? excludeRaw.split(',').map((s) => s.trim()).filter((s) => /^[0-9a-f-]{8,}$/i.test(s)).slice(0, 50)
-    : [];
+  // Matchup-based ranking: we pick a pair of finds the user hasn't seen
+  // BEFORE, not just two individual unseen finds. Critical when new finds
+  // get uploaded later — a long-tenured find can be re-shown against
+  // every newcomer instead of being permanently retired once the user
+  // first voted on it.
+  //
+  // Apple Guideline 1.2: blocked users' finds must not appear to the
+  // blocker. Same query also drops the caller's own finds (existing).
 
-  // Apple Guideline 1.2: blocked users' finds must not appear to the blocker.
-  // Same query also drops the caller's own finds (existing behavior).
+  // First pull the eligible pool — caller's finds + blocked users' finds
+  // excluded. Capped at 500 so a runaway pool can't blow memory; if you
+  // hit that ceiling we have happier problems to solve first.
+  const { rows: pool_rows } = await pool.query(
+    `SELECT f.find_id
+     FROM finds f
+     JOIN users u ON u.user_id = f.user_id
+     WHERE f.user_id != $1
+       AND u.user_id NOT IN (
+         SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
+       )
+     LIMIT 500`,
+    [req.userId]
+  );
+  if (pool_rows.length < 2) return res.status(404).json({ error: 'not_enough' });
+
+  // Random first pick, then look for any second pick that hasn't been
+  // paired with the first for this user. Re-roll up to a few times if
+  // the first pick happens to have no unseen partners.
+  const shuffled = pool_rows.map((r) => r.find_id).sort(() => Math.random() - 0.5);
+  let chosen: [string, string] | null = null;
+  for (let attempt = 0; attempt < Math.min(8, shuffled.length); attempt++) {
+    const first = shuffled[attempt];
+    const { rows: partnerRows } = await pool.query(
+      `SELECT find_id FROM finds
+        WHERE find_id != $1
+          AND find_id = ANY($2::uuid[])
+          AND NOT EXISTS (
+            SELECT 1 FROM find_pair_seen
+            WHERE user_id = $3
+              AND find_a_id = LEAST(find_id::uuid, $1::uuid)
+              AND find_b_id = GREATEST(find_id::uuid, $1::uuid)
+          )
+        ORDER BY RANDOM()
+        LIMIT 1`,
+      [first, shuffled, req.userId]
+    );
+    if (partnerRows.length) {
+      chosen = [first, partnerRows[0].find_id];
+      break;
+    }
+  }
+
+  if (!chosen) {
+    // Every pair involving the random first picks was already seen. Full
+    // pool exhaust check: count matchups the user has seen vs N*(N−1)/2.
+    // We could compute that precisely, but for simplicity just return
+    // not_enough — the client renders the "no more matchups" empty state.
+    return res.status(404).json({ error: 'not_enough' });
+  }
+
+  // Canonicalise for the (LEAST, GREATEST) constraint on find_pair_seen,
+  // then record this matchup as seen BEFORE returning so a skip / app-
+  // close still counts and we don't loop the same pair next request.
+  const [a, b] = chosen;
+  const [pa, pb] = a < b ? [a, b] : [b, a];
+  await pool.query(
+    `INSERT INTO find_pair_seen (user_id, find_a_id, find_b_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, find_a_id, find_b_id) DO NOTHING`,
+    [req.userId, pa, pb]
+  );
+
+  // Hydrate the chosen pair with the full row data the client renders.
   const { rows } = await pool.query(
     `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes,
             u.username, u.user_id
      FROM finds f
      JOIN users u ON u.user_id = f.user_id
-     WHERE f.user_id != $1
-       AND f.find_id <> ALL($2::uuid[])
-       AND u.user_id NOT IN (
-         SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
-       )
-     ORDER BY RANDOM()
-     LIMIT 2`,
-    [req.userId, exclude]
+     WHERE f.find_id = ANY($1::uuid[])`,
+    [[a, b]]
   );
-
-  // If the exclude list has emptied the pool, retry without it so we
-  // gracefully restart the rotation instead of dead-ending the UI.
-  if (rows.length < 2 && exclude.length > 0) {
-    const { rows: fallback } = await pool.query(
-      `SELECT f.find_id, f.photo_url, f.description, f.elo, f.total_votes,
-              u.username, u.user_id
-       FROM finds f
-       JOIN users u ON u.user_id = f.user_id
-       WHERE f.user_id != $1
-         AND u.user_id NOT IN (
-           SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
-         )
-       ORDER BY RANDOM()
-       LIMIT 2`,
-      [req.userId]
-    );
-    if (fallback.length < 2) return res.status(404).json({ error: 'not_enough' });
-    return res.json(fallback);
-  }
-
-  if (rows.length < 2) return res.status(404).json({ error: 'not_enough' });
+  // Preserve the picked order so the client can rely on rows[0] / rows[1].
+  rows.sort((x: any, y: any) => (x.find_id === a ? -1 : 1));
   return res.json(rows);
 }));
 

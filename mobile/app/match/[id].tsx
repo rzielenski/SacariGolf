@@ -102,9 +102,14 @@ export default function MatchLobbyScreen() {
   const shareRoundSummary = useCallback(async () => {
     if (!match || !match.completed) return;
     const me = match.players?.find((p) => p.user_id === user?.user_id);
+    // Spectator guard: this helper assumes the caller is a participant
+    // (it shares "I won/lost/drew" copy). If a non-participant somehow
+    // reaches here — e.g. the Share button were ever re-exposed in a
+    // context menu — bail rather than shipping wrong-narrative text.
+    if (!me) return;
     const opp = match.players?.find((p) => p.user_id !== user?.user_id);
     const tied = match.result?.winner_side == null;
-    const won = !tied && match.result?.winner_side === me?.side;
+    const won = !tied && match.result?.winner_side === me.side;
     const myDelta = match.my_delta_elo ?? 0;
     const courseLine = me?.course_name
       ? `${me.course_name}${me.teebox_name ? ` · ${me.teebox_name} tees` : ''}`

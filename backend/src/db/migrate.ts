@@ -519,6 +519,69 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS clubs_in_bag JSONB;
     `,
   },
+  {
+    // Per-row index on posts.match_id so the feed query's join into the
+    // matches/results/players chain doesn't sequential-scan the posts
+    // table on every request. The existing indexes cover (user_id,
+    // created_at) and (created_at) only — fine for "newest first" reads
+    // but the match join was unindexed.
+    name: 'posts.match_id_idx',
+    sql: `
+      CREATE INDEX IF NOT EXISTS posts_match_idx
+        ON posts(match_id) WHERE match_id IS NOT NULL;
+    `,
+  },
+  {
+    // Per-user matchup history for the finds ranker. Previously we tracked
+    // which individual finds a user had voted on — so once they'd seen a
+    // find paired with one opponent, that find never re-appeared, even
+    // against new finds added later. Now we track the PAIR (canonicalised
+    // as (LEAST, GREATEST)) so a brand-new find can be ranked against
+    // every existing find the user has already seen.
+    //
+    // A row is inserted when the server serves a pair (not just on vote)
+    // so skipping or abandoning a matchup still counts as "seen" — keeps
+    // the ranker from looping the same pair forever.
+    name: 'find_pair_seen.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS find_pair_seen (
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        find_a_id  UUID NOT NULL REFERENCES finds(find_id) ON DELETE CASCADE,
+        find_b_id  UUID NOT NULL REFERENCES finds(find_id) ON DELETE CASCADE,
+        seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, find_a_id, find_b_id),
+        CHECK (find_a_id < find_b_id)
+      );
+      CREATE INDEX IF NOT EXISTS find_pair_seen_user_idx
+        ON find_pair_seen(user_id);
+    `,
+  },
+  {
+    // Feed-post abuse reports. Mirrors find_reports / message_reports:
+    // a lightweight moderation queue, no auto-action, no voting. The
+    // UNIQUE constraint stops one reporter from spamming the same post.
+    // ON DELETE CASCADE on post_id means deleting a post (by its author
+    // or a moderator) clears its reports too. Status starts 'pending';
+    // admins flip it to 'reviewed' / 'dismissed' off-app.
+    //
+    // Required for App Store review — Apple's UGC guideline (1.2) needs
+    // a report path on EVERY user-content surface, and the feed was the
+    // one surface still missing it.
+    name: 'post_reports.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS post_reports (
+        report_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        post_id      UUID NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+        reporter_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        reason       TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (post_id, reporter_id)
+      );
+      CREATE INDEX IF NOT EXISTS post_reports_status_idx
+        ON post_reports(status, created_at);
+    `,
+  },
 ];
 
 export async function runMigrations() {

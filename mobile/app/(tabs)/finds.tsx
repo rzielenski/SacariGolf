@@ -251,33 +251,18 @@ function VoteTab() {
   // this session. Renders a dedicated "no more finds" empty state with a
   // "Start over" button rather than silently re-showing a stale matchup.
   const [exhausted, setExhausted] = useState(false);
-  const seenIdsRef = useRef<Set<string>>(new Set());
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
-  const loadPair = useCallback(async (attempt = 0) => {
+  const loadPair = useCallback(async () => {
     setLoading(true);
     setResult(null);
     setExhausted(false);
     try {
-      // Tell the server which finds we've recently shown so it can pick
-      // a fresh pair. Capped at 50 server-side so we don't blow the query.
-      const exclude = Array.from(seenIdsRef.current).slice(-50);
-      const p = await api.finds.pair(exclude);
-      // Retry if EITHER find has already been seen — prevents the "same
-      // photo keeps winning the random draw" loop on tiny pools.
-      if (
-        attempt < 4 && p.length === 2 &&
-        (seenIdsRef.current.has(p[0].find_id) || seenIdsRef.current.has(p[1].find_id))
-      ) {
-        return loadPair(attempt + 1);
-      }
-      // Exhausted retries AND still got an already-seen find — the user
-      // has voted on everything available. Show the "no more finds" empty
-      // state instead of looping a stale matchup.
-      if (
-        attempt >= 4 && p.length === 2 &&
-        (seenIdsRef.current.has(p[0].find_id) || seenIdsRef.current.has(p[1].find_id))
-      ) {
+      // Server tracks every matchup the user has been served (via the
+      // find_pair_seen table) and only returns pairs they haven't seen
+      // yet. We don't need to pass an exclude list anymore — pass empty.
+      const p = await api.finds.pair([]);
+      if (p.length < 2) {
         setPair([]);
         setExhausted(true);
         return;
@@ -285,10 +270,11 @@ function VoteTab() {
       setPair(p);
     } catch (e: any) {
       if (e.message === 'not_enough') {
-        // Server-side pool is empty (or every find is from blocked / self).
-        // Distinct from "exhausted" so the messaging can differ.
+        // No unseen matchups left for this user (or pool is too small).
+        // Wait for new finds to be uploaded — they'll create fresh
+        // matchups against the entire existing pool.
         setPair([]);
-        setExhausted(false);
+        setExhausted(true);
       } else if (e.message === 'Missing token' || e.message === 'Invalid token') {
         // Token issue — silently show empty state; AuthGuard will redirect if truly logged out
         setPair([]);
@@ -309,7 +295,8 @@ function VoteTab() {
     try {
       const r = await api.finds.vote(winnerId, loserId);
       setResult({ delta: r.delta, winnerId });
-      seenIdsRef.current = new Set([...seenIdsRef.current, winnerId, loserId]);
+      // Server-side find_pair_seen already marked this matchup as seen
+      // when it was served; the local set we used to maintain is gone.
       // Pause so user sees result, then fade to next pair
       setTimeout(() => {
         Animated.timing(fadeAnim, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => {

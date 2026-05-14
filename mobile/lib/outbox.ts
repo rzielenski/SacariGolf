@@ -16,6 +16,23 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
 import { api, subscribeConn, OfflineError } from './api';
 
+/** Per-match local cache keys that need clearing once the round's been
+ *  successfully submitted by the outbox. Mirrors the cleanup the inline
+ *  submit path does on success — without this, a player who submitted
+ *  offline then came back online would still see the local-draft state
+ *  ("scores_<uid>_<mid>") on the next mount even though the server now
+ *  has authoritative data. */
+function localKeysForMatch(matchId: string): string[] {
+  return [
+    // Score draft. Note: SAVE_KEY uses `scores_<userId>_<matchId>` so we
+    // can't reconstruct it without the userId. The async-storage prefix
+    // scan in drainOutbox handles that.
+    `shots_${matchId}`,
+    `shots_active_${matchId}`,
+    `match_cache_${matchId}`,
+  ];
+}
+
 type SubmitPayload = {
   matchId: string;
   body: {
@@ -102,10 +119,15 @@ export async function drainOutbox(): Promise<void> {
     let entries = await readAll();
     if (!entries.length) return;
     const remaining: Entry[] = [];
+    // Match IDs whose submit landed (either fresh or "already completed" =
+    // server confirms there's nothing more to send). We clear the local
+    // round caches for these so a stranded score draft doesn't linger.
+    const submittedMatchIds = new Set<string>();
     for (const entry of entries) {
       try {
         if (entry.kind === 'submit_scores') {
           await api.matches.submitScores(entry.payload.matchId, entry.payload.body);
+          submittedMatchIds.add(entry.payload.matchId);
         } else if (entry.kind === 'contribute_pin') {
           await api.matches.contributePin(
             entry.payload.matchId,
@@ -116,18 +138,48 @@ export async function drainOutbox(): Promise<void> {
           );
         }
         // Success → don't re-queue.
-      } catch (e) {
+      } catch (e: any) {
         // Still offline → keep for next attempt. Server-side error → drop
-        // (retrying won't fix a 4xx like "Match already completed").
+        // (retrying won't fix a 4xx like "Match already completed"). A
+        // 409 'Match already completed' on submit means another device
+        // already submitted the round; treat that as "done" so the local
+        // draft caches get cleaned up too.
         if (e instanceof OfflineError) {
           remaining.push(entry);
         } else {
+          if (entry.kind === 'submit_scores'
+              && /already completed/i.test(String(e?.message ?? ''))) {
+            submittedMatchIds.add(entry.payload.matchId);
+          }
           // eslint-disable-next-line no-console
           console.warn('[outbox] dropping non-retryable entry', entry.kind, e);
         }
       }
     }
     await writeAll(remaining);
+
+    // Local-draft cleanup for every match whose submit successfully landed
+    // (or was already done server-side). Best-effort — a failed unlink
+    // just means the next mount sees a stale draft that load() will
+    // happily overwrite.
+    if (submittedMatchIds.size) {
+      try {
+        const keys = await AsyncStorage.getAllKeys();
+        const toRemove: string[] = [];
+        for (const matchId of submittedMatchIds) {
+          for (const k of localKeysForMatch(matchId)) {
+            if (keys.includes(k)) toRemove.push(k);
+          }
+          // SAVE_KEY has the user_id baked in (scores_<uid>_<mid>); scan
+          // by suffix so we clear it regardless of which account submitted.
+          const suffix = `_${matchId}`;
+          for (const k of keys) {
+            if (k.startsWith('scores_') && k.endsWith(suffix)) toRemove.push(k);
+          }
+        }
+        if (toRemove.length) await AsyncStorage.multiRemove(toRemove);
+      } catch { /* best-effort */ }
+    }
   } finally {
     draining = false;
   }

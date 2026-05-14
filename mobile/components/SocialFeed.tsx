@@ -67,7 +67,7 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       // empty-state isn't ambiguous when the backend deploy hasn't caught
       // up yet. The OfflineError sentinel from api.ts indicates network-
       // class failure; anything else is a real server response.
-      setError(e?.message ?? 'Could not load feed');
+      setError(friendlyError(e));
     }
     finally { setLoading(false); setRefreshing(false); }
   }, [onRefreshExtra]);
@@ -97,6 +97,41 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
     );
   };
 
+  /** Report another user's post. iOS gets an optional free-text reason via
+   *  Alert.prompt; Android falls back to a plain confirm (Alert.prompt is
+   *  iOS-only). Required for App Store UGC compliance — every user-content
+   *  surface needs a report path. */
+  const handleReport = (postId: string) => {
+    const submit = async (reason?: string) => {
+      try {
+        await api.posts.report(postId, reason);
+        Alert.alert('Thanks', 'A moderator will review this post.');
+      } catch (e: any) {
+        Alert.alert('Could not submit report', e?.message ?? 'Try again.');
+      }
+    };
+    if (Platform.OS === 'ios' && typeof Alert.prompt === 'function') {
+      Alert.prompt(
+        'Report post',
+        'Why are you reporting this post? (optional)',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Report', style: 'destructive', onPress: (reason?: string) => submit(reason) },
+        ],
+        'plain-text',
+      );
+    } else {
+      Alert.alert(
+        'Report this post?',
+        'It will be sent to moderators for review.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Report', style: 'destructive', onPress: () => submit() },
+        ],
+      );
+    }
+  };
+
   return (
     <View style={{ flex: 1 }}>
       <FlatList
@@ -112,6 +147,7 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
             post={item}
             isOwn={item.user_id === user?.user_id}
             onDelete={() => handleDelete(item.post_id)}
+            onReport={() => handleReport(item.post_id)}
           />
         )}
         ListEmptyComponent={
@@ -154,14 +190,25 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   );
 }
 
-/** One post card. Branches on kind. */
-function PostCard({ post, isOwn, onDelete }: { post: any; isOwn: boolean; onDelete: () => void }) {
+/** One post card. Branches on kind. Long-press a post that isn't yours to
+ *  report it (App Store UGC requirement — every content surface needs a
+ *  report path). Own posts long-press / tap the × to delete. */
+function PostCard({ post, isOwn, onDelete, onReport }: {
+  post: any; isOwn: boolean; onDelete: () => void; onReport: () => void;
+}) {
   const when = relativeTime(post.created_at);
   const authorAvatar = post.author_avatar
     ? (post.author_avatar.startsWith('http') ? post.author_avatar : `${API_BASE}${post.author_avatar}`)
     : null;
   return (
-    <View style={s.card}>
+    <TouchableOpacity
+      style={s.card}
+      activeOpacity={1}
+      // Long-press is the discoverable gesture for moderation on a content
+      // card. Own posts → delete; others' posts → report.
+      onLongPress={isOwn ? onDelete : onReport}
+      delayLongPress={400}
+    >
       <View style={s.cardHeader}>
         <TouchableOpacity
           style={s.headerLeft}
@@ -185,9 +232,16 @@ function PostCard({ post, isOwn, onDelete }: { post: any; isOwn: boolean; onDele
             </Text>
           </View>
         </TouchableOpacity>
-        {isOwn && (
+        {isOwn ? (
           <TouchableOpacity onPress={onDelete} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={s.deleteX}>×</Text>
+          </TouchableOpacity>
+        ) : (
+          // Explicit, always-visible report affordance — long-press is the
+          // primary path but Apple reviewers (and users) expect a tappable
+          // control too, not a hidden gesture.
+          <TouchableOpacity onPress={onReport} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={s.reportFlag}>⚑</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -208,7 +262,7 @@ function PostCard({ post, isOwn, onDelete }: { post: any; isOwn: boolean; onDele
           {post.body && <Text style={s.caption}>{post.body}</Text>}
         </>
       )}
-    </View>
+    </TouchableOpacity>
   );
 }
 
@@ -393,6 +447,23 @@ function ComposeModal({
   );
 }
 
+/** Map a raw fetch error to a human-friendly empty-state line. Hides
+ *  scary technical text (TypeError, AbortError, raw stack messages) and
+ *  surfaces a useful action instead. */
+function friendlyError(e: any): string {
+  const msg = String(e?.message ?? '');
+  if (e?.name === 'OfflineError' || /offline|no internet|network request failed|timed out/i.test(msg)) {
+    return 'No internet — feed will load when you reconnect.';
+  }
+  if (/server error|5\d\d/i.test(msg)) {
+    return 'Server hiccup. Pull down to retry.';
+  }
+  if (/not authenticated|invalid token|missing token/i.test(msg)) {
+    return 'Session expired. Sign in again.';
+  }
+  return msg || 'Could not load feed.';
+}
+
 /** "5m ago" / "3h ago" / "Apr 8" — keeps card timestamps short. */
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -425,6 +496,7 @@ const s = StyleSheet.create({
   timestamp: { color: C.textMuted, fontSize: 11, marginTop: 2 },
   fof: { color: C.gold + 'aa', fontStyle: 'italic' },
   deleteX: { color: C.textMuted, fontSize: 22, fontWeight: '700', paddingHorizontal: 8 },
+  reportFlag: { color: C.textMuted, fontSize: 15, paddingHorizontal: 8 },
 
   bodyText: { color: C.text, fontSize: 15, lineHeight: 21 },
 

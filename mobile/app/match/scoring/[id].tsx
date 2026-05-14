@@ -946,7 +946,11 @@ export default function ScoringScreen() {
   // Both are orthometric/sea-level so the difference is meaningful. Expected
   // slope error is ~±5 yds (limited by DEM accuracy, ~2-4m per side). Falls
   // back to GPS altimeter only when DEM lookup hasn't completed yet.
-  const slopeAdjustment = (() => {
+  // Memoised so the result identity is stable across renders — the heatmap
+  // ellipse memo lists slopeAdjustment in its dep array, and a fresh object
+  // each render would force the heatmap to re-project 120 perimeter points
+  // every time the parent re-rendered for any reason.
+  const slopeAdjustment = useMemo(() => {
     if (!knownPin || !userCoord || yardsToPin == null) return null;
 
     // PREFERRED PATH — crowdsourced relative elevation. Both endpoints come
@@ -992,7 +996,7 @@ export default function ScoringScreen() {
     const minSurface = isDem ? 1 : 3;
     if (Math.abs(adj) < minSurface) return null;
     return { adj, playsLike: yardsToPin + adj, uphill: adj > 0, source: isDem ? 'dem' as const : 'gps' as const };
-  })();
+  }, [knownPin, userCoord, yardsToPin, pinRelElevM, elevOffsetM, playerElevationM]);
 
   // ── Auto-suggest the most likely club from yardsToPin ─────────────────
   // Picks the bag club whose median distance is closest to the current

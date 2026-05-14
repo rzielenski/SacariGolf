@@ -691,24 +691,36 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     const statYds = vecs.map(ydsFor);
     const medYds = median(statYds);
 
-    // Dispersion frame: forward axis = median bearing. The lateral/long
-    // numbers are pure GPS geometry; dist_yds is the plays-like value
-    // (when available) so the list view shows the normalized distance.
+    // Dispersion frame: forward axis = median bearing.
+    //
+    //   • lateral_yds → signed perpendicular offset (+ = right of aim line)
+    //   • long_yds    → signed forward offset from median forward landing
+    //                   (+ = long, − = short). Pure GEOMETRY: derived from
+    //                   the shot's projection onto the median bearing.
+    //   • dist_yds    → always-positive ABSOLUTE distance the shot covered.
+    //                   Uses plays_like_yds when present (normalized to
+    //                   neutral conditions), else raw GPS great-circle yds.
+    //
+    // Bug history: dist_yds used to fall back to fwd_yds (the forward
+    // projection), so a shot hit sideways or backwards from the player's
+    // typical direction for that club would show a NEGATIVE dist_yds in
+    // the per-shot list ("my 150yd 7-iron shows as −25"). dist_yds is now
+    // independent of bearing; it answers "how far did the ball travel"
+    // not "how far forward of my median did it land".
     const dispersion = vecs.map(v => {
       let off = v.bearing - medB;
       while (off > Math.PI) off -= 2 * Math.PI;
       while (off < -Math.PI) off += 2 * Math.PI;
-      const fwd_m  = v.dist_m * Math.cos(off);
-      const lat_m  = v.dist_m * Math.sin(off);
-      const fwd_yds = fwd_m * M_TO_YDS;
-      const lat_yds = lat_m * M_TO_YDS;
-      const distOut = v.plays_like_yds != null ? v.plays_like_yds : fwd_yds;
+      const totalYds = v.dist_m * M_TO_YDS;
+      const fwd_yds  = totalYds * Math.cos(off);
+      const lat_yds  = totalYds * Math.sin(off);
+      const distAbs  = v.plays_like_yds != null ? v.plays_like_yds : totalYds;
       return {
         shot_id: v.shot_id,
         recorded_at: v.recorded_at,
         lateral_yds: Math.round(lat_yds),
-        long_yds:    Math.round(distOut - medYds), // signed: + = long, − = short
-        dist_yds:    Math.round(distOut),
+        long_yds:    Math.round(fwd_yds - medYds), // signed forward offset
+        dist_yds:    Math.round(distAbs),          // always positive
       };
     });
 

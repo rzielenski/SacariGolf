@@ -52,6 +52,15 @@ function persistVoiceClip(
   return { url: `/uploads/voice/${filename}`, durationMs: dur };
 }
 
+/** Best-effort unlink of a persisted voice clip. Used to clean up after an
+ *  INSERT failure so we don't leak files on disk for messages that never
+ *  reached the database. */
+function unlinkVoiceClip(url: string | null | undefined) {
+  if (!url?.startsWith('/uploads/voice/')) return;
+  const fname = url.replace('/uploads/voice/', '');
+  try { fs.unlinkSync(path.join(VOICE_DIR, fname)); } catch { /* already gone, fine */ }
+}
+
 router.get('/conversations', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // DM conversation list. The LEFT JOIN to chat_reads gives each row a
   // `last_read_at` (NULL if the user has never opened the chat), and
@@ -237,35 +246,42 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const text = typeof body === 'string' ? body.trim().slice(0, 2000) : '';
 
   // Voice clip — optional. When present, decode to disk before the INSERT
-  // so we have a URL to store. On INSERT failure we'd leak a clip file;
-  // acceptable for now (no PII in the filename, low volume).
+  // so we have a URL to store. We unlink the file on any failure below so
+  // a failed message doesn't leak audio on disk.
   let voice: { url: string; durationMs: number } | null = null;
   if (typeof voiceBase64 === 'string' && voiceBase64.length > 0) {
     const result = persistVoiceClip(voiceBase64, voiceMime ?? 'audio/m4a', Number(voiceDurationMs) || 0);
     if ('error' in result) return res.status(400).json({ error: result.error });
     voice = result;
   }
+  // Helper closures so the orphan-cleanup is centralised — both the early
+  // 4xx returns AND a thrown error in the INSERT block unlink the file.
+  const onFail = () => { if (voice) unlinkVoiceClip(voice.url); };
 
   // Either text OR voice must be present.
-  if (!text && !voice) return res.status(400).json({ error: 'body or voice required' });
+  if (!text && !voice) { onFail(); return res.status(400).json({ error: 'body or voice required' }); }
 
   // Default body when only voice is sent — used for push-notification
   // preview and the conversations list's "last_message" preview.
   const effectiveBody = text || '🎤 Voice message';
 
   if (toUserId) {
-    if (toUserId === req.userId) return res.status(400).json({ error: 'Cannot DM yourself' });
+    if (toUserId === req.userId) { onFail(); return res.status(400).json({ error: 'Cannot DM yourself' }); }
     // Gate DMs to friends only — keeps random users from spamming.
     if (!(await areFriends(req.userId!, toUserId))) {
+      onFail();
       return res.status(403).json({ error: 'You can only DM friends' });
     }
-    const { rows } = await pool.query(
-      `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id,
-                 voice_url, voice_duration_ms`,
-      [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
-    );
+    let rows: any[];
+    try {
+      ({ rows } = await pool.query(
+        `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id,
+                   voice_url, voice_duration_ms`,
+        [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
+      ));
+    } catch (err) { onFail(); throw err; }
     const msg = rows[0];
     const { rows: senderRows } = await pool.query('SELECT username FROM users WHERE user_id = $1', [req.userId]);
     const senderName = senderRows[0]?.username ?? 'Someone';
@@ -276,22 +292,26 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     return res.status(201).json({ ...msg, username: senderName });
   }
 
-  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
+  if (!matchId && !clanId) { onFail(); return res.status(400).json({ error: 'matchId, clanId, or toUserId required' }); }
 
   // Sender must actually be a participant of the match / clan
   if (!(await memberOfChat(req.userId!, matchId, clanId))) {
+    onFail();
     return res.status(403).json({ error: 'Not a member of this chat' });
   }
 
   const col = matchId ? 'match_id' : 'clan_id';
   const val = matchId ?? clanId;
 
-  const { rows } = await pool.query(
-    `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms`,
-    [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
-  );
+  let rows: any[];
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms`,
+      [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
+    ));
+  } catch (err) { onFail(); throw err; }
   const msg = rows[0];
 
   const { rows: senderRows } = await pool.query(

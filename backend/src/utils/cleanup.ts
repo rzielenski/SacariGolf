@@ -193,6 +193,12 @@ export async function runPairingPass() {
  * match creation as fallback) so the timeline reflects when the round
  * actually happened, not when the backfill ran.
  */
+/** Batch cap per tick. Prevents a sudden flood (e.g. a one-time DB
+ *  migration that completes 10k matches at once) from locking the posts
+ *  table for an extended write. At 200 rows / 5 min the catch-up speed
+ *  is ~58k rows / day which clears any realistic backlog quickly. */
+const BACKFILL_BATCH_SIZE = 200;
+
 export async function backfillRoundPosts() {
   try {
     const { rowCount } = await pool.query(
@@ -209,7 +215,10 @@ export async function backfillRoundPosts() {
            WHERE p.user_id  = mp.user_id
              AND p.match_id = m.match_id
              AND p.kind     = 'round'
-         )`
+         )
+       ORDER BY m.created_at DESC
+       LIMIT $1`,
+      [BACKFILL_BATCH_SIZE]
     );
     if (rowCount && rowCount > 0) {
       // eslint-disable-next-line no-console
@@ -221,12 +230,21 @@ export async function backfillRoundPosts() {
   }
 }
 
+// Module-scoped handles so we can stop + restart cleanly during HMR / hot
+// reload — without this, every module re-evaluation would leak the prior
+// intervals into the background and double up. Production restarts wipe
+// the process state so this only matters in dev, but it's the kind of
+// drift that takes hours to track down once it surfaces.
 let cleanupHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 
 export function startCleanupSchedule() {
-  if (cleanupHandle) return;
+  // Re-entrancy: stop any previously-running intervals first. If the module
+  // is hot-reloaded the existing handles get cleared before fresh ones are
+  // installed below, so we end up with exactly one of each tick — not two.
+  stopCleanupSchedule();
+
   // Run once on boot to catch anything that drifted while the server was
   // down, then every hour thereafter.
   cancelStaleMatches();
@@ -242,4 +260,11 @@ export function startCleanupSchedule() {
   // so the home feed always reflects everyone's recent rounds.
   backfillRoundPosts();
   feedBackfillHandle = setInterval(backfillRoundPosts, 5 * 60 * 1000);
+}
+
+/** Stop all background tasks. Idempotent; safe to call multiple times. */
+export function stopCleanupSchedule() {
+  if (cleanupHandle) { clearInterval(cleanupHandle); cleanupHandle = null; }
+  if (pairingHandle) { clearInterval(pairingHandle); pairingHandle = null; }
+  if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
 }

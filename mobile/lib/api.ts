@@ -161,9 +161,21 @@ async function request<T>(
   body?: object,
   auth = true,
 ): Promise<T> {
+  // Idempotency policy: only methods that are safe to repeat get auto-retry
+  // on network errors. POST is excluded because we can't distinguish
+  // "request never reached the server" from "request succeeded server-side
+  // but the response was lost in transit" — retrying the latter creates
+  // duplicate writes (extra votes, duplicate posts, double-counted pin
+  // samples, ELO applied twice, etc.).
+  //
+  // Critical POSTs that genuinely need retry semantics route through the
+  // outbox (submitScores, contributePin) which retries against server-side
+  // idempotency gates (match.completed, ON CONFLICT) rather than blindly.
+  const isIdempotent = method === 'GET' || method === 'PUT' || method === 'DELETE';
+  const maxAttempts = isIdempotent ? 1 + RETRY_DELAYS_MS.length : 1;
+
   let lastErr: unknown = null;
-  // Total attempts = 1 + RETRY_DELAYS_MS.length. Each retry waits longer.
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const out = await singleAttempt<T>(method, path, body, auth);
       noteFetchSuccess();
@@ -179,7 +191,7 @@ async function request<T>(
         throw e;
       }
       // Retryable: wait and try again unless we've burned all attempts.
-      if (attempt < RETRY_DELAYS_MS.length) {
+      if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
         continue;
       }
@@ -527,6 +539,10 @@ export const api = {
       request<any>('POST', '/posts', body),
     delete: (id: string) =>
       request<{ success: true }>('DELETE', `/posts/${id}`),
+    /** Flag a feed post for moderation. Idempotent — repeat reports from
+     *  the same user collapse via the DB unique constraint. */
+    report: (id: string, reason?: string) =>
+      request<{ success: true }>('POST', `/posts/${id}/report`, { reason }),
   },
 
   tournaments: {

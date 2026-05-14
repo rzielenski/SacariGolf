@@ -40,12 +40,22 @@ const IMAGE_MIME_EXT: Record<string, string> = {
 /** POST /posts — create a text or photo post. Round posts are inserted
  *  server-side by the match-resolve path; clients can't manually mint them
  *  (kind='round' is rejected here so a malicious client can't fake a win). */
+/** Best-effort unlink of a persisted feed image. Used to clean up after
+ *  an INSERT failure so we don't leak files on disk for posts that never
+ *  reached the database. */
+function unlinkFeedImage(url: string | null | undefined) {
+  if (!url?.startsWith('/uploads/feed/')) return;
+  const fname = url.replace('/uploads/feed/', '');
+  try { fs.unlinkSync(path.join(FEED_DIR, fname)); } catch { /* already gone, fine */ }
+}
+
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { body, imageBase64, imageMime } = req.body ?? {};
 
   const text = typeof body === 'string' ? body.trim().slice(0, MAX_BODY_LEN) : '';
 
   // Image branch — decode + persist before INSERT so we have a URL to store.
+  // We unlink on any failure below so a failed post doesn't leak the photo.
   let imageUrl: string | null = null;
   if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
     const ext = IMAGE_MIME_EXT[imageMime ?? ''];
@@ -61,16 +71,63 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   }
 
   // Either text OR image must be present — empty posts are useless.
-  if (!text && !imageUrl) return res.status(400).json({ error: 'body or image required' });
+  if (!text && !imageUrl) {
+    // No image to clean up here (text-only path), but the guard is mirrored
+    // for symmetry with the voice-message handler.
+    if (imageUrl) unlinkFeedImage(imageUrl);
+    return res.status(400).json({ error: 'body or image required' });
+  }
 
   const kind = imageUrl ? 'photo' : 'text';
-  const { rows } = await pool.query(
-    `INSERT INTO posts (user_id, kind, body, image_url)
-     VALUES ($1, $2, $3, $4)
-     RETURNING post_id, user_id, kind, body, image_url, match_id, created_at`,
-    [req.userId, kind, text || null, imageUrl]
-  );
+  let rows: any[];
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO posts (user_id, kind, body, image_url)
+       VALUES ($1, $2, $3, $4)
+       RETURNING post_id, user_id, kind, body, image_url, match_id, created_at`,
+      [req.userId, kind, text || null, imageUrl]
+    ));
+  } catch (err) {
+    // INSERT failed — unlink the orphan image (if any) before re-throwing
+    // to express's error handler so a failed post doesn't leak on disk.
+    unlinkFeedImage(imageUrl);
+    throw err;
+  }
   return res.status(201).json(rows[0]);
+}));
+
+/**
+ * POST /posts/:id/report — flag a feed post for moderation. Mirrors the
+ * find / message report flow: lightweight queue, no auto-action, dedup'd
+ * per reporter via the UNIQUE constraint on post_reports.
+ *
+ * Required for App Store review (Apple UGC guideline 1.2) — every
+ * user-content surface needs a report path. You can't report your own
+ * post (nothing to moderate there) and the post must exist.
+ */
+router.post('/:id/report', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const reason = typeof req.body?.reason === 'string'
+    ? req.body.reason.trim().slice(0, 500)
+    : null;
+
+  // Confirm the post exists + isn't the reporter's own. A 404 here also
+  // covers "post was already deleted" — fine, nothing to report.
+  const { rows } = await pool.query(
+    `SELECT user_id FROM posts WHERE post_id = $1`,
+    [req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Post not found' });
+  if (rows[0].user_id === req.userId) {
+    return res.status(400).json({ error: 'You cannot report your own post' });
+  }
+
+  await pool.query(
+    `INSERT INTO post_reports (post_id, reporter_id, reason)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (post_id, reporter_id) DO NOTHING`,
+    [req.params.id, req.userId, reason]
+  );
+  return res.status(201).json({ success: true });
 }));
 
 /** DELETE /posts/:id — owner-only. Also unlinks the on-disk image. */
@@ -108,11 +165,32 @@ router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) 
  */
 router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
-  const before = typeof req.query.before === 'string' ? req.query.before : null;
+  // Cursor accepts either a plain ISO timestamp (legacy clients) or a
+  // composite "ISO|post_id" form (current clients). The composite form is
+  // stable across rows that share a created_at — without the tiebreak on
+  // post_id, posts created in the same millisecond could be skipped or
+  // duplicated across page boundaries.
+  const beforeRaw = typeof req.query.before === 'string' ? req.query.before : null;
+  let beforeIso: string | null = null;
+  let beforeId: string | null = null;
+  if (beforeRaw) {
+    const [iso, id] = beforeRaw.split('|');
+    if (iso) beforeIso = iso;
+    if (id) beforeId = id;
+  }
 
-  const beforeClause = before ? ` AND p.created_at < $2` : '';
+  // Build the WHERE clause and parameters. Composite cursor: "created_at
+  // strictly older OR (same created_at AND post_id strictly less)" so the
+  // ordering is total even on duplicate timestamps.
+  let beforeClause = '';
   const params: any[] = [req.userId];
-  if (before) params.push(before);
+  if (beforeIso && beforeId) {
+    params.push(beforeIso, beforeId);
+    beforeClause = ` AND (p.created_at < $2 OR (p.created_at = $2 AND p.post_id < $3))`;
+  } else if (beforeIso) {
+    params.push(beforeIso);
+    beforeClause = ` AND p.created_at < $2`;
+  }
   params.push(limit);
 
   // One pass over the public timeline, with per-row friendship attribution
@@ -168,7 +246,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
      WHERE TRUE${beforeClause}
-     ORDER BY p.created_at DESC
+     ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`,
     params
   );
