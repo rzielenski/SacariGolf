@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '../../lib/api';
+import { api, isSilentError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
@@ -48,6 +48,16 @@ export default function MatchLobbyScreen() {
         setHasSavedProgress(!!saved || hasServerProgress);
       } catch { /* ignore */ }
     } catch (e: any) {
+      // This load effect re-fires whenever auth state flips (it depends on
+      // user?.user_id). On logout / token-invalidation the re-fire hits the
+      // API with no token → NotAuthenticatedError. The app is already
+      // navigating to login — surfacing "Error: Not signed in" is just noise.
+      if (isSilentError(e)) return;
+      // 404 → the match was completed / cancelled / deleted server-side.
+      // Most common cause: tapping a stale "resume round" entry or an old
+      // notification. Don't pop a scary "Match not found" alert — just go
+      // back to wherever the user came from.
+      if (e?.status === 404) { router.back(); return; }
       Alert.alert('Error', e.message);
     } finally {
       setLoading(false);

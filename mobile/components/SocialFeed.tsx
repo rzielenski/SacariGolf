@@ -12,6 +12,10 @@
  * Posts surfaced from friends-of-friends (server marks `is_fof`) get a tiny
  * "via a friend" attribution so users can tell why a stranger shows up.
  *
+ * A Global / Local / Friends toggle at the top of the feed switches the
+ * audience (see api.posts.feed): everyone, players whose home course is
+ * near you, or accepted friends only.
+ *
  * Designed to be the ONLY scrollable surface on the screen it's placed in —
  * a `headerComponent` slot stitches arbitrary content above the feed items
  * so the whole tab scrolls as one. Don't nest this inside a ScrollView.
@@ -39,12 +43,26 @@ interface Props {
   onRefreshExtra?: () => Promise<void> | void;
 }
 
+/** Feed audience. Mirrors the backend `?scope=` param on GET /posts/feed. */
+type FeedScope = 'global' | 'local' | 'friends';
+const SCOPES: { key: FeedScope; label: string }[] = [
+  { key: 'global', label: 'Global' },
+  { key: 'local', label: 'Local' },
+  { key: 'friends', label: 'Friends' },
+];
+
 export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   const { user } = useAuth();
   const [posts, setPosts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  // Feed audience toggle — see api.posts.feed. 'global' is the default so a
+  // brand-new user with no friends still lands on a populated feed.
+  const [scope, setScope] = useState<FeedScope>('global');
+  // Set when scope==='local' but the server had no home course / GPS to
+  // anchor on — drives a tailored "set a home course" empty state.
+  const [localUnavailable, setLocalUnavailable] = useState(false);
   // When the feed fetch errors we keep `loading`/`posts` honest but stash
   // the message so the empty-state can say "Couldn't reach the feed" instead
   // of the generic "No posts yet". Pull-to-refresh clears it.
@@ -57,10 +75,11 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       // the home tab) in parallel with the feed fetch so a single pull
       // updates everything in one round-trip wait.
       const [res] = await Promise.all([
-        api.posts.feed({ limit: 30 }),
+        api.posts.feed({ limit: 30, scope }),
         isRefresh && onRefreshExtra ? Promise.resolve(onRefreshExtra()) : Promise.resolve(),
       ]);
       setPosts(res.posts ?? []);
+      setLocalUnavailable(!!res.localUnavailable);
       setError(null);
     } catch (e: any) {
       // Distinguish "endpoint unreachable / 404" from "empty result" so the
@@ -70,9 +89,20 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       setError(friendlyError(e));
     }
     finally { setLoading(false); setRefreshing(false); }
-  }, [onRefreshExtra]);
+  }, [onRefreshExtra, scope]);
 
   useEffect(() => { load(); }, [load]);
+
+  /** Switch the feed audience. Clears the list immediately so the user sees
+   *  a spinner rather than stale posts from the previous scope while the new
+   *  fetch is in flight (the `load` effect re-fires because `scope` changed). */
+  const switchScope = (next: FeedScope) => {
+    if (next === scope) return;
+    setScope(next);
+    setPosts([]);
+    setLoading(true);
+    setError(null);
+  };
 
   const handleDelete = (postId: string) => {
     Alert.alert(
@@ -138,7 +168,28 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
         data={posts}
         keyExtractor={(p) => p.post_id}
         contentContainerStyle={{ paddingBottom: 120 }}
-        ListHeaderComponent={headerComponent ?? null}
+        ListHeaderComponent={
+          <>
+            {headerComponent}
+            <View style={s.scopeBar}>
+              {SCOPES.map((sc) => {
+                const active = sc.key === scope;
+                return (
+                  <TouchableOpacity
+                    key={sc.key}
+                    style={[s.scopeTab, active && s.scopeTabActive]}
+                    onPress={() => switchScope(sc.key)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[s.scopeTabText, active && s.scopeTabTextActive]}>
+                      {sc.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </>
+        }
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />
         }
@@ -159,10 +210,27 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
               <Text style={s.emptySub}>{error}</Text>
               <Text style={[s.emptySub, { marginTop: 8 }]}>Pull down to retry.</Text>
             </View>
+          ) : scope === 'local' && localUnavailable ? (
+            <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+              <Text style={s.empty}>No location set</Text>
+              <Text style={s.emptySub}>
+                Set a home course in your profile to see posts from players near you.
+              </Text>
+            </View>
           ) : (
             <View style={{ alignItems: 'center', paddingVertical: 40 }}>
-              <Text style={s.empty}>No posts yet.</Text>
-              <Text style={s.emptySub}>Play a round or tap "+ Post" to start the feed.</Text>
+              <Text style={s.empty}>
+                {scope === 'friends'
+                  ? 'No posts from friends yet.'
+                  : scope === 'local'
+                    ? 'No posts from players near you yet.'
+                    : 'No posts yet.'}
+              </Text>
+              <Text style={s.emptySub}>
+                {scope === 'friends'
+                  ? 'Add friends or tap "+ Post" to get the feed going.'
+                  : 'Play a round or tap "+ Post" to start the feed.'}
+              </Text>
             </View>
           )
         }
@@ -482,6 +550,17 @@ function relativeTime(iso: string): string {
 const s = StyleSheet.create({
   empty: { color: C.text, fontWeight: '700', fontSize: 16 },
   emptySub: { color: C.textMuted, fontSize: 12, marginTop: 8, textAlign: 'center', paddingHorizontal: 30 },
+
+  // Global / Local / Friends segmented toggle, pinned just under the header.
+  scopeBar: {
+    flexDirection: 'row', marginHorizontal: 16, marginBottom: 10,
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    padding: 3,
+  },
+  scopeTab: { flex: 1, paddingVertical: 8, borderRadius: 6, alignItems: 'center' },
+  scopeTabActive: { backgroundColor: C.gold },
+  scopeTabText: { color: C.textMuted, fontWeight: '700', fontSize: 13 },
+  scopeTabTextActive: { color: C.bg },
 
   card: {
     backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,

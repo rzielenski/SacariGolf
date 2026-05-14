@@ -8,7 +8,7 @@ import MapView, { Marker, Polyline, Polygon, Circle, Region } from 'react-native
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api, OfflineError } from '../../../lib/api';
+import { api, OfflineError, NotAuthenticatedError } from '../../../lib/api';
 import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
 import { isPremium } from '../../../lib/premium';
@@ -443,6 +443,11 @@ export default function ScoringScreen() {
             }
           }
         } catch { /* nothing to fall back to — selectingCourse stays true */ }
+      } else if (e instanceof NotAuthenticatedError) {
+        // This load effect re-fires when auth state flips (it depends on
+        // user?.user_id). On logout / token-invalidation the re-fire hits
+        // the API with no token — swallow it; the app is already heading to
+        // the login screen and an "Error: Not signed in" popup is just noise.
       } else {
         Alert.alert('Error', e.message);
       }

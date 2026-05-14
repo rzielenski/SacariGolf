@@ -37,6 +37,12 @@ const IMAGE_MIME_EXT: Record<string, string> = {
   'image/webp': 'webp',
 };
 
+// "Local" feed radius — an author counts as local if their home course sits
+// within this many km of the viewer's center point (the viewer's own home
+// course, or client-supplied GPS when provided). ~50 miles is a comfortable
+// "courses near me" range without the feed going empty in rural areas.
+const LOCAL_RADIUS_KM = 80;
+
 /** POST /posts — create a text or photo post. Round posts are inserted
  *  server-side by the match-resolve path; clients can't manually mint them
  *  (kind='round' is rejected here so a malicious client can't fake a win). */
@@ -156,12 +162,20 @@ router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) 
  * the result set by friendship — early-network users get a populated feed
  * full of example rounds from anyone on the platform.
  *
- *   ?limit=20    — default 20, max 50
- *   ?before=ISO  — for "older posts" pagination (created_at strictly less)
+ *   ?limit=20         — default 20, max 50
+ *   ?before=ISO       — for "older posts" pagination (created_at strictly less)
+ *   ?scope=global     — everyone (default; unrecognised values fall back here)
+ *   ?scope=friends    — self + accepted friends only
+ *   ?scope=local      — self + authors whose home course is within
+ *                       LOCAL_RADIUS_KM of the viewer; needs a center point
+ *                       from ?lat=&lng= or the viewer's home course
+ *   ?lat=&lng=        — optional GPS center for scope=local (overrides home
+ *                       course; lets a travelling player see who's nearby)
  *
  * (The previous version capped non-friend content at 20% to keep the feed
  * intimate. We unlocked it because in practice users were landing on an
- * empty feed before they had a network to populate it.)
+ * empty feed before they had a network to populate it — and now the scope
+ * toggle lets a user opt back into a friends-only view explicitly.)
  */
 router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
@@ -179,6 +193,44 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     if (id) beforeId = id;
   }
 
+  // Scope filter — 'global' (default, everyone), 'friends' (self + accepted
+  // friends only), or 'local' (self + authors whose home course is near the
+  // viewer). Anything unrecognised falls back to 'global' so older clients
+  // that don't send a scope keep working unchanged.
+  const scopeRaw = typeof req.query.scope === 'string' ? req.query.scope : 'global';
+  const scope: 'global' | 'local' | 'friends' =
+    scopeRaw === 'friends' || scopeRaw === 'local' ? scopeRaw : 'global';
+
+  // For 'local' we need a center point. Prefer client-supplied GPS (lets a
+  // travelling player see who's around them right now); otherwise fall back
+  // to the viewer's home course. If we end up with neither, 'local' returns
+  // an empty set + a `localUnavailable` flag so the client can prompt the
+  // user to set a home course instead of showing a bare "no posts" state.
+  let centerLat: number | null = null;
+  let centerLng: number | null = null;
+  if (scope === 'local') {
+    const latRaw = req.query.lat;
+    const lngRaw = req.query.lng;
+    if (typeof latRaw === 'string' && typeof lngRaw === 'string') {
+      const la = Number(latRaw);
+      const ln = Number(lngRaw);
+      if (Number.isFinite(la) && Number.isFinite(ln)) { centerLat = la; centerLng = ln; }
+    }
+    if (centerLat == null) {
+      const { rows: hc } = await pool.query(
+        `SELECT c.latitude, c.longitude
+           FROM users u
+           JOIN courses c ON c.course_id = u.home_course_id
+          WHERE u.user_id = $1`,
+        [req.userId]
+      );
+      if (hc.length && hc[0].latitude != null && hc[0].longitude != null) {
+        centerLat = Number(hc[0].latitude);
+        centerLng = Number(hc[0].longitude);
+      }
+    }
+  }
+
   // Build the WHERE clause and parameters. Composite cursor: "created_at
   // strictly older OR (same created_at AND post_id strictly less)" so the
   // ordering is total even on duplicate timestamps.
@@ -191,6 +243,41 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     params.push(beforeIso);
     beforeClause = ` AND p.created_at < $2`;
   }
+
+  // Scope clause (+ for 'local', the radius CTE). Param indexes are derived
+  // from the live params array length so they stay correct whether or not
+  // the before-cursor already consumed $2/$3.
+  let scopeClause = '';
+  let localCte = '';
+  if (scope === 'friends') {
+    scopeClause = ` AND (p.user_id = $1 OR p.user_id IN (SELECT uid FROM my_friends))`;
+  } else if (scope === 'local' && centerLat != null && centerLng != null) {
+    params.push(centerLat, centerLng, LOCAL_RADIUS_KM);
+    const latIdx = params.length - 2;
+    const lngIdx = params.length - 1;
+    const radIdx = params.length;
+    // Great-circle (haversine) distance from the center to each author's
+    // home course. LEAST/GREATEST clamp the dot product into [-1, 1] so a
+    // tiny floating-point overshoot can't make acos() return NaN.
+    localCte = `,
+     local_authors AS (
+       SELECT u.user_id AS uid
+         FROM users u
+         JOIN courses hc ON hc.course_id = u.home_course_id
+        WHERE hc.latitude IS NOT NULL AND hc.longitude IS NOT NULL
+          AND 6371 * acos(LEAST(1, GREATEST(-1,
+                cos(radians($${latIdx})) * cos(radians(hc.latitude)) *
+                cos(radians(hc.longitude) - radians($${lngIdx})) +
+                sin(radians($${latIdx})) * sin(radians(hc.latitude))
+              ))) <= $${radIdx}
+     )`;
+    scopeClause = ` AND (p.user_id = $1 OR p.user_id IN (SELECT uid FROM local_authors))`;
+  } else if (scope === 'local') {
+    // Local requested but no center point available — return nothing rather
+    // than silently falling back to a global feed.
+    scopeClause = ` AND FALSE`;
+  }
+
   params.push(limit);
 
   // One pass over the public timeline, with per-row friendship attribution
@@ -217,7 +304,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
          FROM friends f1
          JOIN friends f2 ON f2.friend_id = f1.friend_id
         WHERE f1.user_id = $1 AND f1.status = 'accepted' AND f2.status = 'accepted'
-     )
+     )${localCte}
      SELECT
        p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
        u.username AS author_username, u.avatar_url AS author_avatar,
@@ -245,13 +332,20 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      LEFT JOIN match_players mp_me ON mp_me.match_id = p.match_id AND mp_me.user_id = p.user_id
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
-     WHERE TRUE${beforeClause}
+     WHERE TRUE${beforeClause}${scopeClause}
      ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`,
     params
   );
 
-  return res.json({ posts: rows });
+  return res.json({
+    posts: rows,
+    scope,
+    // True when 'local' was requested but we had no center point to anchor
+    // it — the client shows "set a home course" guidance instead of a
+    // generic empty state.
+    localUnavailable: scope === 'local' && centerLat == null,
+  });
 }));
 
 export default router;

@@ -32,6 +32,21 @@ export class OfflineError extends Error {
   constructor(message = 'No internet connection') { super(message); this.name = 'OfflineError'; }
 }
 
+/** True for errors that a screen's load-on-mount effect should SWALLOW rather
+ *  than surface via Alert.alert:
+ *   • NotAuthenticatedError — the session ended (logout / token invalidated)
+ *     while the load was in flight. Screen-load effects re-fire when auth
+ *     state flips because `load` depends on `user?.user_id`; the resulting
+ *     "Error: Not signed in" popup is pure noise — the app is already
+ *     navigating to the login screen.
+ *   • OfflineError — the offline banner already communicates this; a second
+ *     "No internet connection" alert is redundant.
+ *  Real server errors (4xx other than auth, 5xx) are NOT silent — they still
+ *  propagate so callers can show them. */
+export function isSilentError(e: unknown): boolean {
+  return e instanceof NotAuthenticatedError || e instanceof OfflineError;
+}
+
 // ── Connectivity singleton ────────────────────────────────────────────────
 // We don't pull in @react-native-community/netinfo (extra dep, native build
 // implications). Instead, every API call updates a small state machine:
@@ -140,7 +155,12 @@ async function singleAttempt<T>(
       err.name = 'TypeError';
       throw err;
     }
-    throw new Error(data.error || 'Request failed');
+    // Real 4xx — propagate immediately. Attach the HTTP status so callers can
+    // distinguish e.g. a 404 ("the thing is gone — navigate away quietly")
+    // from a 400/403 ("show the user what went wrong").
+    const err = new Error(data.error || 'Request failed');
+    (err as any).status = res.status;
+    throw err;
   }
   return data as T;
 }
@@ -524,14 +544,33 @@ export const api = {
   },
 
   posts: {
-    /** Friend-feed timeline. Server mixes ~20% friends-of-friends in to
-     *  gently expand the network. Newest-first. */
-    feed: (opts: { limit?: number; before?: string } = {}) => {
+    /** Feed timeline, newest-first. `scope` picks the audience:
+     *   • 'global'  — everyone on the platform (default)
+     *   • 'friends' — only the viewer + accepted friends
+     *   • 'local'   — viewer + players whose home course is nearby; pass
+     *                 lat/lng to anchor on current GPS, otherwise the
+     *                 server falls back to the viewer's home course. */
+    feed: (
+      opts: {
+        limit?: number;
+        before?: string;
+        scope?: 'global' | 'local' | 'friends';
+        lat?: number;
+        lng?: number;
+      } = {},
+    ) => {
       const q = new URLSearchParams();
       if (opts.limit) q.set('limit', String(opts.limit));
       if (opts.before) q.set('before', opts.before);
+      if (opts.scope) q.set('scope', opts.scope);
+      if (typeof opts.lat === 'number' && typeof opts.lng === 'number') {
+        q.set('lat', String(opts.lat));
+        q.set('lng', String(opts.lng));
+      }
       const qs = q.toString();
-      return request<{ posts: any[] }>('GET', `/posts/feed${qs ? `?${qs}` : ''}`);
+      return request<{ posts: any[]; scope?: string; localUnavailable?: boolean }>(
+        'GET', `/posts/feed${qs ? `?${qs}` : ''}`,
+      );
     },
     /** Create a text or photo post. Round posts can only be created
      *  server-side by the match resolver. */
