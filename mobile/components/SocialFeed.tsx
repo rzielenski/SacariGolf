@@ -45,6 +45,10 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  // When the feed fetch errors we keep `loading`/`posts` honest but stash
+  // the message so the empty-state can say "Couldn't reach the feed" instead
+  // of the generic "No posts yet". Pull-to-refresh clears it.
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -57,7 +61,14 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
         isRefresh && onRefreshExtra ? Promise.resolve(onRefreshExtra()) : Promise.resolve(),
       ]);
       setPosts(res.posts ?? []);
-    } catch { /* silent — empty list shows */ }
+      setError(null);
+    } catch (e: any) {
+      // Distinguish "endpoint unreachable / 404" from "empty result" so the
+      // empty-state isn't ambiguous when the backend deploy hasn't caught
+      // up yet. The OfflineError sentinel from api.ts indicates network-
+      // class failure; anything else is a real server response.
+      setError(e?.message ?? 'Could not load feed');
+    }
     finally { setLoading(false); setRefreshing(false); }
   }, [onRefreshExtra]);
 
@@ -106,6 +117,12 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
         ListEmptyComponent={
           loading ? (
             <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
+          ) : error ? (
+            <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+              <Text style={s.empty}>Couldn't load feed</Text>
+              <Text style={s.emptySub}>{error}</Text>
+              <Text style={[s.emptySub, { marginTop: 8 }]}>Pull down to retry.</Text>
+            </View>
           ) : (
             <View style={{ alignItems: 'center', paddingVertical: 40 }}>
               <Text style={s.empty}>No posts yet.</Text>
