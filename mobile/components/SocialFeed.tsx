@@ -1,0 +1,473 @@
+/**
+ * Shared social-feed surface. Used by the home tab as the bottom of the
+ * scroll (with the user's stats + nav shortcuts passed in as
+ * `headerComponent`) and previously by the social tab.
+ *
+ * Three card kinds:
+ *   • 'round' — auto-posted on match completion; pulls course + score from
+ *               the joined match row server-side and renders a result card
+ *   • 'text'  — just the author's typed body
+ *   • 'photo' — image + optional caption
+ *
+ * Posts surfaced from friends-of-friends (server marks `is_fof`) get a tiny
+ * "via a friend" attribution so users can tell why a stranger shows up.
+ *
+ * Designed to be the ONLY scrollable surface on the screen it's placed in —
+ * a `headerComponent` slot stitches arbitrary content above the feed items
+ * so the whole tab scrolls as one. Don't nest this inside a ScrollView.
+ */
+
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
+  FlatList, RefreshControl, Image, Modal, TextInput, ScrollView,
+  KeyboardAvoidingView, Platform,
+} from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { router } from 'expo-router';
+import { api, API_BASE } from '../lib/api';
+import { useAuth } from '../lib/auth';
+import { C, F } from '../lib/colors';
+
+interface Props {
+  /** Anything that should render above the feed items inside the same
+   *  FlatList — typically the home tab's stats + nav shortcuts. */
+  headerComponent?: React.ReactElement | null;
+  /** Optional callback run alongside the feed reload when the user pulls
+   *  to refresh. Use this to refresh stats / banners that live in the
+   *  header. */
+  onRefreshExtra?: () => Promise<void> | void;
+}
+
+export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
+  const { user } = useAuth();
+  const [posts, setPosts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [composeOpen, setComposeOpen] = useState(false);
+
+  const load = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    try {
+      // Run the optional caller-supplied refresh (e.g. refreshUser for
+      // the home tab) in parallel with the feed fetch so a single pull
+      // updates everything in one round-trip wait.
+      const [res] = await Promise.all([
+        api.posts.feed({ limit: 30 }),
+        isRefresh && onRefreshExtra ? Promise.resolve(onRefreshExtra()) : Promise.resolve(),
+      ]);
+      setPosts(res.posts ?? []);
+    } catch { /* silent — empty list shows */ }
+    finally { setLoading(false); setRefreshing(false); }
+  }, [onRefreshExtra]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleDelete = (postId: string) => {
+    Alert.alert(
+      'Delete post?',
+      'This removes the post from your feed and your friends\' feeds.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete', style: 'destructive',
+          onPress: async () => {
+            // Optimistic remove — rolls back on error.
+            const prev = posts;
+            setPosts((p) => p.filter((x) => x.post_id !== postId));
+            try { await api.posts.delete(postId); }
+            catch (e: any) {
+              Alert.alert('Could not delete', e?.message ?? 'Try again.');
+              setPosts(prev);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  return (
+    <View style={{ flex: 1 }}>
+      <FlatList
+        data={posts}
+        keyExtractor={(p) => p.post_id}
+        contentContainerStyle={{ paddingBottom: 120 }}
+        ListHeaderComponent={headerComponent ?? null}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />
+        }
+        renderItem={({ item }) => (
+          <PostCard
+            post={item}
+            isOwn={item.user_id === user?.user_id}
+            onDelete={() => handleDelete(item.post_id)}
+          />
+        )}
+        ListEmptyComponent={
+          loading ? (
+            <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
+          ) : (
+            <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+              <Text style={s.empty}>No posts yet.</Text>
+              <Text style={s.emptySub}>Play a round or tap "+ Post" to start the feed.</Text>
+            </View>
+          )
+        }
+      />
+
+      {/* Floating compose button — bottom-right above the tab bar */}
+      <TouchableOpacity
+        style={s.composeFab}
+        onPress={() => setComposeOpen(true)}
+        activeOpacity={0.8}
+      >
+        <Text style={s.composeFabText}>+ Post</Text>
+      </TouchableOpacity>
+
+      <ComposeModal
+        visible={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        onPosted={(newPost) => {
+          // Prepend so the user sees their post at the top immediately.
+          setPosts((p) => [newPost, ...p]);
+          setComposeOpen(false);
+        }}
+      />
+    </View>
+  );
+}
+
+/** One post card. Branches on kind. */
+function PostCard({ post, isOwn, onDelete }: { post: any; isOwn: boolean; onDelete: () => void }) {
+  const when = relativeTime(post.created_at);
+  const authorAvatar = post.author_avatar
+    ? (post.author_avatar.startsWith('http') ? post.author_avatar : `${API_BASE}${post.author_avatar}`)
+    : null;
+  return (
+    <View style={s.card}>
+      <View style={s.cardHeader}>
+        <TouchableOpacity
+          style={s.headerLeft}
+          onPress={() => router.push(`/user/${post.user_id}` as any)}
+          activeOpacity={0.7}
+        >
+          {authorAvatar
+            ? <Image source={{ uri: authorAvatar }} style={s.avatar} />
+            : (
+              <View style={[s.avatar, s.avatarFallback]}>
+                <Text style={s.avatarFallbackText}>
+                  {(post.author_username ?? '?')[0]?.toUpperCase()}
+                </Text>
+              </View>
+            )}
+          <View style={{ flex: 1 }}>
+            <Text style={s.authorName}>{post.author_username ?? 'Unknown'}</Text>
+            <Text style={s.timestamp}>
+              {when}
+              {post.is_fof && <Text style={s.fof}> · via a friend</Text>}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        {isOwn && (
+          <TouchableOpacity onPress={onDelete} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={s.deleteX}>×</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
+      {post.kind === 'round' && <RoundCardBody post={post} />}
+      {post.kind === 'text' && post.body && (
+        <Text style={s.bodyText}>{post.body}</Text>
+      )}
+      {post.kind === 'photo' && (
+        <>
+          {post.image_url && (
+            <Image
+              source={{ uri: post.image_url.startsWith('http') ? post.image_url : `${API_BASE}${post.image_url}` }}
+              style={s.photo}
+              resizeMode="cover"
+            />
+          )}
+          {post.body && <Text style={s.caption}>{post.body}</Text>}
+        </>
+      )}
+    </View>
+  );
+}
+
+/** Round card body — pulls from the server-joined match fields. */
+function RoundCardBody({ post }: { post: any }) {
+  const par = post.teebox_par;
+  const strokes = post.author_strokes;
+  const overUnder = (typeof strokes === 'number' && typeof par === 'number')
+    ? strokes - par : null;
+  const ouLabel = overUnder == null
+    ? null
+    : overUnder === 0 ? 'E' : overUnder > 0 ? `+${overUnder}` : `${overUnder}`;
+  const ouColor = overUnder == null
+    ? C.text
+    : overUnder < 0 ? C.green : overUnder === 0 ? C.text : '#FF9800';
+
+  const wonByMe =
+    typeof post.winner_side === 'number'
+      && typeof post.author_side === 'number'
+      && post.winner_side === post.author_side;
+  const tied = post.match_completed && post.winner_side == null;
+
+  return (
+    <TouchableOpacity
+      style={s.roundBody}
+      onPress={() => post.match_id && router.push(`/match/${post.match_id}` as any)}
+      activeOpacity={0.85}
+    >
+      <Text style={s.roundCourse}>
+        {post.course_name ?? 'A course'} · {post.teebox_name ?? '—'}
+      </Text>
+      <View style={s.roundScoreRow}>
+        <Text style={[s.roundScore, { color: ouColor }]}>
+          {typeof strokes === 'number' ? strokes : '—'}
+        </Text>
+        {ouLabel && (
+          <Text style={[s.roundDelta, { color: ouColor }]}>{ouLabel}</Text>
+        )}
+        <View style={{ flex: 1 }} />
+        {post.match_completed && (
+          <View style={[
+            s.resultBadge,
+            wonByMe ? s.resultWin : tied ? s.resultTie : s.resultLoss,
+          ]}>
+            <Text style={[
+              s.resultText,
+              wonByMe ? { color: C.green } : tied ? { color: C.text } : { color: '#FF6B6B' },
+            ]}>
+              {wonByMe ? 'WIN' : tied ? 'TIE' : 'LOSS'}
+            </Text>
+          </View>
+        )}
+      </View>
+      <Text style={s.roundMeta}>
+        {post.match_type ? post.match_type.toUpperCase() : 'MATCH'}
+        {post.format && post.format !== 'stroke' ? ` · ${post.format}` : ''}
+        {typeof post.delta_elo === 'number' && post.match_completed
+          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${post.delta_elo} ELO`
+          : ''}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+/** Compose modal — text body + optional image. */
+function ComposeModal({
+  visible, onClose, onPosted,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onPosted: (post: any) => void;
+}) {
+  const [body, setBody] = useState('');
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [imageMime, setImageMime] = useState<string | null>(null);
+  const [imagePreviewUri, setImagePreviewUri] = useState<string | null>(null);
+  const [posting, setPosting] = useState(false);
+
+  // Reset drafts each time the modal opens so a cancelled draft doesn't
+  // resurrect on the next compose.
+  useEffect(() => {
+    if (visible) {
+      setBody(''); setImageBase64(null); setImageMime(null);
+      setImagePreviewUri(null); setPosting(false);
+    }
+  }, [visible]);
+
+  const pickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'Allow photo access to attach an image.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: false,
+      quality: 0.75,
+      base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    const asset = result.assets[0];
+    setImageBase64(asset.base64!);
+    setImageMime(asset.mimeType ?? 'image/jpeg');
+    setImagePreviewUri(asset.uri);
+  };
+
+  const submit = async () => {
+    const text = body.trim();
+    if (!text && !imageBase64) {
+      Alert.alert('Empty post', 'Add some text or pick a photo.');
+      return;
+    }
+    setPosting(true);
+    try {
+      const post = await api.posts.create({
+        body: text || undefined,
+        imageBase64: imageBase64 || undefined,
+        imageMime: imageMime || undefined,
+      });
+      onPosted(post);
+    } catch (e: any) {
+      Alert.alert('Could not post', e?.message ?? 'Try again.');
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={s.composeHeader}>
+          <TouchableOpacity onPress={onClose}>
+            <Text style={s.composeCancel}>Cancel</Text>
+          </TouchableOpacity>
+          <Text style={s.composeTitle}>New Post</Text>
+          <TouchableOpacity
+            onPress={submit}
+            disabled={posting || (!body.trim() && !imageBase64)}
+          >
+            <Text style={[
+              s.composePost,
+              (posting || (!body.trim() && !imageBase64)) && { opacity: 0.4 },
+            ]}>
+              {posting ? '…' : 'Post'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
+          <TextInput
+            style={s.composeInput}
+            value={body}
+            onChangeText={setBody}
+            placeholder="What's going on? Share a tip, a win, a wild miss…"
+            placeholderTextColor={C.textMuted}
+            multiline
+            maxLength={1000}
+          />
+          <Text style={s.charCount}>{body.length}/1000</Text>
+
+          {imagePreviewUri ? (
+            <View style={s.composeImageWrap}>
+              <Image source={{ uri: imagePreviewUri }} style={s.composeImage} resizeMode="cover" />
+              <TouchableOpacity
+                style={s.composeImageRemove}
+                onPress={() => { setImageBase64(null); setImageMime(null); setImagePreviewUri(null); }}
+              >
+                <Text style={s.composeImageRemoveText}>×</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity style={s.composePickBtn} onPress={pickImage} activeOpacity={0.7}>
+              <Text style={s.composePickBtnText}>📷 Add Photo</Text>
+            </TouchableOpacity>
+          )}
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+/** "5m ago" / "3h ago" / "Apr 8" — keeps card timestamps short. */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const sec = Math.max(0, Math.round((now - then) / 1000));
+  if (sec < 60) return 'just now';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+const s = StyleSheet.create({
+  empty: { color: C.text, fontWeight: '700', fontSize: 16 },
+  emptySub: { color: C.textMuted, fontSize: 12, marginTop: 8, textAlign: 'center', paddingHorizontal: 30 },
+
+  card: {
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    marginBottom: 10, padding: 14, marginHorizontal: 16,
+  },
+  cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  headerLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  avatar: { width: 36, height: 36, borderRadius: 18 },
+  avatarFallback: { backgroundColor: C.gold + '33', alignItems: 'center', justifyContent: 'center' },
+  avatarFallbackText: { color: C.gold, fontWeight: '900', fontSize: 15 },
+  authorName: { color: C.text, fontWeight: '700', fontSize: 14 },
+  timestamp: { color: C.textMuted, fontSize: 11, marginTop: 2 },
+  fof: { color: C.gold + 'aa', fontStyle: 'italic' },
+  deleteX: { color: C.textMuted, fontSize: 22, fontWeight: '700', paddingHorizontal: 8 },
+
+  bodyText: { color: C.text, fontSize: 15, lineHeight: 21 },
+
+  photo: {
+    width: '100%', aspectRatio: 1, borderRadius: 6,
+    backgroundColor: C.bg, marginTop: 4,
+  },
+  caption: { color: C.text, fontSize: 14, lineHeight: 20, marginTop: 10 },
+
+  roundBody: {
+    backgroundColor: C.bg, borderRadius: 6, padding: 12,
+    borderWidth: 1, borderColor: C.gold + '33',
+  },
+  roundCourse: { color: C.gold, fontWeight: '800', fontSize: 13 },
+  roundScoreRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 6 },
+  roundScore: { fontFamily: F.serif, fontWeight: '900', fontSize: 32 },
+  roundDelta: { fontFamily: F.serif, fontWeight: '700', fontSize: 18 },
+  roundMeta: { color: C.textMuted, fontSize: 11, marginTop: 6, letterSpacing: 0.4 },
+  resultBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, borderWidth: 1 },
+  resultWin: { borderColor: C.green },
+  resultTie: { borderColor: C.border },
+  resultLoss: { borderColor: '#FF6B6B' },
+  resultText: { fontWeight: '900', fontSize: 11, letterSpacing: 0.8 },
+
+  composeFab: {
+    position: 'absolute', bottom: 20, right: 20,
+    paddingHorizontal: 18, paddingVertical: 12, borderRadius: 24,
+    backgroundColor: C.gold,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 6, shadowOffset: { width: 0, height: 3 },
+    elevation: 6,
+  },
+  composeFabText: { color: C.bg, fontWeight: '900', fontSize: 14, letterSpacing: 0.5 },
+
+  composeHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingTop: 18, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  composeTitle: { color: C.text, fontWeight: '900', fontSize: 16 },
+  composeCancel: { color: C.textMuted, fontSize: 14 },
+  composePost: { color: C.gold, fontWeight: '900', fontSize: 14, letterSpacing: 0.5 },
+
+  composeInput: {
+    color: C.text, fontSize: 15, lineHeight: 22, minHeight: 120,
+    textAlignVertical: 'top',
+  },
+  charCount: { color: C.textDim, fontSize: 10, alignSelf: 'flex-end', marginTop: 4 },
+
+  composePickBtn: {
+    marginTop: 20, paddingVertical: 14, borderRadius: 6, alignItems: 'center',
+    borderWidth: 1, borderColor: C.gold + '88', borderStyle: 'dashed', backgroundColor: C.gold + '11',
+  },
+  composePickBtnText: { color: C.gold, fontWeight: '800', fontSize: 14 },
+
+  composeImageWrap: { marginTop: 20, position: 'relative' },
+  composeImage: { width: '100%', aspectRatio: 1, borderRadius: 6 },
+  composeImageRemove: {
+    position: 'absolute', top: 8, right: 8,
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center',
+  },
+  composeImageRemoveText: { color: '#fff', fontSize: 18, fontWeight: '900', lineHeight: 20 },
+});

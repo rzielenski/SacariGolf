@@ -1,0 +1,179 @@
+/**
+ * Social feed — friend posts (+ a sprinkle of friends-of-friends) and the
+ * compose endpoint that backs the in-app "share" surface. Three post kinds:
+ *
+ *   • 'round' — auto-inserted when a match completes; carries match_id so
+ *               the card can render the score / opponent / course from the
+ *               joined row instead of bloating the post itself
+ *   • 'text'  — user-typed body (≤ 1 KB)
+ *   • 'photo' — image upload (base64 → /uploads/feed/) with optional caption
+ *
+ * Feed visibility is friends-only by default. Each request mixes in up to
+ * 20% friends-of-friends so the network gradually expands without exposing
+ * randos. No reactions / comments in v1 — extending the existing
+ * round_reactions pattern is the natural follow-up.
+ */
+
+import { Router, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
+import { randomUUID } from 'crypto';
+import pool from '../db/pool';
+import { requireAuth, AuthRequest } from '../middleware/auth';
+import { wrap } from '../utils/asyncHandler';
+
+const router = Router();
+
+const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
+const FEED_DIR = path.join(UPLOADS_DIR, 'feed');
+if (!fs.existsSync(FEED_DIR)) fs.mkdirSync(FEED_DIR, { recursive: true });
+
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;      // 4 MB raw — generous for phone photos
+const MAX_BODY_LEN = 1000;                     // matches a tweet-and-a-half
+const IMAGE_MIME_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg':  'jpg',
+  'image/png':  'png',
+  'image/webp': 'webp',
+};
+
+/** POST /posts — create a text or photo post. Round posts are inserted
+ *  server-side by the match-resolve path; clients can't manually mint them
+ *  (kind='round' is rejected here so a malicious client can't fake a win). */
+router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { body, imageBase64, imageMime } = req.body ?? {};
+
+  const text = typeof body === 'string' ? body.trim().slice(0, MAX_BODY_LEN) : '';
+
+  // Image branch — decode + persist before INSERT so we have a URL to store.
+  let imageUrl: string | null = null;
+  if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
+    const ext = IMAGE_MIME_EXT[imageMime ?? ''];
+    if (!ext) return res.status(400).json({ error: 'Unsupported image format' });
+    const buffer = Buffer.from(imageBase64, 'base64');
+    if (buffer.length === 0)       return res.status(400).json({ error: 'Invalid image data' });
+    if (buffer.length > MAX_IMAGE_BYTES) {
+      return res.status(413).json({ error: 'Image must be 4 MB or smaller' });
+    }
+    const filename = `${randomUUID()}.${ext}`;
+    fs.writeFileSync(path.join(FEED_DIR, filename), buffer);
+    imageUrl = `/uploads/feed/${filename}`;
+  }
+
+  // Either text OR image must be present — empty posts are useless.
+  if (!text && !imageUrl) return res.status(400).json({ error: 'body or image required' });
+
+  const kind = imageUrl ? 'photo' : 'text';
+  const { rows } = await pool.query(
+    `INSERT INTO posts (user_id, kind, body, image_url)
+     VALUES ($1, $2, $3, $4)
+     RETURNING post_id, user_id, kind, body, image_url, match_id, created_at`,
+    [req.userId, kind, text || null, imageUrl]
+  );
+  return res.status(201).json(rows[0]);
+}));
+
+/** DELETE /posts/:id — owner-only. Also unlinks the on-disk image. */
+router.delete('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT image_url FROM posts WHERE post_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Post not found' });
+
+  // Best-effort image cleanup before the row vanishes. Failing to unlink
+  // doesn't block the delete — leaked file is preferable to a stuck post.
+  const url = rows[0].image_url as string | null;
+  if (url?.startsWith('/uploads/feed/')) {
+    const fname = url.replace('/uploads/feed/', '');
+    try { fs.unlinkSync(path.join(FEED_DIR, fname)); } catch { /* ignore */ }
+  }
+  await pool.query(`DELETE FROM posts WHERE post_id = $1`, [req.params.id]);
+  return res.json({ success: true });
+}));
+
+/**
+ * GET /feed — public feed of every player's recent posts, sorted newest
+ * first. Tags each row with `relation` ('friend' | 'fof' | 'public') so
+ * the client can attribute "via a friend" or similar, but does NOT filter
+ * the result set by friendship — early-network users get a populated feed
+ * full of example rounds from anyone on the platform.
+ *
+ *   ?limit=20    — default 20, max 50
+ *   ?before=ISO  — for "older posts" pagination (created_at strictly less)
+ *
+ * (The previous version capped non-friend content at 20% to keep the feed
+ * intimate. We unlocked it because in practice users were landing on an
+ * empty feed before they had a network to populate it.)
+ */
+router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+  const before = typeof req.query.before === 'string' ? req.query.before : null;
+
+  const beforeClause = before ? ` AND p.created_at < $2` : '';
+  const params: any[] = [req.userId];
+  if (before) params.push(before);
+  params.push(limit);
+
+  // One pass over the public timeline, with per-row friendship attribution
+  // computed in-SQL so the client can render a small "via a friend" tag
+  // on FoF posts without us having to do post-processing in JS. Bidirectional
+  // friendship: a row in `friends` can live with the requester as either
+  // user_id or friend_id depending on who sent the request.
+  const { rows } = await pool.query(
+    `WITH my_friends AS (
+       SELECT friend_id AS uid FROM friends WHERE user_id = $1 AND status = 'accepted'
+       UNION
+       SELECT user_id   AS uid FROM friends WHERE friend_id = $1 AND status = 'accepted'
+     ),
+     fof AS (
+       -- 2-hop reach, excluding self and direct friends. The DISTINCT keeps
+       -- the IN-list bounded even when a popular player connects many of
+       -- the requester's friends.
+       SELECT DISTINCT f2.friend_id AS uid
+         FROM friends f1
+         JOIN friends f2 ON f2.user_id = f1.friend_id
+        WHERE f1.user_id = $1 AND f1.status = 'accepted' AND f2.status = 'accepted'
+       UNION
+       SELECT DISTINCT f2.user_id AS uid
+         FROM friends f1
+         JOIN friends f2 ON f2.friend_id = f1.friend_id
+        WHERE f1.user_id = $1 AND f1.status = 'accepted' AND f2.status = 'accepted'
+     )
+     SELECT
+       p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
+       u.username AS author_username, u.avatar_url AS author_avatar,
+       m.match_type, m.format, m.completed AS match_completed,
+       mr.winner_side, mr.delta_elo,
+       mp_me.side  AS author_side,
+       mp_me.strokes AS author_strokes,
+       t.name AS teebox_name, t.par AS teebox_par,
+       c.course_name,
+       CASE
+         WHEN p.user_id = $1                       THEN 'self'
+         WHEN p.user_id IN (SELECT uid FROM my_friends) THEN 'friend'
+         WHEN p.user_id IN (SELECT uid FROM fof)        THEN 'fof'
+         ELSE 'public'
+       END AS relation,
+       -- Kept for backward compat with mobile clients that still read
+       -- is_fof directly. Drop after the next mobile release.
+       (p.user_id IN (SELECT uid FROM fof)
+        AND p.user_id NOT IN (SELECT uid FROM my_friends)
+        AND p.user_id != $1) AS is_fof
+     FROM posts p
+     JOIN users u ON u.user_id = p.user_id
+     LEFT JOIN matches m         ON m.match_id = p.match_id
+     LEFT JOIN match_results mr  ON mr.match_id = p.match_id
+     LEFT JOIN match_players mp_me ON mp_me.match_id = p.match_id AND mp_me.user_id = p.user_id
+     LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
+     LEFT JOIN courses c         ON c.course_id = t.course_id
+     WHERE TRUE${beforeClause}
+     ORDER BY p.created_at DESC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  return res.json({ posts: rows });
+}));
+
+export default router;

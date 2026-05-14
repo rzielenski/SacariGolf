@@ -449,6 +449,60 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Social feed — auto-posts on round completion + user-authored text /
+    // image posts. `kind` discriminates how the card renders client-side.
+    // `match_id` is SET NULL on match wipe (post stays as a historical
+    // marker even if the match record is gone).
+    //
+    //   kind:
+    //     'round'  → match_id required; body/image both null (the card
+    //                pulls the score / course / opponent info via the
+    //                joined match row, so the post itself stays tiny)
+    //     'text'   → body required, image_url null
+    //     'photo'  → image_url required, body optional caption
+    name: 'posts.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS posts (
+        post_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL CHECK (kind IN ('round', 'text', 'photo')),
+        body       TEXT,
+        image_url  TEXT,
+        match_id   UUID REFERENCES matches(match_id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS posts_user_created_idx
+        ON posts(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS posts_created_idx
+        ON posts(created_at DESC);
+    `,
+  },
+  {
+    // Backfill existing completed matches as round posts so the feed isn't
+    // empty for users with history. Inherits each post's created_at from
+    // the match result (or match creation as a fallback) so the timeline
+    // reflects when the round actually happened — they'll sit further down
+    // the feed than new rounds, exactly as expected. Idempotent via the
+    // NOT EXISTS guard: re-running on boot inserts nothing the second time.
+    name: 'posts.backfill_round_posts',
+    sql: `
+      INSERT INTO posts (user_id, kind, match_id, created_at)
+      SELECT mp.user_id, 'round', mp.match_id,
+             COALESCE(mr.created_at, m.created_at)
+      FROM matches m
+      JOIN match_players mp ON mp.match_id = m.match_id
+      LEFT JOIN match_results mr ON mr.match_id = m.match_id
+      WHERE m.completed = TRUE
+        AND m.is_practice = FALSE
+        AND NOT EXISTS (
+          SELECT 1 FROM posts p
+          WHERE p.user_id  = mp.user_id
+            AND p.match_id = m.match_id
+            AND p.kind     = 'round'
+        );
+    `,
+  },
+  {
     // Bag entries get free-text labels alongside the canonical code, so a
     // player can carry e.g. "Vokey 56°" and "Vokey 60°" both mapped to
     // the canonical 'sw' / 'lw' codes for analytics. Migrating in place:

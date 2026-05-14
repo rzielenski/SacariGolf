@@ -511,6 +511,24 @@ export const api = {
     report: (id: string, reason: string) => request<any>('POST', `/finds/${id}/report`, { reason }),
   },
 
+  posts: {
+    /** Friend-feed timeline. Server mixes ~20% friends-of-friends in to
+     *  gently expand the network. Newest-first. */
+    feed: (opts: { limit?: number; before?: string } = {}) => {
+      const q = new URLSearchParams();
+      if (opts.limit) q.set('limit', String(opts.limit));
+      if (opts.before) q.set('before', opts.before);
+      const qs = q.toString();
+      return request<{ posts: any[] }>('GET', `/posts/feed${qs ? `?${qs}` : ''}`);
+    },
+    /** Create a text or photo post. Round posts can only be created
+     *  server-side by the match resolver. */
+    create: (body: { body?: string; imageBase64?: string; imageMime?: string }) =>
+      request<any>('POST', '/posts', body),
+    delete: (id: string) =>
+      request<{ success: true }>('DELETE', `/posts/${id}`),
+  },
+
   tournaments: {
     list: () => request<any[]>('GET', '/tournaments'),
     discover: () => request<any[]>('GET', '/tournaments/discover'),

@@ -1,14 +1,13 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, FlatList, Alert, ActivityIndicator, RefreshControl,
+  TextInput, Alert, ActivityIndicator,
   Animated, Easing,
 } from 'react-native';
 import { router } from 'expo-router';
 import { api } from '../../lib/api';
-import { MatchInvite } from '../../types';
+import { MatchInvite, Clan } from '../../types';
 import { C } from '../../lib/colors';
-import { Clan } from '../../types';
 
 type Tab = 'friends' | 'clans' | 'chats';
 
@@ -572,6 +571,7 @@ function ChatsTab() {
     </ScrollView>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg, padding: 20, paddingTop: 60 },

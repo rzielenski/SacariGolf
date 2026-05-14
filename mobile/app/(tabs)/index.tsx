@@ -1,7 +1,24 @@
+/**
+ * Home tab — stats up top, feed below. Restructured so the screen scrolls as
+ * one surface (the SocialFeed's FlatList) with the stats + navigation
+ * shortcuts living in its ListHeaderComponent.
+ *
+ * What's here:
+ *   • Greeting + rank badge
+ *   • ELO card (rating / matches / wins / win %)
+ *   • Resume / verify / open-beta / perk banners
+ *   • Leaderboard + Tournaments shortcuts (2-wide grid)
+ *   • Friend feed (auto-posted rounds + user posts, w/ FoF mixing)
+ *
+ * What moved elsewhere:
+ *   • Handicap row, My Bag row → profile tab
+ *   • Quick-action match buttons → live in the Play tab
+ *   • Recent matches list, footer (sign-out / delete) → profile tab
+ */
+
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Linking, Alert, TextInput, Modal,
+  View, Text, StyleSheet, TouchableOpacity,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
@@ -9,7 +26,7 @@ import { useAuth } from '../../lib/auth';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { Match } from '../../types';
-import { Divider, OrnamentTitle } from '../../components/Flourish';
+import { SocialFeed } from '../../components/SocialFeed';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -20,71 +37,39 @@ function EloRank(elo: number): { label: string; color: string } {
 }
 
 export default function HomeScreen() {
-  const { user, refreshUser, logout, deleteAccount } = useAuth();
-  const [matches, setMatches] = useState<Match[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const { user, refreshUser } = useAuth();
   const eloTapCount = useRef(0);
   const eloTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [handicapModal, setHandicapModal] = useState(false);
-  const [handicapInput, setHandicapInput] = useState('');
   const [perkCount, setPerkCount] = useState(0);
   // Resumable round: an in-progress match where the player has saved local
   // scoring progress (via "Save & Leave") but hasn't submitted yet. Showing
   // a top-of-home banner makes coming back to it a single tap.
   const [resumable, setResumable] = useState<Match | null>(null);
 
-  const load = useCallback(async () => {
+  const loadHomeData = useCallback(async () => {
     try {
-      const [m] = await Promise.all([api.matches.list(), refreshUser()]);
-      // Guard against the API returning a non-array (server error / proxy
-      // returning HTML, etc.) so we don't crash on .slice
-      const list = Array.isArray(m) ? m : [];
-      setMatches(list.slice(0, 5));
+      await refreshUser();
+    } catch { /* silent */ }
+    try {
+      const matches = await api.matches.list();
+      const list = Array.isArray(matches) ? matches : [];
       // Find any not-yet-completed match the user has local progress for.
       // The scoring screen writes `scores_${userId}_${matchId}` on Save & Leave.
-      // We only show ONE banner at a time — the most recent in-progress one wins.
       try {
         const keys = await AsyncStorage.getAllKeys();
         const myPrefix = `scores_${user?.user_id ?? ''}_`;
         const ids = keys.filter((k) => k.startsWith(myPrefix)).map((k) => k.slice(myPrefix.length));
-        const open = list
-          .filter((row) => !row.completed && ids.includes(row.match_id))
-          .sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
-        setResumable(open[0] ?? null);
+        const candidates = list.filter((m: any) => !m.completed && ids.includes(m.match_id));
+        setResumable(candidates[0] ?? null);
       } catch { setResumable(null); }
-    } catch { /* silent */ } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-    // Lightweight: also fetch active perks for the banner. Failures are silent.
-    api.users.perks()
-      .then((rows) => setPerkCount(Array.isArray(rows) ? rows.length : 0))
-      .catch(() => { });
+    } catch { /* silent */ }
+    try {
+      const rows = await api.users.perks();
+      setPerkCount(Array.isArray(rows) ? rows.length : 0);
+    } catch { /* silent */ }
   }, [refreshUser, user?.user_id]);
 
-  const deleteMatch = useCallback(async (matchId: string) => {
-    try {
-      await api.matches.cancel(matchId);
-      try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${matchId}`); } catch { }
-      setMatches((prev) => prev.filter((m) => m.match_id !== matchId));
-    } catch (e: any) {
-      Alert.alert('Could not delete', e.message);
-    }
-  }, []);
-
-  const confirmDeleteMatch = useCallback((match: Match) => {
-    Alert.alert(
-      'Delete Match',
-      'Remove this match? Only works if no scores have been submitted.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: () => deleteMatch(match.match_id) },
-      ]
-    );
-  }, [deleteMatch]);
-
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadHomeData(); }, [loadHomeData]);
 
   // Clean up the ELO-tap timer if the component unmounts mid-sequence so we
   // don't fire setState on an unmounted screen.
@@ -99,13 +84,11 @@ export default function HomeScreen() {
     ? Math.round((user.total_wins / user.total_matches) * 100)
     : 0;
 
-  return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={C.gold} />}
-    >
-      {/* Header */}
+  /** Everything above the feed renders inside the SocialFeed FlatList's
+   *  ListHeaderComponent so the whole screen scrolls as one surface. */
+  const header = (
+    <View style={styles.header}>
+      {/* Greeting + rank badge */}
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.greeting}>Welcome back,</Text>
@@ -116,7 +99,7 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* ELO Card — tap ELO number 5× to open Find Ranker */}
+      {/* ELO card — tap ELO number 5× to open Find Ranker (existing easter egg) */}
       <View style={styles.eloCard}>
         <TouchableOpacity
           style={styles.eloLeft}
@@ -150,10 +133,8 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Continue-in-progress-round banner — top priority because finishing
-          a started round is the single highest-value action a player can take.
-          Tapping jumps straight to the match lobby where the "Continue Match"
-          button is already wired. */}
+      {/* Resume-round banner — top priority because finishing a started
+          round is the single highest-value action a player can take. */}
       {resumable && (
         <TouchableOpacity
           style={styles.resumeBanner}
@@ -190,9 +171,7 @@ export default function HomeScreen() {
       )}
 
       {/* Open-beta premium banner — visible while OPEN_BETA_PREMIUM is on
-          server-side. We detect it by checking the special premium_plan
-          marker the server stamps on /users/me. Tapping opens the premium
-          page so the user can see the full feature list they have access to. */}
+          server-side (server stamps premium_plan = 'open_beta'). */}
       {(user as any)?.premium_plan === 'open_beta' && (
         <TouchableOpacity
           style={styles.openBetaBanner}
@@ -206,7 +185,7 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Lucky Round perk banner — applies automatically to next ranked match */}
+      {/* Lucky Round perk banner */}
       {perkCount > 0 && (
         <View style={styles.perkBanner}>
           <Text style={styles.perkBannerLabel}>LUCKY ROUND</Text>
@@ -218,228 +197,43 @@ export default function HomeScreen() {
         </View>
       )}
 
-      {/* Handicap row */}
-      <TouchableOpacity style={styles.handicapRow} onPress={() => { setHandicapInput(user.handicap_index?.toString() ?? ''); setHandicapModal(true); }}>
-        <Text style={styles.handicapLabel}>Handicap Index</Text>
-        <Text style={styles.handicapValue}>
-          {user.handicap_index != null ? user.handicap_index.toFixed(1) : 'Set'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* My Bag — same row style as handicap. The club picker + auto-suggest
-          filter to this subset on every shot, so it's worth keeping current.
-          Bag entries are now {code,label?} objects; just count them. */}
-      <TouchableOpacity style={styles.handicapRow} onPress={() => router.push('/bag' as any)}>
-        <Text style={styles.handicapLabel}>My Bag</Text>
-        <Text style={styles.handicapValue}>
-          {Array.isArray(user.clubs_in_bag) && user.clubs_in_bag.length > 0
-            ? `${user.clubs_in_bag.length} club${user.clubs_in_bag.length === 1 ? '' : 's'}`
-            : 'Edit'}
-        </Text>
-      </TouchableOpacity>
-
-      {/* Quick actions — each one drops the user straight into the play
-          wizard with the match type pre-selected, so taking the home-tab
-          shortcut is one tap fewer than tapping Play and then the type
-          card. Solo and Duo are the two most common entry points. */}
-      <View style={styles.actionsRow}>
+      {/* 2-wide nav grid: Leaderboard + Tournaments */}
+      <View style={styles.navGrid}>
         <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => router.push('/(tabs)/play?type=solo' as any)}
+          style={styles.navTile}
+          onPress={() => router.push('/leaderboard' as any)}
+          activeOpacity={0.8}
         >
-          <Text style={styles.actionMark}>1v1</Text>
-          <Text style={styles.actionLabel}>Solo Match</Text>
+          <Text style={styles.navTileMark}>★</Text>
+          <Text style={styles.navTileLabel}>Leaderboard</Text>
+          <Text style={styles.navTileSub}>See where you rank globally</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => router.push('/(tabs)/play?type=duo' as any)}
+          style={styles.navTile}
+          onPress={() => router.push('/tournaments' as any)}
+          activeOpacity={0.8}
         >
-          <Text style={styles.actionMark}>2v2</Text>
-          <Text style={styles.actionLabel}>Duo Match</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => router.push('/(tabs)/social')}
-        >
-          <Text style={styles.actionMark}>CC</Text>
-          <Text style={styles.actionLabel}>Teams</Text>
+          <Text style={styles.navTileMark}>♛</Text>
+          <Text style={styles.navTileLabel}>Tournaments</Text>
+          <Text style={styles.navTileSub}>Leagues + bracketed events</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Leaderboard + Tournaments shortcuts */}
-      <TouchableOpacity style={styles.leaderboardBtn} onPress={() => router.push('/leaderboard' as any)}>
-        <Text style={styles.leaderboardBtnText}>Global Leaderboard</Text>
-        <Text style={styles.leaderboardArrow}>→</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={styles.leaderboardBtn} onPress={() => router.push('/tournaments' as any)}>
-        <Text style={styles.leaderboardBtnText}>Tournaments &amp; Leagues</Text>
-        <Text style={styles.leaderboardArrow}>→</Text>
-      </TouchableOpacity>
-
-      {/* Recent matches */}
-      <Divider style={{ marginTop: 8, marginBottom: 8 }} />
-      <OrnamentTitle title="Recent Matches" align="center" />
-
-      {loading ? (
-        <ActivityIndicator color={C.gold} style={{ marginTop: 24 }} />
-      ) : matches.length === 0 ? (
-        <View style={styles.emptyCard}>
-          <Text style={styles.emptyText}>No matches yet.</Text>
-          <Text style={styles.emptySubText}>Hit the fairway and play your first round!</Text>
-        </View>
-      ) : (
-        matches.map((m) => (
-          <MatchRow
-            key={m.match_id}
-            match={m}
-            userId={user.user_id}
-            onLongPress={!m.completed ? () => confirmDeleteMatch(m) : undefined}
-          />
-        ))
-      )}
-
-      <View style={styles.footerRow}>
-        <TouchableOpacity
-          onPress={() => Linking.openURL('mailto:rpzielenski@gmail.com?subject=Sacari%20Golf%20Feature%20Suggestion')}
-        >
-          <Text style={styles.feedbackText}>suggest a feature</Text>
-        </TouchableOpacity>
-        <Text style={styles.footerDot}>·</Text>
-        <TouchableOpacity onPress={() => Alert.alert('Sign Out', 'Sign out of your account?', [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Sign Out', onPress: logout },
-        ])}>
-          <Text style={styles.feedbackText}>sign out</Text>
-        </TouchableOpacity>
-        <Text style={styles.footerDot}>·</Text>
-        <TouchableOpacity onPress={() => Alert.alert(
-          'Delete Account',
-          'This permanently deletes your account, all match history, and any finds you uploaded. This cannot be undone.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Delete Forever', style: 'destructive', onPress: deleteAccount },
-          ]
-        )}>
-          <Text style={[styles.feedbackText, { color: '#6b3030' }]}>delete account</Text>
-        </TouchableOpacity>
-      </View>
-      {/* Handicap Modal */}
-      <Modal
-        visible={handicapModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setHandicapModal(false)}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <TouchableOpacity onPress={() => setHandicapModal(false)}>
-              <Text style={styles.modalCancel}>Cancel</Text>
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Handicap Index</Text>
-            <TouchableOpacity onPress={async () => {
-              const val = handicapInput.trim() === '' ? null : parseFloat(handicapInput);
-              if (val !== null && (isNaN(val) || val < 0 || val > 54)) {
-                Alert.alert('Invalid', 'Enter a number between 0 and 54.');
-                return;
-              }
-              try {
-                await api.users.update({ handicapIndex: val });
-                await refreshUser();
-                setHandicapModal(false);
-              } catch (e: any) { Alert.alert('Error', e.message); }
-            }}>
-              <Text style={styles.modalSave}>Save</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.modalBody}>
-            <Text style={styles.modalDesc}>
-              Your USGA/WHS handicap index (0–54). Used to calculate course handicap for net scoring.
-            </Text>
-            <TextInput
-              style={styles.modalInput}
-              value={handicapInput}
-              onChangeText={setHandicapInput}
-              placeholder="e.g. 14.2"
-              placeholderTextColor={C.textMuted}
-              keyboardType="decimal-pad"
-              maxLength={5}
-            />
-            {handicapInput.trim() !== '' && !isNaN(parseFloat(handicapInput)) && (() => {
-              // Course handicap example using a slightly tougher-than-average
-              // course (slope 130, rating 72.0, par 72) so the number actually
-              // differs from the bare index. Formula: HCI × (slope/113) + (CR − Par).
-              const exampleSlope = 130;
-              const exampleRating = 72.0;
-              const examplePar = 72;
-              const hi = parseFloat(handicapInput);
-              const ch = Math.round(hi * (exampleSlope / 113) + (exampleRating - examplePar));
-              return (
-                <View style={styles.modalCalcBox}>
-                  <Text style={styles.modalCalcLabel}>
-                    Course Handicap (example — slope {exampleSlope}, rating {exampleRating.toFixed(1)}, par {examplePar})
-                  </Text>
-                  <Text style={styles.modalCalcVal}>{ch} strokes</Text>
-                </View>
-              );
-            })()}
-          </View>
-        </View>
-      </Modal>
-    </ScrollView>
+      <Text style={styles.feedHeader}>FEED</Text>
+    </View>
   );
-}
-
-function MatchRow({ match, userId, onLongPress }: { match: Match; userId: string; onLongPress?: () => void }) {
-  const tied = match.completed && match.winner_side == null && match.my_strokes != null;
-  const won = !tied && match.winner_side === match.my_side;
-  const didPlay = match.completed && match.my_side != null;
-  const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
-  const date = new Date(match.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-
-  // Pick label / colors / signed delta
-  const statusLabel = tied ? 'TIE' : (won ? 'WIN' : 'LOSS');
-  const statusColor = tied ? C.gold : (won ? C.green : C.red);
-  const myDelta = match.my_delta_elo ?? (won ? (match.delta_elo ?? 0) : -(match.delta_elo ?? 0));
 
   return (
-    <TouchableOpacity
-      style={styles.matchRow}
-      onPress={() => router.push(`/match/${match.match_id}` as any)}
-      onLongPress={onLongPress}
-      delayLongPress={400}
-    >
-      <View style={styles.matchLeft}>
-        <Text style={styles.matchType}>{typeLabel}</Text>
-        {match.name ? <Text style={styles.matchName}>{match.name}</Text> : null}
-        <Text style={styles.matchDate}>{date}</Text>
-      </View>
-      <View style={styles.matchRight}>
-        {!match.completed ? (
-          <View style={[styles.statusBadge, { backgroundColor: C.blue + '33' }]}>
-            <Text style={[styles.statusText, { color: C.blue }]}>In Progress</Text>
-          </View>
-        ) : didPlay ? (
-          <>
-            <View style={[styles.statusBadge, { backgroundColor: statusColor + '33' }]}>
-              <Text style={[styles.statusText, { color: statusColor }]}>{statusLabel}</Text>
-            </View>
-            {match.delta_elo != null && (
-              <Text style={[styles.eloDelta, { color: myDelta >= 0 ? C.green : C.red }]}>
-                {myDelta > 0 ? '+' : ''}{myDelta} ELO
-              </Text>
-            )}
-          </>
-        ) : (
-          <Text style={styles.scoreText}>{match.my_strokes ?? '--'} strokes</Text>
-        )}
-      </View>
-    </TouchableOpacity>
+    <View style={styles.container}>
+      <SocialFeed headerComponent={header} onRefreshExtra={loadHomeData} />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
-  content: { padding: 20, paddingTop: 60, paddingBottom: 40 },
+  header: { padding: 20, paddingTop: 60 },
+
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 },
   greeting: { color: C.textMuted, fontSize: 14 },
   username: { color: C.text, fontSize: 24, fontWeight: '800' },
@@ -447,13 +241,9 @@ const styles = StyleSheet.create({
   rankLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
 
   eloCard: {
-    backgroundColor: C.card,
-    borderRadius: 18,
-    padding: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: C.border,
+    backgroundColor: C.card, borderRadius: 18, padding: 20,
+    flexDirection: 'row', alignItems: 'center',
+    borderWidth: 1, borderColor: C.border,
     marginBottom: 20,
   },
   eloLeft: { flex: 1 },
@@ -464,125 +254,52 @@ const styles = StyleSheet.create({
   eloStatNum: { fontSize: 18, fontWeight: '800', color: C.text },
   eloStatLabel: { fontSize: 10, color: C.textMuted, marginTop: 2 },
 
-  actionsRow: { flexDirection: 'row', gap: 10, marginBottom: 28 },
-  actionBtn: {
-    flex: 1,
-    backgroundColor: C.card,
-    borderRadius: 6,
-    padding: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  actionMark: { fontFamily: F.serif, fontSize: 16, fontWeight: '700', color: C.gold, marginBottom: 6, letterSpacing: 1 },
-  actionLabel: { color: C.textMuted, fontSize: 10, fontWeight: '600', textAlign: 'center', letterSpacing: 0.5, textTransform: 'uppercase' },
-
-  sectionTitle: { color: C.textMuted, fontSize: 12, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 12 },
-
-  matchRow: {
-    backgroundColor: C.card,
-    borderRadius: 14,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  matchLeft: { flex: 1 },
-  matchType: { color: C.text, fontWeight: '700', fontSize: 15 },
-  matchName: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  matchDate: { color: C.textDim, fontSize: 11, marginTop: 4 },
-  matchRight: { alignItems: 'flex-end', gap: 4 },
-  statusBadge: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
-  statusText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.5 },
-  eloDelta: { fontSize: 12, fontWeight: '700' },
-  scoreText: { color: C.textMuted, fontSize: 13 },
-
-  emptyCard: { backgroundColor: C.card, borderRadius: 14, padding: 28, alignItems: 'center', borderWidth: 1, borderColor: C.border },
-  emptyText: { color: C.text, fontSize: 16, fontWeight: '700' },
-  emptySubText: { color: C.textMuted, fontSize: 13, marginTop: 6, textAlign: 'center' },
-
-  feedbackBtn: { alignItems: 'center', paddingVertical: 24 },
-  feedbackText: { color: C.textDim, fontSize: 11, letterSpacing: 0.5 },
-
-  footerRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingVertical: 24, gap: 8 },
-  footerDot: { color: C.textDim, fontSize: 11 },
-
-  handicapRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: C.card, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 12,
-    borderWidth: 1, borderColor: C.border, marginBottom: 16,
-  },
-  perkBanner: {
-    backgroundColor: C.gold + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
-    borderWidth: 1, borderColor: C.gold, marginBottom: 14,
-  },
-  perkBannerLabel: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
-  perkBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
-
-  openBetaBanner: {
-    backgroundColor: C.gold + '33', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 14,
-    borderWidth: 1.5, borderColor: C.gold, marginBottom: 14,
-    shadowColor: C.gold, shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 0 },
-  },
-  openBetaLabel: {
-    color: C.gold, fontSize: 12, fontWeight: '900', letterSpacing: 2,
-    fontFamily: F.serif, textAlign: 'center',
-  },
-  openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
-
+  // Banners
   resumeBanner: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: C.green + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 12,
-    borderWidth: 1, borderColor: C.green, marginBottom: 14, gap: 10,
+    backgroundColor: C.gold + '22', borderRadius: 10, padding: 14, marginBottom: 14,
+    borderWidth: 1, borderColor: C.gold,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
   },
-  resumeDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.green },
-  resumeLabel: { color: C.green, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
-  resumeMsg: { color: C.text, fontSize: 13, marginTop: 2 },
-  resumeChev: { color: C.green, fontSize: 24, fontWeight: '300' },
+  resumeDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.gold },
+  resumeLabel: { color: C.gold, fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
+  resumeMsg: { color: C.text, fontSize: 13, marginTop: 3 },
+  resumeChev: { color: C.gold, fontSize: 22, fontWeight: '700' },
 
   verifyBanner: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: C.red + '22', borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
-    borderWidth: 1, borderColor: C.red, marginBottom: 14, gap: 8,
+    backgroundColor: '#ffa50022', borderRadius: 10, padding: 14, marginBottom: 14,
+    borderWidth: 1, borderColor: '#ffa500',
+    flexDirection: 'row', alignItems: 'center', gap: 10,
   },
-  verifyBannerLabel: { color: C.red, fontSize: 10, fontWeight: '900', letterSpacing: 2, fontFamily: F.serif },
-  verifyBannerMsg: { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 16 },
-  verifyBannerChev: { color: C.red, fontSize: 24, fontWeight: '300' },
-  handicapLabel: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
-  handicapValue: { color: C.gold, fontSize: 15, fontWeight: '800', fontFamily: F.serif },
+  verifyBannerLabel: { color: '#ffa500', fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
+  verifyBannerMsg: { color: C.text, fontSize: 13, marginTop: 3 },
+  verifyBannerChev: { color: '#ffa500', fontSize: 22, fontWeight: '700' },
 
-  leaderboardBtn: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    backgroundColor: C.card, borderRadius: 6, paddingHorizontal: 16, paddingVertical: 14,
-    borderWidth: 1, borderColor: C.border, marginBottom: 24,
+  openBetaBanner: {
+    backgroundColor: C.gold + '14', borderRadius: 10, padding: 14, marginBottom: 14,
+    borderWidth: 1, borderColor: C.gold + '88',
   },
-  leaderboardBtnText: { color: C.text, fontWeight: '700', fontSize: 14 },
-  leaderboardArrow: { color: C.gold, fontSize: 16, fontWeight: '700' },
+  openBetaLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.5, textAlign: 'center' },
+  openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
 
-  modalContainer: { flex: 1, backgroundColor: C.bg },
-  modalHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingTop: 20, paddingHorizontal: 20, paddingBottom: 16,
-    borderBottomWidth: 1, borderBottomColor: C.border,
+  perkBanner: {
+    backgroundColor: C.green + '22', borderRadius: 10, padding: 14, marginBottom: 14,
+    borderWidth: 1, borderColor: C.green,
   },
-  modalTitle: { color: C.text, fontSize: 16, fontWeight: '900' },
-  modalCancel: { color: C.textMuted, fontSize: 15 },
-  modalSave: { color: C.gold, fontSize: 15, fontWeight: '700' },
-  modalBody: { padding: 20 },
-  modalDesc: { color: C.textMuted, fontSize: 13, lineHeight: 20, marginBottom: 20 },
-  modalInput: {
-    backgroundColor: C.card, color: C.text, borderRadius: 6,
-    paddingHorizontal: 16, paddingVertical: 13, fontSize: 22,
-    fontFamily: F.serif, fontWeight: '700', borderWidth: 1, borderColor: C.border,
-    textAlign: 'center',
+  perkBannerLabel: { color: C.green, fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
+  perkBannerMsg: { color: C.text, fontSize: 13, marginTop: 4, lineHeight: 18 },
+
+  // 2-wide nav grid (replaces the stacked Leaderboard / Tournaments buttons)
+  navGrid: { flexDirection: 'row', gap: 10, marginTop: 4, marginBottom: 24 },
+  navTile: {
+    flex: 1, backgroundColor: C.card, borderRadius: 10, padding: 14,
+    borderWidth: 1, borderColor: C.gold + '66', alignItems: 'flex-start',
   },
-  modalCalcBox: {
-    marginTop: 20, backgroundColor: C.card, borderRadius: 6, padding: 16,
-    borderWidth: 1, borderColor: C.border, alignItems: 'center',
+  navTileMark: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900' },
+  navTileLabel: { color: C.text, fontSize: 15, fontWeight: '800', marginTop: 6 },
+  navTileSub: { color: C.textMuted, fontSize: 11, marginTop: 3 },
+
+  feedHeader: {
+    color: C.textMuted, fontSize: 11, fontWeight: '700',
+    letterSpacing: 1.5, marginBottom: 4, marginLeft: -4,
   },
-  modalCalcLabel: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginBottom: 6 },
-  modalCalcVal: { color: C.gold, fontFamily: F.serif, fontSize: 28, fontWeight: '700' },
 });

@@ -179,8 +179,51 @@ export async function runPairingPass() {
   }
 }
 
+/**
+ * Backfill round-posts for every completed non-practice match that doesn't
+ * already have one. The auto-post hooks in `resolveElo` / `resolveEloFFA`
+ * cover the standard win/loss/tie completion paths, but matches can be
+ * marked completed by other code paths (auto-pair supersession, forfeits
+ * with edge-case timing, cleanup, etc.) where the hook might not fire.
+ * This sweep guarantees the feed eventually picks them up.
+ *
+ * Idempotent via the NOT EXISTS subquery — only inserts what's missing,
+ * so re-running every 5 min costs essentially nothing once the table is
+ * caught up. Inherits each post's created_at from the match result (or
+ * match creation as fallback) so the timeline reflects when the round
+ * actually happened, not when the backfill ran.
+ */
+export async function backfillRoundPosts() {
+  try {
+    const { rowCount } = await pool.query(
+      `INSERT INTO posts (user_id, kind, match_id, created_at)
+       SELECT mp.user_id, 'round', mp.match_id,
+              COALESCE(mr.created_at, m.created_at)
+       FROM matches m
+       JOIN match_players mp ON mp.match_id = m.match_id
+       LEFT JOIN match_results mr ON mr.match_id = m.match_id
+       WHERE m.completed = TRUE
+         AND m.is_practice = FALSE
+         AND NOT EXISTS (
+           SELECT 1 FROM posts p
+           WHERE p.user_id  = mp.user_id
+             AND p.match_id = m.match_id
+             AND p.kind     = 'round'
+         )`
+    );
+    if (rowCount && rowCount > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[feed-backfill] Backfilled ${rowCount} round post${rowCount === 1 ? '' : 's'}.`);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[feed-backfill] backfillRoundPosts failed:', err);
+  }
+}
+
 let cleanupHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
+let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 
 export function startCleanupSchedule() {
   if (cleanupHandle) return;
@@ -193,4 +236,10 @@ export function startCleanupSchedule() {
   // (filtered by indexed columns + a small subset of recent matches).
   runPairingPass();
   pairingHandle = setInterval(runPairingPass, 60 * 1000);
+
+  // Feed backfill — every 5 min. Catches any round that completed through
+  // a path the auto-post hook missed (forfeits, supersession merges, etc.)
+  // so the home feed always reflects everyone's recent rounds.
+  backfillRoundPosts();
+  feedBackfillHandle = setInterval(backfillRoundPosts, 5 * 60 * 1000);
 }

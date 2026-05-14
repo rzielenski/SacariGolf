@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert,
-  Image, Modal, ActivityIndicator, TextInput, FlatList,
+  Image, Modal, ActivityIndicator, TextInput, FlatList, Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../lib/auth';
@@ -57,6 +57,13 @@ export default function ProfileScreen() {
   const [hcapModalVisible, setHcapModalVisible] = useState(false);
   const [hcapDifferentials, setHcapDifferentials] = useState<any[]>([]);
   const [themePickerVisible, setThemePickerVisible] = useState(false);
+  // Manual-handicap override editor — used as a starting baseline before
+  // the user has enough rated rounds for the WHS auto-calc to take over.
+  // Writes to users.handicap_index, which the SG calculation reads as the
+  // "your skill" baseline. Moved here from the home tab during the home/feed
+  // restructure.
+  const [manualHcapModal, setManualHcapModal] = useState(false);
+  const [manualHcapInput, setManualHcapInput] = useState('');
 
   const setUserTheme = async (track: ThemeTrack) => {
     try {
@@ -392,6 +399,43 @@ export default function ProfileScreen() {
         <Text style={styles.editChev}>›</Text>
       </TouchableOpacity>
 
+      {/* Manual handicap override — drives the SG baseline before the user
+          has enough rated rounds for the WHS auto-calc to populate the
+          column. Moved from the home tab during the home/feed restructure. */}
+      <TouchableOpacity
+        style={styles.editableCard}
+        onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.editableLabel}>STARTING HANDICAP</Text>
+          <Text style={styles.editableValue}>
+            {user.handicap_index != null ? user.handicap_index.toFixed(1) : 'Set'}
+          </Text>
+          <Text style={styles.editableSub}>
+            Manual baseline used for strokes-gained until you've played enough rated rounds
+          </Text>
+        </View>
+        <Text style={styles.editChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* My Bag — the in-round club picker and auto-suggest both filter to
+          this subset on every shot, so it's worth keeping current. Moved
+          from the home tab during the home/feed restructure. */}
+      <TouchableOpacity style={styles.editableCard} onPress={() => router.push('/bag' as any)}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.editableLabel}>MY BAG</Text>
+          <Text style={styles.editableValue}>
+            {Array.isArray((user as any).clubs_in_bag) && (user as any).clubs_in_bag.length > 0
+              ? `${(user as any).clubs_in_bag.length} club${(user as any).clubs_in_bag.length === 1 ? '' : 's'}`
+              : 'Edit'}
+          </Text>
+          <Text style={styles.editableSub}>
+            Pick which clubs you actually carry — drives the picker and auto-suggest
+          </Text>
+        </View>
+        <Text style={styles.editChev}>›</Text>
+      </TouchableOpacity>
+
       {/* ELO Progress */}
       <View style={styles.card}>
         <View style={styles.cardRow}>
@@ -603,6 +647,16 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.acctRowText}>Blocked Users</Text>
+        <Text style={styles.acctRowChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Feature suggestions — emails Richard directly. Moved from home tab. */}
+      <TouchableOpacity
+        style={styles.acctRow}
+        onPress={() => Linking.openURL('mailto:rpzielenski@gmail.com?subject=Sacari%20Golf%20Feature%20Suggestion')}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.acctRowText}>Suggest a Feature</Text>
         <Text style={styles.acctRowChev}>›</Text>
       </TouchableOpacity>
 
@@ -846,6 +900,54 @@ export default function ProfileScreen() {
         onClose={() => setThemePickerVisible(false)}
         onPick={setUserTheme}
       />
+
+      {/* Manual handicap edit modal — moved from home tab. Validates the
+          USGA 0–54 range and writes to users.handicap_index via PATCH. */}
+      <Modal
+        visible={manualHcapModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setManualHcapModal(false)}
+      >
+        <View style={styles.manualHcapContainer}>
+          <View style={styles.manualHcapHeader}>
+            <TouchableOpacity onPress={() => setManualHcapModal(false)}>
+              <Text style={styles.manualHcapCancel}>Cancel</Text>
+            </TouchableOpacity>
+            <Text style={styles.manualHcapTitle}>Starting Handicap</Text>
+            <TouchableOpacity onPress={async () => {
+              const val = manualHcapInput.trim() === '' ? null : parseFloat(manualHcapInput);
+              if (val !== null && (isNaN(val) || val < 0 || val > 54)) {
+                Alert.alert('Invalid', 'Enter a number between 0 and 54.');
+                return;
+              }
+              try {
+                await api.users.update({ handicapIndex: val });
+                await refreshUser();
+                setManualHcapModal(false);
+              } catch (e: any) { Alert.alert('Error', e.message); }
+            }}>
+              <Text style={styles.manualHcapSave}>Save</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={{ padding: 20 }}>
+            <Text style={styles.manualHcapDesc}>
+              Your USGA/WHS handicap index (0–54). Drives the strokes-gained
+              baseline until you've played 3+ rated rounds for the auto-calc
+              to take over. Leave blank to clear.
+            </Text>
+            <TextInput
+              style={styles.manualHcapInput}
+              value={manualHcapInput}
+              onChangeText={setManualHcapInput}
+              placeholder="e.g. 14.2"
+              placeholderTextColor={C.textMuted}
+              keyboardType="decimal-pad"
+              maxLength={5}
+            />
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -1080,4 +1182,21 @@ const styles = StyleSheet.create({
   notifRowTitle: { color: C.text, fontWeight: '700', fontSize: 14, marginBottom: 2 },
   notifRowBody: { color: C.textMuted, fontSize: 13 },
   notifRowTime: { color: C.textDim, fontSize: 11, marginTop: 3 },
+
+  // Manual-handicap edit modal — moved from home tab.
+  manualHcapContainer: { flex: 1, backgroundColor: C.bg },
+  manualHcapHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingTop: 18, paddingBottom: 12,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  manualHcapTitle: { color: C.text, fontWeight: '900', fontSize: 16 },
+  manualHcapCancel: { color: C.textMuted, fontSize: 14 },
+  manualHcapSave: { color: C.gold, fontWeight: '900', fontSize: 14, letterSpacing: 0.5 },
+  manualHcapDesc: { color: C.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 18 },
+  manualHcapInput: {
+    backgroundColor: C.card, color: C.text, borderRadius: 6,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 24, fontWeight: '800',
+    borderWidth: 1, borderColor: C.border, textAlign: 'center',
+  },
 });

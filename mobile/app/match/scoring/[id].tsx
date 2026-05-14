@@ -1207,10 +1207,57 @@ export default function ScoringScreen() {
       return project(a, aimBearing + Math.PI / 2, lateralYds);
     };
 
+    // Player's neutral-condition mean landing distance forward of tee.
+    // `meanLong` is the average forward delta from median across all the
+    // dispersion samples — usually ~0 but absorbs any systematic offset.
+    const baseForward = cs.median_yds + meanLong;
+
+    // Apply current-condition adjustments to the center of the cluster.
+    // The DISPERSION (sigmaMajor/sigmaMinor/theta) is intrinsic to the
+    // player's swing — conditions don't change how scattered they are,
+    // only WHERE the scatter lands. So we shift the centroid and keep the
+    // axes untouched.
+    let effectiveForward = baseForward;
+
+    // ── Weather: wind / temperature / altitude / rain ─────────────────
+    // Same conditions object the pin-distance plays-like uses; just
+    // applied to baseForward as the carry base. plays_like_yds gives the
+    // raw landing distance under conditions, before terrain interception.
+    if (weather && weather.temperature_f != null) {
+      let along = 0;
+      if (weather.wind_speed_mph && weather.wind_from_bearing != null) {
+        const shotBearingDeg = (aimBearing * 180 / Math.PI + 360) % 360;
+        along = windComponents(
+          weather.wind_speed_mph,
+          weather.wind_from_bearing,
+          shotBearingDeg,
+        ).along_mph;
+      }
+      const courseAltFt = weather.elevation_ft
+        ?? (typeof userCoord.altitude === 'number' ? Math.round(metersToFeet(userCoord.altitude)) : 0);
+      const altDeltaFt = homeElevationFt != null ? courseAltFt - homeElevationFt : courseAltFt;
+      const adj = adjustDistance(baseForward, {
+        altitudeFt:   altDeltaFt,
+        temperatureF: weather.temperature_f,
+        windAlongMph: along,
+        rain:         weather.rain,
+      });
+      effectiveForward = adj.plays_like_yds;
+    }
+
+    // ── Slope: ground interception alters where the ball lands ─────────
+    // slopeAdjustment.adj is the yard correction over the FULL pin
+    // distance (positive = uphill = swing needs more club). Pro-rate to
+    // the heatmap's actual landing distance, then subtract — a ball hit
+    // with neutral capability lands `slopeAtLanding` yards SHORT when
+    // uphill (the ground intercepts it earlier), LONG when downhill.
+    if (slopeAdjustment && yardsToPin && yardsToPin > 0) {
+      const slopeAtLanding = slopeAdjustment.adj * (baseForward / yardsToPin);
+      effectiveForward -= slopeAtLanding;
+    }
+
     const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
-    // Ellipse center = mean shot landing point = median + meanLong forward,
-    // meanLat lateral.
-    const center = place(start, cs.median_yds + meanLong, meanLat);
+    const center = place(start, effectiveForward, meanLat);
 
     // Sample 60 points around each σ ellipse perimeter. In the (lateral,
     // long) frame relative to the ELLIPSE CENTER:
@@ -1228,14 +1275,20 @@ export default function ScoringScreen() {
         const ly = mult * sigmaMinor * Math.sin(t);
         const rotLat  = lx * Math.cos(thetaLocal) - ly * Math.sin(thetaLocal);
         const rotLong = lx * Math.sin(thetaLocal) + ly * Math.cos(thetaLocal);
-        // Project from ELLIPSE CENTER, not from start, so the perimeter
-        // points are positioned relative to the mean shot landing.
-        out.push(place(start, cs.median_yds + meanLong + rotLong, meanLat + rotLat));
+        // Project from ELLIPSE CENTER (effectiveForward), not from start,
+        // so the perimeter follows the condition-adjusted landing zone.
+        out.push(place(start, effectiveForward + rotLong, meanLat + rotLat));
       }
       return out;
     };
     return { sigma1: buildRing(1), sigma2: buildRing(2), center };
-  }, [userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub]);
+  }, [
+    userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub,
+    // Re-roll when conditions change — weather poll, slope DEM lookup, or
+    // player elevation calibration. Without these the ellipses would feel
+    // stale relative to the pin's plays-like banner.
+    weather, slopeAdjustment, yardsToPin, homeElevationFt,
+  ]);
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
   // temperature, wind, and rain on top of the slope-adjusted yardage.
