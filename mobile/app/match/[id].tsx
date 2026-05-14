@@ -245,10 +245,21 @@ export default function MatchLobbyScreen() {
       {/* Result (if completed) */}
       {isCompleted && match.result && (() => {
         const tied = match.result.winner_side == null;
-        const won = !tied && match.result.winner_side === myPlayer?.side;
+        // Spectator path: when the viewer wasn't a participant in this match
+        // (opened it from someone else's feed post), we can't frame the card
+        // as VICTORY/DEFEAT — that's a personal lens. Show a neutral FINAL
+        // header instead, with the actual winning side named for context.
+        // Same data, no implied perspective.
+        const isSpectator = !myPlayer;
+        const won = !tied && !isSpectator && match.result.winner_side === myPlayer?.side;
+
         const myDelta = match.my_delta_elo ?? (won ? match.result.delta_elo : -(match.result.delta_elo ?? 0));
-        const color = tied ? C.gold : (won ? C.green : C.red);
-        const label = tied ? 'DRAW' : (won ? 'VICTORY' : 'DEFEAT');
+        const color = isSpectator
+          ? C.gold
+          : tied ? C.gold : (won ? C.green : C.red);
+        const label = isSpectator
+          ? 'FINAL'
+          : tied ? 'DRAW' : (won ? 'VICTORY' : 'DEFEAT');
         const myPerk: any = (match as any).my_perk;
         // Format-specific summary line (e.g. "12 to 9 in Stableford points",
         // "Won 5 holes to 3", "8 skins to 4"). Falls back to the standard
@@ -256,12 +267,25 @@ export default function MatchLobbyScreen() {
         const details: any = match.result.details ?? {};
         const fmt: string = details.format ?? match.format ?? 'stroke';
         const fd: any = details.formatDetails ?? null;
+        // Spectators have no "my side" to anchor the format summary against —
+        // we always frame them from side 1's perspective with a "Side 1 vs
+        // Side 2" line instead of "your X vs their Y". For participants this
+        // stays "your X to their Y" as before.
         const mySide = myPlayer?.side ?? 1;
         const myKey  = mySide === 1 ? 's1' : 's2';
         const oppKey = mySide === 1 ? 's2' : 's1';
         let formatLine: string | null = null;
         if (fd) {
-          if (fmt === 'stableford') {
+          if (isSpectator) {
+            if (fmt === 'stableford') {
+              formatLine = `Side 1: ${fd.s1Points} pts · Side 2: ${fd.s2Points} pts (Modified Stableford)`;
+            } else if (fmt === 'match_play') {
+              formatLine = `Side 1 won ${fd.s1Holes} holes · Side 2 won ${fd.s2Holes}`
+                + (fd.halved ? ` · ${fd.halved} halved` : '');
+            } else if (fmt === 'skins') {
+              formatLine = `Side 1: ${fd.s1Skins} skins · Side 2: ${fd.s2Skins}`;
+            }
+          } else if (fmt === 'stableford') {
             formatLine = `${fd[`${myKey}Points`]} pts to ${fd[`${oppKey}Points`]} (Modified Stableford)`;
           } else if (fmt === 'match_play') {
             formatLine = `Won ${fd[`${myKey}Holes`]} holes to ${fd[`${oppKey}Holes`]}`
@@ -270,18 +294,28 @@ export default function MatchLobbyScreen() {
             formatLine = `${fd[`${myKey}Skins`]} skins to ${fd[`${oppKey}Skins`]}`;
           }
         }
+        // Spectators see "Side N wins" subline since they have no personal
+        // delta to display. Participants keep the ±ELO line as before.
+        const spectatorSubline = isSpectator && !tied
+          ? `Side ${match.result.winner_side} wins`
+          : null;
         return (
           <View style={[styles.resultCard, { borderColor: color }]}>
             <Text style={[styles.resultText, { color }]}>{label}</Text>
+            {spectatorSubline && (
+              <Text style={styles.formatSummary}>{spectatorSubline}</Text>
+            )}
             {formatLine && (
               <Text style={styles.formatSummary}>{formatLine}</Text>
             )}
-            {!isPractice && (
+            {/* ELO line is meaningless to a spectator (it's not their swing)
+                so we hide it. Practice matches never had it. */}
+            {!isPractice && !isSpectator && (
               <Text style={styles.eloChange}>
                 {myDelta > 0 ? '+' : ''}{myDelta} ELO
               </Text>
             )}
-            {myPerk && (
+            {myPerk && !isSpectator && (
               <Text style={styles.perkAppliedLine}>
                 Lucky Round perk applied — {myPerk.original < 0
                   ? `loss of ${Math.abs(myPerk.original)} ELO prevented`
@@ -290,21 +324,30 @@ export default function MatchLobbyScreen() {
                     : 'perk consumed'}
               </Text>
             )}
-            {/* Show stroke-differential row only for the formats where it's
-                meaningful (stroke + scramble). Other formats already showed
-                their summary above. */}
+            {/* Stroke-differential row. Participants see "your vs opponent";
+                spectators see "side 1 vs side 2". */}
             {(fmt === 'stroke' || fmt === 'scramble') && (
               <View style={styles.diffRow}>
-                <Text style={styles.diffLabel}>Your differential: {(myPlayer?.side === 1 ? match.result.side1_score_differential : match.result.side2_score_differential)?.toFixed(1)}</Text>
-                <Text style={styles.diffLabel}>Opponent: {(myPlayer?.side === 1 ? match.result.side2_score_differential : match.result.side1_score_differential)?.toFixed(1)}</Text>
+                {isSpectator ? (
+                  <>
+                    <Text style={styles.diffLabel}>Side 1: {match.result.side1_score_differential?.toFixed(1)}</Text>
+                    <Text style={styles.diffLabel}>Side 2: {match.result.side2_score_differential?.toFixed(1)}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.diffLabel}>Your differential: {(myPlayer?.side === 1 ? match.result.side1_score_differential : match.result.side2_score_differential)?.toFixed(1)}</Text>
+                    <Text style={styles.diffLabel}>Opponent: {(myPlayer?.side === 1 ? match.result.side2_score_differential : match.result.side1_score_differential)?.toFixed(1)}</Text>
+                  </>
+                )}
               </View>
             )}
-            {/* Share Round — turns the result into a text blurb that drops
-                cleanly into Instagram, Snap, X, etc. Image-card upgrade lives
-                in shareRoundSummary's TODO once view-shot is installed. */}
-            <TouchableOpacity style={styles.shareRoundBtn} onPress={shareRoundSummary} activeOpacity={0.85}>
-              <Text style={styles.shareRoundBtnText}>Share Round →</Text>
-            </TouchableOpacity>
+            {/* Share button only makes sense for participants — a spectator
+                isn't sharing "their" round. */}
+            {!isSpectator && (
+              <TouchableOpacity style={styles.shareRoundBtn} onPress={shareRoundSummary} activeOpacity={0.85}>
+                <Text style={styles.shareRoundBtnText}>Share Round →</Text>
+              </TouchableOpacity>
+            )}
           </View>
         );
       })()}
