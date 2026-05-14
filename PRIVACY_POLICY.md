@@ -1,63 +1,58 @@
-# Privacy Policy — Sacari Golf
+Sacari Golf — Privacy Policy
+Last updated: 5/14/26
 
-**Last updated: May 5, 2026**
+This Privacy Policy explains what information Sacari Golf collects, how we use it, and the choices you have. By using the app you agree to this policy.
 
-## 1. Who we are
+Who we are
+Sacari Golf is operated by Richard Zielenski, reachable at rpzielenski@gmail.com.
 
-Sacari Golf ("the App") is operated by Richard Zielenski. Questions can be directed to rpzielenski@gmail.com.
+Information we collect
+Account information — when you create an account we collect your email address, a username you choose, and a securely hashed version of your password. You may optionally add a profile photo, bio, home course, handicap index, and a personal theme song.
 
-## 2. What data we collect
+Gameplay data — we record the matches you play: scores, hole-by-hole statistics, ELO rating, and the clubs in your bag. If you use shot tracking, we store the GPS coordinates of your shots. If you contribute pin or elevation data for a course, those coordinates are stored and shared with other players of that course.
 
-| Data | Why |
-|---|---|
-| Email address | Account creation and login |
-| Username | Display name within the app |
-| Password (hashed, never stored in plaintext) | Authentication |
-| ELO rating, match history, scores | Core app functionality |
-| Golf course and round data you enter | Core app functionality |
-| Photos you upload to Find Ranker | User-generated content feature |
-| Approximate location (when you grant permission) | Show nearby courses and GPS map during rounds |
+Location — while you have a round in progress, the app uses your device's precise location to measure distance to the pin, track shots, detect which course you're on, and look up local weather. We only access location while the app is in use; we do not track your location in the background. Coordinates are sent to our weather and elevation data providers solely to return conditions for your location.
 
-We do **not** collect precise background location. Location is only accessed while the app is in the foreground and only when you are in the scoring or course-selection screens.
+Content you create — posts, photos, voice messages, chat messages, "Finds" submissions, and course-data corrections you submit are stored on our servers and shown to other users according to the app's sharing rules (e.g. friends, teammates, or the public feed).
 
-## 3. How we use your data
+Social connections — your friends list, team/clan memberships, and the list of users you've blocked.
 
-- To provide and improve the App's features (matchmaking, ELO rankings, Find Ranker)
-- To display your profile and stats to other users
-- To surface nearby golf courses based on your location
-- We do **not** sell your data to third parties
-- We do **not** use your data for advertising
+Device information — a push notification token so we can send you match and social notifications.
 
-## 4. User-generated content
+How we use your information
+To operate the app: run matches, calculate ELO and handicaps, show leaderboards, and power the social feed.
+To deliver notifications you've enabled.
+To improve course data through community contributions.
+To keep the app safe — reviewing reported content and enforcing blocks.
+We do not sell your personal information. We do not use third-party advertising or cross-app tracking.
+Who we share it with
+We share data only with service providers that help us run the app:
 
-Photos you upload to Find Ranker are visible to all app users. You may delete your own finds at any time from the "Mine" tab. Other users may report inappropriate content; reported content is reviewed and may be removed.
+Railway — hosts our servers and database.
+Expo and Apple — deliver push notifications.
+Weather and elevation data providers — receive only the coordinates needed to return conditions for your current location.
+RevenueCat — processes in-app purchases, if you make one.
+We may also disclose information if required by law or to protect the safety of our users.
 
-## 5. Data retention and deletion
+User-generated content & safety
+Content other users post is not reviewed before it appears. Every post, message, and submission can be reported from within the app, and you can block any user. We review reports and remove violating content or accounts, typically within 24 hours. We have zero tolerance for objectionable content or abusive users.
 
-You may delete your account at any time from the Home screen → "delete account". Deleting your account permanently removes your profile, match history, and all uploaded finds. This action cannot be undone.
+Your choices and rights
+Access & deletion — you can permanently delete your account at any time from the Profile screen. Deleting your account erases your profile, match history, posts, messages, shot tracks, and uploaded photos from our database. Some content contributed to shared course data (e.g. crowdsourced pin locations) may remain in anonymized form.
+Location — you can revoke location access in your device settings; distance and shot-tracking features will stop working.
+Notifications — you can disable push notifications in your device settings.
+If you are in a region with data-protection laws (such as the EU/EEA or California), you have the right to access, correct, or delete your data — contact us at the email above.
+Data retention
+We keep your data for as long as your account is active. When you delete your account, your personal data is removed promptly. Backups containing your data are cycled out within [30] days.
 
-## 6. Data sharing
+Children
+Sacari Golf is not directed to children under 13 and we do not knowingly collect information from them. If you believe a child has provided us information, contact us and we will delete it.
 
-We do not share your personal information with third parties except:
-- As required by law
-- To protect the rights or safety of users
+Security
+We protect your information with industry-standard measures, including encrypted connections (HTTPS) and hashed passwords. No system is perfectly secure, but we take reasonable steps to safeguard your data.
 
-## 7. Location data
+Changes to this policy
+We may update this policy. Material changes will be noted by updating the date above and, where appropriate, notifying you in the app.
 
-Location permission is requested only for:
-- Showing nearby golf courses when setting up a match
-- Centering the GPS map on your position during a round
-
-Location data is processed on-device and is not stored on our servers.
-
-## 8. Children
-
-The App is not directed at children under 13. We do not knowingly collect data from children under 13.
-
-## 9. Changes to this policy
-
-We may update this policy. Continued use of the App after changes constitutes acceptance. The "Last updated" date at the top will always reflect the most recent revision.
-
-## 10. Contact
-
-Richard Zielenski — rpzielenski@gmail.com
+Contact
+Questions? Email rpzielenski@gmail.com
