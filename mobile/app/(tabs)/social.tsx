@@ -189,7 +189,7 @@ function FriendsTab() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{inv.from_username} invited you</Text>
                 <Text style={styles.userElo}>
-                  {inv.match_type.charAt(0).toUpperCase() + inv.match_type.slice(1)}
+                  {(inv.match_type ?? 'match').charAt(0).toUpperCase() + (inv.match_type ?? 'match').slice(1)}
                   {inv.match_name ? ` · ${inv.match_name}` : ''}
                   {' · '}{inv.from_elo} ELO
                 </Text>
@@ -245,7 +245,7 @@ function FriendsTab() {
       {searchResults.map((u) => (
         <View key={u.user_id} style={styles.userRow}>
           <View style={styles.userAvatar}>
-            <Text style={styles.avatarText}>{u.username[0].toUpperCase()}</Text>
+            <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.userName}>{u.username}</Text>
@@ -263,7 +263,7 @@ function FriendsTab() {
           {requests.map((u) => (
             <View key={u.user_id} style={styles.userRow}>
               <View style={styles.userAvatar}>
-                <Text style={styles.avatarText}>{u.username[0].toUpperCase()}</Text>
+                <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{u.username}</Text>
@@ -288,7 +288,7 @@ function FriendsTab() {
               activeOpacity={0.7}
             >
               <View style={styles.userAvatar}>
-                <Text style={styles.avatarText}>{u.username[0].toUpperCase()}</Text>
+                <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{u.username}</Text>
@@ -488,7 +488,7 @@ function ChatsTab() {
           }}
         >
           <View style={styles.userAvatar}>
-            <Text style={styles.avatarText}>{conv.other_username[0].toUpperCase()}</Text>
+            <Text style={styles.avatarText}>{conv.other_username?.[0]?.toUpperCase() ?? '?'}</Text>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[styles.userName, conv.unread && styles.userNameUnread]}>{conv.other_username}</Text>
@@ -558,7 +558,7 @@ function ChatsTab() {
             }}
           >
             <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-              <Text style={styles.avatarText}>{c.name[0].toUpperCase()}</Text>
+              <Text style={styles.avatarText}>{c.name?.[0]?.toUpperCase() ?? '?'}</Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.userName, unread && styles.userNameUnread]}>{c.name}</Text>

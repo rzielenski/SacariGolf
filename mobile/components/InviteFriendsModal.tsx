@@ -127,7 +127,7 @@ export function InviteFriendsModal({
               return (
                 <View style={s.row}>
                   <View style={s.avatar}>
-                    <Text style={s.avatarText}>{item.username[0]?.toUpperCase()}</Text>
+                    <Text style={s.avatarText}>{item.username?.[0]?.toUpperCase() ?? '?'}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={s.name}>{item.username}</Text>

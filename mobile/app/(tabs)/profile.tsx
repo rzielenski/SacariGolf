@@ -322,7 +322,7 @@ export default function ProfileScreen() {
               style={styles.avatarImage}
             />
           ) : (
-            <Text style={styles.avatarText}>{user.username[0].toUpperCase()}</Text>
+            <Text style={styles.avatarText}>{user.username?.[0]?.toUpperCase() ?? '?'}</Text>
           )}
           <View style={styles.avatarEditBadge}>
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>✎</Text>
@@ -657,6 +657,17 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.acctRowText}>Suggest a Feature</Text>
+        <Text style={styles.acctRowChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Privacy policy — Apple expects an in-app link, not just the App
+          Store Connect metadata field. Opens the hosted GitHub Pages doc. */}
+      <TouchableOpacity
+        style={styles.acctRow}
+        onPress={() => Linking.openURL('https://rzielenski.github.io/sacari-privacy/')}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.acctRowText}>Privacy Policy</Text>
         <Text style={styles.acctRowChev}>›</Text>
       </TouchableOpacity>
 

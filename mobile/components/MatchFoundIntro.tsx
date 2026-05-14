@@ -203,7 +203,7 @@ export function MatchFoundIntro({
                 <Image source={{ uri: `${API_BASE}${p.avatar_url}` }} style={s.memberAvatar} />
               ) : (
                 <View style={[s.memberAvatar, s.memberAvatarFallback]}>
-                  <Text style={s.memberAvatarText}>{p.username[0]?.toUpperCase()}</Text>
+                  <Text style={s.memberAvatarText}>{p.username?.[0]?.toUpperCase() ?? '?'}</Text>
                 </View>
               )}
               <View style={{ flex: 1 }}>

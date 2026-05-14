@@ -171,7 +171,8 @@ export default function MatchLobbyScreen() {
   const allReady = match.players && match.players.length >= 2;
   const isCompleted = match.completed;
 
-  const typeLabel = match.match_type.charAt(0).toUpperCase() + match.match_type.slice(1);
+  const matchTypeRaw = match.match_type ?? 'match';
+  const typeLabel = matchTypeRaw.charAt(0).toUpperCase() + matchTypeRaw.slice(1);
   const isPractice = match.is_practice;
 
   const handleStartScoring = () => {
@@ -627,7 +628,7 @@ export default function MatchLobbyScreen() {
               renderItem={({ item }) => (
                 <View style={styles.friendRow}>
                   <View style={styles.friendAvatar}>
-                    <Text style={styles.friendAvatarText}>{item.username[0].toUpperCase()}</Text>
+                    <Text style={styles.friendAvatarText}>{item.username?.[0]?.toUpperCase() ?? '?'}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.friendName}>{item.username}</Text>
@@ -678,7 +679,7 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
       activeOpacity={0.7}
     >
       <View style={styles.playerAvatar}>
-        <Text style={styles.playerAvatarText}>{player.username[0].toUpperCase()}</Text>
+        <Text style={styles.playerAvatarText}>{player.username?.[0]?.toUpperCase() ?? '?'}</Text>
       </View>
       <View style={{ flex: 1 }}>
         <Text style={styles.playerName}>

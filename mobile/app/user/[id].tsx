@@ -124,7 +124,7 @@ export default function UserProfileScreen() {
           {profile.avatar_url ? (
             <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
           ) : (
-            <Text style={styles.avatarText}>{profile.username[0].toUpperCase()}</Text>
+            <Text style={styles.avatarText}>{profile.username?.[0]?.toUpperCase() ?? '?'}</Text>
           )}
         </View>
         <Text style={styles.username}>{profile.username}</Text>

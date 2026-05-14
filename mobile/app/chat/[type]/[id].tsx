@@ -338,7 +338,7 @@ function MessageBubble({ msg, isMe, onReport }: {
     >
       {!isMe && (
         <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{msg.username[0].toUpperCase()}</Text>
+          <Text style={styles.avatarText}>{msg.username?.[0]?.toUpperCase() ?? '?'}</Text>
         </View>
       )}
       <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>

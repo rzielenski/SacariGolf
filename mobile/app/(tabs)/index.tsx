@@ -145,7 +145,7 @@ export default function HomeScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.resumeLabel}>ROUND IN PROGRESS</Text>
             <Text style={styles.resumeMsg} numberOfLines={1}>
-              {resumable.name ?? `${resumable.match_type[0].toUpperCase()}${resumable.match_type.slice(1)} match`}
+              {resumable.name ?? `${(resumable.match_type ?? 'match').charAt(0).toUpperCase()}${(resumable.match_type ?? 'match').slice(1)} match`}
               {' · '}tap to continue
             </Text>
           </View>

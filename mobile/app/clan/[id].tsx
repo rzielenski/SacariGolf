@@ -275,7 +275,7 @@ export default function ClanDetailScreen() {
               />
             ) : (
               <View style={styles.clanIcon}>
-                <Text style={styles.clanIconText}>{clan.name[0].toUpperCase()}</Text>
+                <Text style={styles.clanIconText}>{clan.name?.[0]?.toUpperCase() ?? '?'}</Text>
               </View>
             )}
             {isLeader && (
@@ -431,7 +431,7 @@ export default function ClanDetailScreen() {
                 : friends.map((f) => (
                   <View key={f.user_id} style={styles.friendInviteRow}>
                     <View style={styles.memberAvatar}>
-                      <Text style={styles.memberAvatarText}>{f.username[0].toUpperCase()}</Text>
+                      <Text style={styles.memberAvatarText}>{f.username?.[0]?.toUpperCase() ?? '?'}</Text>
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.memberName}>{f.username}</Text>
@@ -530,7 +530,7 @@ function MemberRow({
   return (
     <View style={styles.memberCard}>
       <View style={styles.memberAvatar}>
-        <Text style={styles.memberAvatarText}>{member.username[0].toUpperCase()}</Text>
+        <Text style={styles.memberAvatarText}>{member.username?.[0]?.toUpperCase() ?? '?'}</Text>
       </View>
       <View style={{ flex: 1 }}>
         <View style={styles.memberNameRow}>

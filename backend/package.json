@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "node tests/integration.js",
-    "test:prod": "API_URL=https://determined-perfection-production.up.railway.app node tests/integration.js"
+    "test:prod": "API_URL=https://determined-perfection-production.up.railway.app node tests/integration.js",
+    "seed:test": "ts-node src/scripts/seedTestAccount.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

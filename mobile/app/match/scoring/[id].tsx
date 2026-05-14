@@ -205,10 +205,16 @@ export default function ScoringScreen() {
   // When the user taps the Clear button (which sits inside an absolute-
   // positioned banner OVER the MapView), iOS's native MapView still receives
   // the same physical tap — without this guard the map's onPress fires right
-  // after, dropping a NEW measure pin at the banner's screen position. We
-  // record the moment Clear was tapped and ignore map-onPress events that
-  // happen within ~300ms after.
-  const ignoreMapTapUntil = useRef(0);
+  // after, dropping a NEW measure pin at the banner's screen position.
+  //
+  // This is a SINGLE-SHOT boolean, not a time window. The old version armed a
+  // ~300ms timestamp window; any genuine map tap that happened to land inside
+  // that window (a quick re-measure after Clear, or event-timing jitter under
+  // load) got silently swallowed and the banner stayed "stuck" on the old
+  // distance. A single-shot flag swallows at most ONE event — the phantom tap
+  // from Clear — and the very next map press consumes it, so no real tap can
+  // ever be lost.
+  const ignoreNextMapTap = useRef(false);
   const [following, setFollowing] = useState(true);
   const { userCoord, onCourse, locGranted } = useLocation({
     enabled: !selectingCourse,
@@ -1751,9 +1757,13 @@ export default function ScoringScreen() {
         showsCompass
         mapType="satellite"
         onPress={(e) => {
-          // Suppress phantom taps that bleed through from overlay buttons
-          // (e.g. the Clear button on the measure banner).
-          if (Date.now() < ignoreMapTapUntil.current) return;
+          // Suppress the single phantom tap that bleeds through from the
+          // Clear button overlay. Consume the flag on the very next event so
+          // a real tap is never swallowed (see ignoreNextMapTap declaration).
+          if (ignoreNextMapTap.current) {
+            ignoreNextMapTap.current = false;
+            return;
+          }
           setMeasurePin(e.nativeEvent.coordinate);
           setFollowing(false);
         }}
@@ -2453,7 +2463,9 @@ export default function ScoringScreen() {
             </View>
             <TouchableOpacity
               onPress={() => {
-                ignoreMapTapUntil.current = Date.now() + 300;
+                // Arm the single-shot guard so the phantom map tap this
+                // press bleeds through gets eaten — exactly one event.
+                ignoreNextMapTap.current = true;
                 setMeasurePin(null);
               }}
               style={styles.distClear}

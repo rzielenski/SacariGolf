@@ -112,7 +112,7 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
       </Text>
       <View style={[styles.avatar, { backgroundColor: eloColor + '22' }]}>
         <Text style={[styles.avatarText, { color: eloColor }]}>
-          {player.username[0].toUpperCase()}
+          {player.username?.[0]?.toUpperCase() ?? '?'}
         </Text>
       </View>
       <View style={{ flex: 1 }}>
