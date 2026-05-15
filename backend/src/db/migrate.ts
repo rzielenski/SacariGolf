@@ -582,6 +582,21 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON post_reports(status, created_at);
     `,
   },
+  {
+    // GolfCourseAPI id for each imported course. The bulk-import script
+    // (DownloadCourses.py) records it so it can auto-resume from
+    // MAX(external_id)+1 and never re-fetch a course we already have —
+    // the API-cap saver. NULL for the ~27k courses that came in via the
+    // old Supabase backup (they don't carry their API id). Partial unique
+    // index so all those NULL rows coexist without tripping uniqueness.
+    name: 'courses.external_id',
+    sql: `
+      ALTER TABLE courses
+        ADD COLUMN IF NOT EXISTS external_id BIGINT;
+      CREATE UNIQUE INDEX IF NOT EXISTS courses_external_id_idx
+        ON courses(external_id) WHERE external_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {
