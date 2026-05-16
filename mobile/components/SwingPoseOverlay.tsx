@@ -34,20 +34,31 @@ interface Props {
   labels?: boolean;
 }
 
-/** Pairs of joints to draw a connecting line between — the skeleton edges. */
+/** Skeleton edges — pairs of joints connected by a line in the rendered
+ *  figure. SportsBox-style schema: head as a top→bottom line, separate
+ *  L/R shoulders, hips, knees, and feet. Lines from each shoulder to its
+ *  same-side hip form the torso "rectangle"; the head sits on the
+ *  shoulder line via headBottom connecting to both shoulders. */
 const SKELETON_EDGES: [keyof PoseFrame, keyof PoseFrame][] = [
-  ['head', 'neck'],
-  ['neck', 'leftShoulder'],
-  ['neck', 'rightShoulder'],
+  // Head
+  ['headTop', 'headBottom'],
+  ['headBottom', 'leftShoulder'],
+  ['headBottom', 'rightShoulder'],
+  // Shoulders + arms
+  ['leftShoulder', 'rightShoulder'],
   ['leftShoulder', 'leftElbow'],
   ['leftElbow', 'leftWrist'],
   ['rightShoulder', 'rightElbow'],
   ['rightElbow', 'rightWrist'],
-  ['neck', 'hip'],
-  ['hip', 'leftKnee'],
-  ['hip', 'rightKnee'],
-  ['leftShoulder', 'hip'],
-  ['rightShoulder', 'hip'],
+  // Torso
+  ['leftShoulder', 'leftHip'],
+  ['rightShoulder', 'rightHip'],
+  // Hips + legs
+  ['leftHip', 'rightHip'],
+  ['leftHip', 'leftKnee'],
+  ['leftKnee', 'leftFoot'],
+  ['rightHip', 'rightKnee'],
+  ['rightKnee', 'rightFoot'],
 ];
 
 export function SwingPoseOverlay({

@@ -189,6 +189,12 @@ export default function RootLayout() {
         <Stack.Screen name="premium" options={{ animation: 'slide_from_bottom', headerShown: true, presentation: 'modal' }} />
         <Stack.Screen name="club-heatmap" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="bag" options={{ animation: 'slide_from_right', headerShown: true }} />
+        {/* Range Session routes — need headerShown so the screen has the
+            standard nav bar (title + back button), which also pushes the
+            scroll content down so the view-mode tabs aren't slammed
+            against the status bar / notch. */}
+        <Stack.Screen name="range/index" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="range/analyze" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
       </AuthProvider>

@@ -90,20 +90,28 @@ export interface SwingAnalysis {
 }
 
 export interface PoseFrame {
-  /** Joint positions, normalized (0-1). 19 joints to match Apple's
-   *  VNDetectHumanBodyPoseRequest output, but we use a simpler 11-joint
-   *  schema since that's all the UI overlay needs. */
-  head: Point;
-  neck: Point;
+  /** Joint positions, normalized (0-1). SportsBox-style 14-joint schema
+   *  — every joint that an instruction-grade pose analyzer would expose,
+   *  with separate L/R hip and foot points so the player can see weight
+   *  shift + base rotation directly on the skeleton.
+   *
+   *  Maps cleanly to Apple's VNDetectHumanBodyPoseRequest output when we
+   *  swap in the real Vision-framework analyzer in Phase 2 (Apple returns
+   *  19 joints; we use the subset we render). */
+  headTop: Point;
+  headBottom: Point;     // chin / base-of-head — connects to shoulders
   leftShoulder: Point;
   rightShoulder: Point;
   leftElbow: Point;
   rightElbow: Point;
   leftWrist: Point;
   rightWrist: Point;
-  hip: Point;       // center of pelvis
+  leftHip: Point;
+  rightHip: Point;
   leftKnee: Point;
   rightKnee: Point;
+  leftFoot: Point;
+  rightFoot: Point;
 }
 export interface Point { x: number; y: number; }
 
@@ -194,13 +202,17 @@ export async function analyzeSwing(
     ? generatePoseKeyframesDTL(skill)
     : generatePoseKeyframesFaceOn(skill);
 
-  // Clubhead trace — face-on traces a tilted ellipse swing plane, down-the-line
-  // traces a more vertical arc with a slight forward bias on follow-through.
+  // Clubhead trace — face-on traces three Bezier curves (backswing C →
+  // downswing → follow-through C), down-the-line traces a more vertical
+  // figure-eight with crossover at impact. Both generators use the same
+  // u→t map: u=0 address, u=0.5 top, u=0.75 impact, u=1.0 follow-through.
   const totalSec = body.backswingSec + body.downswingSec;
   const trace = cameraAngle === 'down_the_line'
     ? generateClubheadTraceDTL(totalSec)
     : generateClubheadTraceFaceOn(totalSec);
-  const impactTimeSec = body.backswingSec;
+  // Impact lands at u=0.75 of the trace (matches the Bezier inflection),
+  // converted back to real seconds.
+  const impactTimeSec = 0.75 * totalSec;
 
   // Ball position in frame — drives where the pose studio shows the ball
   // marker. Face-on: low-center-front. Down-the-line: forward of stance.
@@ -232,61 +244,76 @@ export async function analyzeSwing(
 function generatePoseKeyframesFaceOn(skill: number): SwingAnalysis['poseKeyframes'] {
   // Address — neutral stance, slight forward bend, hands at center.
   const address: PoseFrame = {
-    head:           { x: 0.50, y: 0.18 },
-    neck:           { x: 0.50, y: 0.25 },
+    headTop:        { x: 0.50, y: 0.14 },
+    headBottom:     { x: 0.50, y: 0.23 },
     leftShoulder:   { x: 0.43, y: 0.28 },
     rightShoulder:  { x: 0.57, y: 0.28 },
     leftElbow:      { x: 0.42, y: 0.41 },
     rightElbow:     { x: 0.58, y: 0.41 },
     leftWrist:      { x: 0.48, y: 0.54 },
     rightWrist:     { x: 0.52, y: 0.54 },
-    hip:            { x: 0.50, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.75 },
-    rightKnee:      { x: 0.55, y: 0.75 },
+    leftHip:        { x: 0.46, y: 0.55 },
+    rightHip:       { x: 0.54, y: 0.55 },
+    leftKnee:       { x: 0.45, y: 0.72 },
+    rightKnee:      { x: 0.55, y: 0.72 },
+    leftFoot:       { x: 0.43, y: 0.88 },
+    rightFoot:      { x: 0.57, y: 0.88 },
   };
   // Top of backswing — shoulders rotated ~95° from address, hips ~45°.
   // Skill affects rotation amount: pros get fuller turn.
   const turnK = 0.85 + skill * 0.15; // 0.85 (amateur) ... 1.0 (pro)
   const top: PoseFrame = {
-    head:           { x: 0.49, y: 0.18 },
-    neck:           { x: 0.50, y: 0.25 },
+    headTop:        { x: 0.49, y: 0.14 },
+    headBottom:     { x: 0.49, y: 0.23 },
     leftShoulder:   { x: 0.39 - 0.04 * turnK, y: 0.32 },
     rightShoulder:  { x: 0.55 + 0.03 * turnK, y: 0.25 },
     leftElbow:      { x: 0.50, y: 0.30 },
     rightElbow:     { x: 0.70, y: 0.22 },
     leftWrist:      { x: 0.62, y: 0.13 },
     rightWrist:     { x: 0.65, y: 0.13 },
-    hip:            { x: 0.50 + 0.02 * turnK, y: 0.55 },
-    leftKnee:       { x: 0.44, y: 0.75 },
-    rightKnee:      { x: 0.56, y: 0.75 },
+    leftHip:        { x: 0.47 + 0.01 * turnK, y: 0.55 },
+    rightHip:       { x: 0.55 + 0.02 * turnK, y: 0.55 },
+    leftKnee:       { x: 0.44, y: 0.72 },
+    rightKnee:      { x: 0.56, y: 0.72 },
+    leftFoot:       { x: 0.43, y: 0.88 },
+    rightFoot:      { x: 0.57, y: 0.88 },
   };
-  // Impact — body slightly ahead of the ball, hands at hip height.
+  // Impact — body slightly ahead of the ball, hands at hip height,
+  // hips opened toward target (screen-right for righty face-on view).
   const impact: PoseFrame = {
-    head:           { x: 0.48, y: 0.18 },
-    neck:           { x: 0.48, y: 0.25 },
+    headTop:        { x: 0.48, y: 0.14 },
+    headBottom:     { x: 0.48, y: 0.23 },
     leftShoulder:   { x: 0.44, y: 0.28 },
     rightShoulder:  { x: 0.55, y: 0.30 },
     leftElbow:      { x: 0.41, y: 0.42 },
     rightElbow:     { x: 0.55, y: 0.42 },
     leftWrist:      { x: 0.46, y: 0.55 },
     rightWrist:     { x: 0.50, y: 0.55 },
-    hip:            { x: 0.51, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.75 },
-    rightKnee:      { x: 0.55, y: 0.75 },
+    leftHip:        { x: 0.47, y: 0.55 },
+    rightHip:       { x: 0.55, y: 0.55 },
+    leftKnee:       { x: 0.45, y: 0.72 },
+    rightKnee:      { x: 0.55, y: 0.72 },
+    leftFoot:       { x: 0.43, y: 0.88 },
+    rightFoot:      { x: 0.57, y: 0.88 },
   };
   // Follow-through — fully rotated, hands high-left, weight on lead leg.
+  // Trail foot (right for righty) lifted slightly on toe — visible by
+  // moving its y up vs the planted lead foot.
   const ft: PoseFrame = {
-    head:           { x: 0.51, y: 0.18 },
-    neck:           { x: 0.51, y: 0.25 },
+    headTop:        { x: 0.51, y: 0.14 },
+    headBottom:     { x: 0.51, y: 0.23 },
     leftShoulder:   { x: 0.58, y: 0.30 },
     rightShoulder:  { x: 0.43, y: 0.25 },
     leftElbow:      { x: 0.55, y: 0.20 },
     rightElbow:     { x: 0.38, y: 0.18 },
     leftWrist:      { x: 0.40, y: 0.10 },
     rightWrist:     { x: 0.37, y: 0.10 },
-    hip:            { x: 0.51, y: 0.55 },
-    leftKnee:       { x: 0.47, y: 0.75 },
-    rightKnee:      { x: 0.55, y: 0.78 },
+    leftHip:        { x: 0.49, y: 0.55 },
+    rightHip:       { x: 0.55, y: 0.55 },
+    leftKnee:       { x: 0.47, y: 0.72 },
+    rightKnee:      { x: 0.55, y: 0.74 },
+    leftFoot:       { x: 0.43, y: 0.88 },  // planted
+    rightFoot:      { x: 0.57, y: 0.84 },  // lifted onto toe
   };
 
   return { address, top, impact, followThrough: ft };
@@ -300,62 +327,78 @@ function generatePoseKeyframesFaceOn(skill: number): SwingAnalysis['poseKeyframe
 function generatePoseKeyframesDTL(skill: number): SwingAnalysis['poseKeyframes'] {
   // Address — golfer's back to camera, slightly side-on. Right shoulder
   // (camera-near) at screen-right; left shoulder (target-near) at center.
+  // Note: in the DTL view we see the side of the body, so leftHip and
+  // rightHip mostly stack vertically rather than separating horizontally
+  // like they do in face-on. Same for the feet.
   const address: PoseFrame = {
-    head:           { x: 0.42, y: 0.18 },
-    neck:           { x: 0.42, y: 0.25 },
-    leftShoulder:   { x: 0.46, y: 0.29 },  // forward, slightly target-ward
-    rightShoulder:  { x: 0.38, y: 0.30 },  // closer to camera
+    headTop:        { x: 0.42, y: 0.14 },
+    headBottom:     { x: 0.42, y: 0.23 },
+    leftShoulder:   { x: 0.46, y: 0.29 },  // target-near (forward)
+    rightShoulder:  { x: 0.38, y: 0.30 },  // camera-near (back)
     leftElbow:      { x: 0.52, y: 0.42 },
     rightElbow:     { x: 0.46, y: 0.43 },
     leftWrist:      { x: 0.56, y: 0.55 },  // hands extend forward to ball
     rightWrist:     { x: 0.54, y: 0.56 },
-    hip:            { x: 0.42, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.75 },
-    rightKnee:      { x: 0.39, y: 0.75 },
+    leftHip:        { x: 0.44, y: 0.55 },  // forward (target-ward) hip
+    rightHip:       { x: 0.40, y: 0.55 },  // back hip
+    leftKnee:       { x: 0.45, y: 0.72 },
+    rightKnee:      { x: 0.39, y: 0.72 },
+    leftFoot:       { x: 0.46, y: 0.88 },
+    rightFoot:      { x: 0.38, y: 0.88 },
   };
   // Top of backswing — club up behind the right shoulder. Skill affects
   // how high + how shallow/upright the plane is.
   const planeK = 0.85 + skill * 0.15;
   const top: PoseFrame = {
-    head:           { x: 0.42, y: 0.18 },
-    neck:           { x: 0.42, y: 0.26 },
+    headTop:        { x: 0.42, y: 0.14 },
+    headBottom:     { x: 0.42, y: 0.24 },
     leftShoulder:   { x: 0.45, y: 0.34 },  // shoulders rotated toward back
     rightShoulder:  { x: 0.36, y: 0.27 },
     leftElbow:      { x: 0.40, y: 0.28 },
     rightElbow:     { x: 0.33, y: 0.22 },
     leftWrist:      { x: 0.28 * planeK + 0.34 * (1 - planeK), y: 0.16 },
     rightWrist:     { x: 0.26 * planeK + 0.33 * (1 - planeK), y: 0.17 },
-    hip:            { x: 0.43, y: 0.55 },  // small hip turn
-    leftKnee:       { x: 0.45, y: 0.75 },
-    rightKnee:      { x: 0.39, y: 0.75 },
+    leftHip:        { x: 0.44, y: 0.55 },  // small hip turn
+    rightHip:       { x: 0.40, y: 0.55 },
+    leftKnee:       { x: 0.45, y: 0.72 },
+    rightKnee:      { x: 0.39, y: 0.72 },
+    leftFoot:       { x: 0.46, y: 0.88 },
+    rightFoot:      { x: 0.38, y: 0.88 },
   };
   // Impact — back to address-like position; weight shifted forward (left).
   const impact: PoseFrame = {
-    head:           { x: 0.42, y: 0.18 },
-    neck:           { x: 0.43, y: 0.25 },
+    headTop:        { x: 0.42, y: 0.14 },
+    headBottom:     { x: 0.43, y: 0.23 },
     leftShoulder:   { x: 0.47, y: 0.29 },
     rightShoulder:  { x: 0.39, y: 0.30 },
     leftElbow:      { x: 0.52, y: 0.42 },
     rightElbow:     { x: 0.46, y: 0.43 },
     leftWrist:      { x: 0.56, y: 0.55 },
     rightWrist:     { x: 0.54, y: 0.56 },
-    hip:            { x: 0.44, y: 0.55 },  // hip slid slightly forward
-    leftKnee:       { x: 0.46, y: 0.75 },
-    rightKnee:      { x: 0.39, y: 0.76 },
+    leftHip:        { x: 0.46, y: 0.55 },  // hip slid slightly forward
+    rightHip:       { x: 0.41, y: 0.55 },
+    leftKnee:       { x: 0.46, y: 0.72 },
+    rightKnee:      { x: 0.39, y: 0.73 },
+    leftFoot:       { x: 0.46, y: 0.88 },  // planted
+    rightFoot:      { x: 0.38, y: 0.88 },
   };
   // Follow-through — club out front-left, body rotated to face target.
+  // Trail (right for righty) foot rotated onto toe.
   const ft: PoseFrame = {
-    head:           { x: 0.42, y: 0.19 },
-    neck:           { x: 0.43, y: 0.26 },
+    headTop:        { x: 0.42, y: 0.15 },
+    headBottom:     { x: 0.43, y: 0.24 },
     leftShoulder:   { x: 0.50, y: 0.27 },  // shoulders rotated open
     rightShoulder:  { x: 0.40, y: 0.32 },
     leftElbow:      { x: 0.62, y: 0.22 },
     rightElbow:     { x: 0.56, y: 0.20 },
     leftWrist:      { x: 0.72, y: 0.14 },  // hands high in front-left
     rightWrist:     { x: 0.70, y: 0.16 },
-    hip:            { x: 0.45, y: 0.55 },
-    leftKnee:       { x: 0.46, y: 0.75 },
-    rightKnee:      { x: 0.40, y: 0.78 },
+    leftHip:        { x: 0.47, y: 0.55 },
+    rightHip:       { x: 0.43, y: 0.55 },
+    leftKnee:       { x: 0.46, y: 0.72 },
+    rightKnee:      { x: 0.40, y: 0.74 },
+    leftFoot:       { x: 0.46, y: 0.88 },  // planted
+    rightFoot:      { x: 0.39, y: 0.84 },  // lifted onto toe
   };
   return { address, top, impact, followThrough: ft };
 }
@@ -364,28 +407,55 @@ function generatePoseKeyframesDTL(skill: number): SwingAnalysis['poseKeyframes']
 // Two angle-specific variants. Both produce a list of ~60 (x, y, t) points
 // describing the clubhead's path through the swing.
 
-/** Face-on swing-plane trace — the canonical tilted ellipse view.
- *  Address bottom-right → top upper-left → impact bottom-center →
- *  follow-through upper-right. */
+/** Face-on swing-plane trace — three Bezier segments forming the canonical
+ *  "C up, mirrored C down, finish high opposite side" shape that golf
+ *  instruction videos use to teach swing plane.
+ *
+ *  Segments (each a quadratic Bezier):
+ *    1. Backswing (u 0 → 0.5):   ball-low-center → mid-back → top-back-high
+ *    2. Downswing (u 0.5 → 0.75): top-back-high → mid-back → impact-low
+ *    3. Follow-through (0.75 → 1): impact-low → mid-front → top-front-high
+ *
+ *  Previous angle-based implementation had its angle convention inverted
+ *  (screen-y grows down but standard math sin/cos assume y-up), so the
+ *  generated trace started at the TOP of the screen and arced wrong.
+ *  Explicit Bezier waypoints eliminate the convention issue. */
 function generateClubheadTraceFaceOn(totalSec: number): SwingAnalysis['clubheadTrace'] {
   const samples = 60;
   const pts: SwingAnalysis['clubheadTrace'] = [];
-  const cx = 0.50, cy = 0.50;
-  const rx = 0.40, ry = 0.40;
-  const tilt = -0.35; // radians — swing-plane tilt angle
+  // Waypoints, all in normalized 0-1 screen coords (y grows down).
+  // Right-handed golfer filmed face-on: club goes up on golfer's right
+  // (screen-LEFT) on the backswing, exits high on screen-right on
+  // follow-through.
+  const ball       = { x: 0.50, y: 0.70 };  // address / impact position
+  const backMid    = { x: 0.30, y: 0.42 };  // mid-backswing
+  const topBack    = { x: 0.20, y: 0.20 };  // top of backswing
+  const downMid    = { x: 0.32, y: 0.50 };  // mid-downswing (slightly inside)
+  const ftMid      = { x: 0.70, y: 0.40 };  // mid-follow-through
+  const ftHigh     = { x: 0.82, y: 0.20 };  // finish high
+
   for (let i = 0; i < samples; i++) {
     const u = i / (samples - 1);
-    let angle: number;
+    let x: number, y: number;
     if (u < 0.5) {
-      angle = -Math.PI / 2 + (u / 0.5) * Math.PI;
+      // Backswing — ball → top-back via mid-back control point.
+      const v = u / 0.5;
+      const oneMinus = 1 - v;
+      x = oneMinus * oneMinus * ball.x + 2 * oneMinus * v * backMid.x + v * v * topBack.x;
+      y = oneMinus * oneMinus * ball.y + 2 * oneMinus * v * backMid.y + v * v * topBack.y;
+    } else if (u < 0.75) {
+      // Downswing — top-back → impact via downswing control point.
+      const v = (u - 0.5) / 0.25;
+      const oneMinus = 1 - v;
+      x = oneMinus * oneMinus * topBack.x + 2 * oneMinus * v * downMid.x + v * v * ball.x;
+      y = oneMinus * oneMinus * topBack.y + 2 * oneMinus * v * downMid.y + v * v * ball.y;
     } else {
-      const v = (u - 0.5) / 0.5;
-      angle = Math.PI / 2 - v * Math.PI;
+      // Follow-through — impact → high-front via ft control point.
+      const v = (u - 0.75) / 0.25;
+      const oneMinus = 1 - v;
+      x = oneMinus * oneMinus * ball.x + 2 * oneMinus * v * ftMid.x + v * v * ftHigh.x;
+      y = oneMinus * oneMinus * ball.y + 2 * oneMinus * v * ftMid.y + v * v * ftHigh.y;
     }
-    const px = Math.cos(angle) * rx;
-    const py = Math.sin(angle) * ry;
-    const x = cx + (px * Math.cos(tilt) - py * Math.sin(tilt));
-    const y = cy + (px * Math.sin(tilt) + py * Math.cos(tilt));
     pts.push({ x, y, t: u * totalSec });
   }
   return pts;
@@ -441,6 +511,70 @@ function generateClubheadTraceDTL(totalSec: number): SwingAnalysis['clubheadTrac
 function round(v: number, decimals: number): number {
   const p = Math.pow(10, decimals);
   return Math.round(v * p) / p;
+}
+
+/** Migrate a saved pose frame that may be in the old 11-joint schema
+ *  (head, neck, single hip, no feet) to the new 14-joint SportsBox schema.
+ *  Idempotent — already-new frames pass through untouched. Called when
+ *  rendering pose data so older sessions still look reasonable.
+ *
+ *  Missing-joint fallbacks aim to keep the figure visually plausible:
+ *    • head → headTop slightly above, headBottom slightly below
+ *    • single hip → split into leftHip/rightHip ±4% of body width
+ *    • feet → place ~13% below their knee, with a tiny outward bias */
+export function normalizePoseFrame(f: any): PoseFrame {
+  if (f && f.headTop && f.leftHip && f.leftFoot && f.rightFoot) {
+    return f as PoseFrame;
+  }
+  const head = f?.head ?? { x: 0.5, y: 0.18 };
+  const headTop    = f?.headTop    ?? { x: head.x, y: Math.max(0, head.y - 0.04) };
+  const headBottom = f?.headBottom ?? { x: head.x, y: head.y + 0.05 };
+  const hip = f?.hip ?? { x: 0.5, y: 0.55 };
+  const leftHip  = f?.leftHip  ?? { x: hip.x - 0.04, y: hip.y };
+  const rightHip = f?.rightHip ?? { x: hip.x + 0.04, y: hip.y };
+  const leftKnee  = f?.leftKnee  ?? { x: 0.45, y: 0.72 };
+  const rightKnee = f?.rightKnee ?? { x: 0.55, y: 0.72 };
+  const leftFoot  = f?.leftFoot  ?? { x: leftKnee.x - 0.01,  y: Math.min(0.98, leftKnee.y + 0.16) };
+  const rightFoot = f?.rightFoot ?? { x: rightKnee.x + 0.01, y: Math.min(0.98, rightKnee.y + 0.16) };
+
+  return {
+    headTop, headBottom,
+    leftShoulder:  f?.leftShoulder  ?? { x: 0.43, y: 0.28 },
+    rightShoulder: f?.rightShoulder ?? { x: 0.57, y: 0.28 },
+    leftElbow:     f?.leftElbow     ?? { x: 0.42, y: 0.41 },
+    rightElbow:    f?.rightElbow    ?? { x: 0.58, y: 0.41 },
+    leftWrist:     f?.leftWrist     ?? { x: 0.48, y: 0.54 },
+    rightWrist:    f?.rightWrist    ?? { x: 0.52, y: 0.54 },
+    leftHip, rightHip,
+    leftKnee, rightKnee,
+    leftFoot, rightFoot,
+  };
+}
+
+/** Linear interpolation between two pose frames. `t` is 0..1.
+ *  Used by the pose studio playback to animate smoothly between the
+ *  four stored keyframes (address → top → impact → follow-through). */
+export function interpolatePoseFrames(a: PoseFrame, b: PoseFrame, t: number): PoseFrame {
+  const lerp = (p: Point, q: Point, k: number): Point => ({
+    x: p.x + (q.x - p.x) * k,
+    y: p.y + (q.y - p.y) * k,
+  });
+  return {
+    headTop:       lerp(a.headTop,       b.headTop,       t),
+    headBottom:    lerp(a.headBottom,    b.headBottom,    t),
+    leftShoulder:  lerp(a.leftShoulder,  b.leftShoulder,  t),
+    rightShoulder: lerp(a.rightShoulder, b.rightShoulder, t),
+    leftElbow:     lerp(a.leftElbow,     b.leftElbow,     t),
+    rightElbow:    lerp(a.rightElbow,    b.rightElbow,    t),
+    leftWrist:     lerp(a.leftWrist,     b.leftWrist,     t),
+    rightWrist:    lerp(a.rightWrist,    b.rightWrist,    t),
+    leftHip:       lerp(a.leftHip,       b.leftHip,       t),
+    rightHip:      lerp(a.rightHip,      b.rightHip,      t),
+    leftKnee:      lerp(a.leftKnee,      b.leftKnee,      t),
+    rightKnee:     lerp(a.rightKnee,     b.rightKnee,     t),
+    leftFoot:      lerp(a.leftFoot,      b.leftFoot,      t),
+    rightFoot:     lerp(a.rightFoot,     b.rightFoot,     t),
+  };
 }
 
 /** Deterministic PRNG seeded from a string — used so a given swing's

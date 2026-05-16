@@ -30,6 +30,7 @@ import {
 } from '../../lib/proSwingStats';
 import {
   RangeSwing, loadSwings, SwingAnalysis, PoseFrame, Point, CameraAngle,
+  normalizePoseFrame, interpolatePoseFrames,
 } from '../../lib/rangeSession';
 import { SwingPoseOverlay } from '../../components/SwingPoseOverlay';
 import { ClubheadTracer } from '../../components/ClubheadTracer';
@@ -55,7 +56,6 @@ export default function RangeAnalyze() {
   // (black canvas, skeleton + ball, no video). Two distinct lenses on
   // the same swing data; the user picks via the tab row.
   const [viewMode, setViewMode] = useState<ViewMode>('tracer');
-  const [keyframe, setKeyframe] = useState<Keyframe>('top');
   const [playbackTimeSec, setPlaybackTimeSec] = useState(0);
   const videoRef = useRef<Video>(null);
 
@@ -152,36 +152,21 @@ export default function RangeAnalyze() {
           </View>
         )}
 
-        {/* ── POSE STUDIO: black canvas, skeleton + ball + ground ──── */}
-        {viewMode === 'pose' && swing.status === 'complete' && swing.result && (
-          <PoseStudio
-            frame={swing.result.poseKeyframes[keyframe]}
-            ball={swing.result.ballPosition}
-            cameraAngle={swing.cameraAngle ?? 'face_on'}
-          />
-        )}
-
-        {/* Keyframe picker — only relevant in pose-studio mode. */}
-        {viewMode === 'pose' && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 4 }}
-            style={styles.keyframeRow}
-          >
-            {(['address', 'top', 'impact', 'followThrough'] as Keyframe[]).map((k) => (
-              <TouchableOpacity
-                key={k}
-                style={[styles.keyframeChip, keyframe === k && styles.keyframeChipActive]}
-                onPress={() => setKeyframe(k)}
-              >
-                <Text style={[styles.keyframeLabel, keyframe === k && styles.keyframeLabelActive]}>
-                  {KEYFRAME_LABELS[k]}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
+        {/* ── POSE STUDIO: animated black canvas, skeleton + ball + ground.
+            Keyframe scrubber + play/pause live INSIDE the studio component
+            so they sit directly under the canvas. */}
+        {viewMode === 'pose' && swing.status === 'complete' && swing.result && (() => {
+          const angle = swing.cameraAngle ?? 'face_on';
+          const ball = swing.result.ballPosition
+            ?? (angle === 'down_the_line' ? { x: 0.62, y: 0.66 } : { x: 0.50, y: 0.68 });
+          return (
+            <PoseStudio
+              keyframes={swing.result.poseKeyframes}
+              ball={ball}
+              cameraAngle={angle}
+            />
+          );
+        })()}
 
         {/* Camera-angle label so the user always sees what perspective
             their swing was filmed from. */}
@@ -214,73 +199,202 @@ export default function RangeAnalyze() {
 
 // ─── Pose Studio ────────────────────────────────────────────────────────
 //
-// A standalone "studio" view: black canvas (NOT the video), with just the
-// skeleton + ball + a horizon line for ground reference. Reads as a clean
-// motion-capture diagram — no busy video background competing with the
-// data. Used when the user wants to focus on pose mechanics rather than
-// see how the swing looked in real life.
+// Animated standalone "studio" view: black canvas, skeleton + ball + ground
+// line, with auto-looping playback through the four keyframes. The
+// skeleton animates between (address → top → impact → follow-through)
+// using linear interpolation per joint. Keyframe chips at the bottom
+// act as scrubber-jump points; tapping one pauses playback and jumps to
+// that pose. A play/pause button toggles auto-play.
+//
+// Keyframe time mapping (matches the clubhead trace's u→t map):
+//   • Address       at t = 0
+//   • Top           at t = 0.50  (50% of total swing time)
+//   • Impact        at t = 0.75  (downswing takes 1/3 the time of backswing)
+//   • Follow-through at t = 1.00
+// Total visible swing time is slowed 1.6× vs the real values so the
+// user can actually watch each phase rather than blink and miss it.
+
+const KEYFRAME_T: Record<Keyframe, number> = {
+  address: 0,
+  top: 0.50,
+  impact: 0.75,
+  followThrough: 1.0,
+};
 
 function PoseStudio({
-  frame, ball, cameraAngle,
+  keyframes, ball, cameraAngle,
 }: {
-  frame: PoseFrame;
+  keyframes: SwingAnalysis['poseKeyframes'];
   ball: Point;
   cameraAngle: CameraAngle;
 }) {
   const W = SCREEN_W - 40;
   const H = W * (16 / 9);
+
+  // Normalize each keyframe at component-mount time so old saved swings
+  // (single-hip, no-feet schema) get upgraded to the SportsBox shape
+  // before they hit the interpolator. Memoised so we don't re-normalize
+  // on every render tick.
+  const normalized = useMemo(() => ({
+    address:       normalizePoseFrame(keyframes.address),
+    top:           normalizePoseFrame(keyframes.top),
+    impact:        normalizePoseFrame(keyframes.impact),
+    followThrough: normalizePoseFrame(keyframes.followThrough),
+  }), [keyframes]);
+
+  // Playback state — `time` is normalized 0..1 across the swing. Playback
+  // updates it 30× per second via requestAnimationFrame when playing.
+  const [time, setTime] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  // Total duration the loop takes to play once, in seconds. Slowed enough
+  // to be readable but not so slow it feels lethargic.
+  const LOOP_SEC = 2.4;
+
+  useEffect(() => {
+    if (!playing) return;
+    let raf: number;
+    let last = Date.now();
+    const tick = () => {
+      const now = Date.now();
+      const dt = (now - last) / 1000 / LOOP_SEC;
+      last = now;
+      setTime((t) => (t + dt) % 1);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+
+  // Pick the two keyframes the current time falls between + how far along
+  // we are within that segment. The 4 keyframes split the loop into 3
+  // segments of unequal length, matching real swing tempo (backswing slow,
+  // downswing fast, follow-through medium).
+  const interpolated: PoseFrame = useMemo(() => {
+    const segments: [number, number, PoseFrame, PoseFrame][] = [
+      [0,    0.50, normalized.address,       normalized.top],
+      [0.50, 0.75, normalized.top,           normalized.impact],
+      [0.75, 1.0,  normalized.impact,        normalized.followThrough],
+    ];
+    for (const [from, to, fromF, toF] of segments) {
+      if (time >= from && time <= to) {
+        const segT = (time - from) / (to - from);
+        // Smooth in-out ease — the body doesn't change direction
+        // instantaneously at keyframes.
+        const eased = segT * segT * (3 - 2 * segT);
+        return interpolatePoseFrames(fromF, toF, eased);
+      }
+    }
+    return normalized.followThrough;
+  }, [time, normalized]);
+
+  // Which keyframe is "active" — for the scrubber-chip highlight. We pick
+  // whichever keyframe is closest to the current playback time.
+  const activeKeyframe: Keyframe = useMemo(() => {
+    const candidates: [Keyframe, number][] = [
+      ['address', KEYFRAME_T.address],
+      ['top', KEYFRAME_T.top],
+      ['impact', KEYFRAME_T.impact],
+      ['followThrough', KEYFRAME_T.followThrough],
+    ];
+    return candidates.reduce(
+      (best, [k, t]) => Math.abs(t - time) < Math.abs(KEYFRAME_T[best] - time) ? k : best,
+      'address' as Keyframe,
+    );
+  }, [time]);
+
+  const jumpToKeyframe = (k: Keyframe) => {
+    setPlaying(false);
+    setTime(KEYFRAME_T[k]);
+  };
+
   return (
-    <View style={[styles.videoFrame, { backgroundColor: '#000' }]}>
-      {/* Ground line — a thin horizontal indicator at ~78% down, gives
-          the figure a physical ground reference without being loud. */}
-      <View
-        pointerEvents="none"
-        style={[
-          studio.ground,
-          { top: H * 0.78, width: W },
-        ]}
-      />
-      {/* Camera-angle indicator on the studio surface — top-left small
-          label so the user knows which view they're inspecting. */}
-      <View style={studio.angleTag}>
-        <Text style={studio.angleTagText}>
-          {cameraAngle === 'down_the_line' ? 'DOWN-THE-LINE' : 'FACE-ON'}
-        </Text>
-      </View>
-      {/* Target-line arrow (down-the-line only) — a faint dashed line
-          stretching toward screen-left, marking the target direction. */}
-      {cameraAngle === 'down_the_line' && (
+    <View>
+      <View style={[styles.videoFrame, { backgroundColor: '#000' }]}>
+        {/* Ground line — physical reference. */}
+        <View pointerEvents="none" style={[studio.ground, { top: H * 0.86, width: W }]} />
+
+        {/* Camera-angle tag — top-left. */}
+        <View style={studio.angleTag}>
+          <Text style={studio.angleTagText}>
+            {cameraAngle === 'down_the_line' ? 'DOWN-THE-LINE' : 'FACE-ON'}
+          </Text>
+        </View>
+
+        {/* Target-line indicator (DTL only). */}
+        {cameraAngle === 'down_the_line' && (
+          <View pointerEvents="none" style={[studio.targetLine, { top: H * 0.86, width: W * 0.5, left: 0 }]} />
+        )}
+
+        {/* Skeleton — interpolated pose at the current playback time. */}
+        <SwingPoseOverlay
+          frame={interpolated}
+          width={W}
+          height={H}
+          accent={C.gold}
+          jointSize={11}
+          lineWidth={3}
+        />
+
+        {/* Ball marker. */}
         <View
           pointerEvents="none"
           style={[
-            studio.targetLine,
-            { top: H * 0.78, width: W * 0.5, left: 0 },
+            studio.ball,
+            { left: ball.x * W - 7, top: ball.y * H - 7 },
           ]}
         />
-      )}
-      {/* Skeleton — the same SwingPoseOverlay used for the (deprecated)
-          video overlay path, drawn against the black studio surface. */}
-      <SwingPoseOverlay
-        frame={frame}
-        width={W}
-        height={H}
-        accent={C.gold}
-        jointSize={11}
-        lineWidth={3}
-      />
-      {/* Ball marker — small white circle with a faint glow. Positioned
-          via the analyzer's ballPosition so face-on shows it at low-
-          center, down-the-line shows it forward of the stance. */}
-      <View
-        pointerEvents="none"
-        style={[
-          studio.ball,
-          {
-            left: ball.x * W - 7,
-            top: ball.y * H - 7,
-          },
-        ]}
-      />
+
+        {/* Live phase label — top-right of the canvas, shows what part
+            of the swing the current frame is in. */}
+        <View style={studio.phaseTag}>
+          <Text style={studio.phaseTagText}>{KEYFRAME_LABELS[activeKeyframe]}</Text>
+        </View>
+      </View>
+
+      {/* Playback controls — play/pause + scrubber track with keyframe
+          jump-chips. Sits directly below the canvas so the user's eye
+          flows from figure → controls without a seek. */}
+      <View style={studio.controls}>
+        <TouchableOpacity
+          style={studio.playBtn}
+          onPress={() => setPlaying((p) => !p)}
+          activeOpacity={0.75}
+        >
+          <Text style={studio.playBtnText}>{playing ? '⏸' : '▶'}</Text>
+        </TouchableOpacity>
+
+        <View style={studio.scrubTrack}>
+          {/* Filled bar showing playback position. */}
+          <View style={[studio.scrubFill, { width: `${time * 100}%` }]} />
+          {/* Keyframe markers — tiny gold ticks along the track. */}
+          {(['address', 'top', 'impact', 'followThrough'] as Keyframe[]).map((k) => (
+            <View
+              key={`mark-${k}`}
+              style={[studio.scrubMark, { left: `${KEYFRAME_T[k] * 100}%` }]}
+            />
+          ))}
+        </View>
+      </View>
+
+      {/* Keyframe scrubber chips — tap any to jump there and pause. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ paddingHorizontal: 4 }}
+        style={styles.keyframeRow}
+      >
+        {(['address', 'top', 'impact', 'followThrough'] as Keyframe[]).map((k) => (
+          <TouchableOpacity
+            key={k}
+            style={[styles.keyframeChip, activeKeyframe === k && styles.keyframeChipActive]}
+            onPress={() => jumpToKeyframe(k)}
+          >
+            <Text style={[styles.keyframeLabel, activeKeyframe === k && styles.keyframeLabelActive]}>
+              {KEYFRAME_LABELS[k]}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
     </View>
   );
 }
@@ -326,6 +440,60 @@ const studio = StyleSheet.create({
     shadowOpacity: 0.8,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 0 },
+  },
+  phaseTag: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderColor: C.gold,
+    borderWidth: 1,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+  },
+  phaseTagText: {
+    color: C.gold,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+  },
+  // Playback row — play/pause button + scrubber track with keyframe ticks.
+  controls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 10,
+    marginBottom: 10,
+  },
+  playBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: C.gold,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  playBtnText: { color: C.bg, fontSize: 18, fontWeight: '900' },
+  scrubTrack: {
+    flex: 1,
+    height: 6,
+    backgroundColor: C.cardAlt,
+    borderRadius: 3,
+    position: 'relative',
+    overflow: 'visible',
+  },
+  scrubFill: {
+    position: 'absolute',
+    left: 0, top: 0, bottom: 0,
+    backgroundColor: C.gold,
+    borderRadius: 3,
+  },
+  scrubMark: {
+    position: 'absolute',
+    width: 2,
+    height: 12,
+    top: -3,
+    marginLeft: -1,
+    backgroundColor: C.goldLight,
+    opacity: 0.85,
   },
 });
 
