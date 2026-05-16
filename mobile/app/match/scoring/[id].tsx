@@ -2433,7 +2433,13 @@ export default function ScoringScreen() {
                   that layout. Each chip shows the entry's custom label
                   when set, else the canonical code. Falls back to the
                   full ALL list when no bag is saved so a fresh account
-                  isn't forced through the bag editor on first use. */}
+                  isn't forced through the bag editor on first use.
+
+                  After the bag chips we ALWAYS append a "CHIP" option —
+                  visually distinct (gold-tinted) — which lets the player
+                  track a shot on the map WITHOUT it counting toward any
+                  specific club's per-club stats. The backend skips
+                  segments tagged 'chip' from /club-stats aggregation. */}
               {(() => {
                 const ALL = ['driver','3w','5w','7w','hybrid','2i','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const;
                 const bag = user?.clubs_in_bag;
@@ -2465,6 +2471,21 @@ export default function ScoringScreen() {
                     </TouchableOpacity>
                   );
                 });
+              })()}
+              {/* CHIP — always visible, styled differently so the player
+                  knows it's a no-stats option. Useful for the bump-and-
+                  run / chip-out shots where the player doesn't want to
+                  pollute their wedge averages with a 15-yard punch. */}
+              {(() => {
+                const active = (activeShot?.club ?? pendingClub) === 'chip';
+                return (
+                  <TouchableOpacity
+                    style={[styles.clubBtn, styles.clubBtnChip, active && styles.clubBtnChipActive]}
+                    onPress={() => { pickClub('chip'); setClubPickerVisible(false); }}
+                  >
+                    <Text style={[styles.clubBtnChipText, active && { color: C.bg }]}>CHIP</Text>
+                  </TouchableOpacity>
+                );
               })()}
             </View>
             <View style={styles.clubPickerFooter}>
@@ -3098,6 +3119,16 @@ const styles = StyleSheet.create({
   },
   clubBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
   clubBtnText: { color: C.text, fontWeight: '800', fontSize: 12, textAlign: 'center', letterSpacing: 0.6 },
+  // CHIP — non-attributing club chip. Same shape as regular club chips
+  // so the picker layout stays tidy, but tinted gold + dashed border to
+  // signal "this is the catch-all, doesn't go into per-club stats."
+  clubBtnChip: {
+    backgroundColor: C.gold + '14',
+    borderColor: C.gold,
+    borderStyle: 'dashed',
+  },
+  clubBtnChipActive: { backgroundColor: C.gold, borderColor: C.gold, borderStyle: 'solid' },
+  clubBtnChipText: { color: C.gold, fontWeight: '900', fontSize: 12, textAlign: 'center', letterSpacing: 0.6 },
   clubClearBtn: { marginTop: 14, alignSelf: 'center', padding: 8 },
   clubClearText: { color: C.textMuted, fontSize: 12 },
   clubPickerFooter: {

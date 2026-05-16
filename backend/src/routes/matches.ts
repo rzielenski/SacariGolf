@@ -1850,10 +1850,18 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   // Allowed clubs and lies — keep these short, lower-cased identifiers.
   // Front-end labels can be richer; here we just whitelist values to avoid
   // free-text growing organically.
+  //
+  // 'chip' is a SPECIAL non-attributing club: the player wants to track
+  // the shot on the map but NOT have it counted toward any specific
+  // club's per-club stats (since "chip" isn't a single physical club —
+  // could be a 56°, 60°, or even a hybrid bump). The /club-stats query
+  // explicitly skips it. Kept in the allowed-set here so the shot save
+  // still records the chip tag rather than coercing it to "unknown".
   const ALLOWED_CLUBS = new Set([
     'driver', '3w', '5w', '7w', 'hybrid',
     '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
     'pw', 'gw', 'sw', 'lw', 'putter',
+    'chip',
   ]);
   const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
 

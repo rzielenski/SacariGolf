@@ -621,6 +621,11 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   for (const row of rows) {
     const segments = eachShotSegment(Array.isArray(row.shots) ? row.shots : []);
     for (const seg of segments) {
+      // 'chip' is a non-attributing club tag — the shot was tracked but
+      // the player explicitly didn't assign it to any specific physical
+      // club. Skip from per-club aggregation entirely so it doesn't
+      // pollute distance medians or dispersion ellipses.
+      if (seg.club === 'chip') continue;
       const dist_m = haversine(seg.start, seg.end);
       if (dist_m < 1 || dist_m > 500) continue; // sanity: drop GPS noise / impossibly long
       const b = bearing(seg.start, seg.end);
@@ -860,13 +865,9 @@ router.get('/:id/shot-stats', requireAuth, requirePremium, wrap(async (req: Auth
   // because we want to count approaches that ended in greenside rough /
   // bunkers — those are still "approach shots" for proximity purposes.
   const APPROACH_END_RADIUS_YDS = 30;
-  // 3 ft "the putt went in" threshold. GPS noise on the player tapping
-  // TRACK after holing out gives end positions a few feet off the pin even
-  // for true makes; 3 ft accommodates that without flattering misses.
-  const MADE_RADIUS_FT = 3;
 
   // Group by (match_id, hole_num) so we know which shot is the last on
-  // each hole — needed for putt make/miss detection.
+  // each hole — used for the approach-proximity bucket logic below.
   const holes = new Map<string, typeof rows>();
   for (const row of rows) {
     const k = `${row.match_id}:${row.hole_num}`;
@@ -874,32 +875,63 @@ router.get('/:id/shot-stats', requireAuth, requirePremium, wrap(async (req: Auth
     holes.get(k)!.push(row);
   }
 
+  // ── Approach pass (GPS-based, unchanged) ───────────────────────────
+  // Putts no longer come from this loop — see the hole-stats pass below.
   for (const holeShots of holes.values()) {
-    // shot_index ordering is enforced by the ORDER BY in the SQL above —
-    // safe to assume the last array element is the final shot of the hole.
     for (let i = 0; i < holeShots.length; i++) {
       const s = holeShots[i];
-      const isLastOnHole = i === holeShots.length - 1;
       const startToPinYd = distYds(s.start_lat, s.start_lng, s.pin_lat, s.pin_lng);
       const endToPinYd   = distYds(s.end_lat,   s.end_lng,   s.pin_lat, s.pin_lng);
-      const startToPinFt = startToPinYd * 3;
       const endToPinFt   = endToPinYd * 3;
 
-      if (startToPinYd <= PUTT_RADIUS_YDS) {
-        // It's a putt — bucket by start-distance-from-pin in feet.
-        const bucket = putting.find((b) => startToPinFt >= b.minFt && startToPinFt < b.maxFt);
-        if (!bucket) continue;
-        bucket.attempts += 1;
-        if (isLastOnHole && endToPinFt <= MADE_RADIUS_FT) {
-          bucket.made += 1;
-        }
-      } else if (endToPinYd <= APPROACH_END_RADIUS_YDS) {
+      // Skip shots that started ON the green — those are putts and now
+      // belong to the manual-entry pass below.
+      if (startToPinYd <= PUTT_RADIUS_YDS) continue;
+
+      if (endToPinYd <= APPROACH_END_RADIUS_YDS) {
         // It's an approach that landed near the green — bucket by start-
         // distance-to-pin in yards, accumulate proximity in feet.
         const bucket = approach.find((b) => startToPinYd >= b.minYd && startToPinYd < b.maxYd);
         if (!bucket) continue;
         bucket.shots += 1;
         bucket.sumProxFt += endToPinFt;
+      }
+    }
+  }
+
+  // ── Putting pass (manual-entry-based) ──────────────────────────────
+  // Pulls putt distances from rounds.hole_stats[].puttDistances, which the
+  // player types into the per-hole "Hole Detail" sheet. The LAST entry in
+  // each hole's puttDistances array is the made putt (it went in to
+  // finish the hole); every earlier entry is a missed putt.
+  //
+  // This decouples putting analytics from on-green shot tracking — a
+  // player who never taps TRACK on the green still gets a complete
+  // putting profile as long as they enter their putt distances.
+  const { rows: roundRows } = await pool.query(
+    `SELECT hole_stats FROM rounds
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 2000`,
+    [req.params.id]
+  );
+  for (const r of roundRows) {
+    const holeStats = Array.isArray(r.hole_stats) ? r.hole_stats : [];
+    for (const hs of holeStats) {
+      const dists: number[] = Array.isArray(hs?.puttDistances)
+        ? hs.puttDistances.filter((d: any) => typeof d === 'number' && d > 0)
+        : [];
+      if (!dists.length) continue;
+      for (let i = 0; i < dists.length; i++) {
+        const ft = dists[i];
+        const bucket = putting.find((b) => ft >= b.minFt && ft < b.maxFt);
+        if (!bucket) continue;
+        bucket.attempts += 1;
+        // Only the LAST putt in the array was made — the hole was
+        // finished on that stroke. All earlier putts are misses.
+        if (i === dists.length - 1) {
+          bucket.made += 1;
+        }
       }
     }
   }
