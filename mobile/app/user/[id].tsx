@@ -10,6 +10,7 @@ import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
+import { RankCrest } from '../../components/RankCrest';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -120,13 +121,15 @@ export default function UserProfileScreen() {
 
       {/* Header */}
       <View style={styles.headerSection}>
-        <View style={[styles.avatar, { borderColor: rank.color }]}>
+        <RankCrest elo={profile.elo} size={96} style={{ marginBottom: 8 }}>
           {profile.avatar_url ? (
             <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
           ) : (
-            <Text style={styles.avatarText}>{profile.username?.[0]?.toUpperCase() ?? '?'}</Text>
+            <View style={styles.avatarLetterBg}>
+              <Text style={styles.avatarText}>{profile.username?.[0]?.toUpperCase() ?? '?'}</Text>
+            </View>
           )}
-        </View>
+        </RankCrest>
         <Text style={styles.username}>{profile.username}</Text>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label} · {profile.elo} ELO</Text>
@@ -509,6 +512,10 @@ const styles = StyleSheet.create({
   },
   avatarImage: { width: 96, height: 96, borderRadius: 48 },
   avatarText: { fontSize: 40, color: C.gold, fontWeight: '900' },
+  avatarLetterBg: {
+    width: 96, height: 96, borderRadius: 48, backgroundColor: C.card,
+    alignItems: 'center', justifyContent: 'center',
+  },
   username: { color: C.text, fontSize: 24, fontWeight: '900', marginBottom: 6 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5 },
   rankLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },

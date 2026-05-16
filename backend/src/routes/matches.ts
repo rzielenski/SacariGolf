@@ -1540,7 +1540,137 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
     [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]
   );
+
+  // ── Celebration detection ──────────────────────────────────────────
+  // Scan the just-saved hole_scores for any birdie/eagle/HIO. The unique
+  // constraint on (match_id, user_id, hole_num) means a celebration fires
+  // exactly once per (player, hole) pair — re-saving the same score, or a
+  // duplicate progress call from a flaky retry, is a no-op via
+  // ON CONFLICT DO NOTHING.
+  //
+  // Hole-in-one wins over the par-3 eagle interpretation: a 1 on a par-3
+  // is an ACE, not just an eagle. The check kind order encodes that.
+  try {
+    const { rows: holeRows } = await pool.query(
+      `SELECT hole_num, par FROM holes
+        WHERE teebox_id = $1
+        ORDER BY hole_num ASC`,
+      [pRows[0].teebox_id]
+    );
+    const pars = new Map<number, number>(
+      holeRows.map((h) => [Number(h.hole_num), Number(h.par)])
+    );
+    // Build a flat insert payload for any qualifying holes we haven't
+    // already recorded. We batch into a single INSERT … VALUES (…), (…), (…)
+    // because most rounds will only have one new celebration per save
+    // anyway and the per-call overhead matters more than the query cost.
+    const events: { hole: number; score: number; par: number; kind: string }[] = [];
+    for (let i = 0; i < holeScores.length; i++) {
+      const score = Number(holeScores[i]);
+      if (!Number.isFinite(score) || score <= 0) continue;
+      const par = pars.get(i + 1);
+      if (par == null) continue;
+      const diff = score - par;
+      let kind: string | null = null;
+      if (score === 1) kind = 'ace';
+      else if (diff === -2) kind = 'eagle';
+      else if (diff <= -3) kind = 'albatross';
+      else if (diff === -1) kind = 'birdie';
+      if (kind) events.push({ hole: i + 1, score, par, kind });
+    }
+    if (events.length) {
+      // Multi-row INSERT with conflict-do-nothing — safe to call repeatedly
+      // because the unique constraint on (match_id, user_id, hole_num)
+      // dedupes per hole regardless of how many times /progress fires.
+      const phs: string[] = [];
+      const vs: any[] = [];
+      events.forEach((e, idx) => {
+        const base = idx * 6;
+        phs.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+        vs.push(req.params.id, req.userId, e.hole, e.score, e.par, e.kind);
+      });
+      await pool.query(
+        `INSERT INTO celebrations (match_id, user_id, hole_num, score, par, kind)
+         VALUES ${phs.join(', ')}
+         ON CONFLICT (match_id, user_id, hole_num) DO NOTHING`,
+        vs
+      );
+    }
+  } catch (err) {
+    // Celebrations are best-effort eye candy. A failure here must never
+    // block the score save itself — the score is already persisted above.
+    console.error('celebration write failed', err);
+  }
+
   return res.json({ success: true });
+}));
+
+/**
+ * Pull all celebrations for this match. Caller passes `since` (an ISO
+ * timestamp from the previous poll) and we return only events newer than
+ * that — keeps the response tiny in the steady state.
+ *
+ * NOTE: deliberately does NOT filter by expires_at. The async-match case
+ * (Player A finishes Monday, Player B plays the same match Saturday) needs
+ * a full retro of A's birdies/eagles/HIO when B opens the scoring screen,
+ * so the client can fire them as B reaches each corresponding hole. The
+ * client-side gate is "has the local player reached hole_num" — server is
+ * the firehose, client is the gate.
+ *
+ * Joins the celebrating user's theme info (personal theme for solos, clan
+ * theme for team matches) so the client doesn't need a second round-trip
+ * to figure out what music to play. We let the CLIENT decide which theme
+ * source to pick based on its own knowledge of the match type — both sets
+ * of fields come back and the client chooses.
+ *
+ * Authorization: any player IN the match can see the celebrations. A
+ * separate spectator endpoint exists for non-players (TODO if/when we
+ * expand spectator views to opponents' real-time scoring).
+ */
+router.get('/:id/celebrations', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: pm } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  if (!pm.length) return res.status(403).json({ error: 'Not in this match' });
+  // `since` is best-effort — accept anything Postgres can parse; otherwise
+  // fall through to "anything still un-expired."
+  const since = typeof req.query.since === 'string' ? req.query.since : null;
+  const { rows } = await pool.query(
+    `SELECT
+        c.celebration_id, c.user_id, c.hole_num, c.score, c.par, c.kind,
+        c.created_at,
+        u.username,
+        u.avatar_url,
+        u.elo,
+        u.theme_track_title   AS user_theme_title,
+        u.theme_track_artist  AS user_theme_artist,
+        u.theme_track_artwork AS user_theme_artwork,
+        u.theme_track_preview AS user_theme_preview,
+        cl.clan_id,
+        cl.name               AS clan_name,
+        cl.theme_track_title  AS clan_theme_title,
+        cl.theme_track_artist AS clan_theme_artist,
+        cl.theme_track_artwork AS clan_theme_artwork,
+        cl.theme_track_preview AS clan_theme_preview
+       FROM celebrations c
+       JOIN users u ON u.user_id = c.user_id
+       LEFT JOIN LATERAL (
+         SELECT cl.clan_id, cl.name,
+                cl.theme_track_title, cl.theme_track_artist,
+                cl.theme_track_artwork, cl.theme_track_preview
+           FROM clan_members cm
+           JOIN clans cl ON cl.clan_id = cm.clan_id
+          WHERE cm.user_id = c.user_id
+          ORDER BY cm.joined_at DESC
+          LIMIT 1
+       ) cl ON true
+      WHERE c.match_id = $1
+        ${since ? 'AND c.created_at > $2' : ''}
+      ORDER BY c.created_at ASC`,
+    since ? [req.params.id, since] : [req.params.id]
+  );
+  return res.json(rows);
 }));
 
 /**

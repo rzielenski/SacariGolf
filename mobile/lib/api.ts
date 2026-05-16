@@ -526,6 +526,36 @@ export const api = {
       holeStats?: ({ putts?: number; chips?: number; fairwayHit?: boolean | null } | null)[];
       teeboxId?: string;
     }) => request<any>('POST', `/matches/${id}/progress`, body),
+    /** Poll recent birdie/eagle/ace events for this match. `since` is an
+     *  ISO timestamp from the previous poll; the server returns only events
+     *  newer than that. Used by both the scoring screen (so opponents see
+     *  the celebration) and any spectator view. */
+    celebrations: (id: string, since?: string | null) =>
+      request<{
+        celebration_id: string;
+        user_id: string;
+        hole_num: number;
+        score: number;
+        par: number;
+        kind: 'birdie' | 'eagle' | 'ace' | 'albatross';
+        created_at: string;
+        username: string;
+        avatar_url: string | null;
+        elo: number;
+        user_theme_title: string | null;
+        user_theme_artist: string | null;
+        user_theme_artwork: string | null;
+        user_theme_preview: string | null;
+        clan_id: string | null;
+        clan_name: string | null;
+        clan_theme_title: string | null;
+        clan_theme_artist: string | null;
+        clan_theme_artwork: string | null;
+        clan_theme_preview: string | null;
+      }[]>(
+        'GET',
+        `/matches/${id}/celebrations${since ? `?since=${encodeURIComponent(since)}` : ''}`
+      ),
   },
 
   finds: {

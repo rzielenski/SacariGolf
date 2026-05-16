@@ -1,10 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing, Modal,
 } from 'react-native';
 import { Audio } from 'expo-av';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
+import { RankCrest } from './RankCrest';
 
 /**
  * Match-found intro screen — animated reveal of both teams' clan info,
@@ -67,13 +68,25 @@ export function MatchFoundIntro({
   //   • solo → opponent's personal theme only
   //   • duo / squad → opponent's team theme only (no falling back to a
   //     teammate's personal theme — if the team hasn't set one, we go silent)
-  const opponentPlayers = meSide === 1 ? side2Players : side1Players;
-  const opponentTheme = isTeamMatch
-    ? (opponentPlayers.find((p) => p.clan_theme_preview)?.clan_theme_preview ?? null)
-    : (opponentPlayers.find((p) => p.user_theme_preview)?.user_theme_preview ?? null);
-  const opponentThemeTitle = isTeamMatch
-    ? (opponentPlayers.find((p) => p.clan_theme_title)?.clan_theme_title ?? null)
-    : (opponentPlayers.find((p) => p.user_theme_title)?.user_theme_title ?? null);
+  //
+  // Memoized so the audio useEffect below doesn't get re-fired if the parent
+  // re-renders with the same data — its deps are `[visible, opponentTheme]`
+  // and unstable references would unload/reload the sound mid-playback.
+  const { opponentTheme, opponentThemeTitle } = useMemo(() => {
+    const opponentPlayers = meSide === 1 ? side2Players : side1Players;
+    if (isTeamMatch) {
+      const withClanTheme = opponentPlayers.find((p) => p.clan_theme_preview);
+      return {
+        opponentTheme: withClanTheme?.clan_theme_preview ?? null,
+        opponentThemeTitle: withClanTheme?.clan_theme_title ?? null,
+      };
+    }
+    const withUserTheme = opponentPlayers.find((p) => p.user_theme_preview);
+    return {
+      opponentTheme: withUserTheme?.user_theme_preview ?? null,
+      opponentThemeTitle: withUserTheme?.user_theme_title ?? null,
+    };
+  }, [isTeamMatch, meSide, side1Players, side2Players]);
 
   // Run animations when the modal becomes visible.
   useEffect(() => {
@@ -147,15 +160,17 @@ export function MatchFoundIntro({
           ]}
         >
           <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
-          {avatar ? (
-            <Image source={{ uri: avatar }} style={s.clanAvatar} />
-          ) : (
-            <View style={[s.clanAvatar, s.clanAvatarFallback]}>
-              <Text style={s.clanAvatarFallbackText}>
-                {name[0]?.toUpperCase()}
-              </Text>
-            </View>
-          )}
+          <RankCrest elo={elo ?? 0} size={72} avatarBorderRadius={8} style={s.crestSpacer}>
+            {avatar ? (
+              <Image source={{ uri: avatar }} style={s.clanAvatarInner} />
+            ) : (
+              <View style={[s.clanAvatarInner, s.clanAvatarFallback]}>
+                <Text style={s.clanAvatarFallbackText}>
+                  {name[0]?.toUpperCase()}
+                </Text>
+              </View>
+            )}
+          </RankCrest>
           <Text style={s.clanName} numberOfLines={1}>{name}</Text>
           {elo != null && <Text style={s.clanElo}>{elo} ELO</Text>}
           {!isMe && opponentTheme && opponentThemeTitle && (
@@ -187,13 +202,17 @@ export function MatchFoundIntro({
         ]}
       >
         <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
-        {clanAvatar ? (
-          <Image source={{ uri: clanAvatar }} style={s.clanAvatar} />
-        ) : (
-          <View style={[s.clanAvatar, s.clanAvatarFallback]}>
-            <Text style={s.clanAvatarFallbackText}>{clanName[0]?.toUpperCase()}</Text>
-          </View>
-        )}
+        {/* Crest wraps the clan emblem and ranks by the clan's ELO so the
+            tier symbolises team strength, not any single member's grind. */}
+        <RankCrest elo={clanElo ?? 0} size={72} avatarBorderRadius={8} style={s.crestSpacer}>
+          {clanAvatar ? (
+            <Image source={{ uri: clanAvatar }} style={s.clanAvatarInner} />
+          ) : (
+            <View style={[s.clanAvatarInner, s.clanAvatarFallback]}>
+              <Text style={s.clanAvatarFallbackText}>{clanName[0]?.toUpperCase()}</Text>
+            </View>
+          )}
+        </RankCrest>
         <Text style={s.clanName} numberOfLines={1}>{clanName}</Text>
         {clanElo != null && <Text style={s.clanElo}>{clanElo} ELO</Text>}
         <View style={s.memberList}>
@@ -277,9 +296,13 @@ const s = StyleSheet.create({
     color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 8,
   },
 
-  clanAvatar: { width: 72, height: 72, borderRadius: 8, marginBottom: 10 },
-  clanAvatarFallback: { backgroundColor: C.gold + '22', justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: C.gold },
+  // Inner avatar (sits inside the RankCrest, which provides the outer ring).
+  // No marginBottom — the crest container's own size + crestSpacer below
+  // give the breathing room.
+  clanAvatarInner: { width: 72, height: 72, borderRadius: 8 },
+  clanAvatarFallback: { backgroundColor: C.gold + '22', justifyContent: 'center', alignItems: 'center' },
   clanAvatarFallbackText: { color: C.gold, fontFamily: F.serif, fontSize: 32, fontWeight: '900' },
+  crestSpacer: { marginBottom: 6 },
   clanName: { color: C.text, fontFamily: F.serif, fontWeight: '900', fontSize: 16, textAlign: 'center' },
   clanElo: { color: C.gold, fontWeight: '900', fontSize: 12, marginTop: 2 },
 

@@ -597,6 +597,56 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON courses(external_id) WHERE external_id IS NOT NULL;
     `,
   },
+  {
+    // Birdie / eagle / hole-in-one celebrations. Written by /matches/:id/progress
+    // the first time a hole's score crosses one of those thresholds, then
+    // pulled by every player + spectator in the match so each device fires
+    // the same celebratory animation.
+    //
+    // UNIQUE (match_id, user_id, hole_num) is what guarantees the celebration
+    // fires exactly once per hole even if the user edits/re-saves the score
+    // (or comes in from a flaky network and the progress endpoint sees the
+    // same shot twice).
+    //
+    // `expires_at` defaults to 365 days so async-paced matches still work:
+    // Player A finishes on Monday, Player B picks up the same match on
+    // Saturday — B should still see A's birdies as B plays each hole. The
+    // client gates by "has the local player reached this hole_num" so the
+    // long server-side window is just a safety net, not the primary control.
+    name: 'celebrations.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS celebrations (
+        celebration_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        match_id        UUID NOT NULL REFERENCES matches(match_id) ON DELETE CASCADE,
+        user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        hole_num        INT NOT NULL,
+        score           INT NOT NULL,
+        par             INT NOT NULL,
+        kind            TEXT NOT NULL,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at      TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '365 days',
+        UNIQUE (match_id, user_id, hole_num)
+      );
+      CREATE INDEX IF NOT EXISTS celebrations_match_active_idx
+        ON celebrations(match_id, created_at);
+    `,
+  },
+  {
+    // Fix-up for any environment that ran the earlier (2-minute expiry)
+    // version of celebrations.create_table before it was widened. Pushes
+    // every existing row's expires_at out to 365 days from creation, then
+    // changes the column default for future inserts. Idempotent — running
+    // it a second time is a no-op because the UPDATE only touches rows
+    // that haven't already been pushed out.
+    name: 'celebrations.expand_expiry',
+    sql: `
+      UPDATE celebrations
+         SET expires_at = created_at + INTERVAL '365 days'
+       WHERE expires_at < created_at + INTERVAL '60 days';
+      ALTER TABLE celebrations
+        ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '365 days';
+    `,
+  },
 ];
 
 export async function runMigrations() {

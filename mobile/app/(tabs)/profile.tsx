@@ -13,6 +13,7 @@ import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
+import { RankCrest } from '../../components/RankCrest';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -309,21 +310,25 @@ export default function ProfileScreen() {
       {/* Avatar */}
       <View style={styles.avatarSection}>
         <TouchableOpacity
-          style={[styles.avatar, { borderColor: rank.color }]}
           onPress={changeAvatar}
           disabled={uploadingAvatar}
           activeOpacity={0.8}
+          style={{ marginBottom: 12 }}
         >
-          {uploadingAvatar ? (
-            <ActivityIndicator color={C.gold} />
-          ) : user.avatar_url ? (
-            <Image
-              source={{ uri: `${API_BASE}${user.avatar_url}` }}
-              style={styles.avatarImage}
-            />
-          ) : (
-            <Text style={styles.avatarText}>{user.username?.[0]?.toUpperCase() ?? '?'}</Text>
-          )}
+          <RankCrest elo={user.elo} size={96}>
+            {uploadingAvatar ? (
+              <View style={styles.avatarLoader}><ActivityIndicator color={C.gold} /></View>
+            ) : user.avatar_url ? (
+              <Image
+                source={{ uri: `${API_BASE}${user.avatar_url}` }}
+                style={styles.avatarImage}
+              />
+            ) : (
+              <View style={styles.avatarLetterBg}>
+                <Text style={styles.avatarText}>{user.username?.[0]?.toUpperCase() ?? '?'}</Text>
+              </View>
+            )}
+          </RankCrest>
           <View style={styles.avatarEditBadge}>
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>✎</Text>
           </View>
@@ -1036,8 +1041,19 @@ const styles = StyleSheet.create({
   },
   avatarImage: { width: 96, height: 96, borderRadius: 48 },
   avatarText: { fontSize: 40, color: C.gold, fontWeight: '900' },
+  avatarLoader: {
+    width: 96, height: 96, borderRadius: 48, backgroundColor: C.card,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarLetterBg: {
+    width: 96, height: 96, borderRadius: 48, backgroundColor: C.card,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  // Edit pencil now sits at the bottom-right of the avatar (inside the crest
+  // ring), not the bottom-right of the wider crest footprint. The 19 inset
+  // = (crestSize − avatarSize) / 2 for size=96.
   avatarEditBadge: {
-    position: 'absolute', bottom: 0, right: 0,
+    position: 'absolute', bottom: 19, right: 19,
     backgroundColor: C.gold, width: 22, height: 22, borderRadius: 11,
     justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: C.bg,

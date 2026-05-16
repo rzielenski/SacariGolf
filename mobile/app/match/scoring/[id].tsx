@@ -22,6 +22,7 @@ import { useGhostPlayer, GHOST_NAME } from './hooks/useGhostPlayer';
 import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
 import { Hole, Teebox, Course } from '../../../types';
 import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
+import { HoleScoreCelebration, CelebrationEvent, CelebrationKind } from '../../../components/HoleScoreCelebration';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const COLLAPSED_H = 110;
@@ -316,8 +317,14 @@ export default function ScoringScreen() {
   // First update fires immediately when scoring starts (so the backend's
   // active-round query has a row to find). Subsequent updates are debounced
   // 2s after the last score change to avoid hammering the API.
+  //
+  // After every successful upload, immediately pull /celebrations so that
+  // the local player sees their own birdie/eagle/HIO animation within ~half
+  // a second of the score landing (without waiting for the regular poll
+  // interval). The poll's own dedup logic prevents double-firing.
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasReportedOnce = useRef(false);
+  const fetchCelebrationsRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (selectingCourse || holes.length === 0 || scores.length === 0 || !teebox) return;
     const send = () => {
@@ -325,7 +332,9 @@ export default function ScoringScreen() {
         holeScores: scores.slice(0, Math.max(currentHole + 1, 1)),
         holeStats: holeStats.slice(0, Math.max(currentHole + 1, 1)),
         teeboxId: teebox.teebox_id,
-      }).catch(() => { });
+      })
+        .then(() => { fetchCelebrationsRef.current(); })
+        .catch(() => { });
     };
     if (!hasReportedOnce.current) {
       hasReportedOnce.current = true;
@@ -336,6 +345,148 @@ export default function ScoringScreen() {
     progressTimer.current = setTimeout(send, 2000);
     return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
   }, [scores, holeStats, currentHole, selectingCourse, holes.length, id, teebox]);
+
+  // ── Birdie / Eagle / Hole-in-One celebrations ─────────────────────────
+  // Polls /celebrations every 8s while the scoring screen is mounted +
+  // forces an immediate fetch right after each /progress upload (above).
+  // The server returns the ENTIRE event history for the match (no time
+  // filter), so the async-play case works correctly: if Player A finished
+  // their round Monday and Player B is playing the same match Saturday,
+  // B's first poll returns A's full set of birdies/eagles/HIO.
+  //
+  // GATING — events only fire when the local player has REACHED the
+  // corresponding hole. "Reached" = currentHole >= hole_num - 1 (since
+  // currentHole is 0-indexed). This means:
+  //   • Live play: A birdies hole 7 → A's screen fires it instantly
+  //     (they're on hole 7); B's screen fires it when B reaches hole 7,
+  //     not when A scored it.
+  //   • Async play: B opens the match on Saturday, currentHole = 0. All of
+  //     A's prior celebrations sit in the queue. As B advances through
+  //     each hole, the corresponding celebration fires on entry.
+  //
+  // PERSISTENCE — celebration ids the local user has already SEEN are
+  // mirrored to AsyncStorage so closing+reopening the match doesn't replay
+  // every prior celebration. Persisted per (matchId, userId) — switching
+  // users on the same device gets a fresh seen-set.
+  //
+  // For team matches we play the SCORING PLAYER's clan theme; for solos
+  // we play their personal theme. Same isTeamMatch switch as MatchFoundIntro.
+  const [celebrationEvent, setCelebrationEvent] = useState<CelebrationEvent | null>(null);
+  type PendingCeleb = CelebrationEvent & { celebration_id: string };
+  const pendingRef = useRef<PendingCeleb[]>([]);
+  const seenIdsRef = useRef<Set<string>>(new Set());
+  const lastSinceRef = useRef<string | null>(null);
+  const isTeamMatch = (match?.match_type ?? 'solo') !== 'solo';
+  const seenStorageKey = `celebrations_seen_${id}_${user?.user_id ?? 'anon'}`;
+
+  // Hydrate the seen-set from disk so a remount doesn't re-fire events.
+  useEffect(() => {
+    if (!user?.user_id) return;
+    let cancelled = false;
+    AsyncStorage.getItem(seenStorageKey).then((raw) => {
+      if (cancelled || !raw) return;
+      try {
+        const arr: string[] = JSON.parse(raw);
+        if (Array.isArray(arr)) seenIdsRef.current = new Set(arr);
+      } catch { /* corrupt — start clean */ }
+    });
+    return () => { cancelled = true; };
+  }, [seenStorageKey, user?.user_id]);
+
+  // Debounced persistence of the seen-set. ~500ms after the last ingestion
+  // we flush. Cheap (single setItem) and bounded in size — even an extreme
+  // 18-hole match with both players acing every hole is 36 short ids.
+  const seenPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const queueSeenPersist = useCallback(() => {
+    if (seenPersistTimer.current) clearTimeout(seenPersistTimer.current);
+    seenPersistTimer.current = setTimeout(() => {
+      AsyncStorage.setItem(seenStorageKey, JSON.stringify([...seenIdsRef.current])).catch(() => { });
+    }, 500);
+  }, [seenStorageKey]);
+
+  /** Promote the first queued event whose hole_num the local player has
+   *  reached into the visible slot. Called whenever something might've
+   *  changed: a new poll landed, currentHole advanced, or the active
+   *  event was dismissed. */
+  const tryFireCelebration = useCallback(() => {
+    if (celebrationEvent) return; // already showing one — wait for dismiss
+    const eligibleHoleMax = currentHole + 1; // currentHole is 0-indexed
+    const idx = pendingRef.current.findIndex((e) => e.hole <= eligibleHoleMax);
+    if (idx < 0) return;
+    const [next] = pendingRef.current.splice(idx, 1);
+    setCelebrationEvent(next);
+  }, [celebrationEvent, currentHole]);
+
+  const fetchCelebrations = useCallback(async () => {
+    if (selectingCourse) return;
+    try {
+      const rows = await api.matches.celebrations(id, lastSinceRef.current);
+      if (!rows.length) return;
+      // Advance the since cursor to the newest event — server returns
+      // chronological order so this is always the last row.
+      lastSinceRef.current = rows[rows.length - 1].created_at;
+      let addedAny = false;
+      for (const row of rows) {
+        if (seenIdsRef.current.has(row.celebration_id)) continue;
+        seenIdsRef.current.add(row.celebration_id);
+        addedAny = true;
+        const themePreview = isTeamMatch
+          ? (row.clan_theme_preview ?? null)
+          : (row.user_theme_preview ?? null);
+        const themeTitle = isTeamMatch
+          ? (row.clan_theme_title ?? null)
+          : (row.user_theme_title ?? null);
+        pendingRef.current.push({
+          celebration_id: row.celebration_id,
+          kind: row.kind as CelebrationKind,
+          username: row.username,
+          avatarUrl: row.avatar_url,
+          elo: row.elo,
+          hole: row.hole_num,
+          score: row.score,
+          par: row.par,
+          themePreview,
+          themeTitle,
+        });
+      }
+      if (addedAny) {
+        queueSeenPersist();
+        tryFireCelebration();
+      }
+    } catch { /* polling is best-effort */ }
+  }, [id, selectingCourse, isTeamMatch, tryFireCelebration, queueSeenPersist]);
+
+  // Expose the latest fetcher to the progress upload callback above. Using
+  // a ref instead of a closure dependency avoids re-creating the progress
+  // useEffect every time fetchCelebrations changes.
+  useEffect(() => { fetchCelebrationsRef.current = fetchCelebrations; }, [fetchCelebrations]);
+
+  // Steady-state polling. 8s cadence — slow enough not to hammer the API,
+  // fast enough that an opponent's birdie pops within ~10s of them tapping.
+  useEffect(() => {
+    if (selectingCourse) return;
+    fetchCelebrations();
+    const t = setInterval(fetchCelebrations, 8_000);
+    return () => clearInterval(t);
+  }, [fetchCelebrations, selectingCourse]);
+
+  // When the local player advances to a new hole, retry firing — events
+  // that were queued waiting for the player to reach this hole_num now
+  // become eligible. Critical for the async-match case.
+  useEffect(() => {
+    tryFireCelebration();
+  }, [currentHole, tryFireCelebration]);
+
+  // When the active celebration is dismissed, try to fire the next eligible
+  // one in the queue — rapid-fire celebrations (two players both birdied)
+  // play back-to-back instead of being dropped.
+  useEffect(() => {
+    if (!celebrationEvent) tryFireCelebration();
+  }, [celebrationEvent, tryFireCelebration]);
+
+  const advanceCelebration = useCallback(() => {
+    setCelebrationEvent(null);
+  }, []);
 
   // ── Data loading ────────────────────────────────────────────────────────────
 
@@ -2728,6 +2879,11 @@ export default function ScoringScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Birdie / Eagle / HIO overlay. Sits ABOVE everything else in the
+          screen because <Modal> escapes the local view tree — so it'll
+          paint over the scorecard modal, the club picker, etc. */}
+      <HoleScoreCelebration event={celebrationEvent} onDismiss={advanceCelebration} />
     </View>
   );
 }
