@@ -215,10 +215,11 @@ export async function analyzeSwing(
   const impactTimeSec = 0.75 * totalSec;
 
   // Ball position in frame — drives where the pose studio shows the ball
-  // marker. Face-on: low-center-front. Down-the-line: forward of stance.
+  // marker. Matches the ball waypoint used by each trace generator so the
+  // ball, trace start, and impact marker all line up.
   const ballPosition: Point = cameraAngle === 'down_the_line'
-    ? { x: 0.62, y: 0.66 }
-    : { x: 0.50, y: 0.68 };
+    ? { x: 0.52, y: 0.78 }
+    : { x: 0.50, y: 0.78 };
 
   return {
     club: club_, body,
@@ -241,164 +242,193 @@ export async function analyzeSwing(
 // swing plane recedes away from the camera. We see the golfer's back
 // and right side (for a righty). Target is to screen-LEFT.
 
+/** FACE-ON keyframes for a right-handed golfer.
+ *
+ *  Convention: joint names refer to SCREEN POSITION, not anatomical body
+ *  parts. `leftShoulder` is whichever shoulder appears on screen-LEFT at
+ *  address (= the trail shoulder, anatomically right, for a righty face-on).
+ *  Same naming carries through every keyframe. This avoids endless mirror
+ *  arithmetic when computing positions.
+ *
+ *  Proportional layout: head 0.20-0.28, shoulders 0.32, hips 0.58, knees
+ *  0.78, feet 0.92. Tighter neck gap than the previous draft so the head
+ *  doesn't look detached. Total body height ~0.72 of frame, head ~11% of
+ *  that — close to real-human proportion.
+ *
+ *  Trail side (screen-LEFT for righty face-on) = where hands go at TOP.
+ *  Lead side (screen-RIGHT for righty face-on) = where hands go at FT. */
 function generatePoseKeyframesFaceOn(skill: number): SwingAnalysis['poseKeyframes'] {
-  // Address — neutral stance, slight forward bend, hands at center.
+  // Address — neutral stance, slight forward bend, hands together at center.
   const address: PoseFrame = {
-    headTop:        { x: 0.50, y: 0.14 },
-    headBottom:     { x: 0.50, y: 0.23 },
-    leftShoulder:   { x: 0.43, y: 0.28 },
-    rightShoulder:  { x: 0.57, y: 0.28 },
-    leftElbow:      { x: 0.42, y: 0.41 },
-    rightElbow:     { x: 0.58, y: 0.41 },
-    leftWrist:      { x: 0.48, y: 0.54 },
-    rightWrist:     { x: 0.52, y: 0.54 },
-    leftHip:        { x: 0.46, y: 0.55 },
-    rightHip:       { x: 0.54, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.72 },
-    rightKnee:      { x: 0.55, y: 0.72 },
-    leftFoot:       { x: 0.43, y: 0.88 },
-    rightFoot:      { x: 0.57, y: 0.88 },
+    headTop:        { x: 0.50, y: 0.20 },
+    headBottom:     { x: 0.50, y: 0.28 },
+    leftShoulder:   { x: 0.43, y: 0.33 },
+    rightShoulder:  { x: 0.57, y: 0.33 },
+    leftElbow:      { x: 0.42, y: 0.46 },
+    rightElbow:     { x: 0.58, y: 0.46 },
+    leftWrist:      { x: 0.48, y: 0.60 },
+    rightWrist:     { x: 0.52, y: 0.60 },
+    leftHip:        { x: 0.45, y: 0.58 },
+    rightHip:       { x: 0.55, y: 0.58 },
+    leftKnee:       { x: 0.45, y: 0.78 },
+    rightKnee:      { x: 0.55, y: 0.78 },
+    leftFoot:       { x: 0.44, y: 0.92 },
+    rightFoot:      { x: 0.56, y: 0.92 },
   };
-  // Top of backswing — shoulders rotated ~95° from address, hips ~45°.
-  // Skill affects rotation amount: pros get fuller turn.
-  const turnK = 0.85 + skill * 0.15; // 0.85 (amateur) ... 1.0 (pro)
+  // Top of backswing — body rotated ~90°, trail shoulder (screen-LEFT) UP
+  // and BACK, lead shoulder (screen-RIGHT) DOWN. Hands raised UP-LEFT
+  // because for a righty face-on, hands at top of backswing are above the
+  // trail (right) shoulder = screen-LEFT.
+  // Skill K controls rotation depth: 0.85 (amateur) ... 1.0 (pro).
+  const k = 0.85 + skill * 0.15;
   const top: PoseFrame = {
-    headTop:        { x: 0.49, y: 0.14 },
-    headBottom:     { x: 0.49, y: 0.23 },
-    leftShoulder:   { x: 0.39 - 0.04 * turnK, y: 0.32 },
-    rightShoulder:  { x: 0.55 + 0.03 * turnK, y: 0.25 },
-    leftElbow:      { x: 0.50, y: 0.30 },
-    rightElbow:     { x: 0.70, y: 0.22 },
-    leftWrist:      { x: 0.62, y: 0.13 },
-    rightWrist:     { x: 0.65, y: 0.13 },
-    leftHip:        { x: 0.47 + 0.01 * turnK, y: 0.55 },
-    rightHip:       { x: 0.55 + 0.02 * turnK, y: 0.55 },
-    leftKnee:       { x: 0.44, y: 0.72 },
-    rightKnee:      { x: 0.56, y: 0.72 },
-    leftFoot:       { x: 0.43, y: 0.88 },
-    rightFoot:      { x: 0.57, y: 0.88 },
+    headTop:        { x: 0.50, y: 0.20 },          // head stays roughly still
+    headBottom:     { x: 0.50, y: 0.28 },
+    leftShoulder:   { x: 0.40, y: 0.30 },          // trail UP and BACK
+    rightShoulder:  { x: 0.55, y: 0.38 },          // lead DOWN and IN
+    leftElbow:      { x: 0.32, y: 0.25 },          // trail elbow UP-BACK
+    rightElbow:     { x: 0.42, y: 0.36 },          // lead elbow across body
+    leftWrist:      { x: 0.30 - 0.02 * k, y: 0.18 },  // hands UP-LEFT
+    rightWrist:     { x: 0.32 - 0.02 * k, y: 0.17 },
+    leftHip:        { x: 0.46, y: 0.58 },          // hips slight turn (less than shoulders)
+    rightHip:       { x: 0.55, y: 0.58 },
+    leftKnee:       { x: 0.45, y: 0.78 },
+    rightKnee:      { x: 0.55, y: 0.78 },
+    leftFoot:       { x: 0.44, y: 0.92 },
+    rightFoot:      { x: 0.56, y: 0.92 },
   };
-  // Impact — body slightly ahead of the ball, hands at hip height,
-  // hips opened toward target (screen-right for righty face-on view).
+  // Impact — body squared back up but with hips ALREADY OPEN toward target.
+  // Hands at impact zone (slightly forward of address — leading the ball
+  // is "forward" toward target = screen-RIGHT for righty face-on).
   const impact: PoseFrame = {
-    headTop:        { x: 0.48, y: 0.14 },
-    headBottom:     { x: 0.48, y: 0.23 },
-    leftShoulder:   { x: 0.44, y: 0.28 },
-    rightShoulder:  { x: 0.55, y: 0.30 },
-    leftElbow:      { x: 0.41, y: 0.42 },
-    rightElbow:     { x: 0.55, y: 0.42 },
-    leftWrist:      { x: 0.46, y: 0.55 },
-    rightWrist:     { x: 0.50, y: 0.55 },
-    leftHip:        { x: 0.47, y: 0.55 },
-    rightHip:       { x: 0.55, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.72 },
-    rightKnee:      { x: 0.55, y: 0.72 },
-    leftFoot:       { x: 0.43, y: 0.88 },
-    rightFoot:      { x: 0.57, y: 0.88 },
+    headTop:        { x: 0.48, y: 0.20 },          // head slightly back
+    headBottom:     { x: 0.48, y: 0.28 },
+    leftShoulder:   { x: 0.44, y: 0.33 },
+    rightShoulder:  { x: 0.60, y: 0.35 },          // lead opening UP-RIGHT
+    leftElbow:      { x: 0.43, y: 0.48 },
+    rightElbow:     { x: 0.58, y: 0.49 },
+    leftWrist:      { x: 0.50, y: 0.62 },
+    rightWrist:     { x: 0.53, y: 0.62 },
+    leftHip:        { x: 0.45, y: 0.58 },
+    rightHip:       { x: 0.60, y: 0.58 },          // hips OPEN to target side
+    leftKnee:       { x: 0.45, y: 0.78 },
+    rightKnee:      { x: 0.56, y: 0.78 },
+    leftFoot:       { x: 0.44, y: 0.92 },
+    rightFoot:      { x: 0.56, y: 0.92 },
   };
-  // Follow-through — fully rotated, hands high-left, weight on lead leg.
-  // Trail foot (right for righty) lifted slightly on toe — visible by
-  // moving its y up vs the planted lead foot.
+  // Follow-through — body fully rotated to face target. For a righty face-on,
+  // target side is screen-RIGHT. Hands finish HIGH on screen-RIGHT (over
+  // the lead shoulder = anatomical left = screen-RIGHT in face-on of righty).
+  // Trail foot (right anatomical = screen-RIGHT) lifted on toe.
   const ft: PoseFrame = {
-    headTop:        { x: 0.51, y: 0.14 },
-    headBottom:     { x: 0.51, y: 0.23 },
-    leftShoulder:   { x: 0.58, y: 0.30 },
-    rightShoulder:  { x: 0.43, y: 0.25 },
-    leftElbow:      { x: 0.55, y: 0.20 },
-    rightElbow:     { x: 0.38, y: 0.18 },
-    leftWrist:      { x: 0.40, y: 0.10 },
-    rightWrist:     { x: 0.37, y: 0.10 },
-    leftHip:        { x: 0.49, y: 0.55 },
-    rightHip:       { x: 0.55, y: 0.55 },
-    leftKnee:       { x: 0.47, y: 0.72 },
-    rightKnee:      { x: 0.55, y: 0.74 },
-    leftFoot:       { x: 0.43, y: 0.88 },  // planted
-    rightFoot:      { x: 0.57, y: 0.84 },  // lifted onto toe
+    headTop:        { x: 0.52, y: 0.20 },          // head turned toward target
+    headBottom:     { x: 0.52, y: 0.28 },
+    leftShoulder:   { x: 0.50, y: 0.34 },
+    rightShoulder:  { x: 0.60, y: 0.30 },          // lead UP and around
+    leftElbow:      { x: 0.58, y: 0.25 },
+    rightElbow:     { x: 0.65, y: 0.22 },
+    leftWrist:      { x: 0.70, y: 0.18 },          // hands UP-RIGHT
+    rightWrist:     { x: 0.68, y: 0.18 },
+    leftHip:        { x: 0.47, y: 0.58 },
+    rightHip:       { x: 0.60, y: 0.58 },
+    leftKnee:       { x: 0.46, y: 0.78 },
+    rightKnee:      { x: 0.56, y: 0.80 },
+    leftFoot:       { x: 0.44, y: 0.92 },          // planted lead
+    rightFoot:      { x: 0.55, y: 0.86 },          // lifted onto toe
   };
 
   return { address, top, impact, followThrough: ft };
 }
 
-/** Down-the-line keyframes — camera behind the golfer along the target line.
- *  Target is to the LEFT of the screen for a right-handed golfer; the
- *  golfer's back faces the camera. The arms extend FORWARD (toward target,
- *  i.e. screen-left at address) and the club arcs up over the right
- *  shoulder at the top. */
+/** DOWN-THE-LINE keyframes for a right-handed golfer.
+ *
+ *  Camera setup: positioned behind/right of the golfer (the standard DTL
+ *  trail-side angle), target appearing as the distant point ahead. For
+ *  this view:
+ *    • Trail side (anatomical right) is camera-NEAR — appears slightly
+ *      to the RIGHT of body center on screen.
+ *    • Lead side (anatomical left) is camera-FAR — appears slightly to
+ *      the LEFT of body center, often partly occluded.
+ *    • At top of backswing, hands rise up and BACK = upper-RIGHT in 2D.
+ *    • At follow-through, hands rise UP and TOWARD target = upper-LEFT.
+ *
+ *  Body figure is narrower than face-on (we see it edge-on), occupies
+ *  roughly x=0.42-0.58 of frame, y=0.20-0.92 vertically. */
 function generatePoseKeyframesDTL(skill: number): SwingAnalysis['poseKeyframes'] {
-  // Address — golfer's back to camera, slightly side-on. Right shoulder
-  // (camera-near) at screen-right; left shoulder (target-near) at center.
-  // Note: in the DTL view we see the side of the body, so leftHip and
-  // rightHip mostly stack vertically rather than separating horizontally
-  // like they do in face-on. Same for the feet.
+  // Address — body bent at hips toward ball, both shoulders/hips stack
+  // close together in X (edge-on view). Hands extend forward toward ball.
   const address: PoseFrame = {
-    headTop:        { x: 0.42, y: 0.14 },
-    headBottom:     { x: 0.42, y: 0.23 },
-    leftShoulder:   { x: 0.46, y: 0.29 },  // target-near (forward)
-    rightShoulder:  { x: 0.38, y: 0.30 },  // camera-near (back)
-    leftElbow:      { x: 0.52, y: 0.42 },
-    rightElbow:     { x: 0.46, y: 0.43 },
-    leftWrist:      { x: 0.56, y: 0.55 },  // hands extend forward to ball
-    rightWrist:     { x: 0.54, y: 0.56 },
-    leftHip:        { x: 0.44, y: 0.55 },  // forward (target-ward) hip
-    rightHip:       { x: 0.40, y: 0.55 },  // back hip
-    leftKnee:       { x: 0.45, y: 0.72 },
-    rightKnee:      { x: 0.39, y: 0.72 },
-    leftFoot:       { x: 0.46, y: 0.88 },
-    rightFoot:      { x: 0.38, y: 0.88 },
+    headTop:        { x: 0.50, y: 0.20 },
+    headBottom:     { x: 0.50, y: 0.28 },
+    leftShoulder:   { x: 0.47, y: 0.33 },  // lead (far from camera)
+    rightShoulder:  { x: 0.53, y: 0.33 },  // trail (near camera)
+    leftElbow:      { x: 0.50, y: 0.46 },
+    rightElbow:     { x: 0.51, y: 0.46 },
+    leftWrist:      { x: 0.55, y: 0.60 },  // hands extended forward to ball
+    rightWrist:     { x: 0.53, y: 0.61 },
+    leftHip:        { x: 0.47, y: 0.58 },
+    rightHip:       { x: 0.53, y: 0.58 },
+    leftKnee:       { x: 0.47, y: 0.78 },
+    rightKnee:      { x: 0.53, y: 0.78 },
+    leftFoot:       { x: 0.46, y: 0.92 },
+    rightFoot:      { x: 0.54, y: 0.92 },
   };
-  // Top of backswing — club up behind the right shoulder. Skill affects
-  // how high + how shallow/upright the plane is.
-  const planeK = 0.85 + skill * 0.15;
+  // Top of backswing — hands rise up and OVER trail shoulder.
+  // For righty DTL filmed from behind, that's UP-RIGHT in the 2D frame.
+  // Skill K affects how high/wide the rotation goes.
+  const k = 0.85 + skill * 0.15;
   const top: PoseFrame = {
-    headTop:        { x: 0.42, y: 0.14 },
-    headBottom:     { x: 0.42, y: 0.24 },
-    leftShoulder:   { x: 0.45, y: 0.34 },  // shoulders rotated toward back
-    rightShoulder:  { x: 0.36, y: 0.27 },
-    leftElbow:      { x: 0.40, y: 0.28 },
-    rightElbow:     { x: 0.33, y: 0.22 },
-    leftWrist:      { x: 0.28 * planeK + 0.34 * (1 - planeK), y: 0.16 },
-    rightWrist:     { x: 0.26 * planeK + 0.33 * (1 - planeK), y: 0.17 },
-    leftHip:        { x: 0.44, y: 0.55 },  // small hip turn
-    rightHip:       { x: 0.40, y: 0.55 },
-    leftKnee:       { x: 0.45, y: 0.72 },
-    rightKnee:      { x: 0.39, y: 0.72 },
-    leftFoot:       { x: 0.46, y: 0.88 },
-    rightFoot:      { x: 0.38, y: 0.88 },
+    headTop:        { x: 0.49, y: 0.20 },
+    headBottom:     { x: 0.49, y: 0.28 },
+    leftShoulder:   { x: 0.47, y: 0.36 },  // lead rotated DOWN
+    rightShoulder:  { x: 0.55, y: 0.30 },  // trail rotated UP
+    leftElbow:      { x: 0.55, y: 0.28 },
+    rightElbow:     { x: 0.62, y: 0.22 },
+    leftWrist:      { x: 0.66 + 0.02 * k, y: 0.18 },  // hands UP-RIGHT
+    rightWrist:     { x: 0.67 + 0.02 * k, y: 0.18 },
+    leftHip:        { x: 0.47, y: 0.58 },
+    rightHip:       { x: 0.53, y: 0.58 },
+    leftKnee:       { x: 0.47, y: 0.78 },
+    rightKnee:      { x: 0.53, y: 0.78 },
+    leftFoot:       { x: 0.46, y: 0.92 },
+    rightFoot:      { x: 0.54, y: 0.92 },
   };
-  // Impact — back to address-like position; weight shifted forward (left).
+  // Impact — back to address-like; hips slid forward (toward target =
+  // screen-LEFT for righty DTL filmed from trail-right).
   const impact: PoseFrame = {
-    headTop:        { x: 0.42, y: 0.14 },
-    headBottom:     { x: 0.43, y: 0.23 },
-    leftShoulder:   { x: 0.47, y: 0.29 },
-    rightShoulder:  { x: 0.39, y: 0.30 },
-    leftElbow:      { x: 0.52, y: 0.42 },
-    rightElbow:     { x: 0.46, y: 0.43 },
-    leftWrist:      { x: 0.56, y: 0.55 },
-    rightWrist:     { x: 0.54, y: 0.56 },
-    leftHip:        { x: 0.46, y: 0.55 },  // hip slid slightly forward
-    rightHip:       { x: 0.41, y: 0.55 },
-    leftKnee:       { x: 0.46, y: 0.72 },
-    rightKnee:      { x: 0.39, y: 0.73 },
-    leftFoot:       { x: 0.46, y: 0.88 },  // planted
-    rightFoot:      { x: 0.38, y: 0.88 },
+    headTop:        { x: 0.49, y: 0.20 },
+    headBottom:     { x: 0.49, y: 0.28 },
+    leftShoulder:   { x: 0.47, y: 0.33 },
+    rightShoulder:  { x: 0.53, y: 0.34 },
+    leftElbow:      { x: 0.50, y: 0.48 },
+    rightElbow:     { x: 0.51, y: 0.48 },
+    leftWrist:      { x: 0.55, y: 0.62 },
+    rightWrist:     { x: 0.53, y: 0.62 },
+    leftHip:        { x: 0.45, y: 0.58 },  // hips slid forward (target-side)
+    rightHip:       { x: 0.51, y: 0.58 },
+    leftKnee:       { x: 0.46, y: 0.78 },
+    rightKnee:      { x: 0.53, y: 0.78 },
+    leftFoot:       { x: 0.46, y: 0.92 },
+    rightFoot:      { x: 0.54, y: 0.92 },
   };
-  // Follow-through — club out front-left, body rotated to face target.
-  // Trail (right for righty) foot rotated onto toe.
+  // Follow-through — body rotated to face target (screen-LEFT for DTL of
+  // righty). Hands finish high on the LEAD side (screen-LEFT, toward target).
+  // Trail foot up on toe.
   const ft: PoseFrame = {
-    headTop:        { x: 0.42, y: 0.15 },
-    headBottom:     { x: 0.43, y: 0.24 },
-    leftShoulder:   { x: 0.50, y: 0.27 },  // shoulders rotated open
-    rightShoulder:  { x: 0.40, y: 0.32 },
-    leftElbow:      { x: 0.62, y: 0.22 },
-    rightElbow:     { x: 0.56, y: 0.20 },
-    leftWrist:      { x: 0.72, y: 0.14 },  // hands high in front-left
-    rightWrist:     { x: 0.70, y: 0.16 },
-    leftHip:        { x: 0.47, y: 0.55 },
-    rightHip:       { x: 0.43, y: 0.55 },
-    leftKnee:       { x: 0.46, y: 0.72 },
-    rightKnee:      { x: 0.40, y: 0.74 },
-    leftFoot:       { x: 0.46, y: 0.88 },  // planted
-    rightFoot:      { x: 0.39, y: 0.84 },  // lifted onto toe
+    headTop:        { x: 0.49, y: 0.20 },
+    headBottom:     { x: 0.50, y: 0.28 },
+    leftShoulder:   { x: 0.47, y: 0.34 },
+    rightShoulder:  { x: 0.55, y: 0.36 },  // trail rotated through
+    leftElbow:      { x: 0.42, y: 0.25 },
+    rightElbow:     { x: 0.45, y: 0.22 },
+    leftWrist:      { x: 0.33, y: 0.18 },  // hands UP-LEFT (target side)
+    rightWrist:     { x: 0.35, y: 0.18 },
+    leftHip:        { x: 0.44, y: 0.58 },
+    rightHip:       { x: 0.52, y: 0.58 },
+    leftKnee:       { x: 0.45, y: 0.78 },
+    rightKnee:      { x: 0.55, y: 0.80 },
+    leftFoot:       { x: 0.46, y: 0.92 },  // planted lead
+    rightFoot:      { x: 0.54, y: 0.86 },  // lifted onto toe
   };
   return { address, top, impact, followThrough: ft };
 }
@@ -408,98 +438,89 @@ function generatePoseKeyframesDTL(skill: number): SwingAnalysis['poseKeyframes']
 // describing the clubhead's path through the swing.
 
 /** Face-on swing-plane trace — three Bezier segments forming the canonical
- *  "C up, mirrored C down, finish high opposite side" shape that golf
- *  instruction videos use to teach swing plane.
+ *  "C up, mirrored C down, finish high opposite side" shape.
  *
- *  Segments (each a quadratic Bezier):
- *    1. Backswing (u 0 → 0.5):   ball-low-center → mid-back → top-back-high
- *    2. Downswing (u 0.5 → 0.75): top-back-high → mid-back → impact-low
- *    3. Follow-through (0.75 → 1): impact-low → mid-front → top-front-high
+ *  Sized to occupy ROUGHLY the body's range: ball at center-low, peaks at
+ *  upper-shoulder height (not above the head). Previous version reached to
+ *  the corners of the frame and looked oversized relative to the golfer.
  *
- *  Previous angle-based implementation had its angle convention inverted
- *  (screen-y grows down but standard math sin/cos assume y-up), so the
- *  generated trace started at the TOP of the screen and arced wrong.
- *  Explicit Bezier waypoints eliminate the convention issue. */
+ *  Right-handed golfer face-on: backswing UP-LEFT (over trail shoulder,
+ *  which is on screen-LEFT due to face-on mirroring); follow-through
+ *  UP-RIGHT (over lead shoulder = screen-RIGHT). */
 function generateClubheadTraceFaceOn(totalSec: number): SwingAnalysis['clubheadTrace'] {
   const samples = 60;
   const pts: SwingAnalysis['clubheadTrace'] = [];
-  // Waypoints, all in normalized 0-1 screen coords (y grows down).
-  // Right-handed golfer filmed face-on: club goes up on golfer's right
-  // (screen-LEFT) on the backswing, exits high on screen-right on
-  // follow-through.
-  const ball       = { x: 0.50, y: 0.70 };  // address / impact position
-  const backMid    = { x: 0.30, y: 0.42 };  // mid-backswing
-  const topBack    = { x: 0.20, y: 0.20 };  // top of backswing
-  const downMid    = { x: 0.32, y: 0.50 };  // mid-downswing (slightly inside)
-  const ftMid      = { x: 0.70, y: 0.40 };  // mid-follow-through
-  const ftHigh     = { x: 0.82, y: 0.20 };  // finish high
+  const ball       = { x: 0.50, y: 0.78 };  // address / impact, low-center
+  const backMid    = { x: 0.33, y: 0.55 };  // mid-backswing on trail side
+  const topBack    = { x: 0.25, y: 0.32 };  // top, upper-LEFT, shoulder height
+  const downMid    = { x: 0.35, y: 0.62 };  // mid-downswing
+  const ftMid      = { x: 0.67, y: 0.50 };  // mid-follow-through
+  const ftHigh     = { x: 0.75, y: 0.32 };  // finish high, upper-RIGHT
 
   for (let i = 0; i < samples; i++) {
     const u = i / (samples - 1);
     let x: number, y: number;
     if (u < 0.5) {
-      // Backswing — ball → top-back via mid-back control point.
       const v = u / 0.5;
-      const oneMinus = 1 - v;
-      x = oneMinus * oneMinus * ball.x + 2 * oneMinus * v * backMid.x + v * v * topBack.x;
-      y = oneMinus * oneMinus * ball.y + 2 * oneMinus * v * backMid.y + v * v * topBack.y;
+      const m = 1 - v;
+      x = m * m * ball.x + 2 * m * v * backMid.x + v * v * topBack.x;
+      y = m * m * ball.y + 2 * m * v * backMid.y + v * v * topBack.y;
     } else if (u < 0.75) {
-      // Downswing — top-back → impact via downswing control point.
       const v = (u - 0.5) / 0.25;
-      const oneMinus = 1 - v;
-      x = oneMinus * oneMinus * topBack.x + 2 * oneMinus * v * downMid.x + v * v * ball.x;
-      y = oneMinus * oneMinus * topBack.y + 2 * oneMinus * v * downMid.y + v * v * ball.y;
+      const m = 1 - v;
+      x = m * m * topBack.x + 2 * m * v * downMid.x + v * v * ball.x;
+      y = m * m * topBack.y + 2 * m * v * downMid.y + v * v * ball.y;
     } else {
-      // Follow-through — impact → high-front via ft control point.
       const v = (u - 0.75) / 0.25;
-      const oneMinus = 1 - v;
-      x = oneMinus * oneMinus * ball.x + 2 * oneMinus * v * ftMid.x + v * v * ftHigh.x;
-      y = oneMinus * oneMinus * ball.y + 2 * oneMinus * v * ftMid.y + v * v * ftHigh.y;
+      const m = 1 - v;
+      x = m * m * ball.x + 2 * m * v * ftMid.x + v * v * ftHigh.x;
+      y = m * m * ball.y + 2 * m * v * ftMid.y + v * v * ftHigh.y;
     }
     pts.push({ x, y, t: u * totalSec });
   }
   return pts;
 }
 
-/** Down-the-line trace — the clubhead's path viewed from behind. Reads as
- *  a more vertical arc that goes up behind the right shoulder, comes back
- *  down through the ball, and exits high forward-left. Slight bias to the
- *  back-side on the backswing portion mimics the canonical "on plane"
- *  shape that golf instruction videos use. */
+/** Down-the-line trace — the clubhead's path viewed from behind+trail-side.
+ *  For a right-handed golfer:
+ *    • Backswing arcs UP-RIGHT (over the trail/right shoulder, which is
+ *      camera-near in DTL)
+ *    • Follow-through arcs UP-LEFT (toward target, which is camera-far in
+ *      this slightly-trail-side DTL view)
+ *
+ *  Previous version had backswing going upper-LEFT and FT going upper-
+ *  RIGHT — the opposite of how real DTL instruction overlays visualize
+ *  a righty's swing plane. */
 function generateClubheadTraceDTL(totalSec: number): SwingAnalysis['clubheadTrace'] {
   const samples = 60;
   const pts: SwingAnalysis['clubheadTrace'] = [];
-  // Ball is at (0.62, 0.66) — see ballPosition above.
-  // Backswing peak: roughly (0.18, 0.16) — high above right shoulder.
-  // Follow-through peak: (0.78, 0.18) — high in front-left.
+  // Sized to fit within the golfer's silhouette + slight extension —
+  // roughly x: 0.32-0.68, y: 0.28-0.80 of frame.
+  const ball       = { x: 0.52, y: 0.78 };  // ball at center-low
+  const backMid    = { x: 0.60, y: 0.55 };  // mid-backswing, trail side
+  const topBack    = { x: 0.65, y: 0.32 };  // top, upper-RIGHT
+  const downMid    = { x: 0.55, y: 0.60 };  // mid-downswing
+  const ftMid      = { x: 0.42, y: 0.50 };  // mid-FT, target side
+  const ftHigh     = { x: 0.35, y: 0.32 };  // finish high, upper-LEFT
+
   for (let i = 0; i < samples; i++) {
     const u = i / (samples - 1);
     let x: number, y: number;
     if (u < 0.5) {
-      // Backswing — quadratic Bezier from ball through mid (0.30, 0.42)
-      // to top (0.18, 0.16). Reads as a clean upward arc behind the
-      // shoulder line.
       const v = u / 0.5;
-      const oneMinus = 1 - v;
-      x = oneMinus * oneMinus * 0.62 + 2 * oneMinus * v * 0.30 + v * v * 0.18;
-      y = oneMinus * oneMinus * 0.66 + 2 * oneMinus * v * 0.42 + v * v * 0.16;
+      const m = 1 - v;
+      x = m * m * ball.x + 2 * m * v * backMid.x + v * v * topBack.x;
+      y = m * m * ball.y + 2 * m * v * backMid.y + v * v * topBack.y;
+    } else if (u < 0.75) {
+      const v = (u - 0.5) / 0.25;
+      const m = 1 - v;
+      x = m * m * topBack.x + 2 * m * v * downMid.x + v * v * ball.x;
+      y = m * m * topBack.y + 2 * m * v * downMid.y + v * v * ball.y;
     } else {
-      // Downswing + follow-through — Bezier from top through ball at
-      // (0.62, 0.66) to high-front-left (0.78, 0.18). Crossover at impact.
-      const v = (u - 0.5) / 0.5;
-      if (v < 0.55) {
-        // Top → impact
-        const w = v / 0.55;
-        const oneMinus = 1 - w;
-        x = oneMinus * oneMinus * 0.18 + 2 * oneMinus * w * 0.35 + w * w * 0.62;
-        y = oneMinus * oneMinus * 0.16 + 2 * oneMinus * w * 0.55 + w * w * 0.66;
-      } else {
-        // Impact → high-forward follow-through
-        const w = (v - 0.55) / 0.45;
-        const oneMinus = 1 - w;
-        x = oneMinus * oneMinus * 0.62 + 2 * oneMinus * w * 0.74 + w * w * 0.78;
-        y = oneMinus * oneMinus * 0.66 + 2 * oneMinus * w * 0.42 + w * w * 0.18;
-      }
+      const v = (u - 0.75) / 0.25;
+      const m = 1 - v;
+      x = m * m * ball.x + 2 * m * v * ftMid.x + v * v * ftHigh.x;
+      y = m * m * ball.y + 2 * m * v * ftMid.y + v * v * ftHigh.y;
     }
     pts.push({ x, y, t: u * totalSec });
   }
