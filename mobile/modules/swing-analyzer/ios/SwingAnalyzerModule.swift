@@ -117,15 +117,20 @@ final class SwingAnalyzer {
             "y": Double(1.0 - point.location.y),
           ]
         }
-        // equationCoefficients is the parabolic fit (a + bx + cx²).
+        // equationCoefficients is a simd_float3 representing the parabolic
+        // fit y = a + bx + cx². Apple maps the components as:
+        //   .x → a (constant term)
+        //   .y → b (linear term)
+        //   .z → c (quadratic term)
+        // See VNTrajectoryObservation docs.
         let coefficients = obs.equationCoefficients
         trajectoryObservations.append([
           "uuid": obs.uuid.uuidString,
           "points": points,
           "equationCoefficients": [
-            "a": Double(coefficients.a),
-            "b": Double(coefficients.b),
-            "c": Double(coefficients.c),
+            "a": Double(coefficients.x),
+            "b": Double(coefficients.y),
+            "c": Double(coefficients.z),
           ],
           "confidence": Double(obs.confidence),
         ])
