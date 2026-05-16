@@ -80,6 +80,17 @@ final class SwingAnalyzer {
       ])
     }
 
+    // ── Orientation handling ───────────────────────────────────────────
+    // iPhone records portrait videos as landscape pixel buffers with a 90°
+    // rotation in the track's preferredTransform. The video player applies
+    // that transform when displaying, but AVAssetReader hands us the RAW
+    // landscape buffer. We need to tell Vision which way is "up" or every
+    // detected joint will be 90° rotated relative to how the user expects
+    // the figure to look.
+    let preferredTransform = try await videoTrack.load(.preferredTransform)
+    let orientation = Self.cgOrientation(from: preferredTransform)
+    NSLog("[SwingAnalyzer] video duration=%.2fs, orientation=%d", duration, orientation.rawValue)
+
     // ── Set up frame reader ────────────────────────────────────────────
     // Pull frames as BGRA pixel buffers — both Vision requests accept this
     // format directly so we avoid any colorspace conversion overhead.
@@ -148,8 +159,10 @@ final class SwingAnalyzer {
       guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { continue }
       let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
 
-      // Body pose — run on this single frame.
-      let bodyHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+      // Body pose — run on this single frame. Pass the orientation derived
+      // from the video's preferredTransform so Vision interprets the buffer
+      // in its display-correct orientation.
+      let bodyHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
       do {
         try bodyHandler.perform([bodyPoseRequest])
         if let observation = bodyPoseRequest.results?.first as? VNHumanBodyPoseObservation {
@@ -165,11 +178,14 @@ final class SwingAnalyzer {
       // Trajectory — feed into the sequence handler so it can correlate
       // across frames and report detected ballistic paths.
       do {
-        try trajectorySequenceHandler.perform([trajectoryRequest], on: pixelBuffer, orientation: .up)
+        try trajectorySequenceHandler.perform([trajectoryRequest], on: pixelBuffer, orientation: orientation)
       } catch {
         // Same — keep going on per-frame errors.
       }
     }
+
+    NSLog("[SwingAnalyzer] processed %d frames, %d poses detected, %d trajectories",
+          frameIndex, poseFrames.count, trajectoryObservations.count)
 
     if reader.status == .failed {
       throw NSError(domain: "SwingAnalyzer", code: 102, userInfo: [
@@ -186,6 +202,44 @@ final class SwingAnalyzer {
   }
 
   // MARK: - Helpers
+
+  /// Convert a video track's preferredTransform (CGAffineTransform) into the
+  /// CGImagePropertyOrientation that Vision expects. Without this, portrait
+  /// iPhone videos get analyzed sideways and every detected joint ends up
+  /// 90° off where the user perceives it on screen.
+  ///
+  /// Standard iPhone portrait video has a transform that rotates the
+  /// landscape buffer 90° CW for display. To tell Vision to interpret
+  /// the buffer in that same display-correct orientation, we return .right.
+  private static func cgOrientation(from transform: CGAffineTransform) -> CGImagePropertyOrientation {
+    // a, b, c, d are the four components of the rotation/scale matrix.
+    // tx, ty are translation; we ignore those for orientation purposes.
+    let a = transform.a
+    let b = transform.b
+    let c = transform.c
+    let d = transform.d
+
+    // Portrait recorded on iPhone (90° CW rotation in metadata).
+    if a == 0 && b == 1.0 && c == -1.0 && d == 0 {
+      return .right
+    }
+    // Portrait upside-down (90° CCW).
+    if a == 0 && b == -1.0 && c == 1.0 && d == 0 {
+      return .left
+    }
+    // Landscape, right-side up (no rotation in metadata).
+    if a == 1.0 && b == 0 && c == 0 && d == 1.0 {
+      return .up
+    }
+    // Landscape, upside-down (180° rotation).
+    if a == -1.0 && b == 0 && c == 0 && d == -1.0 {
+      return .down
+    }
+    // Mirrored variants are rare on iPhone capture but technically possible
+    // for front-camera selfie video. Default to .up — at worst we lose
+    // mirror correction; nothing else breaks.
+    return .up
+  }
 
   private static func parseURL(_ uri: String) throws -> URL {
     if let url = URL(string: uri), url.isFileURL {

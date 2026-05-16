@@ -197,84 +197,98 @@ export async function analyzeSwing(
 }
 
 /** Convert the native Vision-framework output into the SwingAnalysis shape
- *  the UI consumes. Real joint positions + real clubhead trajectory go
- *  through unchanged; metrics that require a launch monitor (ball speed,
- *  smash factor, spin) still come from the template-based estimator. */
+ *  the UI consumes. Honest about what's measurable from video alone:
+ *    • REAL: joint positions, clubhead trace (or wrist-trace fallback),
+ *      keyframe selection, backswing/downswing/tempo timings.
+ *    • UNKNOWN (set to null, UI shows "—"): clubhead speed, ball speed,
+ *      smash factor, launch angle, spin, carry — these need a launch
+ *      monitor or scale calibration that we don't have yet.
+ *    • UNKNOWN: hip/shoulder turn in degrees — derivable from joint
+ *      geometry but requires more analysis than we've built; null for now. */
 function convertNativeToSwingAnalysis(
   native: NativeAnalysisResult,
-  club: string,
-  swingId: string,
-  handicap: number | null,
+  _club: string,
+  _swingId: string,
+  _handicap: number | null,
   cameraAngle: CameraAngle,
 ): SwingAnalysis {
   const totalSec = native.duration;
 
-  // Pick the most-likely-clubhead trajectory: longest × highest confidence.
-  // Apple's VNDetectTrajectoriesRequest may detect multiple ballistic paths
-  // in a video (clubhead + ball flight + reflections on a simulator
-  // screen). The clubhead arc is typically the longest single trajectory.
+  // ── Clubhead trace ─────────────────────────────────────────────────
+  // Try Apple's trajectory request first. If it returns nothing (common
+  // for golf swings since the clubhead isn't truly ballistic — it's
+  // constrained by the swing plane), fall back to building the trace
+  // from WRIST positions which we always have from body pose detection.
+  // Not the actual clubhead, but a real signal from THIS video.
   const bestTraj = pickBestTrajectory(native.trajectories);
-  const clubheadTrace = bestTraj
-    ? bestTraj.points.map((p, i) => ({
-        x: p.x, y: p.y,
-        // Distribute timestamps evenly across the trajectory's segment of
-        // the video. Vision doesn't report per-point timestamps; this is
-        // an approximation. The trajectory length is usually a tight
-        // sequence (5-10 frames at the high-velocity portion of the swing).
-        t: (i / Math.max(1, bestTraj.points.length - 1)) * totalSec,
-      }))
-    : [];
+  let clubheadTrace: SwingAnalysis['clubheadTrace'] = [];
+  if (bestTraj && bestTraj.points.length >= 3) {
+    clubheadTrace = bestTraj.points.map((p, i) => ({
+      x: p.x, y: p.y,
+      t: (i / Math.max(1, bestTraj.points.length - 1)) * totalSec,
+    }));
+  } else {
+    // Wrist-trace fallback. Average the left+right wrist positions per
+    // frame to get a single "hands" point, then use that as the swing
+    // trace. The hands trace is geometrically similar to the clubhead
+    // trace (just smaller arc) so the user gets a visually sensible
+    // overlay of where the swing went.
+    const wristTrace: { x: number; y: number; t: number }[] = [];
+    for (const frame of native.poseFrames) {
+      const lw = frame.leftWrist;
+      const rw = frame.rightWrist;
+      if (!lw && !rw) continue;
+      const x = lw && rw ? (lw.x + rw.x) / 2 : (lw ?? rw)!.x;
+      const y = lw && rw ? (lw.y + rw.y) / 2 : (lw ?? rw)!.y;
+      wristTrace.push({ x, y, t: frame.time });
+    }
+    clubheadTrace = wristTrace;
+  }
 
-  // Snap the four keyframes from the per-frame pose data: address (first
-  // useful frame), top (highest wrist y in the trajectory), impact (lowest
-  // wrist y near the end of backswing), follow-through (last frame).
+  // Snap the four keyframes from the per-frame pose data.
   const poseKeyframes = extractKeyframes(native.poseFrames);
 
-  // Ball position — derived from the trajectory's lowest point if we have
-  // one, else fall back to a sane default.
-  const ballPosition: Point = bestTraj && bestTraj.points.length > 0
-    ? bestTraj.points.reduce((lowest, p) => p.y > lowest.y ? p : lowest, bestTraj.points[0])
+  // Ball position — derived from the trace's LOWEST point (largest y in
+  // screen-coords-down convention) since that's where the clubhead is at
+  // impact. Falls back to a sane default if we have nothing.
+  const ballPosition: Point = clubheadTrace.length > 0
+    ? clubheadTrace.reduce((lowest, p) => p.y > lowest.y ? p : lowest, clubheadTrace[0])
     : (cameraAngle === 'down_the_line' ? { x: 0.52, y: 0.78 } : { x: 0.50, y: 0.78 });
 
-  // Impact time — approximate as the moment in the trajectory where the
-  // clubhead is at the ball (lowest y in the trace). If no trajectory was
-  // detected, fall back to the 75%-of-swing convention.
+  // Impact time — moment in the trace where the clubhead/wrist is lowest.
   const impactTimeSec = clubheadTrace.length > 0
     ? clubheadTrace.reduce((latest, p) => p.y > latest.y ? p : latest, clubheadTrace[0]).t
     : totalSec * 0.75;
 
-  // Metrics that the Vision framework CAN'T provide without launch-monitor
-  // data — keep the template estimates for now, clearly marked in the UI.
-  const ref = SWING_REF[club] ?? SWING_REF['7iron'];
-  const cap = typeof handicap === 'number' ? Math.max(0, Math.min(36, handicap)) : 18;
-  const skill = 1 - cap / 36;
-  const rng = seededRng(swingId);
-  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-  const jitter = (m: number, frac: number) => m * (1 + (rng() - 0.5) * frac);
-
+  // ── Metrics ────────────────────────────────────────────────────────
+  // EVERY launch-monitor-required field is null. The mock path keeps
+  // populating them with templates; the vision path is honest about not
+  // knowing. The UI renders nulls as "—".
   const club_: ClubMetrics = {
-    clubheadSpeedMph: round(jitter(lerp(ref.amateur.clubheadSpeedMph, ref.pro.clubheadSpeedMph, skill), 0.04), 1),
-    ballSpeedMph:     round(jitter(lerp(ref.amateur.ballSpeedMph,     ref.pro.ballSpeedMph,     skill), 0.05), 1),
-    smashFactor:      round(jitter(lerp(ref.amateur.smashFactor,      ref.pro.smashFactor,      skill), 0.02), 2),
-    launchAngleDeg:   round(jitter(lerp(ref.amateur.launchAngleDeg,   ref.pro.launchAngleDeg,   skill), 0.08), 1),
-    spinRpm:          Math.round(jitter(lerp(ref.amateur.spinRpm,     ref.pro.spinRpm,          skill), 0.08)),
-    carryYds:         Math.round(jitter(lerp(ref.amateur.carryYds,    ref.pro.carryYds,         skill), 0.06)),
+    clubheadSpeedMph: null,
+    ballSpeedMph:     null,
+    smashFactor:      null,
+    launchAngleDeg:   null,
+    spinRpm:          null,
+    carryYds:         null,
   };
 
-  // Body metrics — backswing/downswing durations come from real keyframe
-  // timings; the rest are still estimated from the skill coefficient (a
-  // future pass can derive turn angles from joint geometry).
+  // Body metrics — only the timing-based ones are real. Turn angles need
+  // joint-geometry analysis we haven't built yet; in-unit measurements
+  // need scale calibration (a known-size marker in frame).
+  const backswingSec = round(impactTimeSec, 2);
+  const downswingSec = round(Math.max(0.01, totalSec - impactTimeSec), 2);
   const body: BodyMetrics = {
-    backswingSec:      round(impactTimeSec * (0.5 / 0.75), 2),   // back fraction of impact time
-    downswingSec:      round(impactTimeSec * (0.25 / 0.75), 2),
-    tempoRatio:        2.0,  // placeholder until geometry analysis lands
-    hipTurnDeg:        round(jitter(lerp(ref.amateur.hipTurnDeg,        ref.pro.hipTurnDeg,        skill), 0.06), 0),
-    shoulderTurnDeg:   round(jitter(lerp(ref.amateur.shoulderTurnDeg,   ref.pro.shoulderTurnDeg,   skill), 0.05), 0),
-    xFactorDeg:        round(jitter(lerp(ref.amateur.xFactorDeg,        ref.pro.xFactorDeg,        skill), 0.05), 0),
-    lateralHipShiftIn: round(jitter(lerp(ref.amateur.lateralHipShiftIn, ref.pro.lateralHipShiftIn, skill), 0.10), 1),
-    leadWristHingeDeg: round(jitter(lerp(ref.amateur.leadWristHingeDeg, ref.pro.leadWristHingeDeg, skill), 0.06), 0),
-    spineAngleDeg:     round(jitter(lerp(ref.amateur.spineAngleDeg,     ref.pro.spineAngleDeg,     skill), 0.05), 0),
-    headMovementIn:    round(jitter(lerp(ref.amateur.headMovementIn,    ref.pro.headMovementIn,    skill), 0.20), 1),
+    backswingSec,
+    downswingSec,
+    tempoRatio:        downswingSec > 0 ? round(backswingSec / downswingSec, 2) : null,
+    hipTurnDeg:        null,
+    shoulderTurnDeg:   null,
+    xFactorDeg:        null,
+    lateralHipShiftIn: null,
+    leadWristHingeDeg: null,
+    spineAngleDeg:     null,
+    headMovementIn:    null,
   };
 
   return {
@@ -434,7 +448,8 @@ async function analyzeMock(
   // downswing → follow-through C), down-the-line traces a more vertical
   // figure-eight with crossover at impact. Both generators use the same
   // u→t map: u=0 address, u=0.5 top, u=0.75 impact, u=1.0 follow-through.
-  const totalSec = body.backswingSec + body.downswingSec;
+  // Mock path always populates these timing fields with concrete numbers.
+  const totalSec = (body.backswingSec ?? 0.75) + (body.downswingSec ?? 0.25);
   const trace = cameraAngle === 'down_the_line'
     ? generateClubheadTraceDTL(totalSec)
     : generateClubheadTraceFaceOn(totalSec);

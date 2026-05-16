@@ -16,51 +16,62 @@
  * around average for their tier, not "100 mph slower than Rory."
  */
 
-export interface ClubMetrics {
-  /** Clubhead speed at impact, mph */
+/** Reference metrics (always populated) — used for the PRO and AMATEUR
+ *  baselines that the comparison bars plot against. Every field is a
+ *  concrete number; these are constants we publish. */
+export interface ClubReferenceMetrics {
   clubheadSpeedMph: number;
-  /** Ball speed off the face, mph */
   ballSpeedMph: number;
-  /** Smash factor = ball speed / club speed. 1.50 is the physical ceiling. */
   smashFactor: number;
-  /** Launch angle, degrees above horizontal */
   launchAngleDeg: number;
-  /** Backspin, RPM */
   spinRpm: number;
-  /** Carry distance, yards */
   carryYds: number;
 }
 
-export interface BodyMetrics {
-  /** Backswing duration, seconds (address → top of backswing) */
+export interface BodyReferenceMetrics {
   backswingSec: number;
-  /** Downswing duration, seconds (top → impact) */
   downswingSec: number;
-  /** Tempo ratio backswing:downswing. PGA pros are remarkably consistent
-   *  at 3:1; amateurs are quicker and more variable (~2.2-2.5:1). */
   tempoRatio: number;
-  /** Hip turn at top of backswing, degrees from address */
   hipTurnDeg: number;
-  /** Shoulder turn at top of backswing, degrees from address */
   shoulderTurnDeg: number;
-  /** X-factor = shoulder turn − hip turn, the "torsion" stored at the top.
-   *  Higher = more power potential, but also more strain on the back. */
   xFactorDeg: number;
-  /** Lateral hip shift through the strike, inches toward the target */
   lateralHipShiftIn: number;
-  /** Lead wrist hinge angle at top of backswing, degrees */
   leadWristHingeDeg: number;
-  /** Spine angle from vertical at address, degrees forward.
-   *  Pros maintain this through impact within ~3°; amateurs lose it. */
   spineAngleDeg: number;
-  /** Vertical head movement through the swing, inches.
-   *  Pros: under 2". Amateurs: often 4-6". */
   headMovementIn: number;
 }
 
+/** Measured user metrics — fields nullable because the Vision-framework
+ *  path can only derive some of them. Speed/spin/carry require a launch
+ *  monitor (which we don't have); shoulder/hip turn angles require joint-
+ *  geometry analysis we haven't built yet. Null fields render as "—" in
+ *  the UI so the user knows we don't have a measurement, instead of
+ *  seeing a template-generated number pretending to be one. */
+export interface ClubMetrics {
+  clubheadSpeedMph: number | null;
+  ballSpeedMph: number | null;
+  smashFactor: number | null;
+  launchAngleDeg: number | null;
+  spinRpm: number | null;
+  carryYds: number | null;
+}
+
+export interface BodyMetrics {
+  backswingSec: number | null;
+  downswingSec: number | null;
+  tempoRatio: number | null;
+  hipTurnDeg: number | null;
+  shoulderTurnDeg: number | null;
+  xFactorDeg: number | null;
+  lateralHipShiftIn: number | null;
+  leadWristHingeDeg: number | null;
+  spineAngleDeg: number | null;
+  headMovementIn: number | null;
+}
+
 export interface SwingReference {
-  pro: ClubMetrics & BodyMetrics;
-  amateur: ClubMetrics & BodyMetrics;
+  pro: ClubReferenceMetrics & BodyReferenceMetrics;
+  amateur: ClubReferenceMetrics & BodyReferenceMetrics;
 }
 
 // ── Per-club references ──────────────────────────────────────────────────
@@ -68,7 +79,7 @@ export interface SwingReference {
 // body-mechanic numbers (mostly invariant across clubs — a pro's tempo
 // ratio is 3:1 whether they're swinging a driver or a 9-iron).
 
-const PRO_BODY: BodyMetrics = {
+const PRO_BODY: BodyReferenceMetrics = {
   backswingSec: 0.75,
   downswingSec: 0.25,
   tempoRatio: 3.0,
@@ -81,7 +92,7 @@ const PRO_BODY: BodyMetrics = {
   headMovementIn: 1.8,
 };
 
-const AMATEUR_BODY: BodyMetrics = {
+const AMATEUR_BODY: BodyReferenceMetrics = {
   backswingSec: 0.65,
   downswingSec: 0.29,
   tempoRatio: 2.25,

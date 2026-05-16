@@ -738,7 +738,8 @@ function SwingMetrics({ analysis, club }: { analysis: SwingAnalysis; club: strin
 
 interface MetricRowProps {
   label: string;
-  value: number;
+  /** null = we don't have a real measurement for this. Renders as "—". */
+  value: number | null;
   unit: string;
   proValue: number;
   amaValue: number;
@@ -754,9 +755,31 @@ function MetricRow({
   label, value, unit, proValue, amaValue,
   higherIsBetter = true, format, hint,
 }: MetricRowProps) {
-  const interp = interpretDelta(value, proValue, amaValue, unit, higherIsBetter);
   const fmt = format ?? ((v: number) => String(v));
 
+  // No real measurement — render a dim "—" row that still shows the
+  // pro/amateur reference so the user sees what range this metric lives in,
+  // without any pretense that we know their number.
+  if (value == null) {
+    return (
+      <View style={styles.row}>
+        <View style={styles.rowHeader}>
+          <Text style={styles.rowLabel}>{label}</Text>
+          <Text style={[styles.rowValue, { color: C.textDim }]}>—</Text>
+        </View>
+        <View style={styles.refRow}>
+          <Text style={styles.refText}>Amateur · {fmt(amaValue)}{unit}</Text>
+          <Text style={styles.refTextPro}>Pro · {fmt(proValue)}{unit}</Text>
+        </View>
+        <Text style={styles.notMeasured}>
+          Not measured — requires launch monitor or scale calibration.
+        </Text>
+        {hint && <Text style={styles.hint}>{hint}</Text>}
+      </View>
+    );
+  }
+
+  const interp = interpretDelta(value, proValue, amaValue, unit, higherIsBetter);
   const TONE_COLOR: Record<string, string> = {
     great: '#7aab78',
     good:  C.gold,
@@ -977,6 +1000,7 @@ const styles = StyleSheet.create({
 
   interp: { fontSize: 12, marginTop: 8, lineHeight: 17 },
   hint: { color: C.textDim, fontSize: 10, marginTop: 3, fontStyle: 'italic' },
+  notMeasured: { color: C.textMuted, fontSize: 11, marginTop: 8, fontStyle: 'italic' },
 
   footnote: {
     color: C.textDim,

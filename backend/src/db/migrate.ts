@@ -647,6 +647,48 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '365 days';
     `,
   },
+  {
+    // Alder Creek Golf Course — Remsen, NY. 9-hole layout played twice for
+    // an 18-hole round (back 9 mirrors front 9 exactly per the scorecard).
+    // The supplied 34.2 rating is the 9-hole figure; we store the doubled
+    // 68.4 here so handicap math stays in 18-hole units like every other
+    // course in the database. Slope 118 carries through unchanged (slope
+    // is reported on an 18-hole basis already).
+    //
+    // ON CONFLICT DO NOTHING throughout so the migration is idempotent —
+    // running it twice (re-deploy, environment restore) is a no-op.
+    name: 'seed.alder_creek_remsen_ny',
+    sql: `
+      INSERT INTO courses (course_id, course_name, club_name, address, city, state, country, latitude, longitude) VALUES
+        ('a2000000-0000-0000-0000-0000000a1de2', 'Alder Creek Golf Course', 'Alder Creek Golf & Country Club', 'NY-12, Remsen, NY 13438', 'Remsen', 'NY', 'United States', 43.4258, -75.2625)
+      ON CONFLICT (course_id) DO NOTHING;
+
+      INSERT INTO teeboxes (teebox_id, course_id, name, gender, course_rating, slope_rating, total_yards, num_holes, par) VALUES
+        ('b2000000-0000-0000-0000-0000000a1de2', 'a2000000-0000-0000-0000-0000000a1de2', 'White', 'male', 68.4, 118, 6356, 18, 72)
+      ON CONFLICT (teebox_id) DO NOTHING;
+
+      INSERT INTO holes (teebox_id, hole_num, par, yardage, handicap) VALUES
+        ('b2000000-0000-0000-0000-0000000a1de2',  1, 5, 515,  1),
+        ('b2000000-0000-0000-0000-0000000a1de2',  2, 4, 352,  2),
+        ('b2000000-0000-0000-0000-0000000a1de2',  3, 3, 158,  3),
+        ('b2000000-0000-0000-0000-0000000a1de2',  4, 4, 350,  4),
+        ('b2000000-0000-0000-0000-0000000a1de2',  5, 3, 175,  5),
+        ('b2000000-0000-0000-0000-0000000a1de2',  6, 5, 525,  6),
+        ('b2000000-0000-0000-0000-0000000a1de2',  7, 4, 423,  7),
+        ('b2000000-0000-0000-0000-0000000a1de2',  8, 4, 347,  8),
+        ('b2000000-0000-0000-0000-0000000a1de2',  9, 4, 333,  9),
+        ('b2000000-0000-0000-0000-0000000a1de2', 10, 5, 515, 10),
+        ('b2000000-0000-0000-0000-0000000a1de2', 11, 4, 352, 11),
+        ('b2000000-0000-0000-0000-0000000a1de2', 12, 3, 158, 12),
+        ('b2000000-0000-0000-0000-0000000a1de2', 13, 4, 350, 13),
+        ('b2000000-0000-0000-0000-0000000a1de2', 14, 3, 175, 14),
+        ('b2000000-0000-0000-0000-0000000a1de2', 15, 5, 525, 15),
+        ('b2000000-0000-0000-0000-0000000a1de2', 16, 4, 423, 16),
+        ('b2000000-0000-0000-0000-0000000a1de2', 17, 4, 347, 17),
+        ('b2000000-0000-0000-0000-0000000a1de2', 18, 4, 333, 18)
+      ON CONFLICT (teebox_id, hole_num) DO NOTHING;
+    `,
+  },
 ];
 
 export async function runMigrations() {
