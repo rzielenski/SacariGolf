@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  Dimensions,
+  Dimensions, PanResponder,
 } from 'react-native';
 import { useLocalSearchParams, router, Stack } from 'expo-router';
 import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
@@ -145,7 +145,6 @@ export default function RangeAnalyze() {
                   height={(SCREEN_W - 40) * (16 / 9)}
                   currentTimeSec={playbackTimeSec}
                   impactTimeSec={swing.result.impactTimeSec}
-                  accent={C.gold}
                 />
               </View>
             )}
@@ -246,9 +245,30 @@ function PoseStudio({
   // updates it 30× per second via requestAnimationFrame when playing.
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(true);
+  // Track width — measured via onLayout, used by the drag-to-scrub
+  // PanResponder to convert touch x → normalized time.
+  const [trackWidth, setTrackWidth] = useState(1);
   // Total duration the loop takes to play once, in seconds. Slowed enough
   // to be readable but not so slow it feels lethargic.
   const LOOP_SEC = 2.4;
+
+  // Drag-to-scrub gesture on the timeline track. Pauses playback the
+  // moment a touch lands, then lets the user drag the thumb left/right
+  // to step through the swing at their own pace. Releasing the touch
+  // leaves playback paused — the user explicitly presses play to resume.
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e) => {
+      setPlaying(false);
+      const x = e.nativeEvent.locationX;
+      setTime(Math.max(0, Math.min(1, x / trackWidth)));
+    },
+    onPanResponderMove: (e) => {
+      const x = e.nativeEvent.locationX;
+      setTime(Math.max(0, Math.min(1, x / trackWidth)));
+    },
+  }), [trackWidth]);
 
   useEffect(() => {
     if (!playing) return;
@@ -363,16 +383,34 @@ function PoseStudio({
           <Text style={studio.playBtnText}>{playing ? '⏸' : '▶'}</Text>
         </TouchableOpacity>
 
-        <View style={studio.scrubTrack}>
-          {/* Filled bar showing playback position. */}
-          <View style={[studio.scrubFill, { width: `${time * 100}%` }]} />
-          {/* Keyframe markers — tiny gold ticks along the track. */}
-          {(['address', 'top', 'impact', 'followThrough'] as Keyframe[]).map((k) => (
-            <View
-              key={`mark-${k}`}
-              style={[studio.scrubMark, { left: `${KEYFRAME_T[k] * 100}%` }]}
-            />
-          ))}
+        {/* Track is drag-aware — wider hit area + a visible thumb that
+            follows the playback time. Tapping anywhere on the track or
+            dragging the thumb pauses playback and jumps to that point. */}
+        <View
+          style={studio.scrubHit}
+          onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+          {...panResponder.panHandlers}
+        >
+          <View style={studio.scrubTrack}>
+            {/* Filled bar showing playback position. */}
+            <View style={[studio.scrubFill, { width: `${time * 100}%` }]} />
+            {/* Keyframe markers — tiny gold ticks along the track. */}
+            {(['address', 'top', 'impact', 'followThrough'] as Keyframe[]).map((k) => (
+              <View
+                key={`mark-${k}`}
+                style={[studio.scrubMark, { left: `${KEYFRAME_T[k] * 100}%` }]}
+              />
+            ))}
+          </View>
+          {/* Draggable thumb — big enough to feel under the thumb (44px
+              touch target), centered on the current time. */}
+          <View
+            pointerEvents="none"
+            style={[
+              studio.scrubThumb,
+              { left: `${time * 100}%` },
+            ]}
+          />
         </View>
       </View>
 
@@ -472,13 +510,39 @@ const studio = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   playBtnText: { color: C.bg, fontSize: 18, fontWeight: '900' },
-  scrubTrack: {
+  // The hit area wraps the visible track + thumb so the whole row (44px
+  // tall, full-width) is touchable. Without this the track itself is
+  // only 6px tall — impossible to grab with a thumb.
+  scrubHit: {
     flex: 1,
+    height: 44,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  scrubTrack: {
     height: 6,
     backgroundColor: C.cardAlt,
     borderRadius: 3,
     position: 'relative',
     overflow: 'visible',
+  },
+  // Draggable thumb — large filled circle, gold border, sits on top of
+  // the track centered on the current time. `marginLeft: -10` so the
+  // thumb's center (not its left edge) lines up with the time position.
+  scrubThumb: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    top: 12,
+    marginLeft: -10,
+    backgroundColor: C.gold,
+    borderWidth: 2,
+    borderColor: C.bg,
+    shadowColor: C.gold,
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
   },
   scrubFill: {
     position: 'absolute',
