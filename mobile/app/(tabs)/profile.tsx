@@ -373,10 +373,12 @@ export default function ProfileScreen() {
         <Text style={styles.editChev}>›</Text>
       </TouchableOpacity>
 
-      {/* Compact 2×2 grid of profile shortcuts. Full descriptions live
-          inside each card's tap-through modal so this surface stays scannable.
-          Each tile uses PressableScale for tactile press feedback. */}
-      <View style={styles.miniGrid}>
+      {/* 2×2 grid of profile shortcuts, split into two explicit rows so
+          each tile is guaranteed `flex: 1` of the row width minus the
+          gap. The previous flexWrap + flexBasis approach left
+          sub-percentage rounding gaps on some phone widths; this layout
+          is pixel-perfect on every device. */}
+      <View style={styles.miniRow}>
         <PressableScale onPress={() => setHomeCourseModalVisible(true)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>HOME COURSE</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
@@ -392,7 +394,9 @@ export default function ProfileScreen() {
               : 'Need 3+ rounds'}
           </Text>
         </PressableScale>
+      </View>
 
+      <View style={styles.miniRow}>
         <PressableScale
           onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
           style={styles.miniCard}
@@ -1120,21 +1124,17 @@ const styles = StyleSheet.create({
   editableSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   editChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
 
-  // 2×2 grid replacing the four full-width editableCards. Each row spans
-  // the full screen width with two equally-sized cards (50/50 minus gap),
-  // so the profile reads as a clean dashboard rather than four tiny chips.
-  // Visual order matches semantic order: Home Course + Handicap on top,
-  // Starting HCP + My Bag below.
-  miniGrid: {
-    flexDirection: 'row', flexWrap: 'wrap',
-    gap: 10, marginBottom: 14,
+  // Two explicit rows, each with `flex: 1` cards. This is the only RN
+  // layout pattern that guarantees pixel-perfect 50/50 splits on every
+  // device width — flexBasis + flexWrap can leave sub-percentage gaps
+  // on phones where the math doesn't round cleanly.
+  miniRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 10,
   },
   miniCard: {
-    // flexBasis 47% leaves room for the 10px gap and a tiny pixel-rounding
-    // safety margin; flexGrow: 1 takes whatever's left over so each card
-    // ends up at exactly half the available row width on every device size.
-    flexBasis: '47%',
-    flexGrow: 1,
+    flex: 1,                       // each card takes exactly half the row
     backgroundColor: C.card,
     borderRadius: 10,
     paddingVertical: 14,
