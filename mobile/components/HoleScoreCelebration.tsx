@@ -395,14 +395,28 @@ const s = StyleSheet.create({
     transform: [{ scale: 1.1 }],
   },
   avatarBurstHolder: {
-    width: 88,
-    height: 88,
+    // Sized to match the RankCrest's full bounding box (avatar size × 1.5).
+    // The crest's crown extends ABOVE the avatar and the scroll BELOW, so a
+    // tight 88×88 holder would let those ornaments overflow into adjacent
+    // text. 132 = 88 (avatar) × 1.5 (crest container ratio).
+    width: 132,
+    height: 132,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 8,
   },
   burstGlyph: {
     position: 'absolute',
+    // Anchor each glyph's *center* at the holder's center so translateX/Y
+    // fan them out radially from the avatar. Without this, absolute Text
+    // in RN piles at (0, 0) of the parent and the burst would fly outward
+    // from the top-left corner instead of from the avatar. marginTop/Left
+    // are negative half-fontSize so the glyph centers on the (50%, 50%)
+    // anchor instead of having its top-left there.
+    top: '50%',
+    left: '50%',
+    marginTop: -9,
+    marginLeft: -9,
     fontSize: 18,
     fontWeight: '900',
     textShadowColor: 'rgba(0,0,0,0.6)',

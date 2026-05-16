@@ -317,6 +317,25 @@ export const api = {
         }[];
       }[];
     }>('GET', `/users/${id}/club-stats`),
+    /** Premium-only. Putting make % and approach proximity bucketed by
+     *  distance, with PGA Tour scratch baselines for side-by-side compare.
+     *  Empty buckets are returned (attempts/shots = 0) so the UI can render
+     *  a consistent layout while the user accumulates data. */
+    shotStats: (id: string) => request<{
+      putting: {
+        bucket: string;
+        attempts: number;
+        made: number;
+        make_pct: number | null;
+        scratch_make_pct: number;
+      }[];
+      approach: {
+        bucket: string;
+        shots: number;
+        avg_proximity_ft: number | null;
+        scratch_proximity_ft: number;
+      }[];
+    }>('GET', `/users/${id}/shot-stats`),
     /** Delete a single tracked shot from the current user's stats. */
     deleteShot: (shotId: string) =>
       request<{ success: true }>('DELETE', `/users/me/shots/${shotId}`),

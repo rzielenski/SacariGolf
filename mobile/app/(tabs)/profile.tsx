@@ -14,6 +14,7 @@ import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest } from '../../components/RankCrest';
+import { PuttingApproachStats } from '../../components/PuttingApproachStats';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -534,6 +535,14 @@ export default function ProfileScreen() {
         </>
       )}
 
+      {/* Premium-only: putting + approach bucketed by distance, with PGA
+          scratch baselines. Component handles its own loading + 403 (non-
+          premium) state, so we can render it unconditionally and let it
+          self-suppress when the user isn't eligible. */}
+      {user && isPremium(user as any) && (
+        <PuttingApproachStats userId={user.user_id} />
+      )}
+
       {/* Best Round */}
       {bestRound && (
         <>
@@ -1049,11 +1058,14 @@ const styles = StyleSheet.create({
     width: 96, height: 96, borderRadius: 48, backgroundColor: C.card,
     alignItems: 'center', justifyContent: 'center',
   },
-  // Edit pencil now sits at the bottom-right of the avatar (inside the crest
-  // ring), not the bottom-right of the wider crest footprint. The 19 inset
-  // = (crestSize − avatarSize) / 2 for size=96.
+  // Edit pencil sits at the bottom-right of the avatar (inside the crest
+  // ring), not the bottom-right of the wider crest footprint. Inset math
+  // for size=96 with the heraldic 1.5× container (144×144):
+  //   • horizontal inset = (144 − 96) / 2 = 24
+  //   • vertical inset = (144 − 96) / 2 + verticalBias(≈6) ≈ 18  (avatar
+  //     is biased down inside the container to leave room for the crown)
   avatarEditBadge: {
-    position: 'absolute', bottom: 19, right: 19,
+    position: 'absolute', bottom: 18, right: 24,
     backgroundColor: C.gold, width: 22, height: 22, borderRadius: 11,
     justifyContent: 'center', alignItems: 'center',
     borderWidth: 2, borderColor: C.bg,

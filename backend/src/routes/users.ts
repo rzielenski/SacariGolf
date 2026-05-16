@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import pool from '../db/pool';
-import { requireAuth, AuthRequest } from '../middleware/auth';
+import { requireAuth, requirePremium, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
@@ -736,6 +736,189 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // Stable order: longest median distance first (driver → wedges → putter)
   clubs.sort((a, b) => (b.median_yds || 0) - (a.median_yds || 0));
   return res.json({ clubs });
+}));
+
+/**
+ * Putting + approach proximity analytics — premium-only insight screen.
+ *
+ * Buckets every tracked shot in the user's history into one of two analyses:
+ *
+ *   PUTTING  — shots whose `start` is within PUTT_RADIUS_YDS of the pin.
+ *              Bucketed by start-distance-to-pin in feet (3, 6, 10, 15, 25,
+ *              26+ ft). A putt is counted as MADE iff it's the final tracked
+ *              shot on its hole AND its end position is within ~3 ft of pin.
+ *              All other putts count as missed attempts.
+ *
+ *              Heuristic gap: if the player picks up a gimme without tracking
+ *              the final stroke, we under-count makes from 0-3 ft (the stroke
+ *              they didn't tag). Acceptable — the alternative (assume any
+ *              short-distance non-tracked putt was made) over-counts make %
+ *              and is dishonest in the other direction.
+ *
+ *   APPROACH — shots whose `start` is OFF the green (>PUTT_RADIUS_YDS from
+ *              pin) AND whose `end` lands within 30 yds of pin. Bucketed by
+ *              start-to-pin distance (chip < 50 yd, then 50-100, 100-150,
+ *              150-200, 200+). Reported value is mean proximity to pin in
+ *              feet. Excludes tee shots on long holes (because they don't
+ *              "approach" the green directly) and recovery shots that miss
+ *              wildly — both signal-degraders if included.
+ *
+ * Scratch baselines come from Mark Broadie's "Every Shot Counts" research,
+ * widely cited as the canonical reference for PGA-tour scratch-amateur gaps.
+ * Returned alongside each bucket so the client can render side-by-side
+ * comparisons without hard-coding the numbers in the UI layer.
+ *
+ * Premium-gated — this is the kind of detailed analysis that drives
+ * subscription conversion for serious-improvement-oriented players.
+ */
+router.get('/:id/shot-stats', requireAuth, requirePremium, wrap(async (req: AuthRequest, res: Response) => {
+  // Pull every tracked shot for this user that has a pin location to compare
+  // against. INNER JOIN on holes filters out shots from holes that don't have
+  // a known pin (a course with no contributions yet) — those shots are
+  // valuable for club-stats but useless here because we can't measure
+  // proximity. Limit to a generous cap to keep memory bounded.
+  const { rows } = await pool.query(
+    `SELECT s.match_id, s.hole_num, s.shot_index,
+            s.start_lat, s.start_lng, s.end_lat, s.end_lng,
+            h.pin_lat, h.pin_lng
+       FROM shots s
+       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = s.user_id
+       JOIN holes  h ON h.teebox_id = r.teebox_id AND h.hole_num = s.hole_num
+      WHERE s.user_id = $1
+        AND s.match_id IS NOT NULL
+        AND h.pin_lat IS NOT NULL
+        AND h.pin_lng IS NOT NULL
+      ORDER BY s.match_id, s.hole_num, s.shot_index
+      LIMIT 10000`,
+    [req.params.id]
+  );
+
+  // Distance helper — meters between two lat/lng points via haversine, then
+  // a single multiplication to yards.
+  const R_M = 6371000;
+  const M_TO_YDS = 1.0936132983;
+  const toRad = (d: number) => d * Math.PI / 180;
+  const distYds = (lat1: number, lng1: number, lat2: number, lng2: number): number => {
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2
+      + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R_M * Math.asin(Math.sqrt(a)) * M_TO_YDS;
+  };
+
+  // 12 yds = ~36 ft. Standard "green effective radius" — used elsewhere in
+  // the codebase (inferHoleStatsFromShots) so analytics stay consistent.
+  const PUTT_RADIUS_YDS = 12;
+
+  // ── Putting buckets ────────────────────────────────────────────────
+  // Distance from pin in FEET. "0-3 ft" includes anything closer than the
+  // typical gimme line — useful for "tap-in conversion" analysis.
+  type PuttBucket = { label: string; minFt: number; maxFt: number; attempts: number; made: number };
+  const putting: PuttBucket[] = [
+    { label: '0-3 ft',   minFt: 0,   maxFt: 3,        attempts: 0, made: 0 },
+    { label: '4-6 ft',   minFt: 3,   maxFt: 6,        attempts: 0, made: 0 },
+    { label: '7-10 ft',  minFt: 6,   maxFt: 10,       attempts: 0, made: 0 },
+    { label: '11-15 ft', minFt: 10,  maxFt: 15,       attempts: 0, made: 0 },
+    { label: '16-25 ft', minFt: 15,  maxFt: 25,       attempts: 0, made: 0 },
+    { label: '26+ ft',   minFt: 25,  maxFt: Infinity, attempts: 0, made: 0 },
+  ];
+  // Scratch make% baseline from Mark Broadie's PGA Tour data. Numbers are
+  // approximate but widely cited. Used by the client to render "you vs
+  // scratch" comparison bars.
+  const SCRATCH_MAKE_PCT: Record<string, number> = {
+    '0-3 ft':   99,
+    '4-6 ft':   73,
+    '7-10 ft':  41,
+    '11-15 ft': 22,
+    '16-25 ft': 11,
+    '26+ ft':   4,
+  };
+
+  // ── Approach buckets ───────────────────────────────────────────────
+  // Distance from pin at the SHOT'S START, in yards. The shot must land
+  // close to the green to count as an approach (filters out OB recoveries
+  // and wild misses that didn't get there).
+  type ApproachBucket = { label: string; minYd: number; maxYd: number; shots: number; sumProxFt: number };
+  const approach: ApproachBucket[] = [
+    { label: '<50 yd (chip)', minYd: 0,   maxYd: 50,       shots: 0, sumProxFt: 0 },
+    { label: '50-100 yd',     minYd: 50,  maxYd: 100,      shots: 0, sumProxFt: 0 },
+    { label: '100-150 yd',    minYd: 100, maxYd: 150,      shots: 0, sumProxFt: 0 },
+    { label: '150-200 yd',    minYd: 150, maxYd: 200,      shots: 0, sumProxFt: 0 },
+    { label: '200+ yd',       minYd: 200, maxYd: Infinity, shots: 0, sumProxFt: 0 },
+  ];
+  // Scratch proximity baseline, also from Broadie. Reported in FEET because
+  // the typical golfer thinks of "proximity" in feet, not yards.
+  const SCRATCH_PROXIMITY_FT: Record<string, number> = {
+    '<50 yd (chip)': 18,
+    '50-100 yd':     22,
+    '100-150 yd':    32,
+    '150-200 yd':    49,
+    '200+ yd':       72,
+  };
+
+  // 30 yd lands-near-green threshold. Wider than the 12yd putt radius
+  // because we want to count approaches that ended in greenside rough /
+  // bunkers — those are still "approach shots" for proximity purposes.
+  const APPROACH_END_RADIUS_YDS = 30;
+  // 3 ft "the putt went in" threshold. GPS noise on the player tapping
+  // TRACK after holing out gives end positions a few feet off the pin even
+  // for true makes; 3 ft accommodates that without flattering misses.
+  const MADE_RADIUS_FT = 3;
+
+  // Group by (match_id, hole_num) so we know which shot is the last on
+  // each hole — needed for putt make/miss detection.
+  const holes = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const k = `${row.match_id}:${row.hole_num}`;
+    if (!holes.has(k)) holes.set(k, []);
+    holes.get(k)!.push(row);
+  }
+
+  for (const holeShots of holes.values()) {
+    // shot_index ordering is enforced by the ORDER BY in the SQL above —
+    // safe to assume the last array element is the final shot of the hole.
+    for (let i = 0; i < holeShots.length; i++) {
+      const s = holeShots[i];
+      const isLastOnHole = i === holeShots.length - 1;
+      const startToPinYd = distYds(s.start_lat, s.start_lng, s.pin_lat, s.pin_lng);
+      const endToPinYd   = distYds(s.end_lat,   s.end_lng,   s.pin_lat, s.pin_lng);
+      const startToPinFt = startToPinYd * 3;
+      const endToPinFt   = endToPinYd * 3;
+
+      if (startToPinYd <= PUTT_RADIUS_YDS) {
+        // It's a putt — bucket by start-distance-from-pin in feet.
+        const bucket = putting.find((b) => startToPinFt >= b.minFt && startToPinFt < b.maxFt);
+        if (!bucket) continue;
+        bucket.attempts += 1;
+        if (isLastOnHole && endToPinFt <= MADE_RADIUS_FT) {
+          bucket.made += 1;
+        }
+      } else if (endToPinYd <= APPROACH_END_RADIUS_YDS) {
+        // It's an approach that landed near the green — bucket by start-
+        // distance-to-pin in yards, accumulate proximity in feet.
+        const bucket = approach.find((b) => startToPinYd >= b.minYd && startToPinYd < b.maxYd);
+        if (!bucket) continue;
+        bucket.shots += 1;
+        bucket.sumProxFt += endToPinFt;
+      }
+    }
+  }
+
+  return res.json({
+    putting: putting.map((b) => ({
+      bucket: b.label,
+      attempts: b.attempts,
+      made: b.made,
+      make_pct: b.attempts ? Math.round((b.made / b.attempts) * 1000) / 10 : null,
+      scratch_make_pct: SCRATCH_MAKE_PCT[b.label],
+    })),
+    approach: approach.map((b) => ({
+      bucket: b.label,
+      shots: b.shots,
+      avg_proximity_ft: b.shots ? Math.round((b.sumProxFt / b.shots) * 10) / 10 : null,
+      scratch_proximity_ft: SCRATCH_PROXIMITY_FT[b.label],
+    })),
+  });
 }));
 
 /**
