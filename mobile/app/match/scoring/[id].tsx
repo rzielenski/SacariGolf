@@ -247,6 +247,28 @@ export default function ScoringScreen() {
   const elevSampleBuf = useRef<{ lat: number; lng: number; elevationRelM: number }[]>([]);
   const elevFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastElevSampleAtRef = useRef<{ lat: number; lng: number } | null>(null);
+  // ── Barometric anchor (set on first TRACK press of the round) ─────────
+  // The first time the player taps TRACK they're at the tee box — a known
+  // location, ideal for anchoring. We capture two values at that moment:
+  //   • baroAnchorM   — CMAltimeter relativeAltitude (sub-meter precise)
+  //   • gpsAltAnchorM — GPS altitude (±10m noisy, but absolute MSL)
+  // For every subsequent elevation reading along the player's walk:
+  //   effectiveAlt = gpsAltAnchorM + (currentBaroM - baroAnchorM)
+  // The (currentBaro - anchorBaro) delta is sub-meter; the gpsAltAnchor
+  // carries the single noisy absolute reading for the whole round. Across
+  // many rounds + many players the GPS-anchor noise averages out in the
+  // shared course-frame elevation grid, while same-round deltas remain
+  // barometer-precise. This is what makes "walk-the-hole" elevation
+  // mapping actually accurate.
+  const baroAnchorMRef = useRef<number | null>(null);
+  const gpsAltAnchorMRef = useRef<number | null>(null);
+  // Course-level "is elevation well mapped" flag, captured from the
+  // dataQuality response. When TRUE we skip the per-fix elevation
+  // sampling entirely — the shared course grid already has enough
+  // points and continuing to upload would waste battery (barometer +
+  // GPS + radio for the periodic flush) for zero map improvement.
+  // Null = not yet fetched (default to sampling, safe behavior).
+  const [elevationWellMapped, setElevationWellMapped] = useState<boolean | null>(null);
   // Show the "this course is underdocumented" popup at most once per scoring-
   // screen instance so leaving and re-entering doesn't re-nag.
   const dataQualityShownRef = useRef(false);
@@ -754,6 +776,22 @@ export default function ScoringScreen() {
     onTrackPress, onTrackLongPress, cancelActiveShot,
   } = tracking;
 
+  // ── Capture barometric anchor on FIRST track press of the round ────────
+  // When activeShot transitions from null → not-null for the first time in
+  // this scoring screen's lifetime, the player is at the tee box. Capture
+  // the (gpsAlt, baro) pair so subsequent elevation samples + slope
+  // readings can use sub-meter baro deltas instead of noisy GPS altitude.
+  // The refs persist across re-renders — never re-captured this round.
+  useEffect(() => {
+    if (!activeShot) return;
+    if (baroAnchorMRef.current != null) return;     // already anchored
+    if (!userCoord || typeof userCoord.altitude !== 'number') return;
+    const baroNow = getRelativeAltitudeM();
+    if (typeof baroNow !== 'number') return;        // no barometer support
+    baroAnchorMRef.current = baroNow;
+    gpsAltAnchorMRef.current = userCoord.altitude;
+  }, [activeShot, userCoord, getRelativeAltitudeM]);
+
   // ── Past shots at this hole — premium ghost-shot overlay ──────────────
   // Pulls every tracked shot this user has landed on the current course +
   // hole in prior rounds. Only refetches when the hole or course changes.
@@ -920,6 +958,11 @@ export default function ScoringScreen() {
     dataQualityShownRef.current = true;
     api.courses.dataQuality(course.course_id)
       .then((dq) => {
+        // Stash the elevation-coverage flag so the sample effect can
+        // skip uploading new points when the course is already well
+        // mapped — saves battery on every subsequent round at this
+        // course. Inverted: low_elevation=false → wellMapped=true.
+        setElevationWellMapped(dq.low_elevation === false);
         if (!dq.low_data) return;
         const lines: string[] = [];
         if (dq.low_pins) {
@@ -951,19 +994,47 @@ export default function ScoringScreen() {
   // Buffers each watchPositionAsync fix (skip repeats within ~3m horizontal).
   // Every 15s of activity the buffer flushes to the server, where points
   // get bucketed and averaged into the course's shared elevation map.
+  //
+  // ALTITUDE SOURCE — two paths, in order of preference:
+  //   1. PREFERRED: baro-delta. Once the player has tapped TRACK on their
+  //      first shot (= they're at the tee), we capture (gpsAlt, baro) as
+  //      anchors. Subsequent samples use:
+  //          effectiveAlt = gpsAltAnchor + (currentBaro - baroAnchor)
+  //      The delta is sub-meter accurate from CMAltimeter; the anchor's
+  //      GPS noise averages out across many rounds in the shared grid.
+  //   2. FALLBACK: raw GPS altitude. Used until the anchor is captured
+  //      (pre-first-shot wandering) or on devices without a barometer.
   useEffect(() => {
     if (!course?.course_id || elevOffsetM == null || !userCoord) return;
     if (typeof userCoord.altitude !== 'number') return;
+    // BATTERY GATE: skip the whole sampling loop when the server has
+    // told us this course already has solid elevation coverage. The
+    // map won't get materially better from another set of contributions
+    // and we'd be paying barometer + GPS + radio cost for nothing. Falls
+    // through to sampling when the flag is null (data-quality call
+    // hasn't returned yet, or failed) or true-low (course needs data).
+    if (elevationWellMapped === true) return;
     // Throttle by movement so a stationary phone doesn't spam-overwrite the
     // same grid cell with hundreds of identical samples.
     const last = lastElevSampleAtRef.current;
     if (last && distMetres(last.lat, last.lng, userCoord.latitude, userCoord.longitude) < 3) return;
     lastElevSampleAtRef.current = { lat: userCoord.latitude, lng: userCoord.longitude };
 
+    // Compute the sample's altitude. Baro-delta preferred when the anchor
+    // is set + a fresh baro reading is available — sub-meter precision.
+    const baroNow = getRelativeAltitudeM();
+    const haveBaroPath =
+      baroAnchorMRef.current != null
+      && gpsAltAnchorMRef.current != null
+      && typeof baroNow === 'number';
+    const effectiveAlt = haveBaroPath
+      ? gpsAltAnchorMRef.current! + (baroNow! - baroAnchorMRef.current!)
+      : userCoord.altitude;
+
     elevSampleBuf.current.push({
       lat: userCoord.latitude,
       lng: userCoord.longitude,
-      elevationRelM: userCoord.altitude - elevOffsetM,
+      elevationRelM: effectiveAlt - elevOffsetM,
     });
 
     if (!elevFlushTimer.current) {
@@ -980,7 +1051,7 @@ export default function ScoringScreen() {
     // Cleanup is handled by the flush itself; clearing the timer on unmount
     // would drop the final samples, so we let it fire and the closure's
     // null-checks handle any race.
-  }, [course?.course_id, elevOffsetM, userCoord?.latitude, userCoord?.longitude, userCoord?.altitude]);
+  }, [course?.course_id, elevOffsetM, userCoord?.latitude, userCoord?.longitude, userCoord?.altitude, getRelativeAltitudeM, elevationWellMapped]);
 
   // Final flush on unmount so the last few samples aren't lost.
   useEffect(() => {
@@ -1144,7 +1215,18 @@ export default function ScoringScreen() {
       && elevOffsetM != null
       && typeof userCoord.altitude === 'number'
     ) {
-      const userRelM = userCoord.altitude - elevOffsetM;
+      // Effective altitude — uses the baro-delta path when the round's
+      // anchor is set (player has tapped TRACK on their first shot).
+      // Without the anchor we fall back to raw GPS altitude (±10m noise).
+      const baroNow = getRelativeAltitudeM();
+      const haveBaroPath =
+        baroAnchorMRef.current != null
+        && gpsAltAnchorMRef.current != null
+        && typeof baroNow === 'number';
+      const effectiveAlt = haveBaroPath
+        ? gpsAltAnchorMRef.current! + (baroNow! - baroAnchorMRef.current!)
+        : userCoord.altitude;
+      const userRelM = effectiveAlt - elevOffsetM;
       const elevDiffM = pinRelElevM - userRelM;
       const adj = Math.round(elevDiffM * 1.09);
       // Sub-yard noise floor — even barometer reads jitter slightly.
@@ -1512,7 +1594,17 @@ export default function ScoringScreen() {
       windAlongMph: along,
       rain:         weather.rain,
     });
-    const effective = Math.round(baseYds + (-adj.effective_delta_yds));
+    // effective = the "club for X yards" number to display alongside the
+    // raw yardage. By convention (see weatherAdjust.ts:122), positive
+    // effective_delta_yds means conditions REDUCE carry (headwind, cold,
+    // sea-level vs altitude home) so we need MORE club — i.e. effective
+    // should be HIGHER than base. Negative delta means conditions HELP
+    // carry — effective is LOWER than base.
+    //
+    // Previously this had an extra negation that inverted the direction:
+    // a 10mph headwind ended up displaying "plays 135" on a 150 target
+    // (suggesting LESS club), which is exactly backwards.
+    const effective = Math.round(baseYds + adj.effective_delta_yds);
     if (effective === baseYds) return null;
     return {
       effective, breakdown: adj, windAlong: along,
@@ -2629,7 +2721,12 @@ export default function ScoringScreen() {
             windAlongMph: along,
             rain: weather.rain,
           });
-          const eff = Math.round(slopeBase + (-adj.effective_delta_yds));
+          // Same sign convention as the main pin-distance plays-like
+          // calculation above (line ~1515): positive effective_delta means
+          // conditions reduce carry → effective yardage is HIGHER than
+          // base (need more club). A stray negation here used to flip
+          // both wind and altitude readings.
+          const eff = Math.round(slopeBase + adj.effective_delta_yds);
           // Show ANY non-zero adjustment, however small — the user is paying
           // attention to it and a "−1 yds" plays-like still tells them the
           // direction conditions are pushing the ball.
