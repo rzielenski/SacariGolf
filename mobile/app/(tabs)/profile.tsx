@@ -15,6 +15,8 @@ import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest } from '../../components/RankCrest';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
+import { PressableScale } from '../../components/ui/PressableScale';
+import { GlowCard } from '../../components/ui/GlowCard';
 
 function EloRank(elo: number): { label: string; color: string; next: number } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
@@ -372,43 +374,64 @@ export default function ProfileScreen() {
       </TouchableOpacity>
 
       {/* Compact 2×2 grid of profile shortcuts. Full descriptions live
-          inside each card's tap-through modal so this surface stays scannable. */}
+          inside each card's tap-through modal so this surface stays scannable.
+          Each tile uses PressableScale for tactile press feedback. */}
       <View style={styles.miniGrid}>
-        <TouchableOpacity style={styles.miniCard} onPress={() => setHomeCourseModalVisible(true)}>
+        <PressableScale onPress={() => setHomeCourseModalVisible(true)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>HOME COURSE</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
             {(user as any)?.home_course_name || 'Tap to set'}
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
 
-        <TouchableOpacity style={styles.miniCard} onPress={() => setHcapModalVisible(true)}>
+        <PressableScale onPress={() => setHcapModalVisible(true)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>HANDICAP</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
             {handicap?.handicap_index != null
               ? handicap.handicap_index.toFixed(1)
               : 'Need 3+ rounds'}
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
 
-        <TouchableOpacity
-          style={styles.miniCard}
+        <PressableScale
           onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
+          style={styles.miniCard}
         >
           <Text style={styles.miniLabel}>STARTING HCP</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
             {user.handicap_index != null ? user.handicap_index.toFixed(1) : 'Set'}
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
 
-        <TouchableOpacity style={styles.miniCard} onPress={() => router.push('/bag' as any)}>
+        <PressableScale onPress={() => router.push('/bag' as any)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>MY BAG</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
             {Array.isArray((user as any).clubs_in_bag) && (user as any).clubs_in_bag.length > 0
               ? `${(user as any).clubs_in_bag.length} clubs`
               : 'Edit'}
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
       </View>
+
+      {/* Range Session — single prominent CTA. Improvement features (swing
+          capture, pose analysis, pro-comparison) get their own surface
+          rather than being buried in the mini-grid. Tap → /range.
+          GlowCard pulse + PressableScale press feedback. */}
+      <PressableScale onPress={() => router.push('/range' as any)} style={{ marginBottom: 14 }}>
+        <GlowCard color={C.gold} style={styles.rangeCta}>
+          <View style={styles.rangeCtaIcon}>
+            <Text style={styles.rangeCtaIconText}>⛳︎</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.rangeCtaLabel}>RANGE SESSION</Text>
+            <Text style={styles.rangeCtaBody}>
+              Record a swing — body-pose analysis, clubhead trace, full
+              comparison to pro and rec-player baselines.
+            </Text>
+          </View>
+          <Text style={styles.rangeCtaChev}>›</Text>
+        </GlowCard>
+      </PressableScale>
 
       {/* ELO Progress */}
       <View style={styles.card}>
@@ -1097,22 +1120,57 @@ const styles = StyleSheet.create({
   editableSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   editChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
 
-  // Compact 2×2 grid replacing the four full-width editableCards. Each tile
-  // is a fixed-width chip with just the label + current value — descriptions
-  // and breakdowns are shown in the tap-through modal so they don't crowd
-  // the profile surface.
+  // 2×2 grid replacing the four full-width editableCards. Each row spans
+  // the full screen width with two equally-sized cards (50/50 minus gap),
+  // so the profile reads as a clean dashboard rather than four tiny chips.
+  // Visual order matches semantic order: Home Course + Handicap on top,
+  // Starting HCP + My Bag below.
   miniGrid: {
     flexDirection: 'row', flexWrap: 'wrap',
-    gap: 8, marginBottom: 14,
+    gap: 10, marginBottom: 14,
   },
   miniCard: {
-    flexBasis: '48%', flexGrow: 1,
-    backgroundColor: C.card, borderRadius: 8,
-    paddingVertical: 8, paddingHorizontal: 10,
-    borderWidth: 1, borderColor: C.border,
+    // flexBasis 47% leaves room for the 10px gap and a tiny pixel-rounding
+    // safety margin; flexGrow: 1 takes whatever's left over so each card
+    // ends up at exactly half the available row width on every device size.
+    flexBasis: '47%',
+    flexGrow: 1,
+    backgroundColor: C.card,
+    borderRadius: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    minHeight: 64,
+    justifyContent: 'center',
   },
-  miniLabel: { color: C.gold, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
-  miniValue: { color: C.text, fontSize: 13, fontWeight: '700', marginTop: 3 },
+  miniLabel: { color: C.gold, fontSize: 10, fontWeight: '800', letterSpacing: 1.3 },
+  miniValue: { color: C.text, fontSize: 14, fontWeight: '700', marginTop: 4 },
+
+  // Range Session CTA — wrapped in GlowCard which handles the pulsing
+  // border + halo glow itself. We only set inner layout here (padding,
+  // flex direction, gap). Background tint is a light gold wash applied
+  // INSIDE the GlowCard's border layers so the surface still reads as
+  // gold-tinted at rest.
+  rangeCta: {
+    backgroundColor: C.gold + '11',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderRadius: 10,
+  },
+  rangeCtaIcon: {
+    width: 42, height: 42, borderRadius: 8,
+    backgroundColor: C.gold + '33',
+    borderWidth: 1, borderColor: C.gold,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rangeCtaIconText: { color: C.gold, fontSize: 22, fontWeight: '900' },
+  rangeCtaLabel: { color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 1.4, marginBottom: 3 },
+  rangeCtaBody: { color: C.text, fontSize: 12, lineHeight: 16 },
+  rangeCtaChev: { color: C.gold, fontSize: 24, fontWeight: '700' },
 
   bioInput: {
     backgroundColor: C.card, color: C.text, borderRadius: 8,

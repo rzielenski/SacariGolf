@@ -10,19 +10,27 @@ import { Platform } from 'react-native';
 // };
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Sacari Golf — pure black, warm gothic gold, polished silver.
+// Sacari Golf — true black, warm gothic gold, polished silver.
 // Pulled from the SacariSquare crest: black background, gold gothic lettering
 // + sword pommel, silver blade. `gold` and `goldLight` are the warm-gold accent
 // pair; `text` and `textMuted` are silver tones used for body copy.
+//
+// PALETTE NOTES (2026 refresh):
+//   The dark surfaces used to lean warm (#0e0e10, #16161a, brown-tinged border)
+//   which muddied the contrast against the gold. Switched the surface stack
+//   to a slightly cooler near-black so the warm gold pops harder by complement,
+//   and dropped the border to a steel-grey-with-faint-gold instead of brown.
+//   Net effect: gold reads ~10% brighter against the same backgrounds, and
+//   text contrast against card/cardAlt surfaces measures cleaner.
 export const C = {
-  bg:        '#000000',  // pure black — matches the icon background
-  surface:   '#080808',  // near-black surface
-  card:      '#0e0e10',  // raised card on black
-  cardAlt:   '#16161a',  // lifted card
-  border:    '#2a241a',  // warm dark gold-bronze edge
+  bg:        '#000000',  // pure black — matches the icon background exactly
+  surface:   '#050507',  // truer near-black, slight cool cast for depth
+  card:      '#0a0a0d',  // raised card — cooler than prev #0e0e10
+  cardAlt:   '#121216',  // lifted card — cooler than prev #16161a
+  border:    '#1d1c18',  // steel-with-faint-gold (was warm brown)
   gold:      '#d4a93f',  // rich antique gold (matches SACARI lettering)
   goldLight: '#f0c95a',  // brighter gold highlight
-  text:      '#e8e6dc',  // bright polished silver — body text
+  text:      '#ebe9df',  // bright polished silver — body text (touch brighter)
   textMuted: '#9a978a',  // tarnished silver-grey
   textDim:   '#4a4740',  // deep silver shadow
   green:     '#7aab78',  // sage — WIN / JOIN / Playing Now

@@ -27,6 +27,8 @@ import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { Match } from '../../types';
 import { SocialFeed } from '../../components/SocialFeed';
+import { PressableScale } from '../../components/ui/PressableScale';
+import { GlowCard } from '../../components/ui/GlowCard';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -133,42 +135,46 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Compact status row — round-in-progress + lucky-round perks share
-          one line so they don't eat half the screen above the feed. Each
-          chip is tappable: resume continues the round; lucky-round opens
-          an alert explaining what it does. */}
-      {(resumable || perkCount > 0) && (
+      {/* Lucky Round — thin pulsing strip that hugs the bottom of the ELO
+          card. Reads as an "active perk tag" on your rating rather than a
+          separate banner. Tap → alert explaining how it cashes in. */}
+      {perkCount > 0 && (
+        <PressableScale
+          onPress={() =>
+            Alert.alert(
+              'Lucky Round',
+              perkCount > 1
+                ? `You have ${perkCount} Lucky Round perks. Each one will double your next ranked-match win or cancel a loss — whichever happens first.`
+                : 'Your next ranked match will count double on a win, or cancel a loss — whichever happens first.',
+            )
+          }
+          style={{ marginTop: -8, marginBottom: 14 }}
+        >
+          <GlowCard color={C.green} style={styles.luckyBar} minBorderOpacity={0.75} periodMs={2400}>
+            <Text style={styles.luckyBarMark}>★</Text>
+            <Text style={styles.luckyBarLabel} numberOfLines={1}>
+              {perkCount > 1 ? `${perkCount}× LUCKY ROUND ACTIVE` : 'LUCKY ROUND ACTIVE'}
+            </Text>
+          </GlowCard>
+        </PressableScale>
+      )}
+
+      {/* Resume-round chip — sole occupant of the status row now that
+          lucky perks have been promoted to the ELO card. Full-width when
+          present so it reads as the unmissable "finish what you started"
+          banner above the feed. */}
+      {resumable && (
         <View style={styles.statusRow}>
-          {resumable && (
-            <TouchableOpacity
-              style={[styles.statusChip, styles.statusChipGold, { flex: resumable && perkCount > 0 ? 1.4 : 1 }]}
-              onPress={() => router.push(`/match/${resumable.match_id}` as any)}
-              activeOpacity={0.85}
-            >
+          <PressableScale
+            onPress={() => router.push(`/match/${resumable.match_id}` as any)}
+            style={{ flex: 1 }}
+          >
+            <GlowCard color={C.gold} style={[styles.statusChip, styles.statusChipGold]}>
               <View style={styles.statusChipDot} />
               <Text style={styles.statusChipLabel} numberOfLines={1}>RESUME ROUND</Text>
               <Text style={styles.statusChipChev}>›</Text>
-            </TouchableOpacity>
-          )}
-          {perkCount > 0 && (
-            <TouchableOpacity
-              style={[styles.statusChip, styles.statusChipGreen]}
-              activeOpacity={0.85}
-              onPress={() =>
-                Alert.alert(
-                  'Lucky Round',
-                  perkCount > 1
-                    ? `You have ${perkCount} Lucky Round perks. Each one will double your next ranked-match win or cancel a loss — whichever happens first.`
-                    : 'Your next ranked match will count double on a win, or cancel a loss — whichever happens first.',
-                )
-              }
-            >
-              <Text style={styles.statusChipMark}>★</Text>
-              <Text style={styles.statusChipLabel} numberOfLines={1}>
-                {perkCount > 1 ? `${perkCount}× LUCKY` : 'LUCKY ROUND'}
-              </Text>
-            </TouchableOpacity>
-          )}
+            </GlowCard>
+          </PressableScale>
         </View>
       )}
 
@@ -204,26 +210,25 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
-      {/* 2-wide nav grid: Leaderboard + Tournaments */}
+      {/* 2-wide nav grid: Leaderboard + Tournaments. PressableScale gives
+          tactile press feedback (subtle scale + opacity) on each tile. */}
       <View style={styles.navGrid}>
-        <TouchableOpacity
-          style={styles.navTile}
+        <PressableScale
           onPress={() => router.push('/leaderboard' as any)}
-          activeOpacity={0.8}
+          style={styles.navTile}
         >
           <Text style={styles.navTileMark}>★</Text>
           <Text style={styles.navTileLabel}>Leaderboard</Text>
           <Text style={styles.navTileSub}>See where you rank globally</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.navTile}
+        </PressableScale>
+        <PressableScale
           onPress={() => router.push('/tournaments' as any)}
-          activeOpacity={0.8}
+          style={styles.navTile}
         >
           <Text style={styles.navTileMark}>♛</Text>
           <Text style={styles.navTileLabel}>Tournaments</Text>
           <Text style={styles.navTileSub}>Leagues + bracketed events</Text>
-        </TouchableOpacity>
+        </PressableScale>
       </View>
 
       <Text style={styles.feedHeader}>FEED</Text>
@@ -262,23 +267,40 @@ const styles = StyleSheet.create({
   eloStatLabel: { fontSize: 10, color: C.textMuted, marginTop: 2 },
 
   // Compact status row — resume-round and lucky-round share one line.
+  // Chips are wrapped in GlowCard which provides the pulsing border + halo
+  // glow itself, so we only set the inner layout (padding + flex) here.
   statusRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
   statusChip: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: 10,
     paddingVertical: 9,
     borderRadius: 8,
-    borderWidth: 1,
   },
-  statusChipGold:  { backgroundColor: C.gold + '22',  borderColor: C.gold },
-  statusChipGreen: { backgroundColor: C.green + '22', borderColor: C.green },
+  statusChipGold:  { backgroundColor: C.gold + '22' },
+  statusChipGreen: { backgroundColor: C.green + '22' },
   statusChipDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: C.gold },
   statusChipMark:  { color: C.green, fontSize: 13, fontWeight: '900' },
   statusChipLabel: { color: C.text, fontSize: 11, fontWeight: '800', letterSpacing: 0.8, flex: 1 },
   statusChipChev:  { color: C.gold, fontSize: 16, fontWeight: '700' },
+
+  // Lucky Round strip — slim green bar that visually attaches to the bottom
+  // of the ELO card (via the negative top margin on the wrapping
+  // PressableScale). Designed to read as a "perk tag" on the rating rather
+  // than a separate banner. Roughly half the visual weight of a status chip.
+  luckyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    backgroundColor: C.green + '1c',
+  },
+  luckyBarMark:  { color: C.green, fontSize: 11, fontWeight: '900' },
+  luckyBarLabel: { color: C.green, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
 
   verifyBanner: {
     backgroundColor: '#ffa50022', borderRadius: 10, padding: 14, marginBottom: 14,
@@ -296,11 +318,15 @@ const styles = StyleSheet.create({
   openBetaLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.5, textAlign: 'center' },
   openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
 
-  // 2-wide nav grid (replaces the stacked Leaderboard / Tournaments buttons)
+  // 2-wide nav grid (replaces the stacked Leaderboard / Tournaments buttons).
+  // Each tile uses PressableScale for tactile press feedback. Slight
+  // gold-tinted background wash makes the cards lift against the true-black
+  // page background with the refined palette.
   navGrid: { flexDirection: 'row', gap: 10, marginTop: 4, marginBottom: 24 },
   navTile: {
     flex: 1, backgroundColor: C.card, borderRadius: 10, padding: 14,
-    borderWidth: 1, borderColor: C.gold + '66', alignItems: 'flex-start',
+    borderWidth: 1, borderColor: C.gold + '55', alignItems: 'flex-start',
+    shadowColor: C.gold, shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 0 },
   },
   navTileMark: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900' },
   navTileLabel: { color: C.text, fontSize: 15, fontWeight: '800', marginTop: 6 },

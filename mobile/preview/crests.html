@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sacari Rank Crests + Celebrations — Preview</title>
+  <style>
+    /* Matches mobile/lib/colors.ts so the preview looks like the app. */
+    :root {
+      --bg: #000;
+      --surface: #080808;
+      --card: #0e0e10;
+      --cardAlt: #16161a;
+      --border: #2a241a;
+      --gold: #d4a93f;
+      --goldLight: #f0c95a;
+      --text: #e8e6dc;
+      --textMuted: #9a978a;
+      --textDim: #4a4740;
+      --green: #7aab78;
+      --red: #b03434;
+      --blue: #7a96b8;
+
+      --bronze: #cd7f32;
+      --silver: #c8c8d4;
+      --platinum: #dde3ea;
+      --diamond: #a8d8f0;
+      --silverAccent: #9090a0;
+      --goldAccent: var(--goldLight);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Georgia', 'Times New Roman', serif;
+      padding: 40px 24px 80px;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 32px;
+      letter-spacing: 1px;
+      margin: 0 0 8px;
+      color: var(--text);
+    }
+    .sub {
+      color: var(--textMuted);
+      font-size: 14px;
+      margin: 0 0 32px;
+      max-width: 700px;
+      line-height: 1.5;
+    }
+    h2 {
+      font-size: 22px;
+      margin: 40px 0 6px;
+      color: var(--text);
+    }
+    .h2sub { color: var(--textMuted); font-size: 13px; margin: 0 0 20px; }
+
+    /* ─── Crest layout (mirrors RankCrest.tsx) ───────────────────── */
+
+    .crestRow {
+      display: flex;
+      gap: 24px;
+      align-items: flex-end;
+      justify-content: flex-start;
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 28px 24px;
+    }
+    .tierMeta {
+      width: 110px;
+      flex-shrink: 0;
+    }
+    .tierMeta .label {
+      font-size: 22px;
+      font-weight: 900;
+      color: var(--text);
+      font-family: Georgia, serif;
+    }
+    .tierMeta .elo {
+      color: var(--gold);
+      font-size: 12px;
+      font-weight: 700;
+      margin-top: 2px;
+      letter-spacing: 0.5px;
+    }
+    .tierMeta .desc {
+      color: var(--textMuted);
+      font-size: 11px;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+
+    /* The crest container — square, with overflow visible so the crown
+       and shield can extend past the box. Matches the RN component's
+       size * 1.5 footprint. */
+    .crest {
+      position: relative;
+      display: inline-block;
+      overflow: visible;
+      vertical-align: bottom;
+    }
+    .sizeLabel {
+      color: var(--textMuted);
+      font-size: 9px;
+      font-weight: 700;
+      text-align: center;
+      margin-top: 6px;
+      letter-spacing: 1px;
+    }
+    .crestSlot { display: flex; flex-direction: column; align-items: center; }
+
+    /* The avatar — letter fallback inside a circle, centered horizontally,
+       biased DOWN inside the container by 6% so the crown has visual room
+       above. */
+    .avatar {
+      position: absolute;
+      border-radius: 50%;
+      background: var(--cardAlt);
+      color: var(--gold);
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* Rings — sit outside the avatar with progressive insets. */
+    .ring { position: absolute; border-radius: 50%; }
+
+    /* Glyph base styling — all ornament Text in the RN component
+       gets this shared shadow. */
+    .glyph {
+      position: absolute;
+      font-weight: 900;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.75);
+      pointer-events: none;
+      text-align: center;
+      line-height: 1;
+    }
+
+    .swordsTop { text-align: center; left: 0; right: 0; }
+    .crownStack {
+      position: absolute;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-direction: row;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 2%;
+      pointer-events: none;
+    }
+    .crownStack .glyph { position: static; }
+
+    .shieldStack {
+      position: absolute;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: center;
+      gap: 4%;
+      pointer-events: none;
+    }
+    .shieldStack .glyph { position: static; }
+
+    .shieldGem { left: 0; right: 0; text-align: center; }
+    .tailAccent { left: 0; right: 0; text-align: center; }
+
+    /* Diamond shimmer — opacity + scale pulse, 1.8s round trip. */
+    @keyframes shimmer {
+      0%, 100% { opacity: 0.88; transform: scale(0.95); }
+      50%      { opacity: 1;    transform: scale(1.07); }
+    }
+    @keyframes shimmerCounter {
+      0%, 100% { opacity: 1;    transform: scale(1.15); }
+      50%      { opacity: 0.45; transform: scale(0.85); }
+    }
+    @keyframes shimmerSmall {
+      0%, 100% { opacity: 0.45; transform: scale(0.85); }
+      50%      { opacity: 1;    transform: scale(1.15); }
+    }
+    .pulse        { animation: shimmer 1.8s ease-in-out infinite; }
+    .pulseCounter { animation: shimmerCounter 1.8s ease-in-out infinite; }
+    .pulseSmall   { animation: shimmerSmall 1.8s ease-in-out infinite; }
+
+    /* Halo glows by tier. */
+    .glowGold     { filter: drop-shadow(0 0 9px rgba(212,169,63,0.45)); }
+    .glowPlatinum { filter: drop-shadow(0 0 12px rgba(221,227,234,0.6)); }
+    .glowDiamond  { filter: drop-shadow(0 0 20px rgba(168,216,240,0.95))
+                            drop-shadow(0 0 4px rgba(240,201,90,0.5)); }
+
+    /* ─── Celebration overlay ─────────────────────────────────────── */
+
+    .triggerRow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: 16px 0 6px;
+    }
+    .triggerBtn {
+      flex: 1 1 200px;
+      background: var(--card);
+      border: 1px solid var(--gold);
+      color: var(--gold);
+      padding: 16px;
+      border-radius: 10px;
+      font-family: Georgia, serif;
+      font-size: 16px;
+      font-weight: 900;
+      letter-spacing: 1px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .triggerBtn:hover { background: rgba(212,169,63,0.1); }
+    .triggerBtn small {
+      display: block;
+      margin-top: 4px;
+      font-weight: 400;
+      font-size: 10px;
+      color: var(--textMuted);
+      letter-spacing: 0.5px;
+    }
+
+    .tierPicker { display: flex; gap: 8px; margin: 14px 0; }
+    .tierBtn {
+      flex: 1;
+      padding: 10px;
+      border-radius: 6px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--textMuted);
+      font-weight: 800;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .tierBtn.active {
+      border-color: var(--gold);
+      background: rgba(212,169,63,0.13);
+      color: var(--gold);
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.93);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .overlay.visible {
+      display: flex;
+      animation: fadeIn 0.24s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    .celebCard {
+      background: var(--card);
+      border: 2px solid;
+      border-radius: 18px;
+      padding: 24px 26px;
+      width: 82%;
+      max-width: 360px;
+      text-align: center;
+      box-shadow: 0 12px 24px rgba(0,0,0,0.6);
+      position: relative;
+      animation: slideUp 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @keyframes slideUp { from { transform: translateY(40px); } to { transform: translateY(0); } }
+
+    .celebLabel {
+      font-family: Georgia, serif;
+      font-size: 44px;
+      font-weight: 900;
+      letter-spacing: 1.5px;
+      margin: 0 0 18px;
+      text-shadow: 0 2px 12px rgba(255,210,90,0.4);
+      animation: pop 0.5s cubic-bezier(0.22, 1.2, 0.36, 1);
+    }
+    @keyframes pop { from { transform: scale(0); } to { transform: scale(1); } }
+
+    .celebLabelEcho {
+      position: absolute;
+      left: 0; right: 0; top: 24px;
+      opacity: 0.35;
+      transform: scale(1.1);
+      pointer-events: none;
+      animation: pop 0.5s cubic-bezier(0.22, 1.2, 0.36, 1);
+    }
+
+    .avatarBurst {
+      position: relative;
+      width: 132px;
+      height: 132px;
+      margin: 0 auto 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .burstSparkle {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      font-size: 18px;
+      font-weight: 900;
+      text-shadow: 0 0 4px rgba(0,0,0,0.6);
+      transform-origin: center;
+      animation: burst 1.2s ease-out forwards;
+      pointer-events: none;
+    }
+    @keyframes burst {
+      0%   { transform: translate(-50%, -50%) scale(0.4); opacity: 0; }
+      40%  { opacity: 1; }
+      100% { transform: translate(var(--tx), var(--ty)) scale(1); opacity: 0.4; }
+    }
+
+    .stormSparkle {
+      position: absolute;
+      font-weight: 900;
+      text-shadow: 0 0 6px rgba(0,0,0,0.6);
+      pointer-events: none;
+      animation: storm 1.4s ease-in-out infinite alternate;
+    }
+    @keyframes storm {
+      from { opacity: 0.15; transform: scale(0.7); }
+      to   { opacity: 0.85; transform: scale(1.2); }
+    }
+
+    .celebUser {
+      font-family: Georgia, serif;
+      font-size: 22px;
+      font-weight: 900;
+      margin: 14px 0 4px;
+      color: var(--text);
+    }
+    .celebMeta {
+      color: var(--textMuted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 1.4px;
+    }
+    .celebHint {
+      color: var(--textDim);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      margin-top: 20px;
+    }
+
+    .closeNote {
+      color: var(--textDim);
+      font-size: 10px;
+      margin-top: 24px;
+      font-style: italic;
+      max-width: 600px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h1>Sacari Rank Crests</h1>
+  <p class="sub">
+    Static HTML preview of the medieval-themed rank crests + birdie/eagle/HIO
+    celebration overlays. Open this file in any browser — same Unicode glyphs
+    and layout proportions as the React Native components, just rendered via
+    HTML/CSS instead of <code>react-native</code> primitives.
+  </p>
+
+  <h2>The five tiers</h2>
+  <p class="h2sub">Bronze through Diamond — each row shows the crest at 32 / 64 / 96 px.</p>
+
+  <div id="crestRows"></div>
+
+  <h2>Celebrations</h2>
+  <p class="h2sub">Tap each to fire the animation. The avatar's crest tier is set by the picker below.</p>
+
+  <div>
+    <div style="color: var(--textMuted); font-weight: 800; font-size: 10px; letter-spacing: 1.2px; margin-bottom: 6px;">CREST TIER FOR CELEBRATION AVATAR</div>
+    <div class="tierPicker" id="tierPicker"></div>
+
+    <div class="triggerRow" id="triggerRow"></div>
+  </div>
+
+  <p class="closeNote">
+    Note: the celebration audio (player's clan/personal theme song) doesn't
+    play in this static preview — the real RN component fires the audio
+    via <code>expo-av</code>. Everything else (the burst, the storm, the
+    label echo, the crest in the center) matches the live build.
+  </p>
+
+  <!-- Celebration overlay (initially hidden) -->
+  <div class="overlay" id="celebOverlay">
+    <div class="celebCard" id="celebCard">
+      <div class="celebLabel" id="celebLabel"></div>
+      <div class="celebLabelEcho" id="celebLabelEcho" style="display: none;"></div>
+      <div class="avatarBurst" id="avatarBurst"></div>
+      <div class="celebUser">rich1468</div>
+      <div class="celebMeta" id="celebMeta"></div>
+      <div class="celebHint">click anywhere to dismiss</div>
+    </div>
+  </div>
+
+  <script>
+    // ─── Tier configuration (mirrors RankCrest.tsx) ─────────────────────
+
+    const TIERS = [
+      { id: 'bronze',   label: 'Bronze',   elo: 1200, floor: 0,    color: 'var(--bronze)',   accent: 'var(--bronze)',     desc: 'the apprentice — bare medallion, single ring' },
+      { id: 'silver',   label: 'Silver',   elo: 1500, floor: 1400, color: 'var(--silver)',   accent: 'var(--silverAccent)', desc: 'the recruit — double ring + star peak' },
+      { id: 'gold',     label: 'Gold',     elo: 1700, floor: 1600, color: 'var(--gold)',     accent: 'var(--goldAccent)', desc: 'the knight — crown + crossed swords + dagger wings + shield' },
+      { id: 'platinum', label: 'Platinum', elo: 1900, floor: 1800, color: 'var(--platinum)', accent: 'var(--goldAccent)', desc: 'the captain — 5-peak crown + gem-flanked shield' },
+      { id: 'diamond',  label: 'Diamond',  elo: 2200, floor: 2000, color: 'var(--diamond)',  accent: 'var(--goldAccent)', desc: 'the champion — triple ring + pulsing crown + trailing banner' },
+    ];
+
+    const KINDS = [
+      { id: 'birdie',    label: 'BIRDIE',      sub: '5.5s · gold burst',           accent: 'var(--gold)',    sparkleCount: 8,  echo: false, storm: false },
+      { id: 'eagle',     label: 'EAGLE',       sub: '7.5s · sage + green',          accent: 'var(--green)',   sparkleCount: 12, echo: false, storm: false },
+      { id: 'ace',       label: 'HOLE IN ONE', sub: '9.5s · sparkle storm',         accent: 'var(--goldLight)', sparkleCount: 18, echo: true,  storm: true  },
+      { id: 'albatross', label: 'ALBATROSS',   sub: '9.5s · diamond-blue storm',    accent: 'var(--diamond)', sparkleCount: 18, echo: true,  storm: true  },
+    ];
+
+    const STORM_POSITIONS = [
+      [8,12,28],[88,8,22],[18,28,18],[78,22,32],[4,48,24],[92,42,28],
+      [12,68,22],[82,64,18],[22,82,30],[72,86,22],[40,6,20],[56,4,26],
+      [48,92,28],[36,84,18],[64,80,22],[2,32,16],[96,30,20],[6,80,22],
+    ];
+
+    // ─── Build a crest DOM (faithful to RankCrest.tsx layout math) ──────
+
+    function buildCrest(tier, size) {
+      const total = Math.round(size * 1.5);
+      const verticalBias = Math.round(size * 0.06);
+      const avatarLeft = (total - size) / 2;
+      const avatarTop = (total - size) / 2 + verticalBias;
+      const avatarCenterY = avatarTop + size / 2;
+      const avatarBottom = avatarTop + size;
+
+      const swordSize = Math.round(size * 0.28);
+      const crownBig  = Math.round(size * 0.32);
+      const crownMid  = Math.round(size * 0.22);
+      const crownSide = Math.round(size * 0.17);
+      const wingSize  = Math.round(size * 0.42);
+      const shieldSize = Math.round(size * 0.30);
+      const gemSize    = Math.round(size * 0.14);
+      const tailSize   = Math.round(size * 0.13);
+      const sparkleSm  = Math.round(size * 0.11);
+
+      const leftWingX = avatarLeft - wingSize * 0.55;
+      const rightWingX = avatarLeft + size - wingSize * 0.45;
+      const wingY = avatarCenterY - wingSize / 2;
+
+      const t = TIERS.find((x) => x.id === tier);
+      const isBronze   = tier === 'bronze';
+      const isSilver   = tier === 'silver';
+      const isGold     = tier === 'gold';
+      const isPlatinum = tier === 'platinum';
+      const isDiamond  = tier === 'diamond';
+      const goldUp     = isGold || isPlatinum || isDiamond;
+      const platUp     = isPlatinum || isDiamond;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'crest ' + (isDiamond ? 'glowDiamond' : isPlatinum ? 'glowPlatinum' : isGold ? 'glowGold' : '');
+      wrap.style.width = total + 'px';
+      wrap.style.height = total + 'px';
+
+      function add(html) { wrap.insertAdjacentHTML('beforeend', html); }
+
+      // Crossed swords above crown (gold+)
+      if (goldUp) {
+        const top = avatarTop - crownBig * 1.05 - swordSize * 0.45;
+        const color = isDiamond ? '#f0c95a' : t.color;
+        add(`<span class="glyph swordsTop" style="top:${top}px;font-size:${swordSize}px;color:${color};line-height:${swordSize}px">⚔</span>`);
+      }
+
+      // Crown stack (silver+)
+      if (!isBronze) {
+        const stackTop = avatarTop - crownBig * 0.95;
+        const stackHeight = crownBig * 1.1;
+        const html = ['<div class="crownStack" style="top:' + stackTop + 'px;height:' + stackHeight + 'px">'];
+
+        if (goldUp) {
+          html.push(`<span class="glyph" style="color:${t.accent};font-size:${crownSide}px;transform:translateY(${crownBig*0.20}px)">✦</span>`);
+        }
+        if (platUp) {
+          html.push(`<span class="glyph" style="color:${t.color};font-size:${crownMid}px;transform:translateY(${crownBig*0.08}px)">♛</span>`);
+        }
+
+        // Center crown
+        if (isDiamond) {
+          html.push(`<span class="glyph pulse" style="color:#f0c95a;font-size:${crownBig}px">♛</span>`);
+        } else if (isGold || isPlatinum) {
+          html.push(`<span class="glyph" style="color:${t.color};font-size:${crownBig}px">♛</span>`);
+        } else {
+          // Silver
+          html.push(`<span class="glyph" style="color:${t.color};font-size:${Math.round(crownBig*0.65)}px">✦</span>`);
+        }
+
+        if (platUp) {
+          html.push(`<span class="glyph" style="color:${t.color};font-size:${crownMid}px;transform:translateY(${crownBig*0.08}px)">♛</span>`);
+        }
+        if (goldUp) {
+          html.push(`<span class="glyph" style="color:${t.accent};font-size:${crownSide}px;transform:translateY(${crownBig*0.20}px)">✦</span>`);
+        }
+        html.push('</div>');
+        add(html.join(''));
+      }
+
+      // Dagger wings (gold+)
+      if (goldUp) {
+        add(`<span class="glyph" style="top:${wingY}px;left:${leftWingX}px;width:${wingSize}px;height:${wingSize}px;color:${t.accent};font-size:${wingSize}px;line-height:${wingSize}px;transform:rotate(90deg)">†</span>`);
+        add(`<span class="glyph" style="top:${wingY}px;left:${rightWingX}px;width:${wingSize}px;height:${wingSize}px;color:${t.accent};font-size:${wingSize}px;line-height:${wingSize}px;transform:rotate(270deg)">†</span>`);
+      }
+
+      // Dagger-tip sparkles (diamond only)
+      if (isDiamond) {
+        add(`<span class="glyph pulseSmall" style="top:${avatarCenterY - sparkleSm/2}px;left:${leftWingX - sparkleSm*0.3}px;font-size:${sparkleSm}px;color:var(--goldLight)">✦</span>`);
+        add(`<span class="glyph pulseSmall" style="top:${avatarCenterY - sparkleSm/2}px;left:${rightWingX + wingSize - sparkleSm*0.7}px;font-size:${sparkleSm}px;color:var(--goldLight)">✦</span>`);
+      }
+
+      // Rings
+      function ring(inset, color, width) {
+        const ringSize = size + inset * 2;
+        return `<div class="ring" style="left:${avatarLeft-inset}px;top:${avatarTop-inset}px;width:${ringSize}px;height:${ringSize}px;border:${width}px solid ${color}"></div>`;
+      }
+      add(ring(4, t.color, isPlatinum || isDiamond ? 3 : isGold ? 2.5 : 2));
+      if (!isBronze) add(ring(1, t.accent, isDiamond ? 1.5 : 1));
+      if (isDiamond) add(ring(8, t.accent, 1));
+
+      // Avatar (letter fallback)
+      add(`<div class="avatar" style="top:${avatarTop}px;left:${avatarLeft}px;width:${size}px;height:${size}px;font-size:${Math.round(size*0.42)}px">r</div>`);
+
+      // Shield base (gold+)
+      if (goldUp) {
+        const top = avatarBottom - shieldSize * 0.25;
+        const html = [`<div class="shieldStack" style="top:${top}px">`];
+        if (platUp) html.push(`<span class="glyph" style="color:${t.accent};font-size:${gemSize}px">◆</span>`);
+        html.push(`<span class="glyph" style="color:${t.color};font-size:${shieldSize}px">⛨</span>`);
+        if (platUp) html.push(`<span class="glyph" style="color:${t.accent};font-size:${gemSize}px">◆</span>`);
+        html.push('</div>');
+        add(html.join(''));
+      }
+
+      // Shield gem (platinum+)
+      if (platUp) {
+        const top = avatarBottom + shieldSize * 0.13;
+        const color = isDiamond ? '#f0c95a' : 'var(--goldLight)';
+        add(`<span class="glyph shieldGem" style="top:${top}px;font-size:${Math.round(gemSize*0.9)}px;color:${color}">❖</span>`);
+      }
+
+      // Trailing tail (diamond only)
+      if (isDiamond) {
+        const top = avatarBottom + shieldSize * 0.55;
+        add(`<span class="glyph tailAccent" style="top:${top}px;font-size:${tailSize}px;color:${t.accent}">◇</span>`);
+      }
+
+      // Diamond corner sparkles
+      if (isDiamond) {
+        const positions = [
+          [avatarLeft - sparkleSm * 0.3, avatarTop - sparkleSm * 0.3],
+          [avatarLeft + size - sparkleSm * 0.7, avatarTop - sparkleSm * 0.3],
+          [avatarLeft - sparkleSm * 0.3, avatarBottom - sparkleSm * 0.7],
+          [avatarLeft + size - sparkleSm * 0.7, avatarBottom - sparkleSm * 0.7],
+        ];
+        for (const [x, y] of positions) {
+          add(`<span class="glyph pulseCounter" style="top:${y}px;left:${x}px;font-size:${sparkleSm}px;color:var(--goldLight)">✦</span>`);
+        }
+      }
+
+      return wrap;
+    }
+
+    // ─── Render the tier rows ───────────────────────────────────────────
+
+    const rowsContainer = document.getElementById('crestRows');
+    for (const t of TIERS) {
+      const row = document.createElement('div');
+      row.className = 'crestRow';
+      const meta = document.createElement('div');
+      meta.className = 'tierMeta';
+      meta.innerHTML = `
+        <div class="label">${t.label}</div>
+        <div class="elo">${t.floor === 0 ? '< 1400' : t.floor + '+'} ELO</div>
+        <div class="desc">${t.desc}</div>
+      `;
+      row.appendChild(meta);
+
+      for (const sz of [32, 64, 96]) {
+        const slot = document.createElement('div');
+        slot.className = 'crestSlot';
+        slot.appendChild(buildCrest(t.id, sz));
+        const lbl = document.createElement('div');
+        lbl.className = 'sizeLabel';
+        lbl.textContent = sz + 'px';
+        slot.appendChild(lbl);
+        row.appendChild(slot);
+      }
+      rowsContainer.appendChild(row);
+    }
+
+    // ─── Tier picker + celebration triggers ─────────────────────────────
+
+    let pickedTier = 'diamond'; // most fun preview default
+    const tierPicker = document.getElementById('tierPicker');
+    for (const t of TIERS) {
+      const btn = document.createElement('button');
+      btn.className = 'tierBtn' + (t.id === pickedTier ? ' active' : '');
+      btn.textContent = t.label;
+      btn.onclick = () => {
+        pickedTier = t.id;
+        for (const b of tierPicker.querySelectorAll('.tierBtn')) b.classList.remove('active');
+        btn.classList.add('active');
+      };
+      tierPicker.appendChild(btn);
+    }
+
+    const triggerRow = document.getElementById('triggerRow');
+    for (const k of KINDS) {
+      const btn = document.createElement('button');
+      btn.className = 'triggerBtn';
+      btn.innerHTML = `${k.label}<small>${k.sub}</small>`;
+      btn.onclick = () => fireCelebration(k);
+      triggerRow.appendChild(btn);
+    }
+
+    function fireCelebration(kind) {
+      const overlay = document.getElementById('celebOverlay');
+      const card    = document.getElementById('celebCard');
+      const label   = document.getElementById('celebLabel');
+      const echo    = document.getElementById('celebLabelEcho');
+      const meta    = document.getElementById('celebMeta');
+      const burst   = document.getElementById('avatarBurst');
+
+      card.style.borderColor = kind.accent;
+      label.textContent = kind.label;
+      label.style.color = kind.accent;
+
+      if (kind.echo) {
+        echo.style.display = 'block';
+        echo.textContent = kind.label;
+        echo.style.color = kind.accent;
+        echo.className = 'celebLabel celebLabelEcho';
+      } else {
+        echo.style.display = 'none';
+      }
+
+      meta.textContent = `HOLE 7 · PAR 4 · SCORE 3`;
+
+      // Build the burst
+      burst.innerHTML = '';
+
+      // Storm background for ace/albatross
+      const oldStorm = document.querySelectorAll('.stormSparkle');
+      for (const s of oldStorm) s.remove();
+      if (kind.storm) {
+        for (let i = 0; i < STORM_POSITIONS.length; i++) {
+          const [x, y, size] = STORM_POSITIONS[i];
+          const s = document.createElement('span');
+          s.className = 'stormSparkle';
+          s.style.left = x + '%';
+          s.style.top  = y + '%';
+          s.style.fontSize = size + 'px';
+          s.style.color = kind.accent;
+          s.style.animationDelay = (i % 3 * 0.2) + 's';
+          s.textContent = i % 3 === 1 ? '✧' : '✦';
+          overlay.appendChild(s);
+        }
+      }
+
+      // Inner crest
+      const crest = buildCrest(pickedTier, 88);
+      crest.style.position = 'absolute';
+      crest.style.top = '50%';
+      crest.style.left = '50%';
+      crest.style.transform = 'translate(-50%, -50%)';
+      burst.appendChild(crest);
+
+      // Burst sparkles flying outward
+      for (let i = 0; i < kind.sparkleCount; i++) {
+        const angle = (i / kind.sparkleCount) * 2 * Math.PI;
+        const tx = Math.cos(angle) * 80;
+        const ty = Math.sin(angle) * 80;
+        const s = document.createElement('span');
+        s.className = 'burstSparkle';
+        s.style.color = kind.accent;
+        s.style.setProperty('--tx', `calc(${tx}px - 50%)`);
+        s.style.setProperty('--ty', `calc(${ty}px - 50%)`);
+        s.textContent = '✦';
+        burst.appendChild(s);
+      }
+
+      overlay.classList.add('visible');
+
+      // Auto-dismiss
+      const holdMs = kind.id === 'ace' || kind.id === 'albatross' ? 9500
+                   : kind.id === 'eagle' ? 7500
+                   : 5500;
+      clearTimeout(window._celebTimer);
+      window._celebTimer = setTimeout(() => overlay.classList.remove('visible'), holdMs);
+    }
+
+    document.getElementById('celebOverlay').onclick = () => {
+      document.getElementById('celebOverlay').classList.remove('visible');
+      const stormEls = document.querySelectorAll('.stormSparkle');
+      for (const s of stormEls) s.remove();
+    };
+  </script>
+</body>
+</html>

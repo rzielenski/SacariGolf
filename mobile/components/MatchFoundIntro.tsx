@@ -6,6 +6,7 @@ import { Audio } from 'expo-av';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
+import { ShimmerButton } from './ui/ShimmerButton';
 
 /**
  * Match-found intro screen — animated reveal of both teams' clan info,
@@ -268,9 +269,16 @@ export function MatchFoundIntro({
           {renderSide(side2Players, meSide === 2, rightSlide)}
         </View>
 
-        <TouchableOpacity onPress={onDismiss} style={s.dismissBtn} activeOpacity={0.85}>
+        {/* Dismiss button uses ShimmerButton so a subtle gold-light highlight
+            sweeps across every ~4 seconds — draws the eye to the action
+            without being a constant motion distraction. */}
+        <ShimmerButton
+          onPress={onDismiss}
+          background={C.gold}
+          style={s.dismissBtn}
+        >
           <Text style={s.dismissText}>TAP TO START</Text>
-        </TouchableOpacity>
+        </ShimmerButton>
       </Animated.View>
     </Modal>
   );
@@ -333,7 +341,9 @@ const s = StyleSheet.create({
   dismissBtn: {
     position: 'absolute', bottom: 60, alignSelf: 'center',
     paddingHorizontal: 28, paddingVertical: 12,
-    borderWidth: 1, borderColor: C.gold, borderRadius: 6,
+    borderRadius: 6,
   },
-  dismissText: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.5 },
+  // Text now sits on a filled-gold ShimmerButton; flip color to bg
+  // (black) so the contrast reads cleanly.
+  dismissText: { color: C.bg, fontWeight: '900', fontSize: 13, letterSpacing: 1.5 },
 });
