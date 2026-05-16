@@ -24,6 +24,7 @@
         "NSPhotoLibraryAddUsageDescription": "Sacari saves the round summary card to your camera roll so you can share it.",
         "NSCameraUsageDescription": "Sacari uses the camera so you can snap a 'Find' photo without leaving the app.",
         "NSMicrophoneUsageDescription": "Sacari uses the microphone so you can send voice messages in chats with friends, teammates, and opponents.",
+        "NSMotionUsageDescription": "Sacari uses the iPhone barometer to measure elevation changes between your ball and the pin so plays-like distance is accurate.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },

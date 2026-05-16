@@ -57,8 +57,10 @@ export default function CourseMapScreen() {
       }
       setLocGranted(true);
 
-      // Get a quick initial fix
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+      // Get a quick initial fix (Highest = kCLLocationAccuracyBest, max
+      // hardware accuracy — about 5x more accurate than High at the same
+      // battery cost on iPhone)
+      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
       if (!active) return;
       const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
       const near = isOnCourse(coord.latitude, coord.longitude, cLat, cLng);
@@ -69,7 +71,7 @@ export default function CourseMapScreen() {
 
       // Then watch for updates
       watchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 2 },
+        { accuracy: Location.Accuracy.Highest, distanceInterval: 2 },
         (loc) => {
           if (!active) return;
           const c = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };

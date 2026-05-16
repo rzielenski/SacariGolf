@@ -10,6 +10,7 @@ import { useAuth } from '../../../lib/auth';
 import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
 import { VoiceMessageBubble } from '../../../components/VoiceMessageBubble';
+import { UserAvatar } from '../../../components/UserAvatar';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 
 /** Horizontal distance the user has to drag the mic LEFT, in pixels, before
@@ -337,9 +338,13 @@ function MessageBubble({ msg, isMe, onReport }: {
       delayLongPress={400}
     >
       {!isMe && (
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{msg.username?.[0]?.toUpperCase() ?? '?'}</Text>
-        </View>
+        <UserAvatar
+          username={msg.username}
+          avatarUrl={msg.avatar_url}
+          size={32}
+          borderRadius={4}
+          style={{ flexShrink: 0 }}
+        />
       )}
       <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
         {!isMe && <Text style={styles.bubbleName}>{msg.username}</Text>}

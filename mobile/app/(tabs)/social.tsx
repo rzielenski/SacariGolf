@@ -8,6 +8,7 @@ import { router } from 'expo-router';
 import { api } from '../../lib/api';
 import { MatchInvite, Clan } from '../../types';
 import { C } from '../../lib/colors';
+import { UserAvatar } from '../../components/UserAvatar';
 
 type Tab = 'friends' | 'clans' | 'chats';
 
@@ -186,6 +187,7 @@ function FriendsTab() {
           <Text style={styles.sectionTitle}>Match Invites</Text>
           {invites.map((inv) => (
             <View key={inv.invite_id} style={styles.inviteRow}>
+              <UserAvatar username={inv.from_username} avatarUrl={inv.from_avatar_url} size={36} borderRadius={4} />
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{inv.from_username} invited you</Text>
                 <Text style={styles.userElo}>
@@ -244,9 +246,7 @@ function FriendsTab() {
       {searching && <ActivityIndicator color={C.gold} style={{ marginVertical: 10 }} />}
       {searchResults.map((u) => (
         <View key={u.user_id} style={styles.userRow}>
-          <View style={styles.userAvatar}>
-            <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
-          </View>
+          <UserAvatar username={u.username} avatarUrl={u.avatar_url} size={40} borderRadius={4} />
           <View style={{ flex: 1 }}>
             <Text style={styles.userName}>{u.username}</Text>
             <Text style={styles.userElo}>{u.elo} ELO</Text>
@@ -262,9 +262,7 @@ function FriendsTab() {
           <Text style={styles.sectionTitle}>Friend Requests</Text>
           {requests.map((u) => (
             <View key={u.user_id} style={styles.userRow}>
-              <View style={styles.userAvatar}>
-                <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
-              </View>
+              <UserAvatar username={u.username} avatarUrl={u.avatar_url} size={40} borderRadius={4} />
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{u.username}</Text>
                 <Text style={styles.userElo}>{u.elo} ELO</Text>
@@ -287,9 +285,7 @@ function FriendsTab() {
               onPress={() => router.push(`/user/${u.user_id}` as any)}
               activeOpacity={0.7}
             >
-              <View style={styles.userAvatar}>
-                <Text style={styles.avatarText}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
-              </View>
+              <UserAvatar username={u.username} avatarUrl={u.avatar_url} size={40} borderRadius={4} />
               <View style={{ flex: 1 }}>
                 <Text style={styles.userName}>{u.username}</Text>
                 <Text style={styles.userElo}>{u.elo} ELO</Text>
@@ -487,9 +483,12 @@ function ChatsTab() {
             router.push(`/chat/dm/${conv.other_id}?name=${encodeURIComponent(conv.other_username)}` as any);
           }}
         >
-          <View style={styles.userAvatar}>
-            <Text style={styles.avatarText}>{conv.other_username?.[0]?.toUpperCase() ?? '?'}</Text>
-          </View>
+          <UserAvatar
+            username={conv.other_username}
+            avatarUrl={(conv as any).other_avatar_url}
+            size={40}
+            borderRadius={4}
+          />
           <View style={{ flex: 1 }}>
             <Text style={[styles.userName, conv.unread && styles.userNameUnread]}>{conv.other_username}</Text>
             {conv.last_message ? (
@@ -636,7 +635,7 @@ const styles = StyleSheet.create({
   addBtnText: { color: C.gold, fontWeight: '700', fontSize: 12 },
   inviteRow: {
     backgroundColor: C.card, borderRadius: 6, padding: 14,
-    flexDirection: 'row', alignItems: 'center', gap: 0, marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8,
     borderWidth: 1, borderColor: C.gold + '55',
   },
   emptyBox: { alignItems: 'center', paddingTop: 50 },

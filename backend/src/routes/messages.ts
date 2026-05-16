@@ -72,6 +72,7 @@ router.get('/conversations', requireAuth, wrap(async (req: AuthRequest, res: Res
        other_id,
        u.username AS other_username,
        u.elo AS other_elo,
+       u.avatar_url AS other_avatar_url,
        last_msg.body AS last_message,
        last_msg.created_at AS last_at,
        last_msg.from_user_id AS last_from_user_id,
@@ -207,7 +208,8 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 
   if (toUserId) {
     const { rows } = await pool.query(
-      `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id, u.username,
+      `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
+              u.username, u.avatar_url,
               dm.voice_url, dm.voice_duration_ms
        FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
        WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
@@ -227,7 +229,8 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const val = matchId ?? clanId;
 
   const { rows } = await pool.query(
-    `SELECT m.message_id, m.created_at, m.body, m.user_id, u.username,
+    `SELECT m.message_id, m.created_at, m.body, m.user_id,
+            u.username, u.avatar_url,
             m.voice_url, m.voice_duration_ms
      FROM messages m JOIN users u ON u.user_id = m.user_id
      WHERE m.${col} = $1

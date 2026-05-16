@@ -7,6 +7,7 @@ import { router } from 'expo-router';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
+import { UserAvatar } from '../components/UserAvatar';
 
 function EloColor(elo: number) {
   if (elo >= 2000) return '#a8d8f0';
@@ -110,11 +111,13 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
       <Text style={[styles.rank, { color: medalColor, fontFamily: rank <= 3 ? F.serif : undefined }]}>
         {rank <= 3 ? ['I', 'II', 'III'][rank - 1] : `#${rank}`}
       </Text>
-      <View style={[styles.avatar, { backgroundColor: eloColor + '22' }]}>
-        <Text style={[styles.avatarText, { color: eloColor }]}>
-          {player.username?.[0]?.toUpperCase() ?? '?'}
-        </Text>
-      </View>
+      <UserAvatar
+        username={player.username}
+        avatarUrl={player.avatar_url}
+        size={40}
+        borderRadius={4}
+        tintColor={eloColor + '22'}
+      />
       <View style={{ flex: 1 }}>
         <View style={styles.nameRow}>
           <Text style={styles.username}>{player.username}</Text>

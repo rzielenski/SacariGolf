@@ -55,6 +55,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT i.invite_id, i.match_id, i.created_at, i.expires_at,
             u.username AS from_username, u.elo AS from_elo,
+            u.avatar_url AS from_avatar_url,
             m.match_type, m.name AS match_name
      FROM match_invites i
      JOIN users u ON u.user_id = i.from_user_id

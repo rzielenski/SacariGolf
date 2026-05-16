@@ -365,76 +365,44 @@ export default function ProfileScreen() {
         <Text style={styles.editChev}>›</Text>
       </TouchableOpacity>
 
-      {/* Home Course */}
-      <TouchableOpacity style={styles.editableCard} onPress={() => setHomeCourseModalVisible(true)}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.editableLabel}>HOME COURSE</Text>
-          <Text style={styles.editableValue}>
-            {(user as any)?.home_course_name || 'Tap to set your home course'}
+      {/* Compact 2×2 grid of profile shortcuts. Full descriptions live
+          inside each card's tap-through modal so this surface stays scannable. */}
+      <View style={styles.miniGrid}>
+        <TouchableOpacity style={styles.miniCard} onPress={() => setHomeCourseModalVisible(true)}>
+          <Text style={styles.miniLabel}>HOME COURSE</Text>
+          <Text style={styles.miniValue} numberOfLines={1}>
+            {(user as any)?.home_course_name || 'Tap to set'}
           </Text>
-          {(user as any)?.home_course_city && (
-            <Text style={styles.editableSub}>
-              {[(user as any).home_course_city, (user as any).home_course_state].filter(Boolean).join(', ')}
-            </Text>
-          )}
-        </View>
-        <Text style={styles.editChev}>›</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
 
-      {/* Calculated Handicap */}
-      <TouchableOpacity style={styles.editableCard} onPress={() => setHcapModalVisible(true)}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.editableLabel}>HANDICAP INDEX</Text>
-          <Text style={styles.editableValue}>
+        <TouchableOpacity style={styles.miniCard} onPress={() => setHcapModalVisible(true)}>
+          <Text style={styles.miniLabel}>HANDICAP</Text>
+          <Text style={styles.miniValue} numberOfLines={1}>
             {handicap?.handicap_index != null
               ? handicap.handicap_index.toFixed(1)
-              : 'Need 3+ rated rounds'}
+              : 'Need 3+ rounds'}
           </Text>
-          <Text style={styles.editableSub}>
-            {handicap?.num_rounds_used
-              ? `Best ${handicap.num_rounds_used} of last ${handicap.total_rated_rounds} rounds · Tap for breakdown`
-              : `${handicap?.total_rated_rounds ?? 0} rated rounds played`}
-          </Text>
-        </View>
-        <Text style={styles.editChev}>›</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
 
-      {/* Manual handicap override — drives the SG baseline before the user
-          has enough rated rounds for the WHS auto-calc to populate the
-          column. Moved from the home tab during the home/feed restructure. */}
-      <TouchableOpacity
-        style={styles.editableCard}
-        onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
-      >
-        <View style={{ flex: 1 }}>
-          <Text style={styles.editableLabel}>STARTING HANDICAP</Text>
-          <Text style={styles.editableValue}>
+        <TouchableOpacity
+          style={styles.miniCard}
+          onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
+        >
+          <Text style={styles.miniLabel}>STARTING HCP</Text>
+          <Text style={styles.miniValue} numberOfLines={1}>
             {user.handicap_index != null ? user.handicap_index.toFixed(1) : 'Set'}
           </Text>
-          <Text style={styles.editableSub}>
-            Manual baseline used for strokes-gained until you've played enough rated rounds
-          </Text>
-        </View>
-        <Text style={styles.editChev}>›</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
 
-      {/* My Bag — the in-round club picker and auto-suggest both filter to
-          this subset on every shot, so it's worth keeping current. Moved
-          from the home tab during the home/feed restructure. */}
-      <TouchableOpacity style={styles.editableCard} onPress={() => router.push('/bag' as any)}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.editableLabel}>MY BAG</Text>
-          <Text style={styles.editableValue}>
+        <TouchableOpacity style={styles.miniCard} onPress={() => router.push('/bag' as any)}>
+          <Text style={styles.miniLabel}>MY BAG</Text>
+          <Text style={styles.miniValue} numberOfLines={1}>
             {Array.isArray((user as any).clubs_in_bag) && (user as any).clubs_in_bag.length > 0
-              ? `${(user as any).clubs_in_bag.length} club${(user as any).clubs_in_bag.length === 1 ? '' : 's'}`
+              ? `${(user as any).clubs_in_bag.length} clubs`
               : 'Edit'}
           </Text>
-          <Text style={styles.editableSub}>
-            Pick which clubs you actually carry — drives the picker and auto-suggest
-          </Text>
-        </View>
-        <Text style={styles.editChev}>›</Text>
-      </TouchableOpacity>
+        </TouchableOpacity>
+      </View>
 
       {/* ELO Progress */}
       <View style={styles.card}>
@@ -1100,6 +1068,23 @@ const styles = StyleSheet.create({
   editableValue: { color: C.text, fontSize: 14, fontWeight: '600' },
   editableSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   editChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
+
+  // Compact 2×2 grid replacing the four full-width editableCards. Each tile
+  // is a fixed-width chip with just the label + current value — descriptions
+  // and breakdowns are shown in the tap-through modal so they don't crowd
+  // the profile surface.
+  miniGrid: {
+    flexDirection: 'row', flexWrap: 'wrap',
+    gap: 8, marginBottom: 14,
+  },
+  miniCard: {
+    flexBasis: '48%', flexGrow: 1,
+    backgroundColor: C.card, borderRadius: 8,
+    paddingVertical: 8, paddingHorizontal: 10,
+    borderWidth: 1, borderColor: C.border,
+  },
+  miniLabel: { color: C.gold, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
+  miniValue: { color: C.text, fontSize: 13, fontWeight: '700', marginTop: 3 },
 
   bioInput: {
     backgroundColor: C.card, color: C.text, borderRadius: 8,

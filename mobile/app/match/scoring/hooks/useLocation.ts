@@ -1,29 +1,97 @@
 /**
- * Foreground GPS tracking with on-course detection.
+ * Foreground GPS + barometer tracking with quality filtering, fix buffering,
+ * weighted-average sampling, and on-course detection.
  *
- *   const { userCoord, onCourse, locGranted } = useLocation({
+ *   const {
+ *     userCoord, onCourse, locGranted,
+ *     gpsAccuracyM, hasQualityFix,
+ *     getAveragedFix, getRelativeAltitudeM,
+ *   } = useLocation({
  *     enabled: !selectingCourse,
  *     courseLat: course?.latitude,
  *     courseLng: course?.longitude,
  *     onOffCourse: () => setFollowing(false),
  *   });
  *
- * Requests foreground permission, grabs a fresh fix (maximumAge: 0 avoids the
- * stale-cached-position bug seen on some Androids), then subscribes to
- * watchPositionAsync at 2-metre granularity. Whenever the user is outside
- * ON_COURSE_METRES of the course centre, `onCourse` flips false and the
- * optional `onOffCourse` callback fires (used by the parent to stop
- * auto-following on the map).
+ * Architecture (see research report in earlier conversation for sources):
  *
- * Subscription is torn down on unmount or when `enabled` flips false.
+ *   1. Single long-running watchPositionAsync at Highest accuracy
+ *      (kCLLocationAccuracyBest, the max the hardware can produce). We never
+ *      call getCurrentPositionAsync mid-round — that forces a fresh fix and
+ *      kills the GPS chip's hot-start state.
+ *
+ *   2. Quality filter on every incoming fix:
+ *        • drop if horizontalAccuracy < 0 (invalid sentinel)
+ *        • drop if horizontalAccuracy > ACCEPT_MAX_ACCURACY_M (65m)
+ *        • drop if timestamp older than STALE_FIX_MS (5s) — guards against
+ *          iOS handing back a cached fix on subscription start
+ *        • discard the first WARMUP_FIXES (5) regardless — the GPS chip
+ *          needs a few cycles to converge even at Highest accuracy
+ *
+ *   3. Maintain a rolling buffer of the last FIX_BUFFER_LIMIT (30) accepted
+ *      fixes (~30s at 1Hz native rate). `getAveragedFix(windowMs)` returns
+ *      an inverse-variance weighted mean (w_i = 1/accuracy_i²) over the
+ *      window — this is the closed-form maximum-likelihood estimate under
+ *      Gaussian errors with reported variances, what consumer GNSS receivers
+ *      do internally. Used by shot-tracking when the user taps TRACK to
+ *      get a yard-grade position fix instead of a single noisy sample.
+ *
+ *   4. Barometer (CMAltimeter relativeAltitude via expo-sensors): runs in
+ *      parallel and exposes the *current* relative altitude via a ref-backed
+ *      getter. The absolute value is meaningless (relative to wherever the
+ *      sensor started), but deltas between two snapshots are sub-meter
+ *      accurate on the timescale of one shot or one hole — vastly better
+ *      than GPS altitude for plays-like slope. We do NOT fold this into
+ *      userCoord every render (that would re-trigger every consumer); we
+ *      stash it on the latest fix when buffering and let consumers pull
+ *      a fresh value on demand.
+ *
+ *   5. Subscriptions torn down on unmount or when `enabled` flips false.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as Location from 'expo-location';
+import { Barometer } from 'expo-sensors';
 import { distMetres } from '../../../../lib/golfMath';
 
 const ON_COURSE_MILES = 3;
 const ON_COURSE_METRES = ON_COURSE_MILES * 1609.34;
+
+/** Soft outer bound — fixes worse than this are GPS-cold or indoors-grade. */
+const ACCEPT_MAX_ACCURACY_M = 65;
+/** First-N-fixes-after-start filter (warm-up garbage). */
+const WARMUP_FIXES = 5;
+/** Reject any fix older than this relative to now (iOS sometimes returns a
+ *  cached position when the subscription first starts). */
+const STALE_FIX_MS = 5_000;
+/** Accuracy at or below which we consider the fix "trusted" enough to anchor
+ *  shot points. Anything above falls through to "use the best we have but
+ *  surface a low-accuracy flag." */
+const TRUST_ACCURACY_M = 10;
+/** Rolling buffer of recent accepted fixes — sized for the longest
+ *  weighted-average window the callers ask for (currently 2.5s). 30 fixes
+ *  ≈ 30s at the native 1Hz iOS rate; gives plenty of headroom. */
+const FIX_BUFFER_LIMIT = 30;
+/** Spatial coherence threshold used by getAveragedFix to detect "the player
+ *  has been standing still" vs "the player is walking." Only fixes within
+ *  this radius of the most recent fix are kept for averaging — without this,
+ *  a player who taps TRACK immediately after walking to the ball would have
+ *  the start point smeared along the walking path. 6m ≈ 6.5 yds: large
+ *  enough to keep all the stationary-stand jitter on a 5m-accuracy fix,
+ *  tight enough to reject walking-pace samples (1.5 m/s × 2.5s = 3.75m,
+ *  so a walking sample 1+ seconds back is excluded). */
+const STILL_RADIUS_M = 6;
+
+interface BufferedFix {
+  lat: number;
+  lng: number;
+  altitude: number | null;
+  accuracy: number;
+  /** Barometer relativeAltitude (m) captured at the same moment, if known. */
+  baroRelativeM: number | null;
+  /** Local clock ms — used for window filtering. */
+  capturedAt: number;
+}
 
 export interface UserCoord {
   latitude: number;
@@ -42,7 +110,19 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
   const [userCoord, setUserCoord] = useState<UserCoord | null>(null);
   const [onCourse, setOnCourse] = useState(true);
   const [locGranted, setLocGranted] = useState(false);
+  const [gpsAccuracyM, setGpsAccuracyM] = useState<number | null>(null);
+  const [hasQualityFix, setHasQualityFix] = useState(false);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
+  const baroSubRef = useRef<{ remove: () => void } | null>(null);
+
+  /** Most-recent barometer reading, captured outside of React state so we
+   *  don't re-render on every barometer tick (10Hz default). */
+  const baroRelativeMRef = useRef<number | null>(null);
+  /** Rolling buffer of accepted fixes, newest last. Refs (not state) because
+   *  we don't want consumers re-rendering on every push. */
+  const fixBufferRef = useRef<BufferedFix[]>([]);
+  /** Counts fixes seen so far this subscription, to drop the warm-up batch. */
+  const fixesSeenRef = useRef(0);
 
   // Stash callback in a ref so we don't tear down the subscription
   // every time the parent re-renders with a new lambda.
@@ -54,31 +134,124 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     let active = true;
     const cLat = courseLat ?? 0;
     const cLng = courseLng ?? 0;
+    fixesSeenRef.current = 0;
+    fixBufferRef.current = [];
+
+    // ── Barometer (CMAltimeter) ──────────────────────────────────────────
+    // Best-effort: simulator and devices without the chip return false.
+    // We don't gate location on it — barometric altitude is a bonus, not
+    // a requirement.
+    (async () => {
+      try {
+        const supported = await Barometer.isAvailableAsync();
+        if (!supported || !active) return;
+        // 1 Hz is plenty — we only need a fresh sample at TRACK-press time,
+        // and CMAltimeter's noise floor is already tiny.
+        Barometer.setUpdateInterval(1000);
+        baroSubRef.current = Barometer.addListener((data: any) => {
+          if (!active) return;
+          // expo-sensors returns relativeAltitude in METERS on iOS via
+          // CMAltimeter; some platforms only return `pressure`, in which
+          // case relativeAltitude is undefined. Android phones with a
+          // barometer expose pressure (hPa) only — relativeAltitude would
+          // need a sea-level baseline.
+          if (typeof data?.relativeAltitude === 'number' && isFinite(data.relativeAltitude)) {
+            baroRelativeMRef.current = data.relativeAltitude;
+          }
+        });
+      } catch { /* sensor missing or permission denied — skip silently */ }
+    })();
+
+    // ── GPS ──────────────────────────────────────────────────────────────
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
       if (!active) return;
       setLocGranted(true);
 
-      const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-        maximumAge: 0,
-      } as any);
-      if (!active) return;
-      const coord: UserCoord = {
-        latitude: pos.coords.latitude,
-        longitude: pos.coords.longitude,
-        altitude: pos.coords.altitude,
-      };
-      const near = !cLat || distMetres(coord.latitude, coord.longitude, cLat, cLng) <= ON_COURSE_METRES;
-      setOnCourse(near);
-      setUserCoord(coord);
-      if (!near) offCourseCb.current?.();
+      // One-shot fresh fix to populate userCoord ASAP. We do NOT trust this
+      // for shot tracking (it bypasses the warm-up filter), but it gets the
+      // map centered and the "yards to pin" reading on screen quickly.
+      try {
+        const pos = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Highest,
+          maximumAge: 0,
+        } as any);
+        if (!active) return;
+        const coord: UserCoord = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          altitude: pos.coords.altitude,
+        };
+        const near = !cLat || distMetres(coord.latitude, coord.longitude, cLat, cLng) <= ON_COURSE_METRES;
+        setOnCourse(near);
+        setUserCoord(coord);
+        if (typeof pos.coords.accuracy === 'number' && pos.coords.accuracy >= 0) {
+          setGpsAccuracyM(pos.coords.accuracy);
+        }
+        if (!near) offCourseCb.current?.();
+      } catch { /* initial fix can fail in low-signal areas — watch will recover */ }
 
+      // The continuous watch — kCLLocationAccuracyBest under the hood, max
+      // hardware accuracy.
+      //
+      // distanceInterval: 0 means "fire every native cycle" — iOS will push
+      // ~1 fix/second whether the player is moving or standing still. CRITICAL
+      // for shot tracking: a stationary golfer over the ball produces ZERO
+      // callbacks at distanceInterval: 2 (since they haven't moved 2m), so
+      // the inverse-variance-weighted average had nothing to average and
+      // silently fell back to whatever stale fix came in 5+ seconds ago when
+      // the player was last walking. Setting interval to 0 keeps the buffer
+      // fresh during the address-the-ball pause where the user is about to
+      // tap TRACK.
+      //
+      // timeInterval is Android-only on expo-location; iOS uses native cadence.
       watchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, distanceInterval: 2 },
+        { accuracy: Location.Accuracy.Highest, distanceInterval: 0, timeInterval: 1000 },
         (loc) => {
           if (!active) return;
+          fixesSeenRef.current += 1;
+
+          const rawAcc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : -1;
+          const ts = typeof loc.timestamp === 'number' ? loc.timestamp : Date.now();
+          const ageMs = Date.now() - ts;
+
+          // Quality gate. We still want the user to *see* their position on
+          // the map even from a noisy fix (better than no blue dot), so we
+          // split into two paths:
+          //   • Buffer-quality fix → push to the rolling buffer used by
+          //     weighted-average sampling.
+          //   • Display-quality fix → update userCoord so the map dot moves.
+          // The buffer is stricter than the display path.
+
+          const isBufferQuality =
+            rawAcc >= 0
+            && rawAcc <= ACCEPT_MAX_ACCURACY_M
+            && ageMs <= STALE_FIX_MS
+            && fixesSeenRef.current > WARMUP_FIXES;
+
+          if (isBufferQuality) {
+            const fix: BufferedFix = {
+              lat: loc.coords.latitude,
+              lng: loc.coords.longitude,
+              altitude: loc.coords.altitude ?? null,
+              accuracy: rawAcc,
+              baroRelativeM: baroRelativeMRef.current,
+              // Use the fix's own timestamp (when iOS got it from the chip),
+              // not Date.now() (when JS got the callback). Delivery latency
+              // on iOS can be 100s of ms, so Date.now() lets fixes that are
+              // actually 2.8s old slip into a "last 2.5s" window.
+              capturedAt: ts,
+            };
+            const buf = fixBufferRef.current;
+            buf.push(fix);
+            if (buf.length > FIX_BUFFER_LIMIT) buf.shift();
+            if (rawAcc <= TRUST_ACCURACY_M) setHasQualityFix(true);
+          }
+
+          // Display update — accept any non-invalid fix. The user-visible
+          // map dot updates from this; tracked shot endpoints do not.
+          if (rawAcc >= 0) setGpsAccuracyM(rawAcc);
           const c: UserCoord = {
             latitude: loc.coords.latitude,
             longitude: loc.coords.longitude,
@@ -91,12 +264,117 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
         },
       );
     })();
+
     return () => {
       active = false;
       watchRef.current?.remove();
       watchRef.current = null;
+      baroSubRef.current?.remove();
+      baroSubRef.current = null;
+      baroRelativeMRef.current = null;
     };
   }, [enabled, courseLat, courseLng]);
 
-  return { userCoord, onCourse, locGranted };
+  /** Inverse-variance weighted average of fixes received in the last
+   *  `windowMs`. Returns null if no fixes have been buffered yet — caller
+   *  should fall back to userCoord and surface a "low accuracy" warning.
+   *
+   *  Two filtering passes happen before averaging:
+   *    1. TEMPORAL: only fixes whose own timestamp is within windowMs of
+   *       the most-recent buffered fix's timestamp (NOT wall-clock now —
+   *       wall-clock would discard the whole window if the user backgrounded
+   *       the app for 30 seconds).
+   *    2. SPATIAL: only fixes within STILL_RADIUS_M (6m) of the most-recent
+   *       buffered fix. This is what makes the average robust when the
+   *       player has been walking: a player who just arrived at the ball
+   *       and immediately taps TRACK has 2.5s of walking fixes in the
+   *       window, which would smear the start point ~3-4m back along the
+   *       walk path. The spatial filter keeps only the cluster of fixes
+   *       at the player's current location.
+   *
+   *  The weighting (w_i = 1/accuracy_i²) on the surviving fixes is the
+   *  maximum-likelihood estimate under independent Gaussian errors with
+   *  reported variances. In practice this means: a 3m-accuracy fix counts
+   *  100× more than a 30m fix, so pooling a stationary 2-3s sample
+   *  reliably eliminates outliers without any explicit outlier rejection.
+   *
+   *  Altitude is averaged with the same weights, but only over fixes that
+   *  actually reported one (some iOS situations return null altitude). If
+   *  any fix in the window had a barometer reading, the *median* barometer
+   *  value is attached — median (not mean) because barometer noise is
+   *  much tighter than 1/N averaging needs, but we want to ignore the
+   *  rare spike. */
+  const getAveragedFix = useCallback((windowMs: number): {
+    latitude: number;
+    longitude: number;
+    altitude: number | null;
+    baroRelativeM: number | null;
+    accuracyM: number;
+    samples: number;
+  } | null => {
+    const buf = fixBufferRef.current;
+    if (!buf.length) return null;
+    const newest = buf[buf.length - 1];
+
+    // Temporal filter anchored on the newest fix, not wall-clock — covers
+    // the case where the watch callback hasn't ticked in a few seconds.
+    const tempWindow = buf.filter((f) => newest.capturedAt - f.capturedAt <= windowMs);
+    if (!tempWindow.length) return null;
+
+    // Spatial filter — only fixes near the player's current cluster. A pure
+    // temporal filter would let walking-pace fixes from a few seconds ago
+    // pull the average meters back along the walking path.
+    const window = tempWindow.filter(
+      (f) => distMetres(f.lat, f.lng, newest.lat, newest.lng) <= STILL_RADIUS_M,
+    );
+    if (!window.length) return null;
+
+    let sumLat = 0, sumLng = 0, sumW = 0;
+    let sumAlt = 0, altW = 0;
+    const baroSamples: number[] = [];
+    for (const f of window) {
+      const w = 1 / (f.accuracy * f.accuracy);
+      sumLat += f.lat * w;
+      sumLng += f.lng * w;
+      sumW += w;
+      if (typeof f.altitude === 'number') {
+        sumAlt += f.altitude * w;
+        altW += w;
+      }
+      if (typeof f.baroRelativeM === 'number') baroSamples.push(f.baroRelativeM);
+    }
+    if (sumW === 0) return null;
+    // 1σ uncertainty of the weighted mean = 1/sqrt(Σw). With four 5m fixes
+    // that's 2.5m, which matches what consumer survey gear claims.
+    const accuracyM = Math.sqrt(1 / sumW);
+    let baroMedian: number | null = null;
+    if (baroSamples.length) {
+      baroSamples.sort((a, b) => a - b);
+      baroMedian = baroSamples[Math.floor(baroSamples.length / 2)];
+    }
+    return {
+      latitude: sumLat / sumW,
+      longitude: sumLng / sumW,
+      altitude: altW > 0 ? sumAlt / altW : null,
+      baroRelativeM: baroMedian,
+      accuracyM,
+      samples: window.length,
+    };
+  }, []);
+
+  /** Current barometer relativeAltitude (m). null if barometer unsupported
+   *  or hasn't ticked yet. Read from a ref so we don't render-couple. */
+  const getRelativeAltitudeM = useCallback((): number | null => {
+    return baroRelativeMRef.current;
+  }, []);
+
+  return {
+    userCoord,
+    onCourse,
+    locGranted,
+    gpsAccuracyM,
+    hasQualityFix,
+    getAveragedFix,
+    getRelativeAltitudeM,
+  };
 }

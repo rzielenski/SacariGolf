@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { api } from '../lib/api';
 import { C } from '../lib/colors';
+import { UserAvatar } from './UserAvatar';
 
 /**
  * Reusable "invite friends to a match" modal. Same UX as the match lobby's
@@ -21,6 +22,7 @@ interface Friend {
   user_id: string;
   username: string;
   elo: number;
+  avatar_url?: string | null;
 }
 
 interface Props {
@@ -126,9 +128,7 @@ export function InviteFriendsModal({
               const disabled = inMatch || invitedThisVisit || sendingId === item.user_id || (capReached && !invitedThisVisit);
               return (
                 <View style={s.row}>
-                  <View style={s.avatar}>
-                    <Text style={s.avatarText}>{item.username?.[0]?.toUpperCase() ?? '?'}</Text>
-                  </View>
+                  <UserAvatar username={item.username} avatarUrl={item.avatar_url} size={40} borderRadius={4} />
                   <View style={{ flex: 1 }}>
                     <Text style={s.name}>{item.username}</Text>
                     <Text style={s.meta}>{item.elo} ELO</Text>

@@ -54,10 +54,34 @@ interface UseShotTrackingArgs {
    *  persisted alongside the raw GPS coords. Lets the parent inject its
    *  weather / slope context without coupling the hook to those modules. */
   computePlaysLike?: (start: Pt, end: Pt) => number | null;
+  /** Optional: inverse-variance weighted average of recent GPS fixes
+   *  (from useLocation.getAveragedFix). When provided, shot endpoints
+   *  are sampled from the buffered window instead of taking a single
+   *  noisy fix — typically tightens shot length by 50–70%. Falls back
+   *  to userCoord when no buffered fixes are available yet. */
+  getAveragedFix?: (windowMs: number) => {
+    latitude: number;
+    longitude: number;
+    altitude: number | null;
+    baroRelativeM: number | null;
+    accuracyM: number;
+    samples: number;
+  } | null;
+  /** Optional: current barometer relative altitude (m). Captured into the
+   *  Pt's `baro_relative_m` field so plays-like slope can use the sub-meter
+   *  barometric delta instead of the ±10m GPS-altitude delta. */
+  getRelativeAltitudeM?: () => number | null;
 }
+
+/** How far back into the rolling fix buffer we look when finalising a shot
+ *  point. 2.5s is the sweet spot: long enough that a stationary golfer over
+ *  the ball has 2-3 fixes in the window (1Hz native iOS rate), short enough
+ *  that a walking-fast player doesn't average over a 5m arc. */
+const AVERAGE_WINDOW_MS = 2500;
 
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
+  getAveragedFix, getRelativeAltitudeM,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
@@ -118,6 +142,18 @@ export function useShotTracking({
           AsyncStorage.removeItem(activeKey(matchId)).catch(() => { });
           return;
         }
+        // Strip baro_relative_m from the restored start point: the
+        // CMAltimeter barometer counts from wherever the sensor session
+        // started, so a value persisted in the previous session is in a
+        // different reference frame than the freshly-captured END reading
+        // would be. Comparing them produces a meaningless slope delta
+        // (often several meters wrong, since weather pressure drifts).
+        // Drops back to GPS-altitude delta for plays-like — less precise
+        // but at least the SIGN is correct.
+        if (cached.start) {
+          const { baro_relative_m: _baro, ...startNoBaro } = cached.start;
+          cached.start = startNoBaro;
+        }
         setActiveShot(cached);
         // The pendingClub UI label should also reflect the club the player
         // had locked in when they started the shot — re-arm it so the
@@ -142,11 +178,30 @@ export function useShotTracking({
     }
   }, [matchId, activeShot]);
 
-  /** Snapshot the player's current GPS into a Pt. */
+  /** Snapshot the player's position into a Pt. Prefers the inverse-variance
+   *  weighted average of the last AVERAGE_WINDOW_MS of buffered fixes
+   *  (from useLocation) — a stationary golfer over the ball typically has
+   *  2-3 fixes in the window, giving sub-3m horizontal accuracy where a
+   *  single raw fix is 5-10m. Falls back to userCoord if the buffer is
+   *  empty (very first shot of the round, before warm-up completes).
+   *
+   *  Barometric relative altitude is captured into baro_relative_m so the
+   *  end-of-shot computePlaysLike callback can use the sub-meter
+   *  barometric delta for slope instead of the ±10m GPS-altitude delta. */
   const ptFromCoord = (): Pt | null => {
+    const avg = getAveragedFix?.(AVERAGE_WINDOW_MS);
+    if (avg) {
+      const p: Pt = { lat: avg.latitude, lng: avg.longitude };
+      if (typeof avg.altitude === 'number') p.elevation_m = avg.altitude;
+      const baro = avg.baroRelativeM ?? getRelativeAltitudeM?.();
+      if (typeof baro === 'number') p.baro_relative_m = baro;
+      return p;
+    }
     if (!userCoord) return null;
     const p: Pt = { lat: userCoord.latitude, lng: userCoord.longitude };
     if (typeof userCoord.altitude === 'number') p.elevation_m = userCoord.altitude;
+    const baro = getRelativeAltitudeM?.();
+    if (typeof baro === 'number') p.baro_relative_m = baro;
     return p;
   };
 

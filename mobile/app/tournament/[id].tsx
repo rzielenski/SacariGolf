@@ -8,6 +8,7 @@ import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Divider, OrnamentTitle } from '../../components/Flourish';
+import { UserAvatar } from '../../components/UserAvatar';
 
 /**
  * Tournament detail + leaderboard. Shows the standings, the player roster,
@@ -141,7 +142,10 @@ export default function TournamentDetailScreen() {
           onPress={() => router.push(`/user/${p.user_id}` as any)}
           activeOpacity={0.7}
         >
-          <Text style={s.playerName}>{p.username}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+            <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={32} borderRadius={4} />
+            <Text style={s.playerName}>{p.username}</Text>
+          </View>
           <Text style={s.playerElo}>{p.elo} ELO</Text>
         </TouchableOpacity>
       ))}

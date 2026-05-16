@@ -10,6 +10,7 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Clan, ClanMember } from '../../types';
 import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
+import { UserAvatar } from '../../components/UserAvatar';
 
 function rankBadge(elo: number) {
   if (elo >= 2000) return { label: 'Diamond', color: '#5b9cf6' };
@@ -430,9 +431,12 @@ export default function ClanDetailScreen() {
                   </Text>
                 : friends.map((f) => (
                   <View key={f.user_id} style={styles.friendInviteRow}>
-                    <View style={styles.memberAvatar}>
-                      <Text style={styles.memberAvatarText}>{f.username?.[0]?.toUpperCase() ?? '?'}</Text>
-                    </View>
+                    <UserAvatar
+                      username={f.username}
+                      avatarUrl={(f as any).avatar_url}
+                      size={40}
+                      borderRadius={6}
+                    />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.memberName}>{f.username}</Text>
                       <Text style={styles.memberMeta}>{f.elo} ELO</Text>
@@ -529,9 +533,12 @@ function MemberRow({
 
   return (
     <View style={styles.memberCard}>
-      <View style={styles.memberAvatar}>
-        <Text style={styles.memberAvatarText}>{member.username?.[0]?.toUpperCase() ?? '?'}</Text>
-      </View>
+      <UserAvatar
+        username={member.username}
+        avatarUrl={member.avatar_url}
+        size={44}
+        borderRadius={6}
+      />
       <View style={{ flex: 1 }}>
         <View style={styles.memberNameRow}>
           <Text style={styles.memberName}>{member.username}</Text>

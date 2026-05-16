@@ -8,11 +8,19 @@
  */
 
 /** A single geographic point. Elevation is only present when the device
- *  reported an altitude on the GPS fix (some devices return null). */
+ *  reported an altitude on the GPS fix (some devices return null).
+ *
+ *  `baro_relative_m` is the iPhone barometer's relative altitude reading
+ *  (CMAltimeter) at the moment the point was captured. Itself meaningless
+ *  in isolation (it's relative to wherever the barometer session started),
+ *  but the *difference* between two points' baro_relative_m is sub-meter
+ *  accurate over short timescales — vastly better than GPS altitude for
+ *  shot-to-shot or ball-to-pin elevation deltas. */
 export interface Pt {
   lat: number;
   lng: number;
   elevation_m?: number;
+  baro_relative_m?: number;
 }
 
 /** A finalised shot — start + end as one segment. Rendered as a polyline. */

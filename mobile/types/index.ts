@@ -43,6 +43,7 @@ export interface ChatMessage {
   body: string;
   user_id: string;
   username: string;
+  avatar_url?: string | null;
   /** Server-relative URL to a voice clip (e.g. `/uploads/voice/abc.m4a`)
    *  if this message is audio. Body becomes a "🎤 Voice message" preview
    *  string in that case (used for push + conversations-list previews). */
@@ -57,6 +58,7 @@ export interface MatchInvite {
   created_at: string;
   from_username: string;
   from_elo: number;
+  from_avatar_url?: string | null;
   match_type: string;
   match_name: string | null;
 }

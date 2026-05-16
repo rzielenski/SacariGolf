@@ -18,7 +18,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity,
+  View, Text, StyleSheet, TouchableOpacity, Alert,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
@@ -133,24 +133,43 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Resume-round banner — top priority because finishing a started
-          round is the single highest-value action a player can take. */}
-      {resumable && (
-        <TouchableOpacity
-          style={styles.resumeBanner}
-          onPress={() => router.push(`/match/${resumable.match_id}` as any)}
-          activeOpacity={0.85}
-        >
-          <View style={styles.resumeDot} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.resumeLabel}>ROUND IN PROGRESS</Text>
-            <Text style={styles.resumeMsg} numberOfLines={1}>
-              {resumable.name ?? `${(resumable.match_type ?? 'match').charAt(0).toUpperCase()}${(resumable.match_type ?? 'match').slice(1)} match`}
-              {' · '}tap to continue
-            </Text>
-          </View>
-          <Text style={styles.resumeChev}>›</Text>
-        </TouchableOpacity>
+      {/* Compact status row — round-in-progress + lucky-round perks share
+          one line so they don't eat half the screen above the feed. Each
+          chip is tappable: resume continues the round; lucky-round opens
+          an alert explaining what it does. */}
+      {(resumable || perkCount > 0) && (
+        <View style={styles.statusRow}>
+          {resumable && (
+            <TouchableOpacity
+              style={[styles.statusChip, styles.statusChipGold, { flex: resumable && perkCount > 0 ? 1.4 : 1 }]}
+              onPress={() => router.push(`/match/${resumable.match_id}` as any)}
+              activeOpacity={0.85}
+            >
+              <View style={styles.statusChipDot} />
+              <Text style={styles.statusChipLabel} numberOfLines={1}>RESUME ROUND</Text>
+              <Text style={styles.statusChipChev}>›</Text>
+            </TouchableOpacity>
+          )}
+          {perkCount > 0 && (
+            <TouchableOpacity
+              style={[styles.statusChip, styles.statusChipGreen]}
+              activeOpacity={0.85}
+              onPress={() =>
+                Alert.alert(
+                  'Lucky Round',
+                  perkCount > 1
+                    ? `You have ${perkCount} Lucky Round perks. Each one will double your next ranked-match win or cancel a loss — whichever happens first.`
+                    : 'Your next ranked match will count double on a win, or cancel a loss — whichever happens first.',
+                )
+              }
+            >
+              <Text style={styles.statusChipMark}>★</Text>
+              <Text style={styles.statusChipLabel} numberOfLines={1}>
+                {perkCount > 1 ? `${perkCount}× LUCKY` : 'LUCKY ROUND'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
       )}
 
       {/* Email-verification banner — only while user hasn't confirmed yet */}
@@ -183,18 +202,6 @@ export default function HomeScreen() {
             Every paid feature is free for you during open beta — a gift from Richard while we collect course data. Tap to see what's included.
           </Text>
         </TouchableOpacity>
-      )}
-
-      {/* Lucky Round perk banner */}
-      {perkCount > 0 && (
-        <View style={styles.perkBanner}>
-          <Text style={styles.perkBannerLabel}>LUCKY ROUND</Text>
-          <Text style={styles.perkBannerMsg}>
-            {perkCount > 1
-              ? `${perkCount} perks active — each one doubles a win or prevents a loss on your next ranked matches`
-              : 'Active for your next ranked match — doubles a win or prevents a loss'}
-          </Text>
-        </View>
       )}
 
       {/* 2-wide nav grid: Leaderboard + Tournaments */}
@@ -254,16 +261,24 @@ const styles = StyleSheet.create({
   eloStatNum: { fontSize: 18, fontWeight: '800', color: C.text },
   eloStatLabel: { fontSize: 10, color: C.textMuted, marginTop: 2 },
 
-  // Banners
-  resumeBanner: {
-    backgroundColor: C.gold + '22', borderRadius: 10, padding: 14, marginBottom: 14,
-    borderWidth: 1, borderColor: C.gold,
-    flexDirection: 'row', alignItems: 'center', gap: 10,
+  // Compact status row — resume-round and lucky-round share one line.
+  statusRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  statusChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    borderRadius: 8,
+    borderWidth: 1,
   },
-  resumeDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: C.gold },
-  resumeLabel: { color: C.gold, fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
-  resumeMsg: { color: C.text, fontSize: 13, marginTop: 3 },
-  resumeChev: { color: C.gold, fontSize: 22, fontWeight: '700' },
+  statusChipGold:  { backgroundColor: C.gold + '22',  borderColor: C.gold },
+  statusChipGreen: { backgroundColor: C.green + '22', borderColor: C.green },
+  statusChipDot:   { width: 8, height: 8, borderRadius: 4, backgroundColor: C.gold },
+  statusChipMark:  { color: C.green, fontSize: 13, fontWeight: '900' },
+  statusChipLabel: { color: C.text, fontSize: 11, fontWeight: '800', letterSpacing: 0.8, flex: 1 },
+  statusChipChev:  { color: C.gold, fontSize: 16, fontWeight: '700' },
 
   verifyBanner: {
     backgroundColor: '#ffa50022', borderRadius: 10, padding: 14, marginBottom: 14,
@@ -280,13 +295,6 @@ const styles = StyleSheet.create({
   },
   openBetaLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.5, textAlign: 'center' },
   openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
-
-  perkBanner: {
-    backgroundColor: C.green + '22', borderRadius: 10, padding: 14, marginBottom: 14,
-    borderWidth: 1, borderColor: C.green,
-  },
-  perkBannerLabel: { color: C.green, fontWeight: '900', fontSize: 11, letterSpacing: 1.2 },
-  perkBannerMsg: { color: C.text, fontSize: 13, marginTop: 4, lineHeight: 18 },
 
   // 2-wide nav grid (replaces the stacked Leaderboard / Tournaments buttons)
   navGrid: { flexDirection: 'row', gap: 10, marginTop: 4, marginBottom: 24 },

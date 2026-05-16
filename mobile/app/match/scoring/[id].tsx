@@ -216,7 +216,11 @@ export default function ScoringScreen() {
   // ever be lost.
   const ignoreNextMapTap = useRef(false);
   const [following, setFollowing] = useState(true);
-  const { userCoord, onCourse, locGranted } = useLocation({
+  const {
+    userCoord, onCourse, locGranted,
+    gpsAccuracyM, hasQualityFix,
+    getAveragedFix, getRelativeAltitudeM,
+  } = useLocation({
     enabled: !selectingCourse,
     courseLat: course?.latitude,
     courseLng: course?.longitude,
@@ -547,10 +551,22 @@ export default function ScoringScreen() {
     if (gpsYds < 5 || gpsYds > 500) return null;   // skip GPS noise / putts
 
     // Slope: elevation gain (m) converted to yards. Uphill = positive.
-    const slopeYds =
+    //
+    // Prefer the barometric delta when both points have one — CMAltimeter's
+    // relativeAltitude is sub-meter on the timescale of one shot (10s-30s
+    // between TRACK start and TRACK end), where GPS altitude is ±10m and
+    // genuinely useless for plays-like. Fall back to GPS altitude only when
+    // the barometer isn't supported (simulator, very old iPhones).
+    const baroDeltaM =
+      typeof start.baro_relative_m === 'number' && typeof end.baro_relative_m === 'number'
+        ? end.baro_relative_m - start.baro_relative_m
+        : null;
+    const gpsDeltaM =
       typeof start.elevation_m === 'number' && typeof end.elevation_m === 'number'
-        ? (end.elevation_m - start.elevation_m) * 1.0936
-        : 0;
+        ? end.elevation_m - start.elevation_m
+        : null;
+    const slopeM = baroDeltaM ?? gpsDeltaM ?? 0;
+    const slopeYds = slopeM * 1.0936;
 
     // Wind along the shot line (start → end bearing).
     let along = 0;
@@ -579,6 +595,7 @@ export default function ScoringScreen() {
 
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
+    getAveragedFix, getRelativeAltitudeM,
   });
   const {
     shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
@@ -1358,8 +1375,18 @@ export default function ScoringScreen() {
       Alert.alert('No GPS', 'Wait for a GPS lock before marking the pin.');
       return;
     }
-    const elevation_m = typeof userCoord.altitude === 'number' ? userCoord.altitude : null;
-    const point: LocalPin = { lat: userCoord.latitude, lng: userCoord.longitude, elevation_m };
+    // Prefer the inverse-variance weighted average of the last 2.5s of fixes
+    // — the user is standing at the pin, so a 2-3 fix average is dramatically
+    // tighter than a single sample. Falls back to userCoord if the buffer
+    // hasn't filled yet (very first pin contribution of the round).
+    const avg = getAveragedFix(2500);
+    const lat = avg?.latitude ?? userCoord.latitude;
+    const lng = avg?.longitude ?? userCoord.longitude;
+    const elevation_m =
+      avg && typeof avg.altitude === 'number' ? avg.altitude
+      : typeof userCoord.altitude === 'number' ? userCoord.altitude
+      : null;
+    const point: LocalPin = { lat, lng, elevation_m };
     setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
     api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng, elevation_m)
       .then((res) => {
@@ -2284,6 +2311,14 @@ export default function ScoringScreen() {
                 </Text>
               );
             })()}
+            {gpsAccuracyM != null && gpsAccuracyM > 15 && (
+              // Surface poor GPS quality so the user understands why a
+              // distance might be off. >15m horizontal accuracy is roughly
+              // "phone in a pocket near a building" — yardage may swing ±5y.
+              <Text style={styles.pinDistWeak}>
+                weak GPS · ±{Math.round(gpsAccuracyM)}m
+              </Text>
+            )}
             {(() => {
               const samples = currentHoleObj && pinSamplesByHole[currentHoleObj.hole_id];
               if (!samples) return null;
@@ -2879,6 +2914,7 @@ const styles = StyleSheet.create({
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
   pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 11, marginTop: 3, opacity: 0.95 },
   pinDistSamples: { color: '#fff', fontSize: 9, marginTop: 2, opacity: 0.75, fontStyle: 'italic' },
+  pinDistWeak:    { color: '#FFCC66', fontSize: 9, marginTop: 2, opacity: 0.9, fontWeight: '700' },
 
   // Weather details sheet
   wxGrid: { flexDirection: 'row', gap: 8, marginTop: 12 },
