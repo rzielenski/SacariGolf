@@ -174,6 +174,33 @@ export default function RangeAnalyze() {
           {' '}{CLUB_LABELS[swing.club] ?? swing.club}
         </Text>
 
+        {/* Analysis-source banner — tells the user whether the numbers + skeleton
+            + tracer are derived from real Vision-framework analysis of their
+            video, or from the template fallback. Hidden when 'vision' to keep
+            the surface clean; loud and clear when 'mock' so they don't think
+            the template numbers are measurements. */}
+        {swing.source === 'mock' && (
+          <View style={styles.sourceBanner}>
+            <Text style={styles.sourceBannerTitle}>BETA · TEMPLATE ANALYSIS</Text>
+            <Text style={styles.sourceBannerBody}>
+              Skeleton, tracer, and numbers below are SCHEMATIC — generated from
+              your club + handicap, not from analysing the video. Vision-framework
+              analysis requires a development build with the SwingAnalyzer
+              module linked.
+            </Text>
+          </View>
+        )}
+        {swing.source === 'vision' && (
+          <View style={styles.visionBanner}>
+            <Text style={styles.visionBannerTitle}>VISION ANALYSIS</Text>
+            <Text style={styles.visionBannerBody}>
+              Skeleton and tracer derived from your actual video frames using
+              Apple Vision framework. Speed / spin / carry numbers below are
+              still estimates — those require a launch monitor.
+            </Text>
+          </View>
+        )}
+
         {/* ── Analysis status banner ──────────────────────────────── */}
         {swing.status === 'analyzing' && (
           <View style={styles.analyzingBanner}>
@@ -829,9 +856,34 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 1.2,
     marginTop: 4,
-    marginBottom: 18,
+    marginBottom: 10,
     textAlign: 'center',
   },
+
+  // Analysis-source banners — surfaces whether the player is looking at real
+  // Vision-framework output or the template fallback. Two visual treatments
+  // so the user can see at a glance which one they got.
+  sourceBanner: {
+    backgroundColor: '#b0343422',  // muted red — "be careful, this is mocked"
+    borderColor: C.red,
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+  },
+  sourceBannerTitle: { color: C.red, fontWeight: '900', fontSize: 11, letterSpacing: 1.3 },
+  sourceBannerBody:  { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 17 },
+
+  visionBanner: {
+    backgroundColor: C.green + '22',
+    borderColor: C.green,
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+  },
+  visionBannerTitle: { color: C.green, fontWeight: '900', fontSize: 11, letterSpacing: 1.3 },
+  visionBannerBody:  { color: C.text, fontSize: 12, marginTop: 4, lineHeight: 17 },
 
   keyframeRow: { marginBottom: 16 },
   keyframeChip: {

@@ -120,8 +120,14 @@ export default function RangeIndex() {
       await reload();
 
       try {
-        const result = await analyzeSwing(videoUri, club, swingId, user.handicap_index ?? null, cameraAngle);
-        const complete: RangeSwing = { ...pending, status: 'complete', result };
+        // analyzeSwing returns SwingAnalysis + a source tag ('vision' real
+        // ML or 'mock' template fallback). Both are surfaced on the saved
+        // record so the analyze screen can label which one the user is
+        // looking at.
+        const { source, ...result } = await analyzeSwing(
+          videoUri, club, swingId, user.handicap_index ?? null, cameraAngle
+        );
+        const complete: RangeSwing = { ...pending, status: 'complete', result, source };
         await saveSwing(user.user_id, complete);
         await reload();
         router.push(`/range/analyze?swing=${swingId}` as any);

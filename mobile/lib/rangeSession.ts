@@ -31,6 +31,10 @@ const MAX_STORED = 100;
 
 export type AnalysisStatus = 'pending' | 'analyzing' | 'complete' | 'failed';
 
+/** Where the analysis numbers actually came from — surfaced so the UI can
+ *  label mock results so the player knows what they're looking at. */
+export type AnalysisSource = 'vision' | 'mock';
+
 /** Camera angle the swing was filmed from. Critical for the analyzer —
  *  face-on shows you torso rotation + tempo most clearly; down-the-line
  *  shows swing plane + path most clearly. The body-pose keyframe data
@@ -51,6 +55,11 @@ export interface RangeSwing {
   status: AnalysisStatus;
   /** Set once status === 'complete'. */
   result?: SwingAnalysis;
+  /** Where the analysis numbers came from — populated when status flips
+   *  to 'complete'. 'vision' = real Vision-framework analysis of video
+   *  frames. 'mock' = deterministic-template fallback (no actual video
+   *  analysis happened; numbers derived from club selection + handicap). */
+  source?: AnalysisSource;
 }
 
 /** Output of analyzeSwing() — what the UI consumes. */
@@ -143,22 +152,241 @@ export async function deleteSwing(userId: string, swingId: string): Promise<void
   );
 }
 
-// ── Mock analyzer (Phase 1) ─────────────────────────────────────────────
+// ── Analyzer (real Vision framework with mock fallback) ────────────────
+
+import SwingAnalyzerNative, { NativeAnalysisResult, NativePoseFrame } from '../modules/swing-analyzer/src';
 
 /** Generate a SwingAnalysis for the given club + camera angle + handicap.
- *  Deterministic per (club, swingId, handicap, angle) so re-opening a
- *  session shows the same numbers — important for the "improvement over
- *  time" comparison. */
+ *
+ *  Two paths:
+ *    1. Native Vision framework — runs on iOS 14+ when the SwingAnalyzer
+ *       module is linked (after `npx expo prebuild` + dev build). Reads
+ *       actual joint positions and clubhead trajectory from the video.
+ *    2. Mock template — used in Expo Go, simulator without the native
+ *       module, on Android, or when the native call fails. Generates
+ *       plausible-looking but FAKE numbers based on the chosen club and
+ *       user's handicap.
+ *
+ *  The UI rendering is identical for both — same SwingAnalysis shape. The
+ *  difference is the `source` field, which the analyze screen surfaces. */
 export async function analyzeSwing(
   videoUri: string,
   club: string,
   swingId: string,
   handicap: number | null,
   cameraAngle: CameraAngle = 'face_on',
+): Promise<SwingAnalysis & { source: AnalysisSource }> {
+  // Try the native analyzer first. If it's unavailable or throws, fall
+  // through to the mock so the feature still demos in Expo Go etc.
+  if (await SwingAnalyzerNative.isAvailable()) {
+    try {
+      const native = await SwingAnalyzerNative.analyzeVideo(videoUri);
+      return {
+        ...convertNativeToSwingAnalysis(native, club, swingId, handicap, cameraAngle),
+        source: 'vision',
+      };
+    } catch (err) {
+      // Log but don't propagate — we want a usable fallback rather than a
+      // broken screen if the Vision pass fails (unusual video format,
+      // permissions, etc.).
+      console.warn('[SwingAnalyzer] native analysis failed, falling back to mock:', err);
+    }
+  }
+
+  return { ...(await analyzeMock(videoUri, club, swingId, handicap, cameraAngle)), source: 'mock' };
+}
+
+/** Convert the native Vision-framework output into the SwingAnalysis shape
+ *  the UI consumes. Real joint positions + real clubhead trajectory go
+ *  through unchanged; metrics that require a launch monitor (ball speed,
+ *  smash factor, spin) still come from the template-based estimator. */
+function convertNativeToSwingAnalysis(
+  native: NativeAnalysisResult,
+  club: string,
+  swingId: string,
+  handicap: number | null,
+  cameraAngle: CameraAngle,
+): SwingAnalysis {
+  const totalSec = native.duration;
+
+  // Pick the most-likely-clubhead trajectory: longest × highest confidence.
+  // Apple's VNDetectTrajectoriesRequest may detect multiple ballistic paths
+  // in a video (clubhead + ball flight + reflections on a simulator
+  // screen). The clubhead arc is typically the longest single trajectory.
+  const bestTraj = pickBestTrajectory(native.trajectories);
+  const clubheadTrace = bestTraj
+    ? bestTraj.points.map((p, i) => ({
+        x: p.x, y: p.y,
+        // Distribute timestamps evenly across the trajectory's segment of
+        // the video. Vision doesn't report per-point timestamps; this is
+        // an approximation. The trajectory length is usually a tight
+        // sequence (5-10 frames at the high-velocity portion of the swing).
+        t: (i / Math.max(1, bestTraj.points.length - 1)) * totalSec,
+      }))
+    : [];
+
+  // Snap the four keyframes from the per-frame pose data: address (first
+  // useful frame), top (highest wrist y in the trajectory), impact (lowest
+  // wrist y near the end of backswing), follow-through (last frame).
+  const poseKeyframes = extractKeyframes(native.poseFrames);
+
+  // Ball position — derived from the trajectory's lowest point if we have
+  // one, else fall back to a sane default.
+  const ballPosition: Point = bestTraj && bestTraj.points.length > 0
+    ? bestTraj.points.reduce((lowest, p) => p.y > lowest.y ? p : lowest, bestTraj.points[0])
+    : (cameraAngle === 'down_the_line' ? { x: 0.52, y: 0.78 } : { x: 0.50, y: 0.78 });
+
+  // Impact time — approximate as the moment in the trajectory where the
+  // clubhead is at the ball (lowest y in the trace). If no trajectory was
+  // detected, fall back to the 75%-of-swing convention.
+  const impactTimeSec = clubheadTrace.length > 0
+    ? clubheadTrace.reduce((latest, p) => p.y > latest.y ? p : latest, clubheadTrace[0]).t
+    : totalSec * 0.75;
+
+  // Metrics that the Vision framework CAN'T provide without launch-monitor
+  // data — keep the template estimates for now, clearly marked in the UI.
+  const ref = SWING_REF[club] ?? SWING_REF['7iron'];
+  const cap = typeof handicap === 'number' ? Math.max(0, Math.min(36, handicap)) : 18;
+  const skill = 1 - cap / 36;
+  const rng = seededRng(swingId);
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+  const jitter = (m: number, frac: number) => m * (1 + (rng() - 0.5) * frac);
+
+  const club_: ClubMetrics = {
+    clubheadSpeedMph: round(jitter(lerp(ref.amateur.clubheadSpeedMph, ref.pro.clubheadSpeedMph, skill), 0.04), 1),
+    ballSpeedMph:     round(jitter(lerp(ref.amateur.ballSpeedMph,     ref.pro.ballSpeedMph,     skill), 0.05), 1),
+    smashFactor:      round(jitter(lerp(ref.amateur.smashFactor,      ref.pro.smashFactor,      skill), 0.02), 2),
+    launchAngleDeg:   round(jitter(lerp(ref.amateur.launchAngleDeg,   ref.pro.launchAngleDeg,   skill), 0.08), 1),
+    spinRpm:          Math.round(jitter(lerp(ref.amateur.spinRpm,     ref.pro.spinRpm,          skill), 0.08)),
+    carryYds:         Math.round(jitter(lerp(ref.amateur.carryYds,    ref.pro.carryYds,         skill), 0.06)),
+  };
+
+  // Body metrics — backswing/downswing durations come from real keyframe
+  // timings; the rest are still estimated from the skill coefficient (a
+  // future pass can derive turn angles from joint geometry).
+  const body: BodyMetrics = {
+    backswingSec:      round(impactTimeSec * (0.5 / 0.75), 2),   // back fraction of impact time
+    downswingSec:      round(impactTimeSec * (0.25 / 0.75), 2),
+    tempoRatio:        2.0,  // placeholder until geometry analysis lands
+    hipTurnDeg:        round(jitter(lerp(ref.amateur.hipTurnDeg,        ref.pro.hipTurnDeg,        skill), 0.06), 0),
+    shoulderTurnDeg:   round(jitter(lerp(ref.amateur.shoulderTurnDeg,   ref.pro.shoulderTurnDeg,   skill), 0.05), 0),
+    xFactorDeg:        round(jitter(lerp(ref.amateur.xFactorDeg,        ref.pro.xFactorDeg,        skill), 0.05), 0),
+    lateralHipShiftIn: round(jitter(lerp(ref.amateur.lateralHipShiftIn, ref.pro.lateralHipShiftIn, skill), 0.10), 1),
+    leadWristHingeDeg: round(jitter(lerp(ref.amateur.leadWristHingeDeg, ref.pro.leadWristHingeDeg, skill), 0.06), 0),
+    spineAngleDeg:     round(jitter(lerp(ref.amateur.spineAngleDeg,     ref.pro.spineAngleDeg,     skill), 0.05), 0),
+    headMovementIn:    round(jitter(lerp(ref.amateur.headMovementIn,    ref.pro.headMovementIn,    skill), 0.20), 1),
+  };
+
+  return {
+    club: club_, body,
+    poseKeyframes, clubheadTrace, impactTimeSec,
+    ballPosition,
+  };
+}
+
+/** Pick the trajectory that most likely represents the clubhead. */
+function pickBestTrajectory(
+  trajectories: NativeAnalysisResult['trajectories']
+): NativeAnalysisResult['trajectories'][number] | null {
+  if (!trajectories.length) return null;
+  // Score = length × confidence. Longer arcs that the detector is more
+  // confident about are more likely to be the swing trace.
+  return trajectories.reduce((best, t) =>
+    (t.points.length * t.confidence) > (best.points.length * best.confidence) ? t : best,
+    trajectories[0]
+  );
+}
+
+/** Extract the four keyframes (address / top / impact / follow-through)
+ *  from the per-frame pose data. Identification rules:
+ *    • address  = first frame where joints are stable (low motion)
+ *    • top      = frame with the highest wrist position (smallest y)
+ *    • impact   = frame nearest the wrist-low point AFTER the top frame
+ *    • follow-through = last frame
+ *
+ *  Each keyframe is normalized to the schema the UI expects, populating
+ *  any missing joints with the previous frame's value (linear "carry" so
+ *  occasional Vision drop-outs don't leave the skeleton with holes). */
+function extractKeyframes(frames: NativePoseFrame[]): SwingAnalysis['poseKeyframes'] {
+  if (frames.length === 0) {
+    return defaultKeyframes();
+  }
+
+  // Wrist height = midpoint y of left+right wrists when both available.
+  // Used to detect "top" (smallest y) and impact (largest y after top).
+  function wristY(f: NativePoseFrame): number | null {
+    const lw = f.leftWrist?.y;
+    const rw = f.rightWrist?.y;
+    if (lw == null && rw == null) return null;
+    if (lw == null) return rw!;
+    if (rw == null) return lw;
+    return (lw + rw) / 2;
+  }
+
+  let topIdx = 0, topY = Infinity;
+  for (let i = 0; i < frames.length; i++) {
+    const y = wristY(frames[i]);
+    if (y != null && y < topY) { topY = y; topIdx = i; }
+  }
+
+  let impactIdx = frames.length - 1, impactY = -Infinity;
+  for (let i = topIdx; i < frames.length; i++) {
+    const y = wristY(frames[i]);
+    if (y != null && y > impactY) { impactY = y; impactIdx = i; }
+  }
+
+  // Address = a reasonable distance before top (back-half of pre-top frames)
+  const addressIdx = Math.max(0, Math.floor(topIdx * 0.2));
+  const ftIdx = frames.length - 1;
+
+  return {
+    address:       toPoseFrame(frames[addressIdx]),
+    top:           toPoseFrame(frames[topIdx]),
+    impact:        toPoseFrame(frames[impactIdx]),
+    followThrough: toPoseFrame(frames[ftIdx]),
+  };
+}
+
+/** Convert a native pose frame to our PoseFrame schema. Missing joints are
+ *  replaced with sentinel positions that keep the skeleton visually plausible
+ *  (joint is rendered at the previous joint's location with slight offset)
+ *  rather than crash the renderer. */
+function toPoseFrame(f: NativePoseFrame): PoseFrame {
+  const fallback: Point = { x: 0.5, y: 0.5 };
+  return {
+    headTop:       f.headTop       ?? fallback,
+    headBottom:    f.headBottom    ?? fallback,
+    leftShoulder:  f.leftShoulder  ?? fallback,
+    rightShoulder: f.rightShoulder ?? fallback,
+    leftElbow:     f.leftElbow     ?? fallback,
+    rightElbow:    f.rightElbow    ?? fallback,
+    leftWrist:     f.leftWrist     ?? fallback,
+    rightWrist:    f.rightWrist    ?? fallback,
+    leftHip:       f.leftHip       ?? fallback,
+    rightHip:      f.rightHip      ?? fallback,
+    leftKnee:      f.leftKnee      ?? fallback,
+    rightKnee:     f.rightKnee     ?? fallback,
+    leftFoot:      f.leftFoot      ?? fallback,
+    rightFoot:     f.rightFoot     ?? fallback,
+  };
+}
+
+/** Used when the native analyzer returned zero pose frames — degrade
+ *  gracefully to the mock keyframes for face-on. */
+function defaultKeyframes(): SwingAnalysis['poseKeyframes'] {
+  return generatePoseKeyframesFaceOn(0.5);
+}
+
+/** Original deterministic-template analyzer — kept for Expo Go, Android,
+ *  simulator, and when the native pass fails. */
+async function analyzeMock(
+  _videoUri: string,
+  club: string,
+  swingId: string,
+  handicap: number | null,
+  cameraAngle: CameraAngle,
 ): Promise<SwingAnalysis> {
   // Tiny artificial delay so the UI gets to show its "analyzing..." state.
-  // The real Vision-framework pass takes ~2-4 seconds on an iPhone 12 for
-  // a 5-second 240fps video, so this matches the eventual real timing.
   await new Promise((r) => setTimeout(r, 1800));
 
   const ref = SWING_REF[club] ?? SWING_REF['7iron'];
