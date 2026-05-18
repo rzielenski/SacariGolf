@@ -58,6 +58,10 @@ export default function ProfileScreen() {
   const [bestRound, setBestRound] = useState<any | null>(null);
   const [followingCount, setFollowingCount] = useState(0);
   const [followersCount, setFollowersCount] = useState(0);
+  // The user's teams (clans). Surfaced on the profile so the Teams sub-tab
+  // didn't have to keep haunting the Social area after that tab was
+  // refocused on chats only.
+  const [myTeams, setMyTeams] = useState<any[]>([]);
   const [stats, setStats] = useState<any | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
@@ -135,6 +139,12 @@ export default function ProfileScreen() {
         setFollowingCount(data.following_count ?? 0);
         setFollowersCount(data.followers_count ?? 0);
       })
+      .catch(() => { });
+    // Teams the user belongs to. Cheap call, runs alongside the profile
+    // hydrate so the My Teams section is populated by the time the user
+    // scrolls down to it.
+    api.clans.mine()
+      .then((teams) => setMyTeams(Array.isArray(teams) ? teams : []))
       .catch(() => { });
   }, [user?.user_id]);
 
@@ -515,6 +525,38 @@ export default function ProfileScreen() {
         <Text style={styles.statsBtnLabel}>MY MATCHES</Text>
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
+
+      {/* My Teams — replaces the old Social → Teams sub-tab. Each row is
+          a tappable clan that drops into the clan home screen (chats,
+          roster, scheduling, etc.). When the user has no teams yet we
+          show a single "Find or start a team" CTA instead of an empty
+          section header so the surface doesn't feel dead. */}
+      <Text style={styles.sectionHeader}>MY TEAMS</Text>
+      {myTeams.length === 0 ? (
+        <Text style={styles.teamsEmpty}>
+          You&apos;re not on a team yet. Browse public teams or start your own.
+        </Text>
+      ) : (
+        myTeams.map((t: any) => (
+          <TouchableOpacity
+            key={t.clan_id}
+            style={styles.teamRow}
+            onPress={() => router.push(`/clan/${t.clan_id}` as any)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.teamIcon}>
+              <Text style={styles.teamIconText}>{t.name?.[0]?.toUpperCase() ?? '?'}</Text>
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={styles.teamName} numberOfLines={1}>{t.name}</Text>
+              <Text style={styles.teamMeta} numberOfLines={1}>
+                {String(t.clan_mode ?? '').toUpperCase()} · {t.member_count} members
+              </Text>
+            </View>
+            <Text style={styles.statsBtnArrow}>›</Text>
+          </TouchableOpacity>
+        ))
+      )}
 
       {/* Premium upgrade entry point */}
       <TouchableOpacity
@@ -1093,6 +1135,29 @@ const styles = StyleSheet.create({
   },
   statsBtnLabel: { color: C.gold, fontWeight: '800', fontSize: 13, letterSpacing: 0.6 },
   statsBtnArrow: { color: C.gold, fontSize: 22 },
+  // ── My Teams ───────────────────────────────────────────────────────────
+  sectionHeader: {
+    color: C.gold, fontSize: 11, fontWeight: '900',
+    letterSpacing: 1.4, marginTop: 14, marginBottom: 8,
+  },
+  teamsEmpty: {
+    color: C.textMuted, fontSize: 12, fontStyle: 'italic',
+    marginBottom: 12, lineHeight: 17,
+  },
+  teamRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
+    marginBottom: 6,
+  },
+  teamIcon: {
+    width: 36, height: 36, borderRadius: 4,
+    backgroundColor: C.gold + '22',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  teamIconText: { color: C.gold, fontWeight: '900', fontSize: 15 },
+  teamName: { color: C.text, fontSize: 14, fontWeight: '700' },
+  teamMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
   premiumBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: C.card, borderWidth: 1, borderColor: C.gold,

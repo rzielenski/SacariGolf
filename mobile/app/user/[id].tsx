@@ -164,12 +164,27 @@ export default function UserProfileScreen() {
             already friends → "Friends ✓" (disabled). Optimistically updates
             the profile so the button changes immediately after a tap. */}
         {user && user.user_id !== profile.user_id && (
-          <FriendshipButton
-            status={profile.friendship_status}
-            targetUserId={profile.user_id}
-            targetUsername={profile.username}
-            onChange={(next) => setProfile((p: any) => p ? { ...p, friendship_status: next } : p)}
-          />
+          <View style={styles.actionRow}>
+            <FriendshipButton
+              status={profile.friendship_status}
+              targetUserId={profile.user_id}
+              targetUsername={profile.username}
+              onChange={(next) => setProfile((p: any) => p ? { ...p, friendship_status: next } : p)}
+            />
+            {/* Message — jumps straight to (or resumes) the 1:1 chat with
+                this player. Backwards-compat with the old conversations
+                list: the chat screen creates the thread on first send if
+                one doesn't exist yet, so this works for strangers too. */}
+            <TouchableOpacity
+              style={[styles.friendBtn, styles.friendBtnMessage]}
+              onPress={() => router.push(
+                `/chat/dm/${profile.user_id}?name=${encodeURIComponent(profile.username)}` as any,
+              )}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.friendBtnText, { color: C.bg }]}>Message</Text>
+            </TouchableOpacity>
+          </View>
         )}
       </View>
 
@@ -678,7 +693,15 @@ const styles = StyleSheet.create({
   friendBtnAdd:    { backgroundColor: C.gold },
   friendBtnAccept: { backgroundColor: C.green },
   friendBtnDone:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  friendBtnMessage:{ backgroundColor: C.blue ?? '#4a9eff' },
   friendBtnText:   { fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
+  // Two-up row: Friendship CTA + Message side by side. Centered as a
+  // group so a single-button layout (when friendship is "self" and there's
+  // only the message-equivalent) still looks balanced.
+  actionRow: {
+    flexDirection: 'row', justifyContent: 'center', alignItems: 'center',
+    gap: 10, marginTop: 14, flexWrap: 'wrap',
+  },
 
   bioCard: {
     backgroundColor: C.card, borderRadius: 10, padding: 14,

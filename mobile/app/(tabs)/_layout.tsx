@@ -49,9 +49,12 @@ export default function TabLayout() {
       <Tabs.Screen
         name="social"
         options={{
-          title: 'Social',
+          // Renamed from "Social" — the tab is now a chats-only inbox.
+          // Friends + Teams moved to the profile screen; user lookup
+          // ("add a friend") moved to the Following / Followers lists.
+          title: 'Chats',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people" size={size} color={color} />
+            <Ionicons name="chatbubbles" size={size} color={color} />
           ),
         }}
       />
