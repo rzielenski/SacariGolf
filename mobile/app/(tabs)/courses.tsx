@@ -49,8 +49,22 @@ export default function CoursesScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Courses</Text>
-      <Text style={styles.subtitle}>Browse courses, see leaderboards & tee info</Text>
+      {/* Title row with the +Request CTA. Mirrors the +Find button on the
+          Finds tab so the affordance for "this catalog is missing
+          something — add it" is consistent across the app. */}
+      <View style={styles.titleRow}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.title}>Courses</Text>
+          <Text style={styles.subtitle}>Browse courses, see leaderboards & tee info</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.requestBtn}
+          onPress={() => router.push('/course-request' as any)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.requestBtnText}>+ Request</Text>
+        </TouchableOpacity>
+      </View>
       <Divider style={{ marginTop: -4, marginBottom: 8 }} />
 
       <TextInput
@@ -107,8 +121,19 @@ function CourseRow({ course, onPress }: { course: Course; onPress: () => void })
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg, padding: 20, paddingTop: 60 },
+  titleRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   title: { color: C.text, fontSize: 26, fontWeight: '900', marginBottom: 4 },
   subtitle: { color: C.textMuted, fontSize: 13, marginBottom: 16 },
+  // Same look as the +Find button on the Finds tab — gold-tinted pill,
+  // small + glyph, sits aligned to the title's top so the row doesn't
+  // distort vertically as the subtitle wraps.
+  requestBtn: {
+    backgroundColor: C.gold + '22', borderRadius: 4,
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderWidth: 1, borderColor: C.gold,
+    marginTop: 4,
+  },
+  requestBtnText: { color: C.gold, fontWeight: '700', fontSize: 13 },
   searchInput: {
     backgroundColor: C.card, color: C.text, borderRadius: 6,
     paddingHorizontal: 16, paddingVertical: 13, fontSize: 15,

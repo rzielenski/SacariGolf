@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { sendPush } from '../utils/notify';
 
 const router = Router();
 
@@ -532,6 +533,62 @@ router.post('/request', requireAuth, wrap(async (req: AuthRequest, res: Response
      RETURNING request_id`,
     [req.userId, courseName, city, state, country, website, notes]
   );
+
+  // ── Notify the admin via DM ───────────────────────────────────────────
+  // The course_requests inbox is the durable record; the DM is the
+  // realtime ping that lets the admin actually notice without checking
+  // the table. Gated on ADMIN_USER_ID being set in the server env. The
+  // direct_messages INSERT here intentionally BYPASSES the "must be
+  // friends" rule the public POST /dm/:userId endpoint enforces — this
+  // is a server-controlled system message, not a UGC interaction.
+  const adminUserId = process.env.ADMIN_USER_ID;
+  if (adminUserId && adminUserId !== req.userId) {
+    try {
+      // Lookup the requester's username so the DM body reads naturally.
+      const { rows: meRows } = await pool.query(
+        `SELECT username FROM users WHERE user_id = $1`, [req.userId]
+      );
+      const requesterName = meRows[0]?.username ?? 'A user';
+
+      // Compose the DM body. Multi-line so the admin can copy/paste it
+      // straight into the import flow.
+      const lines = [
+        `📍 Course request from ${requesterName}`,
+        ``,
+        `Name: ${courseName}`,
+      ];
+      const loc = [city, state, country].filter(Boolean).join(', ');
+      if (loc)     lines.push(`Location: ${loc}`);
+      if (website) lines.push(`Website: ${website}`);
+      if (notes)   lines.push(`Notes: ${notes}`);
+      const dmBody = lines.join('\n').slice(0, 2000);
+
+      await pool.query(
+        `INSERT INTO direct_messages (from_user_id, to_user_id, body)
+         VALUES ($1, $2, $3)`,
+        [req.userId, adminUserId, dmBody]
+      );
+
+      // Best-effort push so the admin sees a tray notification too.
+      const { rows: adminRows } = await pool.query(
+        `SELECT push_token FROM users WHERE user_id = $1`, [adminUserId]
+      );
+      const token = adminRows[0]?.push_token;
+      if (token) {
+        await sendPush(
+          [token],
+          'New course request',
+          `${requesterName}: ${courseName}${loc ? ` (${loc})` : ''}`,
+          { type: 'dm', fromUserId: req.userId },
+        );
+      }
+    } catch {
+      // Don't fail the user's submission just because the admin
+      // notification couldn't be delivered — the inbox row is the
+      // source of truth and will surface in /courses/requests either way.
+    }
+  }
+
   return res.json({ success: true, request_id: rows[0].request_id });
 }));
 

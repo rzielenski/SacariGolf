@@ -4,6 +4,8 @@ import {
   Image, Modal, ActivityIndicator, TextInput, FlatList, Linking,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../../lib/auth';
 import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
@@ -121,12 +123,37 @@ export default function ProfileScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load notification count badge — must be before any early return
+  // ── Notification bell counter ───────────────────────────────────────
+  // Local counter, persisted in AsyncStorage. The server's `unread_count`
+  // has been unreliable — it kept landing on "1" no matter what — so the
+  // bell now ignores it and counts received pushes directly. The rule is
+  // simple: every push the device sees while we're listening increments,
+  // tapping the bell resets to 0. State outlasts app reloads via the
+  // persisted key. (Pushes that arrive while the app is fully killed are
+  // not counted — the OS shows them in the system tray but our listener
+  // can't fire; that's an OK trade for not staring at a stuck "1" badge.)
+  const NOTIF_BELL_KEY = `notif_bell_count_${user?.user_id ?? 'anon'}`;
   useEffect(() => {
     if (!user) return;
-    api.users.notifications()
-      .then((res) => setNotifCount(res.unread_count ?? 0))
+    let cancelled = false;
+    AsyncStorage.getItem(NOTIF_BELL_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        const n = raw ? parseInt(raw, 10) : 0;
+        setNotifCount(Number.isFinite(n) && n >= 0 ? n : 0);
+      })
       .catch(() => { });
+    const sub = Notifications.addNotificationReceivedListener(() => {
+      setNotifCount((prev) => {
+        const next = prev + 1;
+        AsyncStorage.setItem(NOTIF_BELL_KEY, String(next)).catch(() => { });
+        return next;
+      });
+    });
+    return () => { cancelled = true; sub.remove(); };
+  // NOTIF_BELL_KEY is derived from user.user_id so re-keying happens via
+  // the dep array; safe to depend on user_id alone.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.user_id]);
 
   // Load recent rounds + best round (rich profile data)
@@ -168,23 +195,25 @@ export default function ProfileScreen() {
   const openNotifications = useCallback(async () => {
     setNotifVisible(true);
     setLoadingNotifs(true);
-    // Mark notifications as seen server-side so the badge stays cleared
-    // across reloads. Bell badge counts only actionable items (friend
-    // requests, match invites, results) — chat unreads have their own
-    // surface (pulsing dots in the Social tab), so tapping the bell
-    // doesn't and shouldn't clear them. After the mark-seen completes the
-    // re-fetched `unread_count` returns 0 for actionable items.
+    // Reset the bell counter immediately — the user asked for this exact
+    // semantic: increment per received push, zero out on tap. We persist
+    // 0 so the badge stays cleared across reloads even if the server's
+    // /notifications fetch errors or comes back with stale unread_count.
+    setNotifCount(0);
+    AsyncStorage.setItem(NOTIF_BELL_KEY, '0').catch(() => { });
+    // Fire-and-forget server-side mark-seen so any other surface that
+    // reads from unread_count (and the device's system tray badge) stays
+    // in sync. We no longer depend on the value it returns.
     api.users.markNotificationsSeen().catch(() => { });
     try {
       const res = await api.users.notifications();
       setNotifications(res.notifications ?? []);
-      setNotifCount(res.unread_count ?? 0);
     } catch {
-      setNotifCount(0);
+      /* silent — bell is already cleared locally */
     } finally {
       setLoadingNotifs(false);
     }
-  }, []);
+  }, [NOTIF_BELL_KEY]);
 
   if (!user) return null;
 
