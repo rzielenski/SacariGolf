@@ -681,8 +681,26 @@ export default function ScoringScreen() {
     // diff18() on the backend normalises 9-hole rounds to 18-hole equivalents
     // so different teeboxes (and different hole counts) compare fairly.
     const want = chosenRoundHoles ?? 18;
-    const playableHoles = Math.min(t.num_holes, want, (t.holes ?? []).length);
-    const h = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num).slice(0, playableHoles);
+    const teeboxHoleCount = (t.holes ?? []).length;
+    // "Play 9 holes twice for 18": if the user asked for 18 but the teebox
+    // only has 9 holes, duplicate the front 9 to fill a full 18-card. The
+    // duplicated holes get hole_num 10–18 (offset by 9) so per-hole stats,
+    // scorecards, and shot-tracking keys don't collide between the first
+    // and second pass.
+    const isDoubleUp = want === 18 && teeboxHoleCount === 9;
+    const playableHoles = isDoubleUp ? 18 : Math.min(t.num_holes, want, teeboxHoleCount);
+    const baseHoles = [...(t.holes ?? [])].sort((a, b) => a.hole_num - b.hole_num);
+    const h = isDoubleUp
+      ? [
+          ...baseHoles.slice(0, 9),
+          ...baseHoles.slice(0, 9).map((hole) => ({
+            ...hole,
+            // hole_num continues 10..18 for the second pass so the scorecard
+            // grid and downstream keys (shot-tracking, hole_stats) are unique.
+            hole_num: hole.hole_num + 9,
+          })),
+        ]
+      : baseHoles.slice(0, playableHoles);
     if (h.length === 0) {
       Alert.alert(
         'No Hole Data',
@@ -766,9 +784,30 @@ export default function ScoringScreen() {
     return normalized;
   };
 
+  // ── Per-hole aim point (draggable heatmap target) ──────────────────────
+  // When the player wants to play (say) the left side of the fairway, they
+  // drop / drag the on-map heatmap crosshair to their target. The heatmap
+  // re-projects around that aim, and the snapshot is persisted on each
+  // shot so downstream lateral stats compare against THEIR centerline, not
+  // the fairway center. Cleared automatically when the player advances to
+  // the next hole (each hole has its own aim).
+  const [aimByHole, setAimByHole] = useState<Record<number, { lat: number; lng: number }>>({});
+  const aimRef = useRef(aimByHole);
+  aimRef.current = aimByHole;
+  const aimForCurrentHole: { lat: number; lng: number } | null =
+    currentHoleNum != null ? (aimByHole[currentHoleNum] ?? null) : null;
+  const clearAim = () => {
+    if (currentHoleNum == null) return;
+    setAimByHole((prev) => {
+      const { [currentHoleNum]: _, ...rest } = prev;
+      return rest;
+    });
+  };
+
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
     getAveragedFix, getRelativeAltitudeM,
+    getAimPoint: () => (currentHoleNum != null ? aimRef.current[currentHoleNum] ?? null : null),
   });
   const {
     shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
@@ -1405,7 +1444,13 @@ export default function ScoringScreen() {
    *     orientation on the map.
    */
   const heatmapRings = useMemo<{ sigma1: LL[]; sigma2: LL[]; center: LL } | null>(() => {
-    if (!userIsPremium || !userCoord || !knownPin || !clubStats?.length) return null;
+    if (!userIsPremium || !userCoord || !clubStats?.length) return null;
+    // The heatmap aim target — either the player's manually-dragged aim
+    // point for this hole, or the pin if they haven't dragged one. This is
+    // the centerline the ellipses point along.
+    const aimTarget: { lat: number; lng: number } | null =
+      aimForCurrentHole ?? (knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null);
+    if (!aimTarget) return null;
     const club = activeShot?.club ?? pendingClub;
     if (!club) return null;
     const cs = clubStats.find((c) => c.club === club);
@@ -1413,10 +1458,11 @@ export default function ScoringScreen() {
     // shot has zero variance and would render as a degenerate ellipse.
     if (!cs?.dispersion || cs.dispersion.length < 2 || !cs.median_yds) return null;
 
-    // Aim bearing (player → pin), radians, 0 = N, clockwise.
+    // Aim bearing (player → target), radians, 0 = N, clockwise. Target is
+    // either the manual aim point (when dragged) or the pin.
     const lat1 = userCoord.latitude * Math.PI / 180;
-    const lat2 = knownPin.lat * Math.PI / 180;
-    const dLng = (knownPin.lng - userCoord.longitude) * Math.PI / 180;
+    const lat2 = aimTarget.lat * Math.PI / 180;
+    const dLng = (aimTarget.lng - userCoord.longitude) * Math.PI / 180;
     const yB = Math.sin(dLng) * Math.cos(lat2);
     const xB = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
     const aimBearing = Math.atan2(yB, xB);
@@ -1483,6 +1529,11 @@ export default function ScoringScreen() {
     // only WHERE the scatter lands. So we shift the centroid and keep the
     // axes untouched.
     let effectiveForward = baseForward;
+    // Effective lateral offset to apply to the ellipse center. Defaults to
+    // the (small) per-club systematic bias from the dispersion mean; when
+    // the player drags the aim manually we zero this out and pin the
+    // center to the aim coordinate instead.
+    let effectiveLateral = meanLat;
 
     // ── Weather: wind / temperature / altitude / rain ─────────────────
     // Same conditions object the pin-distance plays-like uses; just
@@ -1522,7 +1573,25 @@ export default function ScoringScreen() {
     }
 
     const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
-    const center = place(start, effectiveForward, meanLat);
+    // When the user has manually dragged the aim point, the heatmap center
+    // IS the aim point — that's the "I'm aiming here" semantic. We
+    // recompute the forward distance so the σ rings extend symmetrically
+    // around the aim along the start→aim line.
+    if (aimForCurrentHole) {
+      // Great-circle distance from start to aim, in yards. Inline rather
+      // than calling distYards() to avoid pulling another helper into the
+      // memo's dep array — the bearing-vs-distance math is already inline
+      // above.
+      const aLat1 = userCoord.latitude * Math.PI / 180;
+      const aLat2 = aimForCurrentHole.lat * Math.PI / 180;
+      const adLat = aLat2 - aLat1;
+      const adLng = (aimForCurrentHole.lng - userCoord.longitude) * Math.PI / 180;
+      const aa = Math.sin(adLat / 2) ** 2 + Math.cos(aLat1) * Math.cos(aLat2) * Math.sin(adLng / 2) ** 2;
+      const aMeters = 6371000 * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
+      effectiveForward = aMeters * 1.0936132983;
+      effectiveLateral = 0;
+    }
+    const center: LL = place(start, effectiveForward, effectiveLateral);
 
     // Sample 60 points around each σ ellipse perimeter. In the (lateral,
     // long) frame relative to the ELLIPSE CENTER:
@@ -1540,9 +1609,10 @@ export default function ScoringScreen() {
         const ly = mult * sigmaMinor * Math.sin(t);
         const rotLat  = lx * Math.cos(thetaLocal) - ly * Math.sin(thetaLocal);
         const rotLong = lx * Math.sin(thetaLocal) + ly * Math.cos(thetaLocal);
-        // Project from ELLIPSE CENTER (effectiveForward), not from start,
-        // so the perimeter follows the condition-adjusted landing zone.
-        out.push(place(start, effectiveForward + rotLong, meanLat + rotLat));
+        // Project from ELLIPSE CENTER (effectiveForward, effectiveLateral),
+        // not from start, so the perimeter follows the (possibly manually
+        // aimed) center.
+        out.push(place(start, effectiveForward + rotLong, effectiveLateral + rotLat));
       }
       return out;
     };
@@ -1553,6 +1623,9 @@ export default function ScoringScreen() {
     // player elevation calibration. Without these the ellipses would feel
     // stale relative to the pin's plays-like banner.
     weather, slopeAdjustment, yardsToPin, homeElevationFt,
+    // Re-roll when the player drags the heatmap aim — the center jumps to
+    // wherever they dropped the crosshair.
+    aimForCurrentHole,
   ]);
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
@@ -1951,12 +2024,16 @@ export default function ScoringScreen() {
                   >
                     <Text style={{ color: C.gold }}>← Change round length ({chosenRoundHoles})</Text>
                   </TouchableOpacity>
-                  {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= chosenRoundHoles).length === 0 && (
+                  {(fullCourse.teeboxes ?? []).filter((t) =>
+                    t.num_holes >= chosenRoundHoles || (chosenRoundHoles === 18 && t.num_holes === 9)
+                  ).length === 0 && (
                     <Text style={{ color: C.textMuted, paddingHorizontal: 20, marginTop: 12 }}>
                       No tee boxes for {chosenRoundHoles} holes at this course.
                     </Text>
                   )}
-                  {(fullCourse.teeboxes ?? []).filter((t) => t.num_holes >= chosenRoundHoles).map((t) => (
+                  {(fullCourse.teeboxes ?? []).filter((t) =>
+                    t.num_holes >= chosenRoundHoles || (chosenRoundHoles === 18 && t.num_holes === 9)
+                  ).map((t) => (
                     <TouchableOpacity
                       key={t.teebox_id}
                       style={[styles.teeboxCard, (t.holes ?? []).length === 0 && styles.teeboxCardDisabled]}
@@ -1966,6 +2043,7 @@ export default function ScoringScreen() {
                         <Text style={styles.teeboxName}>{t.name} Tees</Text>
                         <Text style={styles.teeboxMeta}>
                           {t.num_holes} holes · Par {t.par} · {t.total_yards?.toLocaleString()} yds
+                          {chosenRoundHoles === 18 && t.num_holes === 9 ? '  ·  plays twice for 18' : ''}
                           {(t.holes ?? []).length === 0 ? '  ·  No hole data' : ''}
                         </Text>
                       </View>
@@ -2016,6 +2094,12 @@ export default function ScoringScreen() {
 
   const measureDist = userCoord && measurePin
     ? distYards(userCoord.latitude, userCoord.longitude, measurePin.latitude, measurePin.longitude)
+    : null;
+  // Distance from the tapped measure pin to the actual hole pin (if we
+  // know where the pin is). Lets the player gauge "if I lay up there, how
+  // far do I have left in?" in a single tap — common pre-shot question.
+  const measureToPin = measurePin && knownPin
+    ? distYards(measurePin.latitude, measurePin.longitude, knownPin.lat, knownPin.lng)
     : null;
 
   const scoreParColor = scoreToPar < 0 ? C.green : scoreToPar > 0 ? C.red : C.text;
@@ -2068,6 +2152,40 @@ export default function ScoringScreen() {
                 strokeWidth={2}
                 lineDashPattern={[6, 4]}
               />
+            )}
+            {/* Second leg — from the tapped measure pin to the actual hole
+                pin, when we know the pin's location. Drawn in a paler tint
+                so the player can tell the two legs apart at a glance, and
+                labelled with its own yardage at the midpoint. */}
+            {knownPin && (
+              <>
+                <Polyline
+                  coordinates={[
+                    measurePin,
+                    { latitude: knownPin.lat, longitude: knownPin.lng },
+                  ]}
+                  strokeColor={C.gold + 'aa'}
+                  strokeWidth={2}
+                  lineDashPattern={[4, 4]}
+                />
+                {measureToPin != null && (
+                  <Marker
+                    coordinate={{
+                      latitude:  (measurePin.latitude  + knownPin.lat) / 2,
+                      longitude: (measurePin.longitude + knownPin.lng) / 2,
+                    }}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    tappable={false}
+                    tracksViewChanges={false}
+                  >
+                    <View style={styles.measureLegPill}>
+                      <Text style={styles.measureLegPillText}>
+                        {Math.round(measureToPin)} to pin
+                      </Text>
+                    </View>
+                  </Marker>
+                )}
+              </>
             )}
           </>
         )}
@@ -2146,13 +2264,29 @@ export default function ScoringScreen() {
               strokeWidth={2}
               fillColor="rgba(255,242,0,0.12)"
             />
+            {/* Heatmap center marker is DRAGGABLE — moving it shifts the
+                player's aim for this hole, so a deliberate "I'm playing
+                the left side of the fairway" gets credited as accurate
+                later, not as a lateral miss against fairway center.
+                Long-press the chip in the top-left of the map to reset. */}
             <Marker
               coordinate={heatmapRings.center}
               anchor={{ x: 0.5, y: 0.5 }}
-              tappable={false}
+              draggable
               tracksViewChanges={false}
+              onDragEnd={(e) => {
+                if (currentHoleNum == null) return;
+                const { latitude, longitude } = e.nativeEvent.coordinate;
+                setAimByHole((prev) => ({
+                  ...prev,
+                  [currentHoleNum]: { lat: latitude, lng: longitude },
+                }));
+              }}
             >
-              <View style={styles.heatmapCenterDot} />
+              <View style={[
+                styles.heatmapCenterDot,
+                aimForCurrentHole && styles.heatmapCenterDotAimed,
+              ]} />
             </Marker>
           </>
         )}
@@ -2244,28 +2378,51 @@ export default function ScoringScreen() {
 
         {/* Live tracking line — drawn while the player is between TRACK
             start and TRACK stop. Goes from the start point to current GPS,
-            updates as the player walks. */}
-        {activeShot && userCoord && (
-          <>
-            <Polyline
-              coordinates={[
-                { latitude: activeShot.start.lat, longitude: activeShot.start.lng },
-                { latitude: userCoord.latitude,   longitude: userCoord.longitude },
-              ]}
-              strokeColor={SHOT_COLORS[currentShots.length % SHOT_COLORS.length]}
-              strokeWidth={4}
-              lineDashPattern={[8, 6]}
-            />
-            <Marker
-              coordinate={{ latitude: activeShot.start.lat, longitude: activeShot.start.lng }}
-              anchor={{ x: 0.5, y: 0.5 }}
-            >
-              <View style={[styles.shotDot, { backgroundColor: SHOT_COLORS[currentShots.length % SHOT_COLORS.length] }]}>
-                <Text style={styles.shotDotText}>{currentShots.length + 1}</Text>
-              </View>
-            </Marker>
-          </>
-        )}
+            updates as the player walks. The yardage chip at the midpoint
+            updates with every GPS fix so the player knows how far they've
+            walked — useful as a sanity check before they tap TRACK→stop. */}
+        {activeShot && userCoord && (() => {
+          const liveYds = Math.round(distYards(
+            activeShot.start.lat, activeShot.start.lng,
+            userCoord.latitude,   userCoord.longitude,
+          ));
+          const midLat = (activeShot.start.lat + userCoord.latitude) / 2;
+          const midLng = (activeShot.start.lng + userCoord.longitude) / 2;
+          const color = SHOT_COLORS[currentShots.length % SHOT_COLORS.length];
+          return (
+            <>
+              <Polyline
+                coordinates={[
+                  { latitude: activeShot.start.lat, longitude: activeShot.start.lng },
+                  { latitude: userCoord.latitude,   longitude: userCoord.longitude },
+                ]}
+                strokeColor={color}
+                strokeWidth={4}
+                lineDashPattern={[8, 6]}
+              />
+              <Marker
+                coordinate={{ latitude: activeShot.start.lat, longitude: activeShot.start.lng }}
+                anchor={{ x: 0.5, y: 0.5 }}
+              >
+                <View style={[styles.shotDot, { backgroundColor: color }]}>
+                  <Text style={styles.shotDotText}>{currentShots.length + 1}</Text>
+                </View>
+              </Marker>
+              {/* Midpoint distance label — re-renders with each userCoord
+                  update so the player sees live yardage growing as they
+                  walk to the ball. */}
+              <Marker
+                coordinate={{ latitude: midLat, longitude: midLng }}
+                anchor={{ x: 0.5, y: 0.5 }}
+                tappable={false}
+              >
+                <View style={[styles.liveShotPill, { borderColor: color }]}>
+                  <Text style={[styles.liveShotPillText, { color }]}>{liveYds} yds</Text>
+                </View>
+              </Marker>
+            </>
+          );
+        })()}
       </MapView>
 
       {/* ── Top bar (floats over map) ── */}
@@ -2407,6 +2564,19 @@ export default function ScoringScreen() {
           </Text>
         </TouchableOpacity>
       </View>
+
+      {/* "Reset aim" chip — shown only when the player has dragged the
+          heatmap crosshair away from its default (pin-projected) center.
+          Tap clears their aim for this hole and the heatmap snaps back. */}
+      {aimForCurrentHole && (
+        <TouchableOpacity
+          style={styles.aimResetChip}
+          onPress={clearAim}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.aimResetChipText}>✕ RESET AIM</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Club picker modal */}
       <Modal
@@ -2767,6 +2937,15 @@ export default function ScoringScreen() {
               {adjusted != null && (
                 <Text style={styles.distAdj}>
                   plays {adjusted} ({adjusted > raw ? '+' : ''}{adjusted - raw})
+                </Text>
+              )}
+              {/* "X to pin" — yardage from the tapped point onward to the
+                  actual hole. Mirrors the second polyline + label drawn on
+                  the map so the player has both numbers within glance:
+                  carry to the lay-up + what's left in. */}
+              {measureToPin != null && (
+                <Text style={styles.distLeg}>
+                  +{Math.round(measureToPin)} to pin
                 </Text>
               )}
             </View>
@@ -3152,6 +3331,35 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#000',
     shadowColor: '#fff200', shadowOpacity: 0.8, shadowRadius: 4,
   },
+  // Larger and gold-tinted when the player has manually dragged the aim —
+  // signals "this is your committed aim point, not the auto-projected one."
+  heatmapCenterDotAimed: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: C.gold,
+    borderColor: '#000', borderWidth: 2,
+    shadowColor: C.gold, shadowOpacity: 1, shadowRadius: 6,
+  },
+  // Live shot yardage pill — floats at the midpoint of the active shot
+  // polyline. Dark background so it's readable against the satellite tiles
+  // regardless of where on the course the player is walking.
+  liveShotPill: {
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 12, borderWidth: 1.5,
+    paddingHorizontal: 10, paddingVertical: 4,
+    shadowColor: '#000', shadowOpacity: 0.6, shadowRadius: 3,
+    elevation: 4,
+  },
+  liveShotPillText: { fontFamily: F.serif, fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
+  aimResetChip: {
+    position: 'absolute', top: 184, left: 12,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 14, borderWidth: 1, borderColor: C.gold,
+    paddingHorizontal: 10, paddingVertical: 4,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    zIndex: 6,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4,
+  },
+  aimResetChipText: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 0.5 },
 
   // Ghost player endpoint label — silver, low-contrast so it sits behind
   // the real shot markers. Italic + lowercase for the wizardly vibe.
@@ -3302,6 +3510,20 @@ const styles = StyleSheet.create({
   },
   distNum: { fontFamily: F.serif, color: C.gold, fontSize: 22, fontWeight: '700' },
   distAdj: { color: C.text, fontSize: 11, fontWeight: '700', marginTop: 2 },
+  // Second-leg line — yardage from the tapped point on to the pin. Slightly
+  // dimmer than distNum/distAdj since it's the supporting info, not the
+  // primary readout.
+  distLeg: { color: C.gold + 'cc', fontSize: 11, fontWeight: '700', marginTop: 2 },
+  // Midpoint label on the measure→pin polyline. Matches the live-shot pill
+  // styling so the on-map number readouts feel like one family.
+  measureLegPill: {
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 10, borderWidth: 1, borderColor: C.gold + 'aa',
+    paddingHorizontal: 8, paddingVertical: 3,
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 3,
+    elevation: 3,
+  },
+  measureLegPillText: { color: C.gold, fontFamily: F.serif, fontSize: 11, fontWeight: '900' },
   distClear: { borderRadius: 4, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: C.border },
   distClearText: { color: C.textMuted, fontWeight: '700', fontSize: 11 },
 

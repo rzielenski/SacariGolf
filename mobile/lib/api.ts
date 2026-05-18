@@ -361,6 +361,16 @@ export const api = {
     friendRequests: () => request<any[]>('GET', '/users/me/friend-requests'),
     sendRequest: (friendId: string) => request<any>('POST', '/users/me/friends/request', { friendId }),
     acceptRequest: (friendId: string) => request<any>('POST', '/users/me/friends/accept', { friendId }),
+    /** Users this profile has befriended (sent the accepted request). */
+    following: (id: string) => request<{
+      user_id: string; username: string; elo: number;
+      avatar_url: string | null; created_at: string;
+    }[]>('GET', `/users/${id}/following`),
+    /** Users that befriended this profile (sent it the accepted request). */
+    followers: (id: string) => request<{
+      user_id: string; username: string; elo: number;
+      avatar_url: string | null; created_at: string;
+    }[]>('GET', `/users/${id}/followers`),
     leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
     importShots: (body: {
@@ -443,6 +453,19 @@ export const api = {
     nearby: (lat: number, lng: number) => request<any[]>('GET', `/courses/nearby?lat=${lat}&lng=${lng}`),
     get: (id: string) => request<any>('GET', `/courses/${id}`),
     leaderboard: (id: string) => request<any[]>('GET', `/courses/${id}/leaderboard`),
+    /**
+     * Submit a "please add this course" request. Goes into the
+     * course_requests inbox for an admin to review and add by hand.
+     * Returns `duplicate: true` when this user already has an identical
+     * pending submission (still a soft success — the UX is the same).
+     */
+    requestNew: (body: {
+      courseName: string;
+      city?: string; state?: string; country?: string;
+      website?: string; notes?: string;
+    }) => request<{ success: true; request_id: string; duplicate?: boolean }>(
+      'POST', '/courses/request', body,
+    ),
     reportCorrection: (id: string, body: {
       field: string;
       suggestedValue: string;

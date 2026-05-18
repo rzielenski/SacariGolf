@@ -576,9 +576,17 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         [resolvedTeeboxId]
       );
       const cap = teeRows[0]?.num_holes;
+      // Allow holeScores.length to exceed the teebox cap when it's an integer
+      // multiple — that's the "play this 9-hole course as 18" mode. Without
+      // this exception a doubled-up round would 400 at submit time. We still
+      // reject mismatched lengths (e.g. 12 scores on a 9-hole teebox) to
+      // catch real client bugs.
       if (cap && holeScores.length > cap) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: `Cannot submit ${holeScores.length} holes on a ${cap}-hole tee box` });
+        const isDoubleUp = holeScores.length % cap === 0;
+        if (!isDoubleUp) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: `Cannot submit ${holeScores.length} holes on a ${cap}-hole tee box` });
+        }
       }
     }
 
@@ -1902,6 +1910,15 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           && s.plays_like_yds < 1000) {
         out.plays_like_yds = s.plays_like_yds;
       }
+      // Aim point: where the player aimed at the moment they finalised the
+      // shot, captured from the draggable on-map heatmap target. Stored so
+      // downstream lateral-accuracy stats can compare against the start→aim
+      // line instead of the default start→pin centerline. Validated as a
+      // sane lat/lng pair; ignored otherwise.
+      if (s.aim && typeof s.aim.lat === 'number' && typeof s.aim.lng === 'number'
+          && Math.abs(s.aim.lat) <= 90 && Math.abs(s.aim.lng) <= 180) {
+        out.aim = { lat: s.aim.lat, lng: s.aim.lng };
+      }
       return out;
     }
     // Legacy point format
@@ -1947,8 +1964,9 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
            club, lie,
            start_lat, start_lng, start_elevation_m,
            end_lat,   end_lng,   end_elevation_m,
-           recorded_at, source, plays_like_yds
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14)`,
+           recorded_at, source, plays_like_yds,
+           aim_lat, aim_lng
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16)`,
         [
           req.userId, req.params.id, holeNum, i,
           s.club ?? 'unknown', s.lie ?? null,
@@ -1956,6 +1974,7 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           end.lat,   end.lng,   end.elevation_m ?? null,
           s.recorded_at ?? new Date().toISOString(),
           s.plays_like_yds ?? null,
+          s.aim?.lat ?? null, s.aim?.lng ?? null,
         ]
       );
     }
@@ -1991,7 +2010,10 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
                   'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
                 ),
                 'recorded_at', recorded_at,
-                'plays_like_yds', plays_like_yds
+                'plays_like_yds', plays_like_yds,
+                'aim', CASE WHEN aim_lat IS NOT NULL AND aim_lng IS NOT NULL
+                            THEN json_build_object('lat', aim_lat, 'lng', aim_lng)
+                            ELSE NULL END
               )
               ORDER BY shot_index
             ) AS shots

@@ -689,6 +689,57 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ON CONFLICT (teebox_id, hole_num) DO NOTHING;
     `,
   },
+  {
+    // Where the player aimed at the moment they finalised this shot,
+    // captured from the on-map draggable heatmap target. Nullable — most
+    // shots won't have it because the player only drags the target when
+    // they want a different centerline than start→pin. Lateral-accuracy
+    // stats use these when present so a deliberate "play the left side"
+    // tee shot reads as accurate, not as a lateral miss.
+    name: 'shots.aim_columns',
+    sql: `
+      ALTER TABLE shots
+        ADD COLUMN IF NOT EXISTS aim_lat REAL,
+        ADD COLUMN IF NOT EXISTS aim_lng REAL;
+    `,
+  },
+  {
+    // One-shot guard on the "X started a round" friend-notification path.
+    // POST /matches/:id/started flips this to TRUE on the first call so a
+    // re-mount of the scoring screen doesn't spam every friend repeatedly.
+    // Schema.sql already has the column on fresh installs — this migration
+    // covers existing prod DBs where the column never existed.
+    name: 'matches.started_notified',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS started_notified BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
+  {
+    // User-submitted course-add requests. Pure inbox table — no automated
+    // course creation happens from this; an admin reviews entries by hand
+    // and runs the normal course-import flow if it's legit. Keeping it as
+    // its own table (rather than e.g. a `courses.pending = true` flag) so
+    // we never accidentally surface a half-validated course on /nearby or
+    // /search before review.
+    name: 'course_requests.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS course_requests (
+        request_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id     UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        course_name TEXT NOT NULL,
+        city        TEXT,
+        state       TEXT,
+        country     TEXT,
+        website     TEXT,
+        notes       TEXT,
+        status      TEXT NOT NULL DEFAULT 'pending', -- pending | added | rejected
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_course_requests_status_created
+        ON course_requests(status, created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -134,6 +134,42 @@ export default function UserProfileScreen() {
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label} · {profile.elo} ELO</Text>
         </View>
+
+        {/* Following / Followers strip — tappable, opens a list of each
+            group with deep links into individual profiles. */}
+        <View style={styles.followRow}>
+          <TouchableOpacity
+            style={styles.followCol}
+            onPress={() => router.push(`/user/${profile.user_id}/following` as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.followNum}>{profile.following_count ?? 0}</Text>
+            <Text style={styles.followLabel}>Following</Text>
+          </TouchableOpacity>
+          <View style={styles.followDivider} />
+          <TouchableOpacity
+            style={styles.followCol}
+            onPress={() => router.push(`/user/${profile.user_id}/followers` as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.followNum}>{profile.followers_count ?? 0}</Text>
+            <Text style={styles.followLabel}>Followers</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Friendship CTA — only on someone else's profile. Reflects the
+            current relationship: stranger → "Add Friend", outgoing pending
+            → "Request Sent" (disabled), incoming pending → "Accept Request",
+            already friends → "Friends ✓" (disabled). Optimistically updates
+            the profile so the button changes immediately after a tap. */}
+        {user && user.user_id !== profile.user_id && (
+          <FriendshipButton
+            status={profile.friendship_status}
+            targetUserId={profile.user_id}
+            targetUsername={profile.username}
+            onChange={(next) => setProfile((p: any) => p ? { ...p, friendship_status: next } : p)}
+          />
+        )}
       </View>
 
       {/* Bio */}
@@ -478,6 +514,111 @@ export default function UserProfileScreen() {
   );
 }
 
+/**
+ * Friendship CTA shown on someone else's profile. Translates the
+ * `friendship_status` enum coming from /users/:id into one of four UI
+ * states. Tapping fires the appropriate API call and optimistically
+ * advances the local state so the button feedback is instant.
+ *
+ *   none              → "Add Friend"            (tap → sendRequest)
+ *   request_sent      → "Request Sent" (muted, disabled)
+ *   request_received  → "Accept Request"        (tap → acceptRequest)
+ *   friends           → "Friends ✓" (muted, disabled)
+ */
+function FriendshipButton({
+  status, targetUserId, targetUsername, onChange,
+}: {
+  status: 'self' | 'friends' | 'request_sent' | 'request_received' | 'none' | undefined;
+  targetUserId: string;
+  targetUsername: string;
+  onChange: (next: 'self' | 'friends' | 'request_sent' | 'request_received' | 'none') => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  if (status === 'self' || status === undefined) return null;
+
+  const send = async () => {
+    setBusy(true);
+    try {
+      const res: any = await api.users.sendRequest(targetUserId);
+      onChange('request_sent');
+      if (!res?.alreadyRequested) {
+        Alert.alert('Request sent!', `${targetUsername} will see your friend request.`);
+      }
+    } catch (e: any) {
+      // Server returns 409 with `pendingFromThem: true` if the OTHER user
+      // already sent us one — flip the state so the button switches to
+      // "Accept Request" instead of staying on "Add Friend".
+      const msg = String(e?.message ?? '');
+      if (/already sent you/i.test(msg)) {
+        onChange('request_received');
+        Alert.alert('They sent you a request first', `Tap "Accept Request" to become friends with ${targetUsername}.`);
+      } else if (/already friends/i.test(msg)) {
+        onChange('friends');
+        Alert.alert('Already friends', `You're already friends with ${targetUsername}.`);
+      } else {
+        Alert.alert('Could not send request', msg || 'Try again later.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const accept = async () => {
+    setBusy(true);
+    try {
+      await api.users.acceptRequest(targetUserId);
+      onChange('friends');
+      Alert.alert('Friends!', `You and ${targetUsername} are now friends.`);
+    } catch (e: any) {
+      Alert.alert('Could not accept', e?.message ?? 'Try again later.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (status === 'friends') {
+    return (
+      <View style={[styles.friendBtn, styles.friendBtnDone]}>
+        <Text style={[styles.friendBtnText, { color: C.green }]}>Friends ✓</Text>
+      </View>
+    );
+  }
+  if (status === 'request_sent') {
+    return (
+      <View style={[styles.friendBtn, styles.friendBtnDone]}>
+        <Text style={[styles.friendBtnText, { color: C.textMuted }]}>Request Sent</Text>
+      </View>
+    );
+  }
+  if (status === 'request_received') {
+    return (
+      <TouchableOpacity
+        style={[styles.friendBtn, styles.friendBtnAccept]}
+        onPress={accept}
+        disabled={busy}
+        activeOpacity={0.7}
+      >
+        {busy
+          ? <ActivityIndicator color={C.bg} size="small" />
+          : <Text style={[styles.friendBtnText, { color: C.bg }]}>Accept Request</Text>}
+      </TouchableOpacity>
+    );
+  }
+  // none
+  return (
+    <TouchableOpacity
+      style={[styles.friendBtn, styles.friendBtnAdd]}
+      onPress={send}
+      disabled={busy}
+      activeOpacity={0.7}
+    >
+      {busy
+        ? <ActivityIndicator color={C.bg} size="small" />
+        : <Text style={[styles.friendBtnText, { color: C.bg }]}>+ Add Friend</Text>}
+    </TouchableOpacity>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
     <View style={styles.statBox}>
@@ -519,6 +660,24 @@ const styles = StyleSheet.create({
   username: { color: C.text, fontSize: 24, fontWeight: '900', marginBottom: 6 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5 },
   rankLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
+
+  followRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 12, marginBottom: 4, gap: 8,
+  },
+  followCol: { alignItems: 'center', paddingHorizontal: 18, paddingVertical: 6 },
+  followNum: { color: C.text, fontSize: 18, fontWeight: '900', fontFamily: F.serif },
+  followLabel: { color: C.textMuted, fontSize: 11, marginTop: 1, letterSpacing: 0.5 },
+  followDivider: { width: 1, height: 30, backgroundColor: C.border },
+
+  friendBtn: {
+    marginTop: 14, paddingHorizontal: 22, paddingVertical: 10,
+    borderRadius: 22, alignSelf: 'center', minWidth: 160, alignItems: 'center',
+  },
+  friendBtnAdd:    { backgroundColor: C.gold },
+  friendBtnAccept: { backgroundColor: C.green },
+  friendBtnDone:   { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  friendBtnText:   { fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
 
   bioCard: {
     backgroundColor: C.card, borderRadius: 10, padding: 14,

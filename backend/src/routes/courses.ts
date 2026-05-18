@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import pool from '../db/pool';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
@@ -479,6 +479,80 @@ router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response)
     else updated += n;
   }
   return res.json({ updated, missing_hole_nums: missing });
+}));
+
+/**
+ * User-submitted "please add this course" inbox. Writes a row to
+ * course_requests for an admin to review by hand and (if legit) run through
+ * the normal course-import flow. Lightly rate-limited per-user so a bored
+ * user can't spam the queue: max 10 pending entries from one account, and
+ * we dedupe identical names from the same user.
+ */
+router.post('/request', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const body = req.body ?? {};
+  const courseName = String(body.courseName ?? '').trim().slice(0, 200);
+  const city       = body.city    ? String(body.city).trim().slice(0, 120)    : null;
+  const state      = body.state   ? String(body.state).trim().slice(0, 120)   : null;
+  const country    = body.country ? String(body.country).trim().slice(0, 120) : null;
+  const website    = body.website ? String(body.website).trim().slice(0, 500) : null;
+  const notes      = body.notes   ? String(body.notes).trim().slice(0, 1000)  : null;
+
+  if (!courseName) {
+    return res.status(400).json({ error: 'Course name is required' });
+  }
+
+  // Rate-limit: cap pending submissions from one user to keep the inbox tidy.
+  const { rows: countRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM course_requests
+      WHERE user_id = $1 AND status = 'pending'`,
+    [req.userId]
+  );
+  if ((countRows[0]?.n ?? 0) >= 10) {
+    return res.status(429).json({
+      error: 'You have several requests still under review — please wait for those to be processed first.',
+    });
+  }
+
+  // Dedupe: skip if the same user already requested an identical course name
+  // (case-insensitive) that's still pending. Returning a soft success keeps
+  // the UX simple — the user sees "request received" either way.
+  const { rows: dup } = await pool.query(
+    `SELECT request_id FROM course_requests
+      WHERE user_id = $1 AND status = 'pending' AND LOWER(course_name) = LOWER($2)`,
+    [req.userId, courseName]
+  );
+  if (dup.length > 0) {
+    return res.json({ success: true, request_id: dup[0].request_id, duplicate: true });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO course_requests
+       (user_id, course_name, city, state, country, website, notes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING request_id`,
+    [req.userId, courseName, city, state, country, website, notes]
+  );
+  return res.json({ success: true, request_id: rows[0].request_id });
+}));
+
+/**
+ * Admin-only inbox view. Gated on the same `requirePremium`-style check the
+ * client uses for admin features is overkill here — for now we just require
+ * auth and the admin reviews the table directly in the DB. The endpoint
+ * exists so a future admin UI has somewhere to read from.
+ */
+router.get('/requests', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const status = (req.query.status as string) || 'pending';
+  const { rows } = await pool.query(
+    `SELECT cr.*, u.username AS requested_by_username
+       FROM course_requests cr
+       LEFT JOIN users u ON u.user_id = cr.user_id
+      WHERE cr.status = $1
+      ORDER BY cr.created_at DESC
+      LIMIT 200`,
+    [status]
+  );
+  return res.json(rows);
 }));
 
 export default router;

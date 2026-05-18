@@ -687,7 +687,15 @@ export default function PlayScreen() {
   )?.teebox_id;
   // Sort: last-played tee first, then everything else in the order returned
   // by the backend (which is `total_yards DESC` — black/championship up top).
-  const filteredTees = (courseDetails?.teeboxes ?? []).filter((t) => t.num_holes >= numHoles);
+  // Teeboxes the user can pick at this hole count:
+  //   • If the teebox covers ≥ numHoles, it's a normal pick.
+  //   • If the user picked 18 but the teebox is 9-hole, allow it — the
+  //     scoring screen will duplicate the front 9 to fill out a full 18
+  //     ("play these 9 holes twice"). Particularly useful for short courses
+  //     and executive layouts where every teebox tops out at 9.
+  const filteredTees = (courseDetails?.teeboxes ?? []).filter((t) =>
+    t.num_holes >= numHoles || (numHoles === 18 && t.num_holes === 9)
+  );
   const orderedTees = lastTeeboxIdAtThisCourse
     ? [
         ...filteredTees.filter((t) => t.teebox_id === lastTeeboxIdAtThisCourse),
@@ -736,6 +744,7 @@ export default function PlayScreen() {
                 </View>
                 <Text style={styles.teeboxMeta}>
                   Par {t.par} · {t.total_yards?.toLocaleString() ?? '—'} yds · {t.num_holes} holes
+                  {numHoles === 18 && t.num_holes === 9 ? ' · plays twice for 18' : ''}
                 </Text>
               </View>
               <View style={styles.teeboxRight}>

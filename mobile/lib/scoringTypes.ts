@@ -35,6 +35,13 @@ export interface Shot {
    *  averages reflect what the shot WOULD have gone in neutral conditions.
    *  Missing on legacy rows and on imported launch-monitor data. */
   plays_like_yds?: number;
+  /** Where the player aimed when they took the shot, captured at the moment
+   *  TRACK→stop is tapped. Comes from the draggable heatmap target on the
+   *  scoring map. When present, downstream stats recompute lateral_yds
+   *  relative to the start→aim line instead of the start→pin line — so a
+   *  golfer who deliberately played the right side of the fairway and
+   *  found it isn't penalised with a fake "lateral miss" against center. */
+  aim?: { lat: number; lng: number };
 }
 
 /** A shot that's been started but not stopped yet (TRACK tapped once). */

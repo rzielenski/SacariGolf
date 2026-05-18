@@ -55,6 +55,8 @@ export default function ProfileScreen() {
   const [searchingHomeCourse, setSearchingHomeCourse] = useState(false);
   const [recentRounds, setRecentRounds] = useState<any[]>([]);
   const [bestRound, setBestRound] = useState<any | null>(null);
+  const [followingCount, setFollowingCount] = useState(0);
+  const [followersCount, setFollowersCount] = useState(0);
   const [stats, setStats] = useState<any | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
@@ -129,6 +131,8 @@ export default function ProfileScreen() {
       .then((data) => {
         setRecentRounds(data.recent_rounds ?? []);
         setBestRound(data.best_round ?? null);
+        setFollowingCount(data.following_count ?? 0);
+        setFollowersCount(data.followers_count ?? 0);
       })
       .catch(() => { });
   }, [user?.user_id]);
@@ -153,15 +157,17 @@ export default function ProfileScreen() {
   const openNotifications = useCallback(async () => {
     setNotifVisible(true);
     setLoadingNotifs(true);
-    // Persist "seen" state on the server so the badge stays cleared across reloads.
-    // BUT — chat unreads aren't cleared by the bell tap; they only drop when the
-    // user opens the chat itself. So we re-fetch right after marking seen to
-    // pull back any chat-driven unread count.
+    // Mark notifications as seen server-side so the badge stays cleared
+    // across reloads. Bell badge counts only actionable items (friend
+    // requests, match invites, results) — chat unreads have their own
+    // surface (pulsing dots in the Social tab), so tapping the bell
+    // doesn't and shouldn't clear them. After the mark-seen completes the
+    // re-fetched `unread_count` returns 0 for actionable items.
     api.users.markNotificationsSeen().catch(() => { });
     try {
       const res = await api.users.notifications();
       setNotifications(res.notifications ?? []);
-      setNotifCount(res.chat_unread_count ?? 0);
+      setNotifCount(res.unread_count ?? 0);
     } catch {
       setNotifCount(0);
     } finally {
@@ -351,6 +357,29 @@ export default function ProfileScreen() {
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
         </View>
+
+        {/* Following / Followers strip — tappable, opens the same list
+            screens the public profile uses. Drives users into the social
+            graph from their own profile. */}
+        <View style={styles.followRow}>
+          <TouchableOpacity
+            style={styles.followCol}
+            onPress={() => router.push(`/user/${user.user_id}/following` as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.followNum}>{followingCount}</Text>
+            <Text style={styles.followLabel}>Following</Text>
+          </TouchableOpacity>
+          <View style={styles.followDivider} />
+          <TouchableOpacity
+            style={styles.followCol}
+            onPress={() => router.push(`/user/${user.user_id}/followers` as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.followNum}>{followersCount}</Text>
+            <Text style={styles.followLabel}>Followers</Text>
+          </TouchableOpacity>
+        </View>
         {/* Open-beta note — small enough not to compete with the rank badge.
             Shown only while is_premium = true via the server-side OPEN_BETA
             override (premium_plan === 'open_beta'). Disappears automatically
@@ -467,6 +496,17 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.statsBtnLabel}>VIEW STATS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
+      {/* Match / round history entry point — shows in-progress, completed,
+          and practice rounds grouped by section. */}
+      <TouchableOpacity
+        style={styles.statsBtn}
+        onPress={() => router.push('/matches' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.statsBtnLabel}>MY MATCHES</Text>
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
@@ -837,6 +877,21 @@ export default function ProfileScreen() {
                 </Text>
               </TouchableOpacity>
             )}
+            ListFooterComponent={
+              <TouchableOpacity
+                style={{ paddingVertical: 18, alignItems: 'center' }}
+                onPress={() => {
+                  setHomeCourseModalVisible(false);
+                  // Tiny delay so the sheet has time to dismiss before the next
+                  // route push (otherwise the navigation can drop on iOS).
+                  setTimeout(() => router.push('/course-request' as any), 250);
+                }}
+              >
+                <Text style={{ color: C.gold, fontSize: 13, fontWeight: '700' }}>
+                  Don&apos;t see your course? Request it →
+                </Text>
+              </TouchableOpacity>
+            }
           />
         </View>
       </Modal>
@@ -1107,6 +1162,14 @@ const styles = StyleSheet.create({
   email: { color: C.textMuted, fontSize: 13, marginTop: 2 },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 14, paddingVertical: 5, marginTop: 10 },
   rankLabel: { fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  followRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 14, marginBottom: 4, gap: 8,
+  },
+  followCol: { alignItems: 'center', paddingHorizontal: 18, paddingVertical: 6 },
+  followNum: { color: C.text, fontSize: 18, fontWeight: '900', fontFamily: F.serif },
+  followLabel: { color: C.textMuted, fontSize: 11, marginTop: 1, letterSpacing: 0.5 },
+  followDivider: { width: 1, height: 30, backgroundColor: C.border },
   openBetaNote: {
     color: C.gold, fontSize: 10, marginTop: 10, textAlign: 'center',
     paddingHorizontal: 24, lineHeight: 14, fontStyle: 'italic', opacity: 0.85,

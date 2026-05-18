@@ -112,9 +112,25 @@ function FriendsTab() {
 
   const sendRequest = async (userId: string) => {
     try {
-      await api.users.sendRequest(userId);
-      Alert.alert('Request sent!');
-    } catch (e: any) { Alert.alert('Error', e.message); }
+      const res: any = await api.users.sendRequest(userId);
+      // Server tells us if the request was a no-op because one was already
+      // pending — surface that explicitly so the user knows to wait rather
+      // than spam-tap "+ Add" thinking nothing happened.
+      if (res?.alreadyRequested) {
+        Alert.alert('Already sent', 'You already sent this user a friend request — waiting for them to accept.');
+      } else {
+        Alert.alert('Request sent!');
+      }
+    } catch (e: any) {
+      // Server returns 409 + a clear message for both "already friends"
+      // and "they already sent YOU a request"; map both to friendly alerts.
+      const msg = e?.message ?? 'Unknown error';
+      if (e?.status === 409) {
+        Alert.alert('Heads up', msg);
+      } else {
+        Alert.alert('Error', msg);
+      }
+    }
   };
 
   const acceptRequest = async (userId: string) => {

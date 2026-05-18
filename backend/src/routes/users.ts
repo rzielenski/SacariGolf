@@ -216,6 +216,44 @@ router.post('/me/friends/request', requireAuth, wrap(async (req: AuthRequest, re
   );
   if (!targetRows.length) return res.status(404).json({ error: 'User not found' });
 
+  // Check existing friendship/request rows in EITHER direction.
+  // Friendship is stored as a single directional row (sender, recipient,
+  // status). After accept, the row's status flips to 'accepted'. So we
+  // need to look for any row between this pair regardless of who sent it.
+  const { rows: existing } = await pool.query(
+    `SELECT user_id, friend_id, status FROM friends
+      WHERE (user_id = $1 AND friend_id = $2)
+         OR (user_id = $2 AND friend_id = $1)`,
+    [req.userId, friendId]
+  );
+  if (existing.length > 0) {
+    const accepted = existing.find((r) => r.status === 'accepted');
+    if (accepted) {
+      return res.status(409).json({ error: 'You are already friends with this user' });
+    }
+    const incoming = existing.find((r) =>
+      r.status === 'pending' && r.user_id === friendId && r.friend_id === req.userId
+    );
+    if (incoming) {
+      // The OTHER person already sent ME a request — point the user at
+      // accepting that instead of creating a new one in the opposite direction.
+      return res.status(409).json({
+        error: 'This user has already sent you a friend request — accept theirs instead.',
+        pendingFromThem: true,
+      });
+    }
+    const outgoing = existing.find((r) =>
+      r.status === 'pending' && r.user_id === req.userId && r.friend_id === friendId
+    );
+    if (outgoing) {
+      // I already have a pending request to them. Don't insert (it's a
+      // no-op via the unique constraint) AND don't re-send the push so
+      // the recipient isn't spammed every time the sender taps "+ Add".
+      return res.json({ success: true, alreadyRequested: true });
+    }
+  }
+
+  // Fresh request — insert + send the push notification once.
   await pool.query(
     `INSERT INTO friends (user_id, friend_id, status) VALUES ($1, $2, 'pending')
      ON CONFLICT DO NOTHING`,
@@ -1458,11 +1496,86 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     [req.params.id]
   );
 
+  // Follow counts. The "friends" table is directional with a single row per
+  // pair (status flips from 'pending' → 'accepted' after the recipient
+  // accepts). We expose it to clients in social-network terms:
+  //   • following  = accepted rows where THIS user initiated (user_id = id)
+  //   • followers  = accepted rows where THIS user was the recipient
+  // Sum of both = the user's total friend count. Pending requests are
+  // intentionally excluded — they're not relationships yet.
+  const { rows: followCounts } = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM friends
+         WHERE user_id = $1 AND status = 'accepted') AS following_count,
+       (SELECT COUNT(*)::int FROM friends
+         WHERE friend_id = $1 AND status = 'accepted') AS followers_count`,
+    [req.params.id]
+  );
+
+  // Friendship status with the viewer — drives the "Add Friend" button on
+  // the profile screen. Returns one of:
+  //   'self' | 'friends' | 'request_sent' | 'request_received' | 'none'
+  let friendshipStatus: 'self' | 'friends' | 'request_sent' | 'request_received' | 'none' = 'none';
+  if (req.params.id === req.userId) {
+    friendshipStatus = 'self';
+  } else {
+    const { rows: fs } = await pool.query(
+      `SELECT user_id, friend_id, status FROM friends
+        WHERE (user_id = $1 AND friend_id = $2)
+           OR (user_id = $2 AND friend_id = $1)`,
+      [req.userId, req.params.id]
+    );
+    if (fs.length > 0) {
+      const accepted = fs.find((r) => r.status === 'accepted');
+      if (accepted) friendshipStatus = 'friends';
+      else if (fs.find((r) => r.user_id === req.userId)) friendshipStatus = 'request_sent';
+      else friendshipStatus = 'request_received';
+    }
+  }
+
   return res.json({
     ...userInfo,
     recent_rounds: recentRounds,
     best_round: bestRows[0] ?? null,
+    following_count: followCounts[0]?.following_count ?? 0,
+    followers_count: followCounts[0]?.followers_count ?? 0,
+    friendship_status: friendshipStatus,
   });
+}));
+
+/**
+ * Following list — users that this user has sent (and had accepted) a
+ * friend request to. Public; any authenticated user can view another's
+ * following list. Useful for navigating the social graph from a profile.
+ */
+router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.created_at
+       FROM friends f
+       JOIN users u ON u.user_id = f.friend_id
+      WHERE f.user_id = $1 AND f.status = 'accepted'
+      ORDER BY f.created_at DESC
+      LIMIT 500`,
+    [req.params.id]
+  );
+  return res.json(rows);
+}));
+
+/**
+ * Followers list — users that sent THIS user a friend request which was
+ * accepted. Mirror of /following.
+ */
+router.get('/:id/followers', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.created_at
+       FROM friends f
+       JOIN users u ON u.user_id = f.user_id
+      WHERE f.friend_id = $1 AND f.status = 'accepted'
+      ORDER BY f.created_at DESC
+      LIMIT 500`,
+    [req.params.id]
+  );
+  return res.json(rows);
 }));
 
 router.delete('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
@@ -1966,9 +2079,18 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
   } catch { /* chat_reads table may not exist yet on older deployments */ }
 
   const baseUnread = notes.filter((n) => new Date(n.created_at) > new Date(seenAt)).length;
+  // Bell badge counts ONLY actionable notifications (friend requests, match
+  // invites, clan invites, match results). Chat unreads have their own
+  // surface — the pulsing unread dots in the Social tab — and are NOT
+  // cleared by tapping the bell. Folding them into `unread_count` made
+  // the bell stick at 1+ whenever the user had any unread message in any
+  // chat, with no way to clear it short of opening every chat. Now the
+  // bell clears cleanly on tap; chat unreads continue to surface only in
+  // their proper place. `chat_unread_count` is still returned for any
+  // consumer that wants the combined view (e.g. an app-icon badge).
   return res.json({
     notifications: notes,
-    unread_count: baseUnread + chatUnreadCount,
+    unread_count: baseUnread,
     chat_unread_count: chatUnreadCount,
   });
 }));

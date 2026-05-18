@@ -71,6 +71,11 @@ interface UseShotTrackingArgs {
    *  Pt's `baro_relative_m` field so plays-like slope can use the sub-meter
    *  barometric delta instead of the ±10m GPS-altitude delta. */
   getRelativeAltitudeM?: () => number | null;
+  /** Optional: the player's aim point for THIS hole, set by dragging the
+   *  on-map heatmap target. When present, it's recorded on the finalised
+   *  Shot so the post-round lateral calculation uses the start→aim line as
+   *  the centerline instead of the default start→pin line. */
+  getAimPoint?: () => { lat: number; lng: number } | null;
 }
 
 /** How far back into the rolling fix buffer we look when finalising a shot
@@ -81,7 +86,7 @@ const AVERAGE_WINDOW_MS = 2500;
 
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
-  getAveragedFix, getRelativeAltitudeM,
+  getAveragedFix, getRelativeAltitudeM, getAimPoint,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
@@ -237,6 +242,11 @@ export function useShotTracking({
       const end = ptFromCoord();
       if (!end) return;
       const playsLike = computePlaysLike?.(activeShot.start, end);
+      // Snapshot the player's heatmap target as the shot's aim — used by
+      // post-round stats to compute lateral relative to start→aim instead of
+      // start→pin. Falls back to undefined if the player never dragged the
+      // heatmap, in which case stats default to the start→pin centerline.
+      const aim = getAimPoint?.() ?? null;
       const newShot: Shot = {
         club: activeShot.club,
         lie: activeShot.lie,
@@ -246,6 +256,7 @@ export function useShotTracking({
         ...(typeof playsLike === 'number' && playsLike > 0
           ? { plays_like_yds: Math.round(playsLike) }
           : {}),
+        ...(aim ? { aim } : {}),
       };
       setShotsByHole((prev) => {
         const cur = prev[currentHoleNum] ?? [];

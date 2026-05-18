@@ -119,6 +119,12 @@ function AuthGuard() {
         router.push('/(tabs)/social' as any);
       } else if (data.type === 'matchFound' && typeof data.matchId === 'string') {
         router.push(`/match/${data.matchId}` as any);
+      } else if (data.type === 'round_started' && typeof data.userId === 'string') {
+        // Friend started a round — open their profile, which renders the
+        // live in-progress round card with the running scorecard / spectate
+        // button. (matchId is on the push too if we ever want a deep-link
+        // straight to spectate mode.)
+        router.push(`/user/${data.userId}` as any);
       }
     });
     return () => sub.remove();
@@ -189,6 +195,10 @@ export default function RootLayout() {
         <Stack.Screen name="premium" options={{ animation: 'slide_from_bottom', headerShown: true, presentation: 'modal' }} />
         <Stack.Screen name="club-heatmap" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="bag" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="matches" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="course-request" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="user/[id]/following" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="user/[id]/followers" options={{ animation: 'slide_from_right', headerShown: true }} />
         {/* Range Session routes — need headerShown so the screen has the
             standard nav bar (title + back button), which also pushes the
             scroll content down so the view-mode tabs aren't slammed
