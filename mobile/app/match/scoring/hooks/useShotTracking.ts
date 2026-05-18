@@ -25,6 +25,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../../../../lib/api';
+import { distYards, bearingDeg } from '../../../../lib/golfMath';
 import type { Shot, ActiveShot, Pt } from '../../../../lib/scoringTypes';
 
 /**
@@ -76,6 +77,12 @@ interface UseShotTrackingArgs {
    *  Shot so the post-round lateral calculation uses the start→aim line as
    *  the centerline instead of the default start→pin line. */
   getAimPoint?: () => { lat: number; lng: number } | null;
+  /** Optional: the known pin coordinate for THIS hole. Used as the
+   *  fallback centerline for lateral_yds when the player hasn't dragged
+   *  the heatmap aim — i.e. on every shot where no manual target was
+   *  picked but we do know where the hole is. Absent on holes the player
+   *  hasn't pinned yet AND the course catalog doesn't have a pin for. */
+  getPinPoint?: () => { lat: number; lng: number } | null;
 }
 
 /** How far back into the rolling fix buffer we look when finalising a shot
@@ -86,7 +93,7 @@ const AVERAGE_WINDOW_MS = 2500;
 
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
-  getAveragedFix, getRelativeAltitudeM, getAimPoint,
+  getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
@@ -247,16 +254,61 @@ export function useShotTracking({
       // start→pin. Falls back to undefined if the player never dragged the
       // heatmap, in which case stats default to the start→pin centerline.
       const aim = getAimPoint?.() ?? null;
+      const pin = getPinPoint?.() ?? null;
+
+      // ── Per-shot geometry, computed at finalize time ──────────────────
+      //   total_yds  – raw great-circle yards from start to end. Always
+      //                present (only requires both endpoints).
+      //   lateral_yds – signed perpendicular offset of the END point from
+      //                 the start→centerline line, where the centerline is:
+      //                   • start → aim, if the player dragged a target
+      //                   • start → pin, if the hole's pin is known
+      //                   • undefined otherwise — we record NO lateral
+      //                     rather than fall back to a meaningless axis.
+      //                 Sign: positive = right of intended line, negative
+      //                 = left. Standard course-mapper convention.
+      const total_yds = Math.round(distYards(
+        activeShot.start.lat, activeShot.start.lng,
+        end.lat,              end.lng,
+      ));
+      let lateral_yds: number | undefined;
+      let lateral_ref: 'aim' | 'pin' | undefined;
+      const centerline = aim ?? pin;
+      if (centerline) {
+        const refBearing = bearingDeg(
+          activeShot.start.lat, activeShot.start.lng,
+          centerline.lat,       centerline.lng,
+        );
+        const shotBearing = bearingDeg(
+          activeShot.start.lat, activeShot.start.lng,
+          end.lat,              end.lng,
+        );
+        // Signed bearing delta in (-180, 180]. Positive = end is clockwise
+        // (right) of the centerline as viewed from start; negative = left.
+        let dB = shotBearing - refBearing;
+        while (dB > 180) dB -= 360;
+        while (dB < -180) dB += 360;
+        // Perpendicular component: total * sin(angleBetween). Same as
+        // projecting end onto the axis perpendicular to the centerline at
+        // start. For small angles this is essentially the lateral miss.
+        lateral_yds = Math.round(total_yds * Math.sin(dB * Math.PI / 180));
+        lateral_ref = aim ? 'aim' : 'pin';
+      }
+
       const newShot: Shot = {
         club: activeShot.club,
         lie: activeShot.lie,
         start: activeShot.start,
         end,
         recorded_at: new Date().toISOString(),
+        total_yds,
         ...(typeof playsLike === 'number' && playsLike > 0
           ? { plays_like_yds: Math.round(playsLike) }
           : {}),
         ...(aim ? { aim } : {}),
+        ...(lateral_yds != null && lateral_ref
+          ? { lateral_yds, lateral_ref }
+          : {}),
       };
       setShotsByHole((prev) => {
         const cur = prev[currentHoleNum] ?? [];

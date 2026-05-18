@@ -1919,6 +1919,18 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           && Math.abs(s.aim.lat) <= 90 && Math.abs(s.aim.lng) <= 180) {
         out.aim = { lat: s.aim.lat, lng: s.aim.lng };
       }
+      // Frozen-at-finalize geometry. Sanity-clamped so a buggy client
+      // can't poison the column with nonsense — anything beyond a long
+      // par-5's worth of yards is rejected.
+      if (typeof s.total_yds === 'number' && s.total_yds >= 0 && s.total_yds < 1000) {
+        out.total_yds = Math.round(s.total_yds);
+      }
+      if (typeof s.lateral_yds === 'number' && s.lateral_yds > -500 && s.lateral_yds < 500) {
+        out.lateral_yds = Math.round(s.lateral_yds);
+      }
+      if (s.lateral_ref === 'aim' || s.lateral_ref === 'pin') {
+        out.lateral_ref = s.lateral_ref;
+      }
       return out;
     }
     // Legacy point format
@@ -1965,8 +1977,9 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
            start_lat, start_lng, start_elevation_m,
            end_lat,   end_lng,   end_elevation_m,
            recorded_at, source, plays_like_yds,
-           aim_lat, aim_lng
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16)`,
+           aim_lat, aim_lng,
+           total_yds, lateral_yds, lateral_ref
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19)`,
         [
           req.userId, req.params.id, holeNum, i,
           s.club ?? 'unknown', s.lie ?? null,
@@ -1975,6 +1988,7 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           s.recorded_at ?? new Date().toISOString(),
           s.plays_like_yds ?? null,
           s.aim?.lat ?? null, s.aim?.lng ?? null,
+          s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null,
         ]
       );
     }
@@ -2011,6 +2025,9 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
                 ),
                 'recorded_at', recorded_at,
                 'plays_like_yds', plays_like_yds,
+                'total_yds', total_yds,
+                'lateral_yds', lateral_yds,
+                'lateral_ref', lateral_ref,
                 'aim', CASE WHEN aim_lat IS NOT NULL AND aim_lng IS NOT NULL
                             THEN json_build_object('lat', aim_lat, 'lng', aim_lng)
                             ELSE NULL END

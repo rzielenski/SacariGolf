@@ -75,6 +75,30 @@ export function projectYards(
   return p;
 }
 
+// ─── Handicap display ───────────────────────────────────────────────────────
+
+/**
+ * Format a USGA Handicap Index for display.
+ *
+ *   12.3   → "12.3"   (positive — a normal handicap)
+ *   0      → "0.0"    (scratch)
+ *   -2.4   → "+2.4"   ("plus 2.4" — better-than-scratch player who gives
+ *                      strokes back to the course rather than receiving them)
+ *   null   → fallback ("—" by default)
+ *
+ * Negative handicaps must never render with a literal minus sign — by
+ * convention a sub-scratch index is read as "plus X." Centralised here so
+ * every screen surfaces the same shape.
+ */
+export function fmtHandicap(
+  hi: number | null | undefined,
+  fallback: string = '—',
+): string {
+  if (hi == null || isNaN(hi)) return fallback;
+  if (hi < 0) return `+${(-hi).toFixed(1)}`;
+  return hi.toFixed(1);
+}
+
 // ─── Score display ──────────────────────────────────────────────────────────
 
 /** Friendly label + accent color for a strokes-vs-par result.

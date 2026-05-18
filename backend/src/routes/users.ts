@@ -51,7 +51,11 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
   if (pushToken !== undefined) { values.push(pushToken); updates.push(`push_token = $${values.length}`); }
   if (handicapIndex !== undefined) {
     const hi = parseFloat(handicapIndex);
-    if (isNaN(hi) || hi < 0 || hi > 54) return res.status(400).json({ error: 'handicapIndex must be 0–54' });
+    // USGA WHS allows "plus handicaps" — negative values for players who
+    // average below par (e.g. -2.4 is read as "plus 2.4"). The UI formats
+    // negatives with a leading `+` on the way out; here we just need to
+    // accept them. Cap at -10 / 54 — beyond that is almost certainly a typo.
+    if (isNaN(hi) || hi < -10 || hi > 54) return res.status(400).json({ error: 'handicapIndex must be between -10 and 54' });
     values.push(hi); updates.push(`handicap_index = $${values.length}`);
   }
   if (bio !== undefined) {

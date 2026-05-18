@@ -803,11 +803,24 @@ export default function ScoringScreen() {
       return rest;
     });
   };
+  // "Move heatmap" mode — when enabled, the next map tap *places* the aim
+  // point instead of dropping a measure pin. Drag-to-move on the Marker
+  // itself was unreliable on iOS (react-native-maps swallows the gesture
+  // when tracksViewChanges is off, and turning it on stutters), so this
+  // tap-to-set toggle is the canonical interaction. Native drag still
+  // works as a bonus when it does fire — both code paths feed setAimByHole.
+  const [movingAim, setMovingAim] = useState(false);
+
+  const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
     getAveragedFix, getRelativeAltitudeM,
     getAimPoint: () => (currentHoleNum != null ? aimRef.current[currentHoleNum] ?? null : null),
+    // Pin fallback for the lateral_yds centerline. Read off a ref so the
+    // hook gets the current hole's pin without needing the calling
+    // component to memoize the callback.
+    getPinPoint: () => knownPinRef.current,
   });
   const {
     shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
@@ -1199,6 +1212,10 @@ export default function ScoringScreen() {
   const yardsToPin = (knownPin && userCoord)
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
     : null;
+  // Keep the ref in sync so useShotTracking's lateral_yds fallback reads
+  // the right pin on each finalize. Plain assignment in render is fine —
+  // refs aren't reactive and we're just shipping the latest value through.
+  knownPinRef.current = knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null;
 
   // Ghost player — procedurally generated "slightly better" opponent whose
   // path appears faintly on the map for the player to chase. Pure visual,
@@ -2123,6 +2140,20 @@ export default function ScoringScreen() {
             ignoreNextMapTap.current = false;
             return;
           }
+          // "Move heatmap" mode: the next map tap drops / repositions the
+          // aim point for this hole instead of placing a measure pin.
+          // Auto-exits the mode so the player can immediately tap again to
+          // measure something else without thinking about the toggle.
+          if (movingAim && currentHoleNum != null) {
+            const { latitude, longitude } = e.nativeEvent.coordinate;
+            setAimByHole((prev) => ({
+              ...prev,
+              [currentHoleNum]: { lat: latitude, lng: longitude },
+            }));
+            setMovingAim(false);
+            setFollowing(false);
+            return;
+          }
           setMeasurePin(e.nativeEvent.coordinate);
           setFollowing(false);
         }}
@@ -2289,6 +2320,33 @@ export default function ScoringScreen() {
               ]} />
             </Marker>
           </>
+        )}
+
+        {/* Standalone aim crosshair — shown when the player has placed an
+            aim but the dispersion heatmap isn't renderable (e.g. brand-
+            new player without enough club stats, or before clubStats has
+            loaded). Keeps the dropped target visible so the player isn't
+            staring at a blank map wondering where their aim went. */}
+        {aimForCurrentHole && !heatmapRings && (
+          <Marker
+            coordinate={{
+              latitude:  aimForCurrentHole.lat,
+              longitude: aimForCurrentHole.lng,
+            }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            draggable
+            tracksViewChanges={false}
+            onDragEnd={(e) => {
+              if (currentHoleNum == null) return;
+              const { latitude, longitude } = e.nativeEvent.coordinate;
+              setAimByHole((prev) => ({
+                ...prev,
+                [currentHoleNum]: { lat: latitude, lng: longitude },
+              }));
+            }}
+          >
+            <View style={styles.heatmapCenterDotAimed} />
+          </Marker>
         )}
 
         {/* Pin marker (center of green) for the current hole */}
@@ -2565,18 +2623,33 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* "Reset aim" chip — shown only when the player has dragged the
-          heatmap crosshair away from its default (pin-projected) center.
-          Tap clears their aim for this hole and the heatmap snaps back. */}
-      {aimForCurrentHole && (
+      {/* Heatmap aim controls — always-visible toggle so the player can
+          drop / move their target with a single tap. Native drag-to-move
+          on the heatmap Marker is also wired up, but iOS swallowed it
+          inconsistently during testing; this tap-to-place flow is the
+          canonical interaction.
+            • MOVE HEATMAP → arms the next map tap to set the aim.
+            • RESET AIM    → clears the manual aim (only shown when set). */}
+      <View style={styles.aimChipRow}>
         <TouchableOpacity
-          style={styles.aimResetChip}
-          onPress={clearAim}
+          style={[styles.aimResetChip, movingAim && styles.aimResetChipArmed]}
+          onPress={() => setMovingAim((m) => !m)}
           activeOpacity={0.7}
         >
-          <Text style={styles.aimResetChipText}>✕ RESET AIM</Text>
+          <Text style={[styles.aimResetChipText, movingAim && { color: C.bg }]}>
+            {movingAim ? 'TAP MAP TO PLACE' : '⌖ MOVE HEATMAP'}
+          </Text>
         </TouchableOpacity>
-      )}
+        {aimForCurrentHole && !movingAim && (
+          <TouchableOpacity
+            style={styles.aimResetChip}
+            onPress={clearAim}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.aimResetChipText}>✕ RESET</Text>
+          </TouchableOpacity>
+        )}
+      </View>
 
       {/* Club picker modal */}
       <Modal
@@ -3350,14 +3423,24 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   liveShotPillText: { fontFamily: F.serif, fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
+  aimChipRow: {
+    position: 'absolute', top: 184, left: 12, right: 12,
+    flexDirection: 'row', gap: 8,
+    zIndex: 6,
+  },
   aimResetChip: {
-    position: 'absolute', top: 184, left: 12,
     backgroundColor: C.bg + 'ee',
     borderRadius: 14, borderWidth: 1, borderColor: C.gold,
     paddingHorizontal: 10, paddingVertical: 4,
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    zIndex: 6,
     shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4,
+  },
+  // When the player has tapped MOVE HEATMAP, the chip flips to a filled
+  // gold pill so it's obvious the next tap will be consumed by aim
+  // placement, not measure-pin placement.
+  aimResetChipArmed: {
+    backgroundColor: C.gold,
+    borderColor: C.gold,
   },
   aimResetChipText: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 0.5 },
 

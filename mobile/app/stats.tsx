@@ -8,6 +8,7 @@ import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { OrnamentTitle } from '../components/Flourish';
 import { parseCSV } from '../lib/importShots';
+import { fmtHandicap } from '../lib/golfMath';
 
 /**
  * Detailed stats view. Shows handicap, strokes-gained per category (per round,
@@ -131,7 +132,7 @@ export default function StatsScreen() {
           <View style={s.summaryRow}>
             <SummaryBox
               label="HANDICAP"
-              value={handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
+              value={fmtHandicap(handicap?.handicap_index ?? null)}
               sub={handicap?.num_rounds_used
                 ? `${handicap.num_rounds_used} of ${handicap.total_rated_rounds} rounds`
                 : 'Need 3+ rated rounds'}

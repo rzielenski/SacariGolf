@@ -42,6 +42,20 @@ export interface Shot {
    *  golfer who deliberately played the right side of the fairway and
    *  found it isn't penalised with a fake "lateral miss" against center. */
   aim?: { lat: number; lng: number };
+  /** Total great-circle distance from start to end, in yards. Always
+   *  computed at finalize time so per-shot reads don't need to recompute
+   *  haversine on every render. */
+  total_yds?: number;
+  /** Signed perpendicular offset from the centerline at the moment the
+   *  shot was finalised, in yards. Positive = right of intended line,
+   *  negative = left. Centerline is start→aim if the player dragged a
+   *  heatmap target, else start→pin if the pin location is known. Absent
+   *  when neither aim nor pin is available — we report total distance only
+   *  in that case rather than guess a centerline. */
+  lateral_yds?: number;
+  /** Which centerline `lateral_yds` was computed against. Lets downstream
+   *  stats know whether the lateral is meaningful (aim/pin) or absent. */
+  lateral_ref?: 'aim' | 'pin';
 }
 
 /** A shot that's been started but not stopped yet (TRACK tapped once). */

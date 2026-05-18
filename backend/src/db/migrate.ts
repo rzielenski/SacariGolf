@@ -704,6 +704,24 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Per-shot geometry frozen at finalize time. Keeps lateral / total
+    // values consistent with the player's intent at the moment they
+    // tapped TRACK→stop — even if the pin gets re-pinned later, or the
+    // course catalog adds a pin for a hole that didn't have one before.
+    //   • total_yds   — raw great-circle distance start→end (yards).
+    //   • lateral_yds — signed perpendicular offset from the centerline
+    //                   the player aimed at. Sign convention: + = right.
+    //   • lateral_ref — 'aim' or 'pin' depending on which centerline was
+    //                   in scope. NULL when neither was available.
+    name: 'shots.geometry_columns',
+    sql: `
+      ALTER TABLE shots
+        ADD COLUMN IF NOT EXISTS total_yds   INTEGER,
+        ADD COLUMN IF NOT EXISTS lateral_yds INTEGER,
+        ADD COLUMN IF NOT EXISTS lateral_ref TEXT;
+    `,
+  },
+  {
     // One-shot guard on the "X started a round" friend-notification path.
     // POST /matches/:id/started flips this to TRUE on the first call so a
     // re-mount of the scoring screen doesn't spam every friend repeatedly.

@@ -9,6 +9,7 @@ import { api, API_BASE } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
 import { isPremium } from '../../lib/premium';
+import { fmtHandicap } from '../../lib/golfMath';
 import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
@@ -418,21 +419,26 @@ export default function ProfileScreen() {
         <PressableScale onPress={() => setHcapModalVisible(true)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>HANDICAP</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
-            {handicap?.handicap_index != null
-              ? handicap.handicap_index.toFixed(1)
-              : 'Need 3+ rounds'}
+            {fmtHandicap(handicap?.handicap_index ?? null, 'Need 3+ rounds')}
           </Text>
         </PressableScale>
       </View>
 
       <View style={styles.miniRow}>
         <PressableScale
-          onPress={() => { setManualHcapInput(user.handicap_index?.toString() ?? ''); setManualHcapModal(true); }}
+          onPress={() => {
+            // Pre-fill matches how we DISPLAY the handicap: a stored -2.4
+            // shows in the input as "+2.4". The parse side accepts both
+            // "+2.4" and "-2.4" so either input works.
+            const hi = user.handicap_index;
+            setManualHcapInput(hi == null ? '' : hi < 0 ? `+${(-hi).toFixed(1)}` : hi.toString());
+            setManualHcapModal(true);
+          }}
           style={styles.miniCard}
         >
           <Text style={styles.miniLabel}>STARTING HCP</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
-            {user.handicap_index != null ? user.handicap_index.toFixed(1) : 'Set'}
+            {fmtHandicap(user.handicap_index ?? null, 'Set')}
           </Text>
         </PressableScale>
 
@@ -921,7 +927,7 @@ export default function ProfileScreen() {
           <ScrollView contentContainerStyle={{ padding: 20 }}>
             <View style={styles.hcapHero}>
               <Text style={styles.hcapBigNum}>
-                {handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
+                {fmtHandicap(handicap?.handicap_index ?? null)}
               </Text>
               <Text style={styles.hcapBigLabel}>
                 {handicap?.num_rounds_used
@@ -991,9 +997,21 @@ export default function ProfileScreen() {
             </TouchableOpacity>
             <Text style={styles.manualHcapTitle}>Starting Handicap</Text>
             <TouchableOpacity onPress={async () => {
-              const val = manualHcapInput.trim() === '' ? null : parseFloat(manualHcapInput);
-              if (val !== null && (isNaN(val) || val < 0 || val > 54)) {
-                Alert.alert('Invalid', 'Enter a number between 0 and 54.');
+              // "Plus handicap" parsing: a player better than scratch enters
+              // their index with a leading "+" (e.g. "+2.4"). USGA stores
+              // these as NEGATIVE numbers (-2.4), so we flip the sign on
+              // any explicit "+" prefix before sending to the server.
+              const raw = manualHcapInput.trim();
+              let val: number | null;
+              if (raw === '') {
+                val = null;
+              } else if (raw.startsWith('+')) {
+                val = -parseFloat(raw.slice(1));
+              } else {
+                val = parseFloat(raw);
+              }
+              if (val !== null && (isNaN(val) || val < -10 || val > 54)) {
+                Alert.alert('Invalid', 'Enter a handicap between +10 and 54. Plus handicaps use a leading "+", e.g. "+2.4".');
                 return;
               }
               try {
@@ -1007,17 +1025,21 @@ export default function ProfileScreen() {
           </View>
           <View style={{ padding: 20 }}>
             <Text style={styles.manualHcapDesc}>
-              Your USGA/WHS handicap index (0–54). Drives the strokes-gained
+              Your USGA/WHS handicap index. Drives the strokes-gained
               baseline until you've played 3+ rated rounds for the auto-calc
-              to take over. Leave blank to clear.
+              to take over. Better than scratch? Enter a plus handicap as
+              "+2.4". Leave blank to clear.
             </Text>
             <TextInput
               style={styles.manualHcapInput}
               value={manualHcapInput}
               onChangeText={setManualHcapInput}
-              placeholder="e.g. 14.2"
+              placeholder="e.g. 14.2 or +2.4"
               placeholderTextColor={C.textMuted}
-              keyboardType="decimal-pad"
+              // numbers-and-punctuation includes "+", which decimal-pad
+              // doesn't. Required so a player can enter "+2.4" without
+              // having to switch keyboards.
+              keyboardType="numbers-and-punctuation"
               maxLength={5}
             />
           </View>

@@ -11,6 +11,7 @@ import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
+import { fmtHandicap } from '../../lib/golfMath';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -202,7 +203,7 @@ export default function UserProfileScreen() {
         <Stat label="Win Rate" value={`${winRate}%`} />
         <Stat
           label="Handicap"
-          value={handicap?.handicap_index != null ? handicap.handicap_index.toFixed(1) : '—'}
+          value={fmtHandicap(handicap?.handicap_index ?? null)}
         />
         <Stat label="Course Records" value={courseRecords.length} />
       </View>
