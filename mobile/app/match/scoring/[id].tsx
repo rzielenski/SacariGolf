@@ -1590,22 +1590,16 @@ export default function ScoringScreen() {
     }
 
     const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
-    // When the user has manually dragged the aim point, the heatmap center
-    // IS the aim point — that's the "I'm aiming here" semantic. We
-    // recompute the forward distance so the σ rings extend symmetrically
-    // around the aim along the start→aim line.
+    // When the user manually places an aim, we use that point's BEARING
+    // (already captured into `aimBearing` above) but keep `effectiveForward`
+    // pinned to the club's condition-adjusted carry. The semantic is "I'm
+    // aiming this direction for THIS club" — the heatmap rotates around
+    // the player at the club's natural distance, it does NOT stretch out
+    // to wherever the user tapped. That's exactly the case for someone
+    // laying up or aiming at the left side of a green: same club, same
+    // expected distance, different line. Lateral offset is zeroed so the
+    // ellipse sits squarely on the new aim line.
     if (aimForCurrentHole) {
-      // Great-circle distance from start to aim, in yards. Inline rather
-      // than calling distYards() to avoid pulling another helper into the
-      // memo's dep array — the bearing-vs-distance math is already inline
-      // above.
-      const aLat1 = userCoord.latitude * Math.PI / 180;
-      const aLat2 = aimForCurrentHole.lat * Math.PI / 180;
-      const adLat = aLat2 - aLat1;
-      const adLng = (aimForCurrentHole.lng - userCoord.longitude) * Math.PI / 180;
-      const aa = Math.sin(adLat / 2) ** 2 + Math.cos(aLat1) * Math.cos(aLat2) * Math.sin(adLng / 2) ** 2;
-      const aMeters = 6371000 * 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
-      effectiveForward = aMeters * 1.0936132983;
       effectiveLateral = 0;
     }
     const center: LL = place(start, effectiveForward, effectiveLateral);
@@ -2314,10 +2308,17 @@ export default function ScoringScreen() {
                 }));
               }}
             >
-              <View style={[
-                styles.heatmapCenterDot,
-                aimForCurrentHole && styles.heatmapCenterDotAimed,
-              ]} />
+              {/* The outer transparent square is the actual TOUCH target —
+                  46×46pt is roughly an Apple-HIG fingertip. The inner View
+                  is the visible dot. Without the oversized wrapper the
+                  draggable hitbox is just the 8–14pt dot, which is brutal
+                  to grab on a satellite tile. */}
+              <View style={styles.heatmapHitbox}>
+                <View style={[
+                  styles.heatmapCenterDot,
+                  aimForCurrentHole && styles.heatmapCenterDotAimed,
+                ]} />
+              </View>
             </Marker>
           </>
         )}
@@ -2345,7 +2346,11 @@ export default function ScoringScreen() {
               }));
             }}
           >
-            <View style={styles.heatmapCenterDotAimed} />
+            {/* Same fingertip-sized hitbox as the heatmap-rings center marker
+                so the standalone aim is just as easy to grab. */}
+            <View style={styles.heatmapHitbox}>
+              <View style={styles.heatmapCenterDotAimed} />
+            </View>
           </Marker>
         )}
 
@@ -3403,6 +3408,19 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff200',
     borderWidth: 1, borderColor: '#000',
     shadowColor: '#fff200', shadowOpacity: 0.8, shadowRadius: 4,
+  },
+  // Invisible 90×90pt wrapper around the heatmap center dot. Way bigger
+  // than Apple's 44pt HIG minimum — the heatmap marker sits on top of a
+  // satellite tile (no nearby contrast to aim at) AND has to win the drag
+  // race against the map pan gesture, so a generous hitbox is the only
+  // way it feels reliable. The visible dot stays small (8–14pt) so the
+  // σ rings underneath aren't occluded.
+  heatmapHitbox: {
+    width: 90, height: 90,
+    alignItems: 'center', justifyContent: 'center',
+    // backgroundColor left undefined so the wrapper is fully transparent;
+    // a tinted debug background can be temporarily added here when
+    // troubleshooting hit testing.
   },
   // Larger and gold-tinted when the player has manually dragged the aim —
   // signals "this is your committed aim point, not the auto-projected one."
