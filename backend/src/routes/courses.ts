@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
+import { sendEmail } from '../utils/email';
 
 const router = Router();
 
@@ -534,42 +535,62 @@ router.post('/request', requireAuth, wrap(async (req: AuthRequest, res: Response
     [req.userId, courseName, city, state, country, website, notes]
   );
 
-  // ── Notify the admin via DM ───────────────────────────────────────────
-  // The course_requests inbox is the durable record; the DM is the
-  // realtime ping that lets the admin actually notice without checking
-  // the table. Gated on ADMIN_USER_ID being set in the server env. The
-  // direct_messages INSERT here intentionally BYPASSES the "must be
-  // friends" rule the public POST /dm/:userId endpoint enforces — this
-  // is a server-controlled system message, not a UGC interaction.
-  const adminUserId = process.env.ADMIN_USER_ID;
-  if (adminUserId && adminUserId !== req.userId) {
-    try {
-      // Lookup the requester's username so the DM body reads naturally.
-      const { rows: meRows } = await pool.query(
-        `SELECT username FROM users WHERE user_id = $1`, [req.userId]
-      );
-      const requesterName = meRows[0]?.username ?? 'A user';
+  // ── Notify the admin ──────────────────────────────────────────────────
+  // The course_requests inbox is the durable record; these notifications
+  // are the realtime ping that lets the admin actually notice without
+  // polling the table. Two opt-in channels, each gated on its own env var:
+  //
+  //   ADMIN_EMAIL    — sends a plaintext email via Resend (the existing
+  //                    email utility). Cheapest + simplest path; doesn't
+  //                    require either the admin to be a user in the DB
+  //                    or any new service integration.
+  //   ADMIN_USER_ID  — in addition, drops a DM + push into the admin's
+  //                    in-app inbox. Server-controlled INSERT bypasses
+  //                    the "must be friends" rule the public DM endpoint
+  //                    enforces — this is a system message, not UGC.
+  //
+  // Either, both, or neither can be set. All of this is best-effort and
+  // wrapped in try/catch so a delivery failure doesn't sink the user's
+  // submission (the inbox row is the source of truth either way).
+  try {
+    const { rows: meRows } = await pool.query(
+      `SELECT username, email FROM users WHERE user_id = $1`, [req.userId]
+    );
+    const requesterName = meRows[0]?.username ?? 'A user';
+    const requesterEmail = meRows[0]?.email ?? null;
+    const loc = [city, state, country].filter(Boolean).join(', ');
 
-      // Compose the DM body. Multi-line so the admin can copy/paste it
-      // straight into the import flow.
-      const lines = [
-        `📍 Course request from ${requesterName}`,
-        ``,
-        `Name: ${courseName}`,
-      ];
-      const loc = [city, state, country].filter(Boolean).join(', ');
-      if (loc)     lines.push(`Location: ${loc}`);
-      if (website) lines.push(`Website: ${website}`);
-      if (notes)   lines.push(`Notes: ${notes}`);
-      const dmBody = lines.join('\n').slice(0, 2000);
+    // Shared body — same content for email + DM so they read identically.
+    const lines = [
+      `Course request from ${requesterName}`,
+      ``,
+      `Name: ${courseName}`,
+    ];
+    if (loc)     lines.push(`Location: ${loc}`);
+    if (website) lines.push(`Website: ${website}`);
+    if (notes)   lines.push(`Notes: ${notes}`);
+    const body = lines.join('\n');
 
+    // Email
+    const adminEmail = process.env.ADMIN_EMAIL;
+    if (adminEmail) {
+      const subject = `Course request: ${courseName}${loc ? ` — ${loc}` : ''}`;
+      const replyTail = requesterEmail ? `\n\n(Requested by ${requesterEmail})` : '';
+      await sendEmail({
+        to: adminEmail,
+        subject,
+        text: body + replyTail,
+      });
+    }
+
+    // DM + push
+    const adminUserId = process.env.ADMIN_USER_ID;
+    if (adminUserId && adminUserId !== req.userId) {
       await pool.query(
         `INSERT INTO direct_messages (from_user_id, to_user_id, body)
          VALUES ($1, $2, $3)`,
-        [req.userId, adminUserId, dmBody]
+        [req.userId, adminUserId, body.slice(0, 2000)]
       );
-
-      // Best-effort push so the admin sees a tray notification too.
       const { rows: adminRows } = await pool.query(
         `SELECT push_token FROM users WHERE user_id = $1`, [adminUserId]
       );
@@ -582,11 +603,9 @@ router.post('/request', requireAuth, wrap(async (req: AuthRequest, res: Response
           { type: 'dm', fromUserId: req.userId },
         );
       }
-    } catch {
-      // Don't fail the user's submission just because the admin
-      // notification couldn't be delivered — the inbox row is the
-      // source of truth and will surface in /courses/requests either way.
     }
+  } catch {
+    // Swallowed by design — see comment above.
   }
 
   return res.json({ success: true, request_id: rows[0].request_id });

@@ -690,6 +690,87 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Lake Pleasant Golf Course — Lake Pleasant, NY (Adirondacks, 315 area
+    // code). 9-hole physical layout that's played twice for an 18-hole
+    // round; the scorecard exposes two tee positions on each physical
+    // hole so the front 9 and back 9 differ slightly in yardage on a few
+    // holes (per the supplied scorecard). Stored as full 18-hole teeboxes
+    // so the on-screen scorecard matches the printed one exactly — a
+    // player who picks "9 holes" plays the front-9 tee positions, "18"
+    // plays the full layout.
+    //
+    // Two tee colors recorded:
+    //   • RED   — 4914 yds, Par 73, Rating 68.3 / Slope 114
+    //   • WHITE — 5531 yds, Par 70, Rating 66.7 / Slope 110
+    //
+    // WHITE par follows the user-provided per-hole breakdown — holes 5/8
+    // and their back-9 mirrors 14 are par-3 from WHITE despite being
+    // par-4 from the (shorter, forward) RED tees, the standard
+    // forward-vs-back-tee convention. HCP rankings: RED was provided
+    // directly; WHITE re-uses RED's since the physical hole order is the
+    // same and the relative difficulty ranking doesn't change with tee.
+    //
+    // Coords are approximate centroid of the course (Adirondack Park, NY).
+    // ON CONFLICT DO NOTHING so the seed is idempotent.
+    name: 'seed.lake_pleasant_ny',
+    sql: `
+      INSERT INTO courses (course_id, course_name, club_name, address, city, state, country, latitude, longitude) VALUES
+        ('a3000001-0000-0000-0000-000000001ace', 'Lake Pleasant Golf Course', 'Lake Pleasant Golf Course', 'Lake Pleasant, NY', 'Lake Pleasant', 'NY', 'United States', 43.4793, -74.4153)
+      ON CONFLICT (course_id) DO NOTHING;
+
+      INSERT INTO teeboxes (teebox_id, course_id, name, gender, course_rating, slope_rating, total_yards, num_holes, par) VALUES
+        ('b3000001-0000-0000-0000-000000001ace', 'a3000001-0000-0000-0000-000000001ace', 'Red',   'female', 68.3, 114, 4914, 18, 73),
+        ('b3000002-0000-0000-0000-000000001ace', 'a3000001-0000-0000-0000-000000001ace', 'White', 'male',   66.7, 110, 5531, 18, 70)
+      ON CONFLICT (teebox_id) DO NOTHING;
+
+      INSERT INTO holes (teebox_id, hole_num, par, yardage, handicap) VALUES
+        -- Red tees: 4914 yds / Par 73. Holes 4/5/8/9 vs 13/14/17/18 have
+        -- slightly different yardages because the second pass uses an
+        -- alternate tee marker on the same physical hole.
+        ('b3000001-0000-0000-0000-000000001ace',  1, 4, 315,  7),
+        ('b3000001-0000-0000-0000-000000001ace',  2, 5, 370,  9),
+        ('b3000001-0000-0000-0000-000000001ace',  3, 4, 338,  1),
+        ('b3000001-0000-0000-0000-000000001ace',  4, 3, 134,  5),
+        ('b3000001-0000-0000-0000-000000001ace',  5, 4, 225, 15),
+        ('b3000001-0000-0000-0000-000000001ace',  6, 5, 370, 13),
+        ('b3000001-0000-0000-0000-000000001ace',  7, 4, 320,  3),
+        ('b3000001-0000-0000-0000-000000001ace',  8, 4, 220, 17),
+        ('b3000001-0000-0000-0000-000000001ace',  9, 4, 195, 11),
+        ('b3000001-0000-0000-0000-000000001ace', 10, 4, 315,  8),
+        ('b3000001-0000-0000-0000-000000001ace', 11, 5, 370, 12),
+        ('b3000001-0000-0000-0000-000000001ace', 12, 4, 338,  2),
+        ('b3000001-0000-0000-0000-000000001ace', 13, 3, 152,  6),
+        ('b3000001-0000-0000-0000-000000001ace', 14, 4, 203, 18),
+        ('b3000001-0000-0000-0000-000000001ace', 15, 5, 370, 16),
+        ('b3000001-0000-0000-0000-000000001ace', 16, 4, 320,  4),
+        ('b3000001-0000-0000-0000-000000001ace', 17, 3, 164, 10),
+        ('b3000001-0000-0000-0000-000000001ace', 18, 4, 195, 14),
+
+        -- White tees: 5531 yds / Par 70. Par diverges from RED on holes
+        -- 5/8/14 (long par-3s from white that are short par-4s from the
+        -- forward red tees).
+        ('b3000002-0000-0000-0000-000000001ace',  1, 4, 315,  7),
+        ('b3000002-0000-0000-0000-000000001ace',  2, 5, 458,  9),
+        ('b3000002-0000-0000-0000-000000001ace',  3, 4, 390,  1),
+        ('b3000002-0000-0000-0000-000000001ace',  4, 3, 134,  5),
+        ('b3000002-0000-0000-0000-000000001ace',  5, 3, 225, 15),
+        ('b3000002-0000-0000-0000-000000001ace',  6, 5, 426, 13),
+        ('b3000002-0000-0000-0000-000000001ace',  7, 4, 320,  3),
+        ('b3000002-0000-0000-0000-000000001ace',  8, 3, 220, 17),
+        ('b3000002-0000-0000-0000-000000001ace',  9, 4, 290, 11),
+        ('b3000002-0000-0000-0000-000000001ace', 10, 4, 315,  8),
+        ('b3000002-0000-0000-0000-000000001ace', 11, 5, 458, 12),
+        ('b3000002-0000-0000-0000-000000001ace', 12, 4, 390,  2),
+        ('b3000002-0000-0000-0000-000000001ace', 13, 3, 152,  6),
+        ('b3000002-0000-0000-0000-000000001ace', 14, 3, 203, 18),
+        ('b3000002-0000-0000-0000-000000001ace', 15, 5, 426, 16),
+        ('b3000002-0000-0000-0000-000000001ace', 16, 4, 320,  4),
+        ('b3000002-0000-0000-0000-000000001ace', 17, 3, 164, 10),
+        ('b3000002-0000-0000-0000-000000001ace', 18, 4, 325, 14)
+      ON CONFLICT (teebox_id, hole_num) DO NOTHING;
+    `,
+  },
+  {
     // Where the player aimed at the moment they finalised this shot,
     // captured from the on-map draggable heatmap target. Nullable — most
     // shots won't have it because the player only drags the target when
