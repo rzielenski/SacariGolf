@@ -16,7 +16,7 @@
  * to a "not found" view if the swing was deleted or doesn't exist.
  */
 
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
   Dimensions, PanResponder,
@@ -29,11 +29,17 @@ import {
   CLUB_LABELS, SWING_REF, interpretDelta,
 } from '../../lib/proSwingStats';
 import {
-  RangeSwing, loadSwings, SwingAnalysis, PoseFrame, Point, CameraAngle,
-  normalizePoseFrame, interpolatePoseFrames,
+  RangeSwing, loadSwings, saveSwing, SwingAnalysis, PoseFrame, Point, CameraAngle,
+  Stroke, normalizePoseFrame, interpolatePoseFrames,
 } from '../../lib/rangeSession';
+// POSE STUDIO disabled — joint-tracking has been hidden pending revisit
+// per user request. SwingPoseOverlay import is kept so the (commented-out)
+// PoseStudio block below still compiles when re-enabled. Linter dead-code
+// warnings are intentionally tolerated here.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { SwingPoseOverlay } from '../../components/SwingPoseOverlay';
 import { ClubheadTracer } from '../../components/ClubheadTracer';
+import { SwingAnnotator } from '../../components/SwingAnnotator';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -45,28 +51,83 @@ const KEYFRAME_LABELS: Record<Keyframe, string> = {
   followThrough: 'FOLLOW-THROUGH',
 };
 
-type ViewMode = 'tracer' | 'pose';
+// POSE STUDIO is hidden — the joint-tracking lens is commented out for now.
+// Leaving the type so the disabled JSX block below remains valid TS when
+// it's revisited.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type ViewMode = 'tracer';
+
+/** Slow-motion playback presets. Drives expo-av's `rate` prop —
+ *  values < 1.0 stretch the playback over a longer real-time window, which
+ *  is what makes a 30fps recording readable for swing analysis. */
+const PLAYBACK_RATES: { label: string; rate: number }[] = [
+  { label: '1×',    rate: 1.0  },
+  { label: '½×',    rate: 0.5  },
+  { label: '¼×',    rate: 0.25 },
+  { label: '⅛×',    rate: 0.125 },
+];
+
+/** Pen color palette for the annotation tool. Tuned to read against
+ *  satellite-tile / grass / sky backgrounds — every color is high-saturation
+ *  with a built-in shadow on the segments. */
+const PEN_COLORS = ['#ffd60a', '#e63946', '#4a9eff', '#7aab78', '#ffffff'];
 
 export default function RangeAnalyze() {
   const { user } = useAuth();
   const { swing: swingId } = useLocalSearchParams<{ swing: string }>();
   const [swing, setSwing] = useState<RangeSwing | null | undefined>(undefined);
-  // View mode is mutually exclusive — either you're watching the video
-  // with the clubhead tracer overlay, OR you're in the pose studio
-  // (black canvas, skeleton + ball, no video). Two distinct lenses on
-  // the same swing data; the user picks via the tab row.
-  const [viewMode, setViewMode] = useState<ViewMode>('tracer');
   const [playbackTimeSec, setPlaybackTimeSec] = useState(0);
   const videoRef = useRef<Video>(null);
+
+  // ── Slo-mo playback ────────────────────────────────────────────────
+  // Controls the `rate` prop on the Video element. Persisted only in
+  // component state — a session-scoped preference. expo-av treats rate
+  // < 1.0 as slow-motion, pitch-correcting the audio track (we have no
+  // audio that matters so this just slows the frames).
+  const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+
+  // ── Drawing / annotation ──────────────────────────────────────────
+  // Strokes are kept in component state during the session and persisted
+  // to the saved RangeSwing whenever they change so a reload restores
+  // the drawing.
+  const [drawingMode, setDrawingMode] = useState<'pen' | 'eraser'>('pen');
+  const [drawingEnabled, setDrawingEnabled] = useState(false);
+  const [penColor, setPenColor] = useState<string>(PEN_COLORS[0]);
+  const [strokes, setStrokes] = useState<Stroke[]>([]);
 
   // Load the swing from storage. `undefined` = still loading, `null` = not found.
   useEffect(() => {
     if (!user?.user_id || !swingId) return;
     (async () => {
       const all = await loadSwings(user.user_id);
-      setSwing(all.find((s) => s.swing_id === swingId) ?? null);
+      const found = all.find((s) => s.swing_id === swingId) ?? null;
+      setSwing(found);
+      // Seed annotations from the saved record. Defaults to empty so
+      // pre-existing swings (no annotations field) start with a clean
+      // canvas.
+      setStrokes(found?.annotations ?? []);
     })();
   }, [user?.user_id, swingId]);
+
+  /** Persist a stroke change immediately — the user expects their
+   *  marks to survive a navigate-away → navigate-back. We update local
+   *  state synchronously for instant render, then fire-and-forget the
+   *  AsyncStorage write. */
+  const persistStrokes = useCallback((next: Stroke[]) => {
+    setStrokes(next);
+    if (!user?.user_id || !swing) return;
+    const updated: RangeSwing = { ...swing, annotations: next };
+    setSwing(updated);
+    saveSwing(user.user_id, updated).catch(() => { });
+  }, [user?.user_id, swing]);
+
+  // Apply the slo-mo rate to the Video element imperatively. expo-av
+  // takes a `rate` prop but recreating the player on every rate change
+  // would interrupt playback; this hits the running player instead.
+  useEffect(() => {
+    if (!videoRef.current) return;
+    videoRef.current.setRateAsync(playbackRate, true).catch(() => { });
+  }, [playbackRate]);
 
   // Track video playback time so the clubhead tracer can animate in sync.
   // We sample at iOS's natural ~60Hz status callback rate; if the user
@@ -101,60 +162,181 @@ export default function RangeAnalyze() {
         title: CLUB_LABELS[swing.club] ?? swing.club,
         headerStyle: { backgroundColor: C.bg }, headerTintColor: C.text,
       }} />
-      <ScrollView contentContainerStyle={styles.scroll}>
-        {/* ── View mode tabs ──────────────────────────────────────────
-            Two distinct lenses: tracer view OVER the video, pose studio
-            on its own black canvas. Mutually exclusive — one rendered
-            at a time. */}
-        <View style={styles.viewModeRow}>
-          <TouchableOpacity
-            style={[styles.viewModeTab, viewMode === 'tracer' && styles.viewModeTabActive]}
-            onPress={() => setViewMode('tracer')}
-          >
-            <Text style={[styles.viewModeLabel, viewMode === 'tracer' && styles.viewModeLabelActive]}>
-              VIDEO + TRACER
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.viewModeTab, viewMode === 'pose' && styles.viewModeTabActive]}
-            onPress={() => setViewMode('pose')}
-          >
-            <Text style={[styles.viewModeLabel, viewMode === 'pose' && styles.viewModeLabelActive]}>
-              POSE STUDIO
-            </Text>
-          </TouchableOpacity>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        // Scroll is locked while the user is drawing — otherwise a stroke
+        // gesture is interpreted as a scroll and the annotation never
+        // registers. Toggled off when the drawing layer is disabled.
+        scrollEnabled={!drawingEnabled}
+      >
+        {/* ── VIDEO + OVERLAYS ─────────────────────────────────────────
+            Stack: native Video player at the bottom, ClubheadTracer above
+            (purely visual, no touch capture), SwingAnnotator on top
+            (captures touch when drawing is enabled, otherwise transparent
+            to touches). POSE STUDIO was previously a separate full-screen
+            lens; it's been hidden pending revisit. */}
+        <View style={styles.videoFrame}>
+          <Video
+            ref={videoRef}
+            source={{ uri: swing.video_uri }}
+            style={styles.video}
+            // Disable native controls while drawing so seek-bar taps
+            // don't intercept stroke touches. Reinstated when the user
+            // toggles drawing off.
+            useNativeControls={!drawingEnabled}
+            resizeMode={ResizeMode.CONTAIN}
+            isLooping
+            rate={playbackRate}
+            onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+          />
+          {swing.status === 'complete' && swing.result && (
+            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+              <ClubheadTracer
+                trace={swing.result.clubheadTrace}
+                width={SCREEN_W - 40}
+                height={(SCREEN_W - 40) * (16 / 9)}
+                currentTimeSec={playbackTimeSec}
+                impactTimeSec={swing.result.impactTimeSec}
+              />
+            </View>
+          )}
+          <SwingAnnotator
+            width={SCREEN_W - 40}
+            height={(SCREEN_W - 40) * (16 / 9)}
+            strokes={strokes}
+            drawing={drawingEnabled}
+            mode={drawingMode}
+            penColor={penColor}
+            onStrokesChange={persistStrokes}
+          />
         </View>
 
-        {/* ── TRACER VIEW: actual video with clubhead trace overlay ── */}
-        {viewMode === 'tracer' && (
-          <View style={styles.videoFrame}>
-            <Video
-              ref={videoRef}
-              source={{ uri: swing.video_uri }}
-              style={styles.video}
-              useNativeControls
-              resizeMode={ResizeMode.CONTAIN}
-              isLooping
-              onPlaybackStatusUpdate={onPlaybackStatusUpdate}
-            />
-            {swing.status === 'complete' && swing.result && (
-              <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-                <ClubheadTracer
-                  trace={swing.result.clubheadTrace}
-                  width={SCREEN_W - 40}
-                  height={(SCREEN_W - 40) * (16 / 9)}
-                  currentTimeSec={playbackTimeSec}
-                  impactTimeSec={swing.result.impactTimeSec}
-                />
-              </View>
+        {/* ── Slo-mo playback chips ────────────────────────────────────
+            Lets the player slow ANY recording down for analysis — the
+            iOS system camera offers 120/240fps slo-mo at record time
+            (swipe to SLO-MO before tapping record), but those high-fps
+            recordings still play at 30fps unless slowed here. */}
+        <View style={styles.toolbarRow}>
+          <Text style={styles.toolbarLabel}>SPEED</Text>
+          <View style={styles.toolbarChips}>
+            {PLAYBACK_RATES.map((p) => (
+              <TouchableOpacity
+                key={p.label}
+                style={[
+                  styles.rateChip,
+                  playbackRate === p.rate && styles.rateChipActive,
+                ]}
+                onPress={() => setPlaybackRate(p.rate)}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.rateChipLabel,
+                    playbackRate === p.rate && styles.rateChipLabelActive,
+                  ]}
+                >
+                  {p.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* ── Drawing toolbar ──────────────────────────────────────────
+            Enable + tool toggles. Pen / Eraser are exclusive (radio).
+            Color row only appears in pen mode. Clear all wipes every
+            stroke; the persist callback fires immediately so the save
+            survives a screen leave. */}
+        <View style={styles.toolbarRow}>
+          <Text style={styles.toolbarLabel}>DRAW</Text>
+          <View style={styles.toolbarChips}>
+            <TouchableOpacity
+              style={[
+                styles.toolBtn,
+                drawingEnabled && drawingMode === 'pen' && styles.toolBtnActive,
+              ]}
+              onPress={() => {
+                if (!drawingEnabled) setDrawingEnabled(true);
+                setDrawingMode('pen');
+              }}
+              activeOpacity={0.7}
+            >
+              <Text style={[
+                styles.toolBtnLabel,
+                drawingEnabled && drawingMode === 'pen' && styles.toolBtnLabelActive,
+              ]}>✎ Pen</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.toolBtn,
+                drawingEnabled && drawingMode === 'eraser' && styles.toolBtnActive,
+              ]}
+              onPress={() => {
+                if (!drawingEnabled) setDrawingEnabled(true);
+                setDrawingMode('eraser');
+              }}
+              activeOpacity={0.7}
+            >
+              <Text style={[
+                styles.toolBtnLabel,
+                drawingEnabled && drawingMode === 'eraser' && styles.toolBtnLabelActive,
+              ]}>⌫ Erase</Text>
+            </TouchableOpacity>
+            {/* The Pen / Erase chips above implicitly enable drawing —
+                this button only appears once drawing is on, as the
+                explicit off-switch (also re-enables scroll). */}
+            {drawingEnabled && (
+              <TouchableOpacity
+                style={styles.toolBtn}
+                onPress={() => setDrawingEnabled(false)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.toolBtnLabel}>Done</Text>
+              </TouchableOpacity>
             )}
+            {strokes.length > 0 && (
+              <TouchableOpacity
+                style={[styles.toolBtn, { borderColor: C.red + '88' }]}
+                onPress={() => persistStrokes([])}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.toolBtnLabel, { color: C.red }]}>Clear</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {/* Color picker — only in pen mode. Five high-saturation colors
+            tuned to read against grass / sky / netting backgrounds. */}
+        {drawingEnabled && drawingMode === 'pen' && (
+          <View style={styles.colorRow}>
+            {PEN_COLORS.map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.colorSwatch,
+                  { backgroundColor: c },
+                  penColor === c && styles.colorSwatchActive,
+                ]}
+                onPress={() => setPenColor(c)}
+                activeOpacity={0.7}
+              />
+            ))}
           </View>
         )}
 
-        {/* ── POSE STUDIO: animated black canvas, skeleton + ball + ground.
-            Keyframe scrubber + play/pause live INSIDE the studio component
-            so they sit directly under the canvas. */}
-        {viewMode === 'pose' && swing.status === 'complete' && swing.result && (() => {
+        {drawingEnabled && (
+          <Text style={styles.drawHint}>
+            Drawing mode — scroll is locked. Tap Done to scroll the page.
+          </Text>
+        )}
+
+        {/* ── POSE STUDIO — commented out pending revisit ─────────────
+            The pose-studio lens (animated skeleton over a black canvas)
+            is hidden while body-joint tracking is being reworked. The
+            block below stays as reference for re-enabling later.
+
+        {swing.status === 'complete' && swing.result && (() => {
           const angle = swing.cameraAngle ?? 'face_on';
           const ball = swing.result.ballPosition
             ?? (angle === 'down_the_line' ? { x: 0.62, y: 0.66 } : { x: 0.50, y: 0.68 });
@@ -166,6 +348,7 @@ export default function RangeAnalyze() {
             />
           );
         })()}
+        ── end pose studio block ─────────────────────────────────────── */}
 
         {/* Camera-angle label so the user always sees what perspective
             their swing was filmed from. */}
@@ -857,8 +1040,56 @@ const styles = StyleSheet.create({
   },
   video: { width: '100%', height: '100%' },
 
-  // View-mode tabs (Tracer ↔ Pose Studio). Sit above the visual area
-  // because the user's first decision is "what lens am I looking through."
+  // ── Toolbar (slo-mo + drawing controls) ───────────────────────────
+  // Both rows share this shape: a leading label-chip on the left, then
+  // a horizontally-scrollable cluster of action chips on the right.
+  toolbarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  toolbarLabel: {
+    color: C.textMuted, fontSize: 10, fontWeight: '900',
+    letterSpacing: 1.4, width: 54,
+  },
+  toolbarChips: {
+    flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6,
+  },
+  rateChip: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+    minWidth: 44, alignItems: 'center',
+  },
+  rateChipActive: { backgroundColor: C.gold, borderColor: C.gold },
+  rateChipLabel: { color: C.textMuted, fontSize: 12, fontWeight: '800' },
+  rateChipLabelActive: { color: C.bg },
+
+  toolBtn: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+  },
+  toolBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
+  toolBtnLabel: { color: C.textMuted, fontSize: 12, fontWeight: '800' },
+  toolBtnLabelActive: { color: C.bg },
+
+  colorRow: {
+    flexDirection: 'row', gap: 10,
+    paddingLeft: 62,
+    marginBottom: 8,
+  },
+  colorSwatch: {
+    width: 26, height: 26, borderRadius: 13,
+    borderWidth: 2, borderColor: 'transparent',
+  },
+  colorSwatchActive: { borderColor: C.text },
+  drawHint: {
+    color: C.gold, fontSize: 11, fontStyle: 'italic',
+    marginTop: 2, marginBottom: 8, paddingLeft: 62,
+  },
+
+  // View-mode tabs (kept for reference — pose mode is currently hidden).
+  // eslint-disable-next-line
   viewModeRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   viewModeTab: {
     flex: 1,

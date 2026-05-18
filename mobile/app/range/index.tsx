@@ -233,6 +233,26 @@ export default function RangeIndex() {
           ))}
         </View>
 
+        {/* ── Slo-mo recording hint ──────────────────────────────────
+            iOS's system camera (which we launch via ImagePicker) has a
+            built-in SLO-MO mode at 120/240fps — far higher than what
+            we could capture through a custom in-app recorder. Rather
+            than rebuilding the camera, we surface a clear hint so the
+            player knows the option exists. Playback can ALWAYS be
+            slowed in the analyzer regardless of recording fps. */}
+        <View style={styles.slomoHint}>
+          <Text style={styles.slomoHintIcon}>◐</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.slomoHintTitle}>SLO-MO recording</Text>
+            <Text style={styles.slomoHintBody}>
+              When the camera opens, swipe right on the mode picker to
+              SLO-MO (120/240fps) for the cleanest swing analysis. You
+              can also slow ANY recording down in playback after the
+              fact — works on regular 30fps clips too.
+            </Text>
+          </View>
+        </View>
+
         {/* Capture row */}
         <View style={styles.captureRow}>
           <TouchableOpacity
@@ -243,7 +263,7 @@ export default function RangeIndex() {
             {busy ? <ActivityIndicator color={C.bg} /> : <>
               <Text style={styles.captureBtnIcon}>●</Text>
               <Text style={styles.captureBtnLabel}>Record swing</Text>
-              <Text style={styles.captureBtnSub}>Camera — tip: swipe to SLO-MO in iOS camera</Text>
+              <Text style={styles.captureBtnSub}>Camera — swipe to SLO-MO in iOS</Text>
             </>}
           </TouchableOpacity>
           <TouchableOpacity
@@ -373,6 +393,21 @@ const styles = StyleSheet.create({
   angleSub:       { color: C.textDim, fontSize: 10, marginTop: 4, lineHeight: 13 },
   angleSubActive: { color: C.text },
 
+
+  slomoHint: {
+    flexDirection: 'row',
+    gap: 12,
+    backgroundColor: C.card,
+    borderColor: C.gold + '66',
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    alignItems: 'flex-start',
+  },
+  slomoHintIcon: { color: C.gold, fontSize: 22, lineHeight: 22, marginTop: 1 },
+  slomoHintTitle: { color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 1.2, marginBottom: 4 },
+  slomoHintBody: { color: C.text, fontSize: 12, lineHeight: 17 },
 
   captureRow: { flexDirection: 'row', gap: 10 },
   captureBtn: {

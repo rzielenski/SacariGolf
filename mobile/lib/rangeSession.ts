@@ -60,6 +60,25 @@ export interface RangeSwing {
    *  frames. 'mock' = deterministic-template fallback (no actual video
    *  analysis happened; numbers derived from club selection + handicap). */
   source?: AnalysisSource;
+  /** User-drawn freehand annotations layered over the video on playback.
+   *  Persisted so a swing the player marked up keeps its marks across
+   *  app restarts. Points are normalised 0-1 in the video frame so the
+   *  same drawing maps correctly even when the playback container
+   *  resizes (rotation / different device). */
+  annotations?: Stroke[];
+}
+
+/** A single freehand annotation stroke drawn over the swing video. */
+export interface Stroke {
+  id: string;
+  /** Hex color. */
+  color: string;
+  /** Stroke width in pixels at the natural overlay size. */
+  width: number;
+  /** Time-ordered touch samples in normalized 0-1 coords. A stroke with a
+   *  single point is rendered as a dot; ≥2 points is rendered as a series
+   *  of connected line segments. */
+  points: { x: number; y: number }[];
 }
 
 /** Output of analyzeSwing() — what the UI consumes. */
@@ -215,35 +234,21 @@ function convertNativeToSwingAnalysis(
   const totalSec = native.duration;
 
   // ── Clubhead trace ─────────────────────────────────────────────────
-  // Try Apple's trajectory request first. If it returns nothing (common
-  // for golf swings since the clubhead isn't truly ballistic — it's
-  // constrained by the swing plane), fall back to building the trace
-  // from WRIST positions which we always have from body pose detection.
-  // Not the actual clubhead, but a real signal from THIS video.
+  // Use ONLY the real clubhead trajectory from Vision's
+  // VNDetectTrajectoriesRequest. The prior wrist-trace fallback (averaged
+  // hand positions from pose detection) was geometrically similar but
+  // NOT the clubhead — it consistently undershoots the true arc by 30-
+  // 50% (the length of the club + extension). Drawing it as "the
+  // clubhead" misleads the user. When Vision can't detect a coherent
+  // trajectory we leave the trace empty and the overlay simply doesn't
+  // render, which is the honest answer.
   const bestTraj = pickBestTrajectory(native.trajectories);
-  let clubheadTrace: SwingAnalysis['clubheadTrace'] = [];
-  if (bestTraj && bestTraj.points.length >= 3) {
-    clubheadTrace = bestTraj.points.map((p, i) => ({
-      x: p.x, y: p.y,
-      t: (i / Math.max(1, bestTraj.points.length - 1)) * totalSec,
-    }));
-  } else {
-    // Wrist-trace fallback. Average the left+right wrist positions per
-    // frame to get a single "hands" point, then use that as the swing
-    // trace. The hands trace is geometrically similar to the clubhead
-    // trace (just smaller arc) so the user gets a visually sensible
-    // overlay of where the swing went.
-    const wristTrace: { x: number; y: number; t: number }[] = [];
-    for (const frame of native.poseFrames) {
-      const lw = frame.leftWrist;
-      const rw = frame.rightWrist;
-      if (!lw && !rw) continue;
-      const x = lw && rw ? (lw.x + rw.x) / 2 : (lw ?? rw)!.x;
-      const y = lw && rw ? (lw.y + rw.y) / 2 : (lw ?? rw)!.y;
-      wristTrace.push({ x, y, t: frame.time });
-    }
-    clubheadTrace = wristTrace;
-  }
+  const clubheadTrace: SwingAnalysis['clubheadTrace'] = bestTraj && bestTraj.points.length >= 3
+    ? bestTraj.points.map((p, i) => ({
+        x: p.x, y: p.y,
+        t: (i / Math.max(1, bestTraj.points.length - 1)) * totalSec,
+      }))
+    : [];
 
   // Snap the four keyframes from the per-frame pose data.
   const poseKeyframes = extractKeyframes(native.poseFrames);
