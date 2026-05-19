@@ -357,50 +357,14 @@ export default function RangeAnalyze() {
           {' '}{CLUB_LABELS[swing.club] ?? swing.club}
         </Text>
 
-        {/* Analysis-source banner — tells the user whether the numbers + skeleton
-            + tracer are derived from real Vision-framework analysis of their
-            video, or from the template fallback. Hidden when 'vision' to keep
-            the surface clean; loud and clear when 'mock' so they don't think
-            the template numbers are measurements. */}
-        {swing.source === 'mock' && (
-          <View style={styles.sourceBanner}>
-            <Text style={styles.sourceBannerTitle}>BETA · TEMPLATE ANALYSIS</Text>
-            <Text style={styles.sourceBannerBody}>
-              Skeleton, tracer, and numbers below are SCHEMATIC — generated from
-              your club + handicap, not from analysing the video. Vision-framework
-              analysis requires a development build with the SwingAnalyzer
-              module linked.
-            </Text>
-          </View>
-        )}
-        {swing.source === 'vision' && (
-          <View style={styles.visionBanner}>
-            <Text style={styles.visionBannerTitle}>VISION ANALYSIS</Text>
-            <Text style={styles.visionBannerBody}>
-              Skeleton and tracer derived from your actual video frames using
-              Apple Vision framework. Speed / spin / carry numbers below are
-              still estimates — those require a launch monitor.
-            </Text>
-          </View>
-        )}
-
-        {/* ── Analysis status banner ──────────────────────────────── */}
-        {swing.status === 'analyzing' && (
-          <View style={styles.analyzingBanner}>
-            <ActivityIndicator color={C.gold} />
-            <Text style={styles.analyzingText}>Analyzing swing — this takes a couple of seconds.</Text>
-          </View>
-        )}
-        {swing.status === 'failed' && (
-          <View style={styles.failedBanner}>
-            <Text style={styles.failedText}>Analysis failed. Record the swing again to retry.</Text>
-          </View>
-        )}
-
-        {/* ── Metrics ──────────────────────────────────────────────── */}
-        {swing.status === 'complete' && swing.result && (
-          <SwingMetrics analysis={swing.result} club={swing.club} />
-        )}
+        {/* All automated metrics (clubhead speed, ball speed, smash, launch,
+            spin, carry, body mechanics) were removed — they were not real
+            measurements (no launch monitor + no scale calibration), so the
+            numbers were misleading. The video, slo-mo playback, clubhead
+            tracer, and drawing tools remain — those are observed signals,
+            not derived metrics. Metrics will return when there's a real
+            launch monitor / pose-derived measurement pipeline to back
+            them up. */}
       </ScrollView>
     </View>
   );
@@ -771,9 +735,23 @@ const studio = StyleSheet.create({
   },
 });
 
-// ─── Metrics section ─────────────────────────────────────────────────────
+// ─── Metrics section — REMOVED ─────────────────────────────────────────
+// SwingMetrics + MetricRow + their styles used to render clubhead speed,
+// ball speed, smash, launch, spin, carry, and the body-mechanic rows
+// (tempo, turn angles, X-factor, lateral shift, wrist hinge, spine,
+// head movement) with pro / amateur reference bars. All of it was fed
+// by the template mock (numbers from club + handicap, not the video)
+// or by the Vision conversion that returned null for every value that
+// actually requires a launch monitor. The bars on screen were
+// misleading either way, so the whole section was deleted.
+//
+// The video + slo-mo + clubhead tracer + drawing tool remain — those
+// are observed signals, not derived metrics. Metrics will return when
+// there's a real measurement pipeline backing them. The legacy block
+// below is kept as a non-rendered reference for that future work.
 
-function SwingMetrics({ analysis, club }: { analysis: SwingAnalysis; club: string }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _legacy_SwingMetrics({ analysis, club }: { analysis: SwingAnalysis; club: string }) {
   const ref = SWING_REF[club] ?? SWING_REF['7iron'];
 
   // Ballistic stats (driver carry, smash factor, etc.) come first because

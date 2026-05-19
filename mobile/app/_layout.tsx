@@ -205,6 +205,10 @@ export default function RootLayout() {
             against the status bar / notch. */}
         <Stack.Screen name="range/index" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="range/analyze" options={{ animation: 'slide_from_right', headerShown: true }} />
+        {/* Vision-camera-powered swing recorder. Slides up from the bottom
+            because it's a focused capture surface — same UX rhythm as
+            the system camera. */}
+        <Stack.Screen name="range/camera" options={{ animation: 'slide_from_bottom', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
       </AuthProvider>

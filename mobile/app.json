@@ -64,6 +64,13 @@
           "photosPermission": "Sacari needs photo access so you can pick a profile picture, upload a 'Find' photo, and set a clan banner.",
           "cameraPermission": "Sacari uses the camera so you can snap a 'Find' photo without leaving the app."
         }
+      ],
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "Sacari uses the camera so you can record your golf swings in slow motion right inside the app.",
+          "enableMicrophonePermission": false
+        }
       ]
     ],
     "experiments": {

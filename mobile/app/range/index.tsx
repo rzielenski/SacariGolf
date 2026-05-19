@@ -76,28 +76,35 @@ export default function RangeIndex() {
       return;
     }
 
-    // Permission for camera or library.
-    const perm = sourceCamera
-      ? await ImagePicker.requestCameraPermissionsAsync()
-      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    // Camera path → in-app vision-camera screen (real SLO-MO support via
+    // AVCaptureSession). That screen handles permission, fps selection,
+    // record/stop, save, analyze, and the final navigation to
+    // /range/analyze — so we just hand off and let it drive.
+    if (sourceCamera) {
+      const swingId = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      router.push(
+        `/range/camera?club=${encodeURIComponent(club)}` +
+        `&angle=${cameraAngle}&swingId=${swingId}` as any,
+      );
+      return;
+    }
+
+    // Upload-existing path — still uses ImagePicker (no recording UI
+    // needed, the OS picker is fine for selecting a clip the user
+    // already shot in the system Camera app, including SLO-MO clips).
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.status !== 'granted') {
-      Alert.alert('Permission needed', `Sacari needs ${sourceCamera ? 'camera' : 'photo library'} access to import your swing.`);
+      Alert.alert('Permission needed', 'Sacari needs photo library access to import your swing.');
       return;
     }
 
     setBusy(true);
     try {
-      const result = sourceCamera
-        ? await ImagePicker.launchCameraAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-            videoMaxDuration: 15,
-            quality: 1,
-          })
-        : await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-            quality: 1,
-            videoMaxDuration: 15,
-          });
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+        quality: 1,
+        videoMaxDuration: 15,
+      });
       if (result.canceled || !result.assets?.[0]?.uri) {
         setBusy(false);
         return;
@@ -105,9 +112,6 @@ export default function RangeIndex() {
       const videoUri = result.assets[0].uri;
       const swingId = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-      // Save a pending stub immediately so the user sees the new entry in
-      // the list while the analyzer runs. Then run analyze and overwrite
-      // with the complete record.
       const pending: RangeSwing = {
         swing_id: swingId,
         club,
@@ -120,10 +124,6 @@ export default function RangeIndex() {
       await reload();
 
       try {
-        // analyzeSwing returns SwingAnalysis + a source tag ('vision' real
-        // ML or 'mock' template fallback). Both are surfaced on the saved
-        // record so the analyze screen can label which one the user is
-        // looking at.
         const { source, ...result } = await analyzeSwing(
           videoUri, club, swingId, user.handicap_index ?? null, cameraAngle
         );
@@ -233,22 +233,21 @@ export default function RangeIndex() {
           ))}
         </View>
 
-        {/* ── Slo-mo recording hint ──────────────────────────────────
-            iOS's system camera (which we launch via ImagePicker) has a
-            built-in SLO-MO mode at 120/240fps — far higher than what
-            we could capture through a custom in-app recorder. Rather
-            than rebuilding the camera, we surface a clear hint so the
-            player knows the option exists. Playback can ALWAYS be
-            slowed in the analyzer regardless of recording fps. */}
+        {/* ── In-app SLO-MO camera explainer ─────────────────────────
+            Tap "Record swing" → in-app camera with FPS chips
+            (30 / 60 / SLO 120 / SLO 240). We probe the device for what
+            it can deliver and grey-out anything the hardware doesn't
+            support. Playback in the analyzer can ALSO be slowed via
+            the SPEED chips, so a 30fps recording still gets useful
+            slow-motion analysis. */}
         <View style={styles.slomoHint}>
           <Text style={styles.slomoHintIcon}>◐</Text>
           <View style={{ flex: 1 }}>
-            <Text style={styles.slomoHintTitle}>SLO-MO recording</Text>
+            <Text style={styles.slomoHintTitle}>SLO-MO recording — in-app</Text>
             <Text style={styles.slomoHintBody}>
-              When the camera opens, swipe right on the mode picker to
-              SLO-MO (120/240fps) for the cleanest swing analysis. You
-              can also slow ANY recording down in playback after the
-              fact — works on regular 30fps clips too.
+              The record button opens our in-app camera with a SLO-MO
+              toggle (120 / 240 fps where your phone supports it). After
+              recording, you can slow playback further on the analyzer.
             </Text>
           </View>
         </View>
@@ -263,7 +262,7 @@ export default function RangeIndex() {
             {busy ? <ActivityIndicator color={C.bg} /> : <>
               <Text style={styles.captureBtnIcon}>●</Text>
               <Text style={styles.captureBtnLabel}>Record swing</Text>
-              <Text style={styles.captureBtnSub}>Camera — swipe to SLO-MO in iOS</Text>
+              <Text style={styles.captureBtnSub}>In-app camera with SLO-MO 120/240</Text>
             </>}
           </TouchableOpacity>
           <TouchableOpacity
