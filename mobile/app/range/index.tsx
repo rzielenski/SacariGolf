@@ -25,7 +25,15 @@ import {
 } from 'react-native';
 import { router, Stack } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
+import Constants from 'expo-constants';
 import { useAuth } from '../../lib/auth';
+
+/** True when the JS is running inside Expo Go (the public app from the
+ *  App Store / Play Store) rather than our custom dev-client / production
+ *  build. Expo Go can't link native modules like react-native-vision-camera,
+ *  so we have to fall back to the system camera (ImagePicker) when this
+ *  is true — otherwise the in-app camera screen crashes at import time. */
+const isExpoGo = Constants.appOwnership === 'expo';
 import { isPremium } from '../../lib/premium';
 import { C, F } from '../../lib/colors';
 import { CLUB_LABELS } from '../../lib/proSwingStats';
@@ -80,7 +88,13 @@ export default function RangeIndex() {
     // AVCaptureSession). That screen handles permission, fps selection,
     // record/stop, save, analyze, and the final navigation to
     // /range/analyze — so we just hand off and let it drive.
-    if (sourceCamera) {
+    //
+    // Expo Go fallback: vision-camera needs a dev build, so when we're
+    // running in the public Expo Go app we fall through to the
+    // ImagePicker.launchCameraAsync flow below (which uses iOS's stock
+    // UIImagePickerController — no SLO-MO chips, but the app stays
+    // functional until the user installs a dev build).
+    if (sourceCamera && !isExpoGo) {
       const swingId = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
       router.push(
         `/range/camera?club=${encodeURIComponent(club)}` +
@@ -89,22 +103,36 @@ export default function RangeIndex() {
       return;
     }
 
-    // Upload-existing path — still uses ImagePicker (no recording UI
-    // needed, the OS picker is fine for selecting a clip the user
-    // already shot in the system Camera app, including SLO-MO clips).
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    // Either:
+    //   • Upload-existing path (sourceCamera = false), OR
+    //   • Expo Go fallback for the record path (sourceCamera = true, but
+    //     isExpoGo) — vision-camera unavailable, so use the OS camera UI
+    //     via ImagePicker. No SLO-MO chips in this fallback path; that's
+    //     the cost of Expo Go.
+    const perm = sourceCamera
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.status !== 'granted') {
-      Alert.alert('Permission needed', 'Sacari needs photo library access to import your swing.');
+      Alert.alert(
+        'Permission needed',
+        `Sacari needs ${sourceCamera ? 'camera' : 'photo library'} access to import your swing.`,
+      );
       return;
     }
 
     setBusy(true);
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-        quality: 1,
-        videoMaxDuration: 15,
-      });
+      const result = sourceCamera
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+            videoMaxDuration: 15,
+            quality: 1,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+            quality: 1,
+            videoMaxDuration: 15,
+          });
       if (result.canceled || !result.assets?.[0]?.uri) {
         setBusy(false);
         return;
