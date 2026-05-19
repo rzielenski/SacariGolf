@@ -22,7 +22,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview,
-            u.clubs_in_bag,
+            u.clubs_in_bag, u.censor_offensive_language,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -44,9 +44,18 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
+
+  // Content-safety toggle. Booleanish — accepts true/false, also 0/1 from
+  // older clients. Defaults to TRUE in the DB so an explicit `false` is
+  // the only way the censor turns off.
+  if (censorOffensiveLanguage !== undefined) {
+    const flag = !!censorOffensiveLanguage;
+    values.push(flag);
+    updates.push(`censor_offensive_language = $${values.length}`);
+  }
 
   if (pushToken !== undefined) { values.push(pushToken); updates.push(`push_token = $${values.length}`); }
   if (handicapIndex !== undefined) {

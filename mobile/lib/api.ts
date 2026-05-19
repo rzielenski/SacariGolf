@@ -256,6 +256,10 @@ export const api = {
        *  ≤14 entries + whitelisted codes + ≤30-char labels. Plain
        *  `string[]` (just codes) is also accepted for backward compat. */
       clubsInBag?: ({ code: string; label?: string } | string)[] | null;
+      /** Per-user content-safety toggle — when true (the default), slurs
+       *  and curse words are censored everywhere user-generated text
+       *  renders in the app. The user can flip this off in Profile. */
+      censorOffensiveLanguage?: boolean;
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     notifications: () => request<{

@@ -12,6 +12,7 @@ import { ChatMessage } from '../../../types';
 import { VoiceMessageBubble } from '../../../components/VoiceMessageBubble';
 import { UserAvatar } from '../../../components/UserAvatar';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { censorText } from '../../../lib/censor';
 
 /** Horizontal distance the user has to drag the mic LEFT, in pixels, before
  *  the gesture is interpreted as "cancel this recording" instead of "send". */
@@ -328,6 +329,10 @@ export default function ChatScreen() {
 function MessageBubble({ msg, isMe, onReport }: {
   msg: ChatMessage; isMe: boolean; onReport: () => void;
 }) {
+  // Censor is opt-out (default ON). The viewer's preference governs what
+  // THEY see — senders aren't policed; readers control their own surface.
+  const { user } = useAuth();
+  const censor = user?.censor_offensive_language !== false;
   const time = new Date(msg.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   // Long-press → report. Disabled for own messages (no point reporting self).
   return (
@@ -355,7 +360,7 @@ function MessageBubble({ msg, isMe, onReport }: {
             tint={isMe ? 'self' : 'other'}
           />
         ) : (
-          <Text style={[styles.bubbleBody, isMe && { color: '#000' }]}>{msg.body}</Text>
+          <Text style={[styles.bubbleBody, isMe && { color: '#000' }]}>{censorText(msg.body, censor)}</Text>
         )}
         <Text style={[styles.bubbleTime, isMe && { color: 'rgba(0,0,0,0.4)' }]}>{time}</Text>
       </View>

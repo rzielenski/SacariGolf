@@ -35,6 +35,11 @@ export interface User {
   premium_since?: string | null;
   premium_until?: string | null;
   premium_plan?: string | null;
+  /** Profanity / slur censor toggle. TRUE by default for every account
+   *  (App Review baseline for a UGC app) — when the user flips it off
+   *  in Profile the value persists on the server. Drives censorText()
+   *  everywhere user-generated text from someone else is rendered. */
+  censor_offensive_language?: boolean;
 }
 
 export interface ChatMessage {

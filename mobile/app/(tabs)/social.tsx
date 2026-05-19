@@ -33,6 +33,8 @@ import { api } from '../../lib/api';
 import { MatchInvite } from '../../types';
 import { C } from '../../lib/colors';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useAuth } from '../../lib/auth';
+import { censorText } from '../../lib/censor';
 
 /**
  * Shared pulse driver for the unread indicators. One Animated.Value at module
@@ -69,6 +71,9 @@ function UnreadDot() {
 }
 
 export default function SocialScreen() {
+  const { user } = useAuth();
+  // Default ON: censor unless the viewer explicitly turned it off.
+  const censor = user?.censor_offensive_language !== false;
   // Invites — actionable items that surface alongside the chats. Match
   // invites and Team invites both need accept/decline before they can
   // open a chat, so we render them at the top of the same scroll view.
@@ -261,7 +266,7 @@ export default function SocialScreen() {
                   style={[styles.userElo, conv.unread && styles.userMsgUnread]}
                   numberOfLines={1}
                 >
-                  {conv.last_message}
+                  {censorText(conv.last_message, censor)}
                 </Text>
               ) : null}
             </View>

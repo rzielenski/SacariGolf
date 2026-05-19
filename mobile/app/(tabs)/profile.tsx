@@ -767,6 +767,43 @@ export default function ProfileScreen() {
           settings screen, not a tiny footer link. */}
       <Text style={[styles.editableLabel, { marginTop: 24, marginBottom: 8 }]}>ACCOUNT</Text>
 
+      {/* Profanity / slur censor toggle. ON by default for new accounts
+          (App Review expectation for any UGC app) — the user can flip
+          it OFF here if they want unfiltered chat / posts / DMs. The
+          server-stored flag drives censorText() everywhere text from
+          another user is rendered. */}
+      <TouchableOpacity
+        style={styles.acctRow}
+        onPress={async () => {
+          const next = (user as any)?.censor_offensive_language === false;
+          try {
+            await api.users.update({ censorOffensiveLanguage: next });
+            await refreshUser?.();
+          } catch (e: any) {
+            Alert.alert('Could not update', e?.message ?? 'Try again.');
+          }
+        }}
+        activeOpacity={0.7}
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.acctRowText}>Censor offensive language</Text>
+          <Text style={[styles.acctRowText, { fontSize: 11, color: C.textMuted, marginTop: 2, fontWeight: '500' }]}>
+            {(user as any)?.censor_offensive_language === false
+              ? 'OFF — slurs and curse words shown as written'
+              : 'ON — slurs and curse words shown as ***'}
+          </Text>
+        </View>
+        <View style={[
+          styles.toggleTrack,
+          (user as any)?.censor_offensive_language !== false && styles.toggleTrackOn,
+        ]}>
+          <View style={[
+            styles.toggleThumb,
+            (user as any)?.censor_offensive_language !== false && styles.toggleThumbOn,
+          ]} />
+        </View>
+      </TouchableOpacity>
+
       <TouchableOpacity
         style={styles.acctRow}
         onPress={() => router.push('/blocked-users' as any)}
@@ -1420,6 +1457,21 @@ const styles = StyleSheet.create({
   },
   acctRowText: { color: C.text, fontWeight: '600', fontSize: 14 },
   acctRowChev: { color: C.textDim, fontSize: 18 },
+  // iOS-style switch track + thumb. Custom rather than RN <Switch> so the
+  // colors match the gold/dark theme without per-platform fiddling.
+  toggleTrack: {
+    width: 44, height: 26, borderRadius: 13,
+    backgroundColor: C.cardAlt,
+    borderWidth: 1, borderColor: C.border,
+    justifyContent: 'center',
+    paddingHorizontal: 2,
+  },
+  toggleTrackOn: { backgroundColor: C.gold + '88', borderColor: C.gold },
+  toggleThumb: {
+    width: 20, height: 20, borderRadius: 10,
+    backgroundColor: C.textMuted,
+  },
+  toggleThumbOn: { backgroundColor: C.gold, transform: [{ translateX: 18 }] },
 
   // Notifications modal
   notifContainer: { flex: 1, backgroundColor: C.bg },

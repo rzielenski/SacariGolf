@@ -32,6 +32,7 @@ import { router } from 'expo-router';
 import { api, API_BASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
+import { censorText } from '../lib/censor';
 
 interface Props {
   /** Anything that should render above the feed items inside the same
@@ -264,6 +265,10 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
 function PostCard({ post, isOwn, onDelete, onReport }: {
   post: any; isOwn: boolean; onDelete: () => void; onReport: () => void;
 }) {
+  const { user } = useAuth();
+  // Default ON: the censor is opt-OUT. If the user record hasn't loaded
+  // yet (anon home tab) we still censor — fail safe.
+  const censor = user?.censor_offensive_language !== false;
   const when = relativeTime(post.created_at);
   const authorAvatar = post.author_avatar
     ? (post.author_avatar.startsWith('http') ? post.author_avatar : `${API_BASE}${post.author_avatar}`)
@@ -316,7 +321,7 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
 
       {post.kind === 'round' && <RoundCardBody post={post} />}
       {post.kind === 'text' && post.body && (
-        <Text style={s.bodyText}>{post.body}</Text>
+        <Text style={s.bodyText}>{censorText(post.body, censor)}</Text>
       )}
       {post.kind === 'photo' && (
         <>
@@ -327,7 +332,7 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
               resizeMode="cover"
             />
           )}
-          {post.body && <Text style={s.caption}>{post.body}</Text>}
+          {post.body && <Text style={s.caption}>{censorText(post.body, censor)}</Text>}
         </>
       )}
     </TouchableOpacity>
@@ -336,8 +341,21 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
 
 /** Round card body — pulls from the server-joined match fields. */
 function RoundCardBody({ post }: { post: any }) {
-  const par = post.teebox_par;
   const strokes = post.author_strokes;
+  // Pro-rate par to the number of holes actually played. Previously this
+  // used `teebox_par` raw, which is always the FULL teebox par (18-hole
+  // par on most teeboxes). A 9-hole round of an 18-hole teebox would
+  // then read "−31" or similar nonsense. Pro-rating by hole-count gets
+  // us the right answer on every standard layout (front 9 ≈ back 9
+  // par; the tiny asymmetry on courses like Lake Pleasant red — 37/36
+  // — is within rounding tolerance for a feed card).
+  const teeboxPar       = typeof post.teebox_par       === 'number' ? post.teebox_par       : null;
+  const teeboxNumHoles  = typeof post.teebox_num_holes === 'number' ? post.teebox_num_holes : null;
+  const matchNumHoles   = typeof post.match_num_holes  === 'number' ? post.match_num_holes  : null;
+  let par: number | null = teeboxPar;
+  if (teeboxPar != null && teeboxNumHoles && matchNumHoles && matchNumHoles !== teeboxNumHoles) {
+    par = Math.round(teeboxPar * (matchNumHoles / teeboxNumHoles));
+  }
   const overUnder = (typeof strokes === 'number' && typeof par === 'number')
     ? strokes - par : null;
   const ouLabel = overUnder == null
@@ -346,6 +364,11 @@ function RoundCardBody({ post }: { post: any }) {
   const ouColor = overUnder == null
     ? C.text
     : overUnder < 0 ? C.green : overUnder === 0 ? C.text : '#FF9800';
+  // Holes-played suffix shows on the course line so the viewer always
+  // knows whether they're looking at a 9 or 18-hole result. Avoids a
+  // future "this looks too good" reaction to a 9-hole score next to an
+  // 18-hole one.
+  const holesSuffix = matchNumHoles ? ` · ${matchNumHoles} holes` : '';
 
   const wonByMe =
     typeof post.winner_side === 'number'
@@ -360,7 +383,7 @@ function RoundCardBody({ post }: { post: any }) {
       activeOpacity={0.85}
     >
       <Text style={s.roundCourse}>
-        {post.course_name ?? 'A course'} · {post.teebox_name ?? '—'}
+        {post.course_name ?? 'A course'} · {post.teebox_name ?? '—'}{holesSuffix}
       </Text>
       <View style={s.roundScoreRow}>
         <Text style={[s.roundScore, { color: ouColor }]}>

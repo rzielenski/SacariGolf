@@ -815,6 +815,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Per-user toggle for the content-safety profanity censor. Default
+    // TRUE so new accounts and existing rows (which the ALTER backfills
+    // with the default) start with the cleaner experience — the same
+    // posture App Review will expect for a UGC app. A user who wants
+    // to see unfiltered chat / posts / DMs can flip it OFF from the
+    // Profile screen.
+    name: 'users.censor_offensive_language',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS censor_offensive_language BOOLEAN NOT NULL DEFAULT TRUE;
+    `,
+  },
+  {
     // User-submitted course-add requests. Pure inbox table — no automated
     // course creation happens from this; an admin reviews entries by hand
     // and runs the normal course-import flow if it's legit. Keeping it as

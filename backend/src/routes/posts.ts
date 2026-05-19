@@ -309,10 +309,19 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
        u.username AS author_username, u.avatar_url AS author_avatar,
        m.match_type, m.format, m.completed AS match_completed,
+       -- num_holes + holes_subset on the MATCH (what was actually played)
+       -- so a 9-hole round of an 18-hole teebox is shown against the right
+       -- par on the feed card. Without these, RoundCardBody computed
+       -- strokes minus teebox_par directly and a real 9-hole score read
+       -- as wildly under par (e.g. 41 strokes vs 72 teebox par → "-31").
+       -- Always include them even when the values match the teebox so
+       -- the frontend can pro-rate par confidently.
+       m.num_holes AS match_num_holes,
+       m.holes_subset AS match_holes_subset,
        mr.winner_side, mr.delta_elo,
        mp_me.side  AS author_side,
        mp_me.strokes AS author_strokes,
-       t.name AS teebox_name, t.par AS teebox_par,
+       t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,
        c.course_name,
        CASE
          WHEN p.user_id = $1                       THEN 'self'
