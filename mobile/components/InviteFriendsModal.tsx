@@ -6,6 +6,7 @@ import {
 import { api } from '../lib/api';
 import { C } from '../lib/colors';
 import { UserAvatar } from './UserAvatar';
+import { useCensor } from '../lib/censor';
 
 /**
  * Reusable "invite friends to a match" modal. Same UX as the match lobby's
@@ -45,6 +46,7 @@ export function InviteFriendsModal({
   visible, matchId, onClose, excludeUserIds, maxAdditional, onInvited,
   title = 'Invite Friends', subtitle,
 }: Props) {
+  const c = useCensor();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [loading, setLoading] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
@@ -130,7 +132,7 @@ export function InviteFriendsModal({
                 <View style={s.row}>
                   <UserAvatar username={item.username} avatarUrl={item.avatar_url} size={40} borderRadius={4} />
                   <View style={{ flex: 1 }}>
-                    <Text style={s.name}>{item.username}</Text>
+                    <Text style={s.name}>{c(item.username)}</Text>
                     <Text style={s.meta}>{item.elo} ELO</Text>
                   </View>
                   <TouchableOpacity

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 /**
  * Profanity / slur censor.
  *
@@ -167,4 +168,40 @@ export function censorText(text: string, enabled: boolean): string {
   }
   out += text.slice(cursor);
   return out;
+}
+
+/**
+ * Hook that returns a memoised censor function bound to the current user's
+ * `censor_offensive_language` preference.
+ *
+ *   const c = useCensor();
+ *   <Text>{c(player.username)}</Text>
+ *
+ * Default ON: when the user record isn't loaded yet (anon screens, first
+ * paint before /users/me resolves) the censor fires anyway. That's the
+ * App-Review-safe default — content can only become MORE permissive after
+ * the auth callback returns the user's explicit `false`.
+ *
+ * The returned function:
+ *   • Accepts string, null, or undefined; the latter two pass through as
+ *     the empty string so callers can use it on optional fields without
+ *     `?? ''` boilerplate.
+ *   • Is referentially stable while the user's preference doesn't change,
+ *     so passing it as a render-time helper doesn't cause cascading
+ *     re-renders.
+ *
+ * Defined here rather than in a separate hooks file so the censor utility
+ * has zero React-tree dependencies for non-component callers (server-side
+ * formatters, tests) while still being one-stop for components.
+ */
+import { useCallback } from 'react';
+import { useAuth } from './auth';
+
+export function useCensor(): (s: string | null | undefined) => string {
+  const { user } = useAuth();
+  const enabled = (user as any)?.censor_offensive_language !== false;
+  return useCallback(
+    (s) => censorText(s ?? '', enabled),
+    [enabled],
+  );
 }

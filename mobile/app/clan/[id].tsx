@@ -11,6 +11,7 @@ import { C, F } from '../../lib/colors';
 import { Clan, ClanMember } from '../../types';
 import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useCensor } from '../../lib/censor';
 
 function rankBadge(elo: number) {
   if (elo >= 2000) return { label: 'Diamond', color: '#5b9cf6' };
@@ -27,6 +28,7 @@ const groupLabel = (mode?: string) => (mode === 'duo' ? 'Duo' : 'Squad');
 export default function ClanDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const c = useCensor();
   const [clan, setClan] = useState<Clan | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -276,7 +278,7 @@ export default function ClanDetailScreen() {
               />
             ) : (
               <View style={styles.clanIcon}>
-                <Text style={styles.clanIconText}>{clan.name?.[0]?.toUpperCase() ?? '?'}</Text>
+                <Text style={styles.clanIconText}>{c(clan.name)[0]?.toUpperCase() ?? '?'}</Text>
               </View>
             )}
             {isLeader && (
@@ -287,7 +289,7 @@ export default function ClanDetailScreen() {
               </View>
             )}
           </TouchableOpacity>
-          <Text style={styles.clanName}>{clan.name}</Text>
+          <Text style={styles.clanName}>{c(clan.name)}</Text>
           <View style={styles.badgeRow}>
             <View style={[styles.badge, { borderColor: rank.color }]}>
               <Text style={[styles.badgeText, { color: rank.color }]}>{rank.label}</Text>
@@ -438,7 +440,7 @@ export default function ClanDetailScreen() {
                       borderRadius={6}
                     />
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.memberName}>{f.username}</Text>
+                      <Text style={styles.memberName}>{c(f.username)}</Text>
                       <Text style={styles.memberMeta}>{f.elo} ELO</Text>
                     </View>
                     <TouchableOpacity
@@ -526,6 +528,7 @@ function MemberRow({
   onTransfer: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const c = useCensor();
   const rank = rankBadge(member.elo);
   const winRate = member.total_matches > 0
     ? Math.round((member.total_wins / member.total_matches) * 100)
@@ -541,7 +544,7 @@ function MemberRow({
       />
       <View style={{ flex: 1 }}>
         <View style={styles.memberNameRow}>
-          <Text style={styles.memberName}>{member.username}</Text>
+          <Text style={styles.memberName}>{c(member.username)}</Text>
           {member.role === 'leader' && (
             <View style={styles.leaderBadge}>
               <Text style={styles.leaderBadgeText}>Leader</Text>

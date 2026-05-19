@@ -22,6 +22,7 @@ import {
 import { Stack, router } from 'expo-router';
 import { api, API_BASE } from '../lib/api';
 import { C, F } from '../lib/colors';
+import { useCensor } from '../lib/censor';
 
 type FollowUser = {
   user_id: string;
@@ -43,6 +44,7 @@ export function FollowList({
   const [searchQ, setSearchQ] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<FollowUser[]>([]);
+  const censor = useCensor();
 
   const onSearchChange = async (q: string) => {
     setSearchQ(q);
@@ -83,11 +85,11 @@ export function FollowList({
                 <Image source={{ uri: `${API_BASE}${u.avatar_url}` }} style={s.avatar} />
               ) : (
                 <View style={[s.avatar, s.avatarFallback]}>
-                  <Text style={s.avatarLetter}>{u.username?.[0]?.toUpperCase() ?? '?'}</Text>
+                  <Text style={s.avatarLetter}>{censor(u.username)[0]?.toUpperCase() ?? '?'}</Text>
                 </View>
               )}
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={s.username} numberOfLines={1}>{u.username}</Text>
+                <Text style={s.username} numberOfLines={1}>{censor(u.username)}</Text>
                 <Text style={s.elo}>{u.elo} ELO</Text>
               </View>
               <Text style={s.chev}>›</Text>
@@ -137,11 +139,11 @@ export function FollowList({
                 <Image source={{ uri: `${API_BASE}${item.avatar_url}` }} style={s.avatar} />
               ) : (
                 <View style={[s.avatar, s.avatarFallback]}>
-                  <Text style={s.avatarLetter}>{item.username?.[0]?.toUpperCase() ?? '?'}</Text>
+                  <Text style={s.avatarLetter}>{censor(item.username)[0]?.toUpperCase() ?? '?'}</Text>
                 </View>
               )}
               <View style={{ flex: 1, minWidth: 0 }}>
-                <Text style={s.username} numberOfLines={1}>{item.username}</Text>
+                <Text style={s.username} numberOfLines={1}>{censor(item.username)}</Text>
                 <Text style={s.elo}>{item.elo} ELO</Text>
               </View>
               <Text style={s.chev}>›</Text>

@@ -8,6 +8,7 @@ import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
+import { useCensor } from '../lib/censor';
 
 function EloColor(elo: number) {
   if (elo >= 2000) return '#a8d8f0';
@@ -92,6 +93,7 @@ export default function LeaderboardScreen() {
 }
 
 function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: boolean }) {
+  const c = useCensor();
   const eloColor = EloColor(player.elo);
   const winRate = player.total_matches > 0
     ? Math.round((player.total_wins / player.total_matches) * 100)
@@ -120,7 +122,7 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
       />
       <View style={{ flex: 1 }}>
         <View style={styles.nameRow}>
-          <Text style={styles.username}>{player.username}</Text>
+          <Text style={styles.username}>{c(player.username)}</Text>
           {isMe && <Text style={styles.youBadge}>You</Text>}
         </View>
         <Text style={styles.meta}>

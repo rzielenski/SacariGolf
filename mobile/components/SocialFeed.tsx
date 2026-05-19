@@ -293,12 +293,12 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
             : (
               <View style={[s.avatar, s.avatarFallback]}>
                 <Text style={s.avatarFallbackText}>
-                  {(post.author_username ?? '?')[0]?.toUpperCase()}
+                  {(censorText(post.author_username ?? '?', censor))[0]?.toUpperCase()}
                 </Text>
               </View>
             )}
           <View style={{ flex: 1 }}>
-            <Text style={s.authorName}>{post.author_username ?? 'Unknown'}</Text>
+            <Text style={s.authorName}>{post.author_username ? censorText(post.author_username, censor) : 'Unknown'}</Text>
             <Text style={s.timestamp}>
               {when}
               {post.is_fof && <Text style={s.fof}> · via a friend</Text>}

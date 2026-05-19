@@ -7,6 +7,7 @@ import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
 import { ShimmerButton } from './ui/ShimmerButton';
+import { useCensor } from '../lib/censor';
 
 /**
  * Match-found intro screen — animated reveal of both teams' clan info,
@@ -59,6 +60,7 @@ export function MatchFoundIntro({
   // match type so a solo player who happens to be in a duo doesn't get
   // their duo's banner pasted onto a 1v1 match.
   const isTeamMatch = matchType !== 'solo';
+  const c = useCensor();
   const fadeIn = useRef(new Animated.Value(0)).current;
   const leftSlide = useRef(new Animated.Value(-300)).current;
   const rightSlide = useRef(new Animated.Value(300)).current;
@@ -150,7 +152,7 @@ export function MatchFoundIntro({
     if (!isTeamMatch) {
       const p = players[0];
       const avatar = p?.avatar_url ? `${API_BASE}${p.avatar_url}` : null;
-      const name = p?.username ?? '—';
+      const name = p?.username ? c(p.username) : '—';
       const elo = p?.elo ?? null;
       return (
         <Animated.View
@@ -192,7 +194,8 @@ export function MatchFoundIntro({
     // (defensive — pairing should already require it for team matches).
     const lead = players.find((p) => p.clan_name) ?? players[0];
     const clanAvatar = lead?.clan_avatar_url ? `${API_BASE}${lead.clan_avatar_url}` : null;
-    const clanName = lead?.clan_name ?? lead?.username ?? '—';
+    const rawClanName = lead?.clan_name ?? lead?.username ?? '—';
+    const clanName = c(rawClanName);
     const clanElo = lead?.clan_elo ?? lead?.elo ?? null;
     return (
       <Animated.View
@@ -223,11 +226,11 @@ export function MatchFoundIntro({
                 <Image source={{ uri: `${API_BASE}${p.avatar_url}` }} style={s.memberAvatar} />
               ) : (
                 <View style={[s.memberAvatar, s.memberAvatarFallback]}>
-                  <Text style={s.memberAvatarText}>{p.username?.[0]?.toUpperCase() ?? '?'}</Text>
+                  <Text style={s.memberAvatarText}>{c(p.username)[0]?.toUpperCase() ?? '?'}</Text>
                 </View>
               )}
               <View style={{ flex: 1 }}>
-                <Text style={s.memberName} numberOfLines={1}>{p.username}</Text>
+                <Text style={s.memberName} numberOfLines={1}>{c(p.username)}</Text>
                 <Text style={s.memberElo}>{p.elo ?? '—'} ELO</Text>
               </View>
             </View>

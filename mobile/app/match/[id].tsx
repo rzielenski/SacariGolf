@@ -7,6 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api, isSilentError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
+import { useCensor } from '../../lib/censor';
 import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
 import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
@@ -15,6 +16,11 @@ import { OrnamentTitle, Divider } from '../../components/Flourish';
 export default function MatchLobbyScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  // Drop-in censor function — pipes any user-controlled string through
+  // the offensive-language filter when the viewer's preference is ON
+  // (default). Usernames, match/duo names, and guest names all flow
+  // through it.
+  const c = useCensor();
   const [match, setMatch] = useState<Match | null>(null);
   const [loading, setLoading] = useState(true);
   const [inviteVisible, setInviteVisible] = useState(false);
@@ -254,7 +260,7 @@ export default function MatchLobbyScreen() {
         <View style={[styles.typeBadge, isPractice && { borderColor: C.textMuted }]}>
           <Text style={[styles.typeText, isPractice && { color: C.textMuted }]}>{typeLabel}</Text>
         </View>
-        <Text style={styles.matchTitle}>{match.name || `${typeLabel} Match`}</Text>
+        <Text style={styles.matchTitle}>{match.name ? c(match.name) : `${typeLabel} Match`}</Text>
         <Text style={styles.matchId}>ID: {id.slice(0, 8).toUpperCase()}</Text>
       </View>
 
@@ -476,7 +482,7 @@ export default function MatchLobbyScreen() {
           {(match.guest_players ?? []).filter((g) => g.scores?.length).map((g, i) => {
             const teebox = match.players?.find((p) => p.teebox_id === g.teebox_id) ?? match.players?.[0];
             const entry: ScorecardEntry = {
-              username: g.name + ' (guest)',
+              username: c(g.name) + ' (guest)',
               teebox_name: teebox?.teebox_name ?? null,
               hole_scores: g.scores,
               course_id: teebox?.course_id ?? null,
@@ -638,10 +644,10 @@ export default function MatchLobbyScreen() {
               renderItem={({ item }) => (
                 <View style={styles.friendRow}>
                   <View style={styles.friendAvatar}>
-                    <Text style={styles.friendAvatarText}>{item.username?.[0]?.toUpperCase() ?? '?'}</Text>
+                    <Text style={styles.friendAvatarText}>{c(item.username)[0]?.toUpperCase() ?? '?'}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.friendName}>{item.username}</Text>
+                    <Text style={styles.friendName}>{c(item.username)}</Text>
                     <Text style={styles.friendElo}>{item.elo} ELO</Text>
                   </View>
                   <TouchableOpacity
@@ -681,6 +687,7 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
 }) {
   // Anti-cheat: only show stroke totals for me OR when the match is fully completed
   const canSeeStrokes = isMe || matchCompleted;
+  const c = useCensor();
 
   return (
     <TouchableOpacity
@@ -689,11 +696,11 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
       activeOpacity={0.7}
     >
       <View style={styles.playerAvatar}>
-        <Text style={styles.playerAvatarText}>{player.username?.[0]?.toUpperCase() ?? '?'}</Text>
+        <Text style={styles.playerAvatarText}>{c(player.username)[0]?.toUpperCase() ?? '?'}</Text>
       </View>
       <View style={{ flex: 1 }}>
         <Text style={styles.playerName}>
-          {player.username} {isMe && <Text style={{ color: C.gold }}>(You)</Text>}
+          {c(player.username)} {isMe && <Text style={{ color: C.gold }}>(You)</Text>}
         </Text>
         <Text style={styles.playerElo}>{player.elo} ELO · Side {player.side}</Text>
         {player.teebox_name ? (

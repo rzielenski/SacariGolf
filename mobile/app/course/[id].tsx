@@ -7,8 +7,10 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
+import { useCensor } from '../../lib/censor';
 
 export default function CourseInfoScreen() {
+  const c = useCensor();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [course, setCourse] = useState<any>(null);
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
@@ -171,7 +173,7 @@ export default function CourseInfoScreen() {
             </Text>
             <View style={{ flex: 1 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={styles.lbUser}>{r.username}</Text>
+                <Text style={styles.lbUser}>{c(r.username)}</Text>
                 {i === 0 && lbTab === 'stroke' && (
                   <View style={styles.recordBadge}>
                     <Text style={styles.recordBadgeText}>RECORD</Text>

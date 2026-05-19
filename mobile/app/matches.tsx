@@ -23,6 +23,7 @@ import {
 import { Stack, router } from 'expo-router';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { useCensor } from '../lib/censor';
 import { C, F } from '../lib/colors';
 
 // Server returns Match objects without a course_name on the top-level row;
@@ -174,6 +175,7 @@ export default function MatchesHistoryScreen() {
 function MatchRow({ match: m }: { match: ListedMatch }) {
   const badge = resultBadge(m);
   const isResumable = !m.completed && !m.cancelled;
+  const c = useCensor();
 
   const onPress = () => {
     if (isResumable) {
@@ -190,7 +192,7 @@ function MatchRow({ match: m }: { match: ListedMatch }) {
       <View style={{ flex: 1 }}>
         <View style={s.rowTopLine}>
           <Text style={s.rowType}>{matchTypeLabel(m.match_type)}</Text>
-          {m.name && <Text style={s.rowName} numberOfLines={1}>{m.name}</Text>}
+          {m.name && <Text style={s.rowName} numberOfLines={1}>{c(m.name)}</Text>}
         </View>
         <Text style={s.rowDate}>{fmtDate(m.created_at)}</Text>
       </View>

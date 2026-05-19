@@ -5,6 +5,7 @@ import { C, F } from '../lib/colors';
 import { scoreColor } from '../lib/golfMath';
 import type { HoleStat } from '../lib/scoringTypes';
 import { ShotMapModal } from './ShotMap';
+import { useCensor } from '../lib/censor';
 
 // Re-export so existing importers of HoleStat from Scorecard keep working.
 export type { HoleStat };
@@ -206,13 +207,14 @@ export function ScorecardCard({ entry, highlight, onPress }: {
   onPress?: () => void;
 }) {
   const holes = useTeeboxHoles(entry.course_id, entry.teebox_id);
+  const c = useCensor();
   const { front, back, frontScores, backScores, frontPar, backPar, totalPar, totalScore } = buildGridData(entry, holes);
   const diff = totalScore - totalPar;
 
   const Inner = (
     <>
       <View style={s.cardHeader}>
-        <Text style={s.cardName}>{entry.username}</Text>
+        <Text style={s.cardName}>{c(entry.username)}</Text>
         <Text style={s.cardTotal}>
           {totalScore} <Text style={{ color: C.textMuted, fontSize: 12 }}>
             ({diff === 0 ? 'E' : diff > 0 ? `+${diff}` : diff})
@@ -265,6 +267,7 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
   onClose: () => void;
   onViewProfile?: () => void;
 }) {
+  const censor = useCensor();
   const { front, back, frontScores, backScores, frontPar, backPar, totalPar, totalScore } = buildGridData(entry, holes);
   const diff = totalScore - totalPar;
 
@@ -355,7 +358,7 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
     <View style={s.modalContainer}>
       <View style={s.modalHeader}>
         <View style={{ flex: 1 }}>
-          <Text style={s.modalTitle}>{entry.username ?? 'Scorecard'}</Text>
+          <Text style={s.modalTitle}>{entry.username ? censor(entry.username) : 'Scorecard'}</Text>
           <Text style={s.modalSub}>
             {[entry.teebox_name, entry.course_name].filter(Boolean).join(' · ')}
             {entry.created_at ? ` · ${new Date(entry.created_at).toLocaleDateString()}` : ''}
@@ -421,8 +424,8 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
             ) : comments.map((c) => (
               <View key={c.comment_id} style={s.commentRow}>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.commentAuthor}>{c.username}</Text>
-                  <Text style={s.commentBody}>{c.body}</Text>
+                  <Text style={s.commentAuthor}>{censor(c.username)}</Text>
+                  <Text style={s.commentBody}>{censor(c.body)}</Text>
                   <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
                 </View>
                 {c.mine && (

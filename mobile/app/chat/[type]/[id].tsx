@@ -21,6 +21,11 @@ const CANCEL_SLIDE_PX = 90;
 export default function ChatScreen() {
   const { type, id, name } = useLocalSearchParams<{ type: 'match' | 'clan' | 'dm'; id: string; name?: string }>();
   const { user } = useAuth();
+  // Censor flag for the OUTER screen — used for the header title (DM
+  // recipient's name). The MessageBubble component has its own
+  // useCensor() call further down so bubble bodies / usernames are
+  // censored independently.
+  const censor = (user as any)?.censor_offensive_language !== false;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState('');
@@ -158,7 +163,7 @@ export default function ChatScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   })).current;
 
-  const title = type === 'dm' ? (name ?? 'Direct Message') : type === 'match' ? 'Match Chat' : 'Team Chat';
+  const title = type === 'dm' ? (name ? censorText(name, censor) : 'Direct Message') : type === 'match' ? 'Match Chat' : 'Team Chat';
   // Subtitle clarifies the audience. Easy to miss that match chat reaches
   // OPPONENTS too — team/clan chat is the teammates-only room. Making this
   // explicit avoids the "I thought my opponent couldn't see this" surprise.
@@ -352,7 +357,7 @@ function MessageBubble({ msg, isMe, onReport }: {
         />
       )}
       <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
-        {!isMe && <Text style={styles.bubbleName}>{msg.username}</Text>}
+        {!isMe && <Text style={styles.bubbleName}>{censorText(msg.username, censor)}</Text>}
         {msg.voice_url ? (
           <VoiceMessageBubble
             url={msg.voice_url}

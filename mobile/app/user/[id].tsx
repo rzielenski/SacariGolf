@@ -12,6 +12,7 @@ import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
 import { fmtHandicap } from '../../lib/golfMath';
+import { useCensor } from '../../lib/censor';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -24,6 +25,7 @@ function EloRank(elo: number): { label: string; color: string } {
 export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const c = useCensor();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -127,11 +129,11 @@ export default function UserProfileScreen() {
             <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
           ) : (
             <View style={styles.avatarLetterBg}>
-              <Text style={styles.avatarText}>{profile.username?.[0]?.toUpperCase() ?? '?'}</Text>
+              <Text style={styles.avatarText}>{c(profile.username)[0]?.toUpperCase() ?? '?'}</Text>
             </View>
           )}
         </RankCrest>
-        <Text style={styles.username}>{profile.username}</Text>
+        <Text style={styles.username}>{c(profile.username)}</Text>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label} · {profile.elo} ELO</Text>
         </View>
@@ -191,7 +193,7 @@ export default function UserProfileScreen() {
       {/* Bio */}
       {profile.bio ? (
         <View style={styles.bioCard}>
-          <Text style={styles.bioText}>"{profile.bio}"</Text>
+          <Text style={styles.bioText}>"{c(profile.bio)}"</Text>
         </View>
       ) : null}
 

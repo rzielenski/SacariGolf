@@ -177,10 +177,10 @@ export default function SocialScreen() {
               <View key={inv.invite_id} style={styles.inviteRow}>
                 <UserAvatar username={inv.from_username} avatarUrl={inv.from_avatar_url} size={36} borderRadius={4} />
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.userName} numberOfLines={1}>{inv.from_username} invited you</Text>
+                  <Text style={styles.userName} numberOfLines={1}>{censorText(inv.from_username, censor)} invited you</Text>
                   <Text style={styles.userElo} numberOfLines={1}>
                     {(inv.match_type ?? 'match').charAt(0).toUpperCase() + (inv.match_type ?? 'match').slice(1)}
-                    {inv.match_name ? ` · ${inv.match_name}` : ''}
+                    {inv.match_name ? ` · ${censorText(inv.match_name, censor)}` : ''}
                     {' · '}{inv.from_elo} ELO
                   </Text>
                 </View>
@@ -208,12 +208,12 @@ export default function SocialScreen() {
             {clanInvites.map((inv) => (
               <View key={inv.invite_id} style={styles.inviteRow}>
                 <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-                  <Text style={styles.avatarText}>{inv.clan_name?.[0]?.toUpperCase() ?? '?'}</Text>
+                  <Text style={styles.avatarText}>{censorText(inv.clan_name ?? '', censor)[0]?.toUpperCase() ?? '?'}</Text>
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.userName} numberOfLines={1}>{inv.clan_name}</Text>
+                  <Text style={styles.userName} numberOfLines={1}>{censorText(inv.clan_name, censor)}</Text>
                   <Text style={styles.userElo} numberOfLines={1}>
-                    {inv.clan_mode.toUpperCase()} · {inv.member_count}/{inv.max_players} · from {inv.from_username}
+                    {inv.clan_mode.toUpperCase()} · {inv.member_count}/{inv.max_players} · from {censorText(inv.from_username, censor)}
                   </Text>
                 </View>
                 <TouchableOpacity
@@ -259,7 +259,7 @@ export default function SocialScreen() {
             />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={[styles.userName, conv.unread && styles.userNameUnread]} numberOfLines={1}>
-                {conv.other_username}
+                {censorText(conv.other_username, censor)}
               </Text>
               {conv.last_message ? (
                 <Text
@@ -303,7 +303,7 @@ export default function SocialScreen() {
               </View>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={[styles.userName, unread && styles.userNameUnread]} numberOfLines={1}>
-                  {m.name || m.match_type}
+                  {m.name ? censorText(m.name, censor) : m.match_type}
                 </Text>
                 <Text style={styles.userElo} numberOfLines={1}>Match ID: {m.match_id.slice(0, 8)}…</Text>
               </View>
@@ -333,11 +333,11 @@ export default function SocialScreen() {
               }}
             >
               <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-                <Text style={styles.avatarText}>{c.name?.[0]?.toUpperCase() ?? '?'}</Text>
+                <Text style={styles.avatarText}>{censorText(c.name ?? '', censor)[0]?.toUpperCase() ?? '?'}</Text>
               </View>
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={[styles.userName, unread && styles.userNameUnread]} numberOfLines={1}>
-                  {c.name}
+                  {censorText(c.name, censor)}
                 </Text>
                 <Text style={styles.userElo} numberOfLines={1}>
                   {c.clan_mode.toUpperCase()} · {c.member_count} members

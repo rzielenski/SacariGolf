@@ -9,6 +9,7 @@ import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Divider, OrnamentTitle } from '../../components/Flourish';
 import { UserAvatar } from '../../components/UserAvatar';
+import { useCensor } from '../../lib/censor';
 
 /**
  * Tournament detail + leaderboard. Shows the standings, the player roster,
@@ -18,6 +19,7 @@ import { UserAvatar } from '../../components/UserAvatar';
 export default function TournamentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
+  const c = useCensor();
   const [t, setT] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -75,14 +77,14 @@ export default function TournamentDetailScreen() {
     >
       <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
 
-      <Text style={s.title}>{t.name}</Text>
-      {t.description ? <Text style={s.desc}>{t.description}</Text> : null}
+      <Text style={s.title}>{c(t.name)}</Text>
+      {t.description ? <Text style={s.desc}>{c(t.description)}</Text> : null}
       <Text style={s.meta}>
         {label('scoring', t.scoring)} · {label('format', t.format)}
         {t.course_name ? ` · ${t.course_name}` : ''}
         {t.ends_at ? ` · ends ${new Date(t.ends_at).toLocaleDateString()}` : ''}
       </Text>
-      <Text style={s.meta}>Hosted by {t.owner_username}</Text>
+      <Text style={s.meta}>Hosted by {c(t.owner_username)}</Text>
       <Divider style={{ marginTop: 14, marginBottom: 14 }} />
 
       {t.join_code && (isOwner || isMember) && (
@@ -114,7 +116,7 @@ export default function TournamentDetailScreen() {
               {i <= 2 ? ['I','II','III'][i] : `#${i + 1}`}
             </Text>
             <View style={{ flex: 1 }}>
-              <Text style={s.lbName}>{row.username}</Text>
+              <Text style={s.lbName}>{c(row.username)}</Text>
               <Text style={s.lbMeta}>
                 {row.rounds_played ?? 0} round{row.rounds_played === 1 ? '' : 's'} played
               </Text>
@@ -144,7 +146,7 @@ export default function TournamentDetailScreen() {
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
             <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={32} borderRadius={4} />
-            <Text style={s.playerName}>{p.username}</Text>
+            <Text style={s.playerName}>{c(p.username)}</Text>
           </View>
           <Text style={s.playerElo}>{p.elo} ELO</Text>
         </TouchableOpacity>

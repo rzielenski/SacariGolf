@@ -10,6 +10,7 @@ import { router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
+import { useCensor } from '../../lib/censor';
 
 const { width: W, height: H } = Dimensions.get('window');
 
@@ -68,6 +69,7 @@ export default function FindRankerScreen() {
 
 // ── Find image viewer (swipe down/up to dismiss) ────────────────────────────
 function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }) {
+  const c = useCensor();
   const translateY = useRef(new Animated.Value(0)).current;
   const opacity = useRef(new Animated.Value(1)).current;
 
@@ -139,8 +141,8 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
                 resizeMode="contain"
                 pointerEvents="none"
               />
-              {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }} pointerEvents="none">{find.description}</Text> : null}
-              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {find.username}  ·  {find.elo} ELO</Text>
+              {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }} pointerEvents="none">{c(find.description)}</Text> : null}
+              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {c(find.username)}  ·  {find.elo} ELO</Text>
               <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }} pointerEvents="none">Swipe or tap anywhere to dismiss</Text>
             </>
           )}
@@ -243,6 +245,7 @@ function UploadButton() {
 
 // ── Vote tab ────────────────────────────────────────────────────────────────
 function VoteTab() {
+  const c = useCensor();
   const [pair, setPair] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [voting, setVoting] = useState(false);
@@ -361,8 +364,8 @@ function VoteTab() {
             />
             <View style={styles.findOverlay}>
               <View style={styles.findMeta}>
-                <Text style={styles.findUser}>{find.username}</Text>
-                {find.description ? <Text style={styles.findDesc} numberOfLines={2}>{find.description}</Text> : null}
+                <Text style={styles.findUser}>{c(find.username)}</Text>
+                {find.description ? <Text style={styles.findDesc} numberOfLines={2}>{c(find.description)}</Text> : null}
               </View>
               <View style={styles.findEloBox}>
                 <Text style={styles.findElo}>{find.elo}</Text>
@@ -481,6 +484,7 @@ function MineTab({ userId, onSelectFind }: { userId: string; onSelectFind: (f: a
 
 // ── Shared find row ──────────────────────────────────────────────────────────
 function FindRow({ find, rank, onDelete, onPress }: { find: any; rank: number; onDelete?: () => void; onPress?: () => void }) {
+  const c = useCensor();
   const medalColor = rank === 1 ? C.gold : rank === 2 ? '#b0bec5' : rank === 3 ? '#a1673a' : C.textDim;
 
   const reportFind = () => {
@@ -510,9 +514,9 @@ function FindRow({ find, rank, onDelete, onPress }: { find: any; rank: number; o
         resizeMode="cover"
       />
       <View style={{ flex: 1 }}>
-        {find.username && <Text style={styles.findRowUser}>{find.username}</Text>}
+        {find.username && <Text style={styles.findRowUser}>{c(find.username)}</Text>}
         {find.description
-          ? <Text style={styles.findRowDesc} numberOfLines={2}>{find.description}</Text>
+          ? <Text style={styles.findRowDesc} numberOfLines={2}>{c(find.description)}</Text>
           : <Text style={styles.findRowDesc}>No description</Text>}
         <Text style={styles.findRowVotes}>{find.total_votes} votes</Text>
       </View>

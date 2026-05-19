@@ -5,6 +5,7 @@ import {
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
+import { useCensor } from '../lib/censor';
 
 /**
  * "Blocked users" management screen. Lists every user the caller has blocked
@@ -12,6 +13,7 @@ import { C, F } from '../lib/colors';
  * if you can block, you must be able to view and reverse the list.
  */
 export default function BlockedUsersScreen() {
+  const c = useCensor();
   const [list, setList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -74,7 +76,7 @@ export default function BlockedUsersScreen() {
               onPress={() => router.push(`/user/${u.blocked_id}` as any)}
               activeOpacity={0.6}
             >
-              <Text style={s.name}>{u.username}</Text>
+              <Text style={s.name}>{c(u.username)}</Text>
               <Text style={s.meta}>
                 {u.elo} ELO · blocked {new Date(u.created_at).toLocaleDateString()}
               </Text>

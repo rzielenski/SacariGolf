@@ -41,6 +41,7 @@ import { Audio } from 'expo-av';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
+import { useCensor } from '../lib/censor';
 
 export type CelebrationKind = 'birdie' | 'eagle' | 'ace' | 'albatross';
 
@@ -85,6 +86,7 @@ const ACCENT: Record<CelebrationKind, string> = {
 };
 
 export function HoleScoreCelebration({ event, onDismiss }: Props) {
+  const c = useCensor();
   const kind = event?.kind ?? 'birdie';
   const accent = ACCENT[kind];
 
@@ -299,14 +301,14 @@ export function HoleScoreCelebration({ event, onDismiss }: Props) {
                 ) : (
                   <View style={s.avatarLetterFallback}>
                     <Text style={s.avatarLetterText}>
-                      {event.username?.[0]?.toUpperCase() ?? '?'}
+                      {c(event.username)[0]?.toUpperCase() ?? '?'}
                     </Text>
                   </View>
                 )}
               </RankCrest>
             </View>
 
-            <Text style={s.username} numberOfLines={1}>{event.username}</Text>
+            <Text style={s.username} numberOfLines={1}>{c(event.username)}</Text>
             <Text style={s.holeLine}>
               HOLE {event.hole} · PAR {event.par} · SCORE {event.score}
             </Text>
