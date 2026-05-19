@@ -12,6 +12,7 @@ import { C, F } from '../../lib/colors';
 import { router } from 'expo-router';
 import { isPremium } from '../../lib/premium';
 import { fmtHandicap } from '../../lib/golfMath';
+import { useCensor } from '../../lib/censor';
 import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
@@ -44,6 +45,7 @@ const pb = StyleSheet.create({
 
 export default function ProfileScreen() {
   const { user, logout, refreshUser, deleteAccount } = useAuth();
+  const censor = useCensor();
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifications, setNotifications] = useState<any[]>([]);
@@ -374,7 +376,7 @@ export default function ProfileScreen() {
               />
             ) : (
               <View style={styles.avatarLetterBg}>
-                <Text style={styles.avatarText}>{user.username?.[0]?.toUpperCase() ?? '?'}</Text>
+                <Text style={styles.avatarText}>{censor(user.username)[0]?.toUpperCase() ?? '?'}</Text>
               </View>
             )}
           </RankCrest>
@@ -382,7 +384,7 @@ export default function ProfileScreen() {
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>✎</Text>
           </View>
         </TouchableOpacity>
-        <Text style={styles.username}>{user.username}</Text>
+        <Text style={styles.username}>{censor(user.username)}</Text>
         <View style={styles.usernameSubRow}>
           {isPremium(user as any) && (
             <View style={styles.premiumPill}>
@@ -436,7 +438,7 @@ export default function ProfileScreen() {
         <View style={{ flex: 1 }}>
           <Text style={styles.editableLabel}>BIO</Text>
           <Text style={styles.editableValue}>
-            {(user as any)?.bio || 'Tap to add a short bio'}
+            {(user as any)?.bio ? censor((user as any).bio) : 'Tap to add a short bio'}
           </Text>
         </View>
         <Text style={styles.editChev}>›</Text>
@@ -555,16 +557,35 @@ export default function ProfileScreen() {
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
-      {/* My Teams — replaces the old Social → Teams sub-tab. Each row is
-          a tappable clan that drops into the clan home screen (chats,
-          roster, scheduling, etc.). When the user has no teams yet we
-          show a single "Find or start a team" CTA instead of an empty
-          section header so the surface doesn't feel dead. */}
-      <Text style={styles.sectionHeader}>MY TEAMS</Text>
+      {/* My Teams — replaces the old Social → Teams sub-tab.
+          The header row has a "Browse / + New" affordance so finding
+          teams to join is one tap from the profile. Empty state used
+          to be a single line of text; now it's a prominent CTA card
+          since "I can't figure out how to join a team" was real
+          feedback. */}
+      <View style={styles.teamsHeader}>
+        <Text style={styles.sectionHeader}>MY TEAMS</Text>
+        <TouchableOpacity
+          style={styles.browseBtn}
+          onPress={() => router.push('/teams' as any)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.browseBtnText}>Browse / + New</Text>
+        </TouchableOpacity>
+      </View>
       {myTeams.length === 0 ? (
-        <Text style={styles.teamsEmpty}>
-          You&apos;re not on a team yet. Browse public teams or start your own.
-        </Text>
+        <TouchableOpacity
+          style={styles.teamsEmptyCta}
+          onPress={() => router.push('/teams' as any)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.teamsEmptyCtaTitle}>Find or start a team</Text>
+          <Text style={styles.teamsEmptyCtaBody}>
+            Join up to 2 duos and 2 squads free.
+            Premium uncaps it.
+          </Text>
+          <Text style={styles.teamsEmptyCtaArrow}>Browse public teams →</Text>
+        </TouchableOpacity>
       ) : (
         myTeams.map((t: any) => (
           <TouchableOpacity
@@ -574,10 +595,10 @@ export default function ProfileScreen() {
             activeOpacity={0.7}
           >
             <View style={styles.teamIcon}>
-              <Text style={styles.teamIconText}>{t.name?.[0]?.toUpperCase() ?? '?'}</Text>
+              <Text style={styles.teamIconText}>{censor(t.name)[0]?.toUpperCase() ?? '?'}</Text>
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
-              <Text style={styles.teamName} numberOfLines={1}>{t.name}</Text>
+              <Text style={styles.teamName} numberOfLines={1}>{censor(t.name)}</Text>
               <Text style={styles.teamMeta} numberOfLines={1}>
                 {String(t.clan_mode ?? '').toUpperCase()} · {t.member_count} members
               </Text>
@@ -1210,6 +1231,28 @@ const styles = StyleSheet.create({
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     marginBottom: 12, lineHeight: 17,
   },
+  // Header row above the team list with a Browse / +New affordance so
+  // joining/creating is one tap from the profile.
+  teamsHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: 14, marginBottom: 8,
+  },
+  browseBtn: {
+    backgroundColor: C.gold + '22', borderColor: C.gold, borderWidth: 1,
+    borderRadius: 12, paddingHorizontal: 10, paddingVertical: 5,
+  },
+  browseBtnText: { color: C.gold, fontWeight: '900', fontSize: 10, letterSpacing: 0.8 },
+  // Empty-state CTA card — big, gold-bordered, unmissable. Replaces the
+  // single italic line that was easy to skim past.
+  teamsEmptyCta: {
+    backgroundColor: C.gold + '11',
+    borderColor: C.gold, borderWidth: 1,
+    borderRadius: 10, padding: 14, marginBottom: 12,
+    gap: 4,
+  },
+  teamsEmptyCtaTitle: { color: C.gold, fontSize: 14, fontWeight: '900' },
+  teamsEmptyCtaBody:  { color: C.text, fontSize: 12, lineHeight: 17 },
+  teamsEmptyCtaArrow: { color: C.gold, fontSize: 12, fontWeight: '800', marginTop: 4 },
   teamRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: C.card, borderWidth: 1, borderColor: C.border,

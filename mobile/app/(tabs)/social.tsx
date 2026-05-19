@@ -135,7 +135,19 @@ export default function SocialScreen() {
         { text: 'View Team', onPress: () => router.push(`/clan/${result.clanId}` as any) },
         { text: 'OK' },
       ]);
-    } catch (e: any) { Alert.alert('Error', e.message); }
+    } catch (e: any) {
+      const msg = e?.message ?? 'Could not accept';
+      // Surface the free-tier cap as an upgrade prompt rather than a
+      // generic error toast (server emits 402 + upgrade_required).
+      if (e?.status === 402 || /Upgrade to Premium/i.test(msg)) {
+        Alert.alert('Team limit reached', msg, [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'See Premium', onPress: () => router.push('/premium' as any) },
+        ]);
+      } else {
+        Alert.alert('Error', msg);
+      }
+    }
   };
   const declineClanInvite = async (inviteId: string) => {
     try {
@@ -315,9 +327,15 @@ export default function SocialScreen() {
         {/* ── Team Chats ────────────────────────────────────────── */}
         <Text style={styles.sectionTitle}>Team Chats</Text>
         {clansSorted.length === 0 && (
-          <Text style={styles.emptySubText}>
-            No clans joined — find or start one from your profile.
-          </Text>
+          <TouchableOpacity
+            onPress={() => router.push('/teams' as any)}
+            style={styles.emptyCta}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.emptyCtaText}>
+              No team chats yet · Browse or create a team →
+            </Text>
+          </TouchableOpacity>
         )}
         {clansSorted.map((c) => {
           const unread = unreadClanIds.has(c.clan_id);
@@ -366,6 +384,16 @@ const styles = StyleSheet.create({
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     paddingHorizontal: 4, paddingBottom: 4, lineHeight: 17,
   },
+  // Tap-target empty state — used when there are zero team chats so the
+  // user has a one-tap path to Browse Teams instead of staring at an
+  // italic "no clans" line.
+  emptyCta: {
+    backgroundColor: C.gold + '11',
+    borderColor: C.gold + '66', borderWidth: 1,
+    borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  emptyCtaText: { color: C.gold, fontWeight: '800', fontSize: 12, letterSpacing: 0.4 },
 
   userRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,

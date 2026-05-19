@@ -29,6 +29,7 @@ import { Match } from '../../types';
 import { SocialFeed } from '../../components/SocialFeed';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { GlowCard } from '../../components/ui/GlowCard';
+import { useCensor } from '../../lib/censor';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -40,6 +41,7 @@ function EloRank(elo: number): { label: string; color: string } {
 
 export default function HomeScreen() {
   const { user, refreshUser } = useAuth();
+  const censor = useCensor();
   const eloTapCount = useRef(0);
   const eloTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [perkCount, setPerkCount] = useState(0);
@@ -94,7 +96,7 @@ export default function HomeScreen() {
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.greeting}>Welcome back,</Text>
-          <Text style={styles.username}>{user.username}</Text>
+          <Text style={styles.username}>{censor(user.username)}</Text>
         </View>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>

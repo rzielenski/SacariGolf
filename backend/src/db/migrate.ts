@@ -828,6 +828,32 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // clan_invites was referenced by clans.ts + users.ts (notifications)
+    // for months but never defined in schema.sql or a prior migration. On
+    // a fresh prod DB the invite endpoints silently failed against a
+    // missing table. This idempotent ADD covers existing DBs that have
+    // it (legacy hand-creation) and new ones equally.
+    //   status flow: pending → accepted | declined (set by accept/decline)
+    //   expires_at NULL = no expiry (the leader can revoke by re-inviting
+    //   or the recipient can decline at any time).
+    name: 'clan_invites.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS clan_invites (
+        invite_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        clan_id       UUID NOT NULL REFERENCES clans(clan_id) ON DELETE CASCADE,
+        from_user_id  UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        to_user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at    TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_clan_invites_to_status
+        ON clan_invites(to_user_id, status);
+      CREATE INDEX IF NOT EXISTS idx_clan_invites_clan
+        ON clan_invites(clan_id);
+    `,
+  },
+  {
     // User-submitted course-add requests. Pure inbox table — no automated
     // course creation happens from this; an admin reviews entries by hand
     // and runs the normal course-import flow if it's legit. Keeping it as

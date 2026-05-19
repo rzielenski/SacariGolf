@@ -196,6 +196,7 @@ export default function RootLayout() {
         <Stack.Screen name="club-heatmap" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="bag" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="matches" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="teams"   options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="course-request" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="user/[id]/following" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="user/[id]/followers" options={{ animation: 'slide_from_right', headerShown: true }} />

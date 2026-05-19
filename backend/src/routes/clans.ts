@@ -5,12 +5,57 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const CLAN_AVATARS_DIR = path.join(UPLOADS_DIR, 'clan-avatars');
 if (!fs.existsSync(CLAN_AVATARS_DIR)) fs.mkdirSync(CLAN_AVATARS_DIR, { recursive: true });
 
 const router = Router();
+
+/** Per-mode team caps for non-premium users. The user can be on at most
+ *  this many DUOs and this many SQUADs simultaneously. Premium users are
+ *  uncapped. Counts include teams the user leads. */
+const FREE_TEAM_CAP: Record<'duo' | 'squad', number> = { duo: 2, squad: 2 };
+
+/** Check whether the user has room for another team in the given mode.
+ *  Returns `{ ok: true }` when they can join, or `{ ok: false, error,
+ *  status }` with a ready-to-return HTTP envelope. Premium users always
+ *  return ok. */
+async function checkTeamQuota(
+  userId: string, mode: 'duo' | 'squad',
+): Promise<{ ok: true } | { ok: false; status: number; body: any }> {
+  // Open-beta override: while OPEN_BETA_PREMIUM is on, everyone gets the
+  // unlimited cap (same posture the per-feature gates use).
+  if (OPEN_BETA_PREMIUM) return { ok: true };
+  const { rows } = await pool.query(
+    `SELECT
+       (SELECT is_premium FROM users WHERE user_id = $1) AS is_premium,
+       (SELECT premium_until FROM users WHERE user_id = $1) AS premium_until,
+       (SELECT COUNT(*)::int FROM clan_members cm
+          JOIN clans c ON c.clan_id = cm.clan_id
+         WHERE cm.user_id = $1 AND c.clan_mode = $2) AS current_count`,
+    [userId, mode],
+  );
+  const row = rows[0] ?? {};
+  const isPremium = !!row.is_premium
+    && (row.premium_until == null || new Date(row.premium_until) > new Date());
+  if (isPremium) return { ok: true };
+  const current: number = row.current_count ?? 0;
+  if (current >= FREE_TEAM_CAP[mode]) {
+    return {
+      ok: false,
+      status: 402,
+      body: {
+        error: `Free accounts can be on at most ${FREE_TEAM_CAP[mode]} ${mode} teams. Upgrade to Premium for unlimited teams.`,
+        upgrade_required: true,
+        cap: FREE_TEAM_CAP[mode],
+        mode,
+      },
+    };
+  }
+  return { ok: true };
+}
 
 router.get('/', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
@@ -78,7 +123,7 @@ router.post('/invites/:inviteId/accept', requireAuth, wrap(async (req: AuthReque
 
     // Lock the clan row + count members so concurrent joins/accepts can't oversize it.
     const { rows: clanRows } = await client.query(
-      `SELECT c.max_players,
+      `SELECT c.max_players, c.clan_mode,
               (SELECT COUNT(*)::int FROM clan_members WHERE clan_id = c.clan_id) AS member_count
        FROM clans c
        WHERE c.clan_id = $1
@@ -92,6 +137,15 @@ router.post('/invites/:inviteId/accept', requireAuth, wrap(async (req: AuthReque
     if (clanRows[0].member_count >= clanRows[0].max_players) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Team is now full' });
+    }
+    // Free-tier per-mode quota check on invite acceptance too — otherwise
+    // a non-premium user could exceed the cap by accepting more invites
+    // than they could ever join publicly.
+    const mode = clanRows[0].clan_mode as 'duo' | 'squad';
+    const quota = await checkTeamQuota(req.userId!, mode);
+    if (!quota.ok) {
+      await client.query('ROLLBACK');
+      return res.status(quota.status).json(quota.body);
     }
     await client.query(
       `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
@@ -126,6 +180,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   if (clanMode !== 'duo' && clanMode !== 'squad') {
     return res.status(400).json({ error: 'clanMode must be duo or squad' });
   }
+  // Free-tier cap — creating a team makes you a member, so it counts
+  // against the same quota as joining one.
+  const quota = await checkTeamQuota(req.userId!, clanMode);
+  if (!quota.ok) return res.status(quota.status).json(quota.body);
   const maxPlayers = clanMode === 'duo' ? 2 : 4;
   const client = await pool.connect();
   try {
@@ -381,7 +439,7 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
     await client.query('BEGIN');
     // Lock the clan row so concurrent joins can't both bypass the cap.
     const { rows: clanRows } = await client.query(
-      `SELECT c.clan_id, c.max_players, c.is_public,
+      `SELECT c.clan_id, c.max_players, c.is_public, c.clan_mode,
               (SELECT COUNT(*)::int FROM clan_members WHERE clan_id = c.clan_id) AS member_count
        FROM clans c
        WHERE c.clan_id = $1
@@ -396,6 +454,14 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
     if (clanRows[0].member_count >= clanRows[0].max_players) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Team is full' });
+    }
+    // Free-tier per-mode quota check. Rolled back inside the same TX so
+    // a denied join doesn't leak the lock.
+    const mode = clanRows[0].clan_mode as 'duo' | 'squad';
+    const quota = await checkTeamQuota(req.userId!, mode);
+    if (!quota.ok) {
+      await client.query('ROLLBACK');
+      return res.status(quota.status).json(quota.body);
     }
     await client.query(
       `INSERT INTO clan_members (clan_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
