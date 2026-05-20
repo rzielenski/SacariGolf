@@ -20,6 +20,17 @@ export async function cancelStaleMatches() {
         WHERE m.completed = FALSE
           AND m.cancelled = FALSE
           AND m.is_practice = FALSE
+          -- NEVER cancel a match where a player has already FINISHED their
+          -- round. A duo/squad that completed its round but is still
+          -- waiting for an opponent represents real, played golf — the
+          -- previous logic silently cancelled it after 24h of "idle"
+          -- (idle only meant no NEW round/shot activity, not "nobody
+          -- played"), making the round vanish from My Matches. Now those
+          -- sit visibly as "awaiting opponent" instead of disappearing.
+          AND NOT EXISTS (
+            SELECT 1 FROM match_players mp
+            WHERE mp.match_id = m.match_id AND mp.completed = TRUE
+          )
           -- Most recent signal of life across all players in this match.
           -- If even one player has done anything in the last 24h, keep it.
           AND GREATEST(

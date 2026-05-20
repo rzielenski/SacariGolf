@@ -55,6 +55,10 @@ export interface ChatMessage {
   voice_url?: string | null;
   /** Clip duration in ms — present iff voice_url is present. */
   voice_duration_ms?: number | null;
+  /** Server-relative URL to an attached photo (e.g. `/uploads/chat/abc.jpg`)
+   *  if this message is an image. Body becomes a "📷 Photo" placeholder
+   *  unless the sender also typed a caption. */
+  image_url?: string | null;
 }
 
 export interface MatchInvite {

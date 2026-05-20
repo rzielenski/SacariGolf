@@ -72,12 +72,30 @@ function matchTypeLabel(type: string): string {
 }
 
 function resultBadge(m: ListedMatch): { label: string; color: string } | null {
+  // `played` = the user has submitted their own round in this match
+  // (my_strokes is set). Used to distinguish "I finished my round but
+  // there's no opponent yet" from "still mid-round."
+  const played = m.my_strokes != null;
   // Order matters: an ACTIVE round reads "IN PROGRESS" regardless of type
   // (so an in-progress practice round in the IN PROGRESS section is
   // labeled correctly). Only a COMPLETED practice round gets the
   // "PRACTICE" badge.
-  if (m.cancelled)   return { label: 'CANCELLED', color: C.textDim };
-  if (!m.completed)  return { label: 'IN PROGRESS', color: C.gold };
+  if (m.cancelled) {
+    // A cancelled match the user actually PLAYED reads "NO OPPONENT" —
+    // their round was real, it just never got matched. A cancelled match
+    // they never played is a plain "CANCELLED".
+    return played
+      ? { label: 'NO OPPONENT', color: C.textMuted }
+      : { label: 'CANCELLED', color: C.textDim };
+  }
+  if (!m.completed) {
+    // Finished your round but waiting on an opponent → "AWAITING
+    // OPPONENT"; still mid-round → "IN PROGRESS".
+    if (played && m.has_opponent === false) {
+      return { label: 'AWAITING OPPONENT', color: C.blue };
+    }
+    return { label: 'IN PROGRESS', color: C.gold };
+  }
   if (m.is_practice) return { label: 'PRACTICE', color: C.textMuted };
   // Completed, ranked
   if (m.winner_side == null && m.my_side != null) {
@@ -126,11 +144,21 @@ export default function MatchesHistoryScreen() {
   const completed  = matches.filter((m) =>  m.completed && !m.cancelled && !m.is_practice);
   // PRACTICE = finished practice rounds only (active practice is in IN PROGRESS above).
   const practice   = matches.filter((m) =>  m.completed && !m.cancelled && m.is_practice);
+  // NO OPPONENT = matches the user PLAYED (my_strokes set) that got cancelled
+  // — almost always a duo/squad that finished its round but never got
+  // matched and aged out under the old cleanup. Surfaced so the round
+  // isn't silently lost. (Going forward the cleanup no longer cancels
+  // played matches, but this recovers any already in that state.)
+  const noOpponent = matches.filter((m) => m.cancelled && m.my_strokes != null);
 
   const rows: ({ kind: 'header'; label: string; key: string } | { kind: 'row'; match: ListedMatch; key: string })[] = [];
   if (inProgress.length) {
     rows.push({ kind: 'header', label: `IN PROGRESS (${inProgress.length})`, key: 'h-active' });
     for (const m of inProgress) rows.push({ kind: 'row', match: m, key: m.match_id });
+  }
+  if (noOpponent.length) {
+    rows.push({ kind: 'header', label: `NO OPPONENT (${noOpponent.length})`, key: 'h-noopp' });
+    for (const m of noOpponent) rows.push({ kind: 'row', match: m, key: m.match_id });
   }
   if (completed.length) {
     rows.push({ kind: 'header', label: `RECENT (${completed.length})`, key: 'h-recent' });

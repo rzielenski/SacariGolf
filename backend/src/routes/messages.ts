@@ -12,6 +12,18 @@ const router = Router();
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const VOICE_DIR = path.join(UPLOADS_DIR, 'voice');
 if (!fs.existsSync(VOICE_DIR)) fs.mkdirSync(VOICE_DIR, { recursive: true });
+const CHAT_IMG_DIR = path.join(UPLOADS_DIR, 'chat');
+if (!fs.existsSync(CHAT_IMG_DIR)) fs.mkdirSync(CHAT_IMG_DIR, { recursive: true });
+
+/** Max raw image size after base64 decode. Mirrors the 4 MB feed-photo cap
+ *  in posts.ts — generous for a phone photo at quality 0.6-0.75. */
+const MAX_CHAT_IMG_BYTES = 4 * 1024 * 1024;
+const CHAT_IMG_MIME_EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/jpg':  'jpg',
+  'image/png':  'png',
+  'image/webp': 'webp',
+};
 
 /** Max raw audio size in bytes after base64 decoding. 60s of AAC at 64kbps
  *  is ~480 KB; 2 MB gives generous headroom for higher bitrates without
@@ -59,6 +71,28 @@ function unlinkVoiceClip(url: string | null | undefined) {
   if (!url?.startsWith('/uploads/voice/')) return;
   const fname = url.replace('/uploads/voice/', '');
   try { fs.unlinkSync(path.join(VOICE_DIR, fname)); } catch { /* already gone, fine */ }
+}
+
+/** Decode + persist a base64 chat image. Same write-before-INSERT pattern
+ *  as the voice clip so a failed message doesn't leak a file. */
+function persistChatImage(
+  base64: string,
+  mimeType: string,
+): { url: string } | { error: string } {
+  const ext = CHAT_IMG_MIME_EXT[mimeType];
+  if (!ext) return { error: 'Unsupported image format (use JPEG, PNG, or WebP)' };
+  const buffer = Buffer.from(base64, 'base64');
+  if (buffer.length === 0) return { error: 'Invalid image data' };
+  if (buffer.length > MAX_CHAT_IMG_BYTES) return { error: 'Image too large (max 4 MB)' };
+  const filename = `${randomUUID()}.${ext}`;
+  fs.writeFileSync(path.join(CHAT_IMG_DIR, filename), buffer);
+  return { url: `/uploads/chat/${filename}` };
+}
+
+function unlinkChatImage(url: string | null | undefined) {
+  if (!url?.startsWith('/uploads/chat/')) return;
+  const fname = url.replace('/uploads/chat/', '');
+  try { fs.unlinkSync(path.join(CHAT_IMG_DIR, fname)); } catch { /* already gone, fine */ }
 }
 
 router.get('/conversations', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
@@ -210,7 +244,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const { rows } = await pool.query(
       `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
               u.username, u.avatar_url,
-              dm.voice_url, dm.voice_duration_ms
+              dm.voice_url, dm.voice_duration_ms, dm.image_url
        FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
        WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
           OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
@@ -231,7 +265,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.message_id, m.created_at, m.body, m.user_id,
             u.username, u.avatar_url,
-            m.voice_url, m.voice_duration_ms
+            m.voice_url, m.voice_duration_ms, m.image_url
      FROM messages m JOIN users u ON u.user_id = m.user_id
      WHERE m.${col} = $1
      ORDER BY m.created_at ASC
@@ -242,10 +276,10 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId, toUserId, body, voiceBase64, voiceMime, voiceDurationMs } = req.body ?? {};
-  // Trim text; cap at 2000 chars. For voice messages the body becomes the
-  // push-notification preview (default "🎤 Voice message"); text-only
-  // messages must have non-empty body.
+  const { matchId, clanId, toUserId, body, voiceBase64, voiceMime, voiceDurationMs,
+          imageBase64, imageMime } = req.body ?? {};
+  // Trim text; cap at 2000 chars. For voice/image messages the body becomes
+  // the push-notification preview; text-only messages must have non-empty body.
   const text = typeof body === 'string' ? body.trim().slice(0, 2000) : '';
 
   // Voice clip — optional. When present, decode to disk before the INSERT
@@ -257,16 +291,31 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     if ('error' in result) return res.status(400).json({ error: result.error });
     voice = result;
   }
+
+  // Image attachment — optional, same write-before-INSERT discipline.
+  let image: { url: string } | null = null;
+  if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
+    const result = persistChatImage(imageBase64, imageMime ?? 'image/jpeg');
+    if ('error' in result) {
+      if (voice) unlinkVoiceClip(voice.url);
+      return res.status(400).json({ error: result.error });
+    }
+    image = result;
+  }
+
   // Helper closures so the orphan-cleanup is centralised — both the early
-  // 4xx returns AND a thrown error in the INSERT block unlink the file.
-  const onFail = () => { if (voice) unlinkVoiceClip(voice.url); };
+  // 4xx returns AND a thrown error in the INSERT block unlink the files.
+  const onFail = () => {
+    if (voice) unlinkVoiceClip(voice.url);
+    if (image) unlinkChatImage(image.url);
+  };
 
-  // Either text OR voice must be present.
-  if (!text && !voice) { onFail(); return res.status(400).json({ error: 'body or voice required' }); }
+  // Text, voice, OR image must be present.
+  if (!text && !voice && !image) { onFail(); return res.status(400).json({ error: 'body, voice, or image required' }); }
 
-  // Default body when only voice is sent — used for push-notification
-  // preview and the conversations list's "last_message" preview.
-  const effectiveBody = text || '🎤 Voice message';
+  // Default body — drives push-notification preview + the conversations
+  // list "last_message". Voice wins the icon if both somehow present.
+  const effectiveBody = text || (voice ? '🎤 Voice message' : '📷 Photo');
 
   if (toUserId) {
     if (toUserId === req.userId) { onFail(); return res.status(400).json({ error: 'Cannot DM yourself' }); }
@@ -278,11 +327,11 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     let rows: any[];
     try {
       ({ rows } = await pool.query(
-        `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms, image_url)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id,
-                   voice_url, voice_duration_ms`,
-        [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
+                   voice_url, voice_duration_ms, image_url`,
+        [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]
       ));
     } catch (err) { onFail(); throw err; }
     const msg = rows[0];
@@ -316,10 +365,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   let rows: any[];
   try {
     ({ rows } = await pool.query(
-      `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms`,
-      [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null]
+      `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms, image_url)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms, image_url`,
+      [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]
     ));
   } catch (err) { onFail(); throw err; }
   const msg = rows[0];

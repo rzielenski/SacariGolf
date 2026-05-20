@@ -2,10 +2,11 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TextInput, TouchableOpacity,
   KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
-  PanResponder, Animated,
+  PanResponder, Animated, Image, Modal,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api } from '../../../lib/api';
+import { api, API_BASE } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
@@ -90,6 +91,45 @@ export default function ChatScreen() {
       ));
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     } catch { setText(trimmed); } finally { setSending(false); }
+  };
+
+  /** Pick a photo from the library and send it as a chat message. Mirrors
+   *  the voice flow: base64-encode → POST → optimistically append. */
+  const sendImage = async () => {
+    if (sending) return;
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (perm.status !== 'granted') {
+      Alert.alert('Permission needed', 'Allow photo access to send pictures.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.6,
+      base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    const asset = result.assets[0];
+    setSending(true);
+    try {
+      const base = type === 'match'
+        ? { matchId: id }
+        : type === 'clan'
+        ? { clanId: id }
+        : { toUserId: id };
+      const msg = await api.messages.send({
+        ...base,
+        imageBase64: asset.base64!,
+        imageMime: asset.mimeType ?? 'image/jpeg',
+      });
+      setMessages((prev) => (
+        prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
+      ));
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    } catch (e: any) {
+      Alert.alert('Could not send photo', e?.message ?? 'Try again.');
+    } finally {
+      setSending(false);
+    }
   };
 
   /** Finalise the recording and POST it. Called by the PanResponder's
@@ -314,7 +354,18 @@ export default function ChatScreen() {
                   ? <ActivityIndicator color="#000" size="small" />
                   : <Text style={styles.sendBtnText}>Send</Text>}
               </TouchableOpacity>
-            ) : null}
+            ) : (
+              // Photo attach — only shown when there's no text to send
+              // (where the Send button would otherwise sit), so the
+              // composer stays uncluttered.
+              <TouchableOpacity
+                style={[styles.imgBtn, sending && { opacity: 0.4 }]}
+                onPress={sendImage}
+                disabled={sending}
+              >
+                <Text style={styles.imgGlyph}>📷</Text>
+              </TouchableOpacity>
+            )}
           </>
         )}
         {/* Mic always present so the gesture target doesn't disappear when
@@ -338,7 +389,15 @@ function MessageBubble({ msg, isMe, onReport }: {
   // THEY see — senders aren't policed; readers control their own surface.
   const { user } = useAuth();
   const censor = user?.censor_offensive_language !== false;
+  const [zoom, setZoom] = useState(false);
   const time = new Date(msg.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const imageUri = msg.image_url
+    ? (msg.image_url.startsWith('http') ? msg.image_url : `${API_BASE}${msg.image_url}`)
+    : null;
+  // Whether the body is just the auto-generated photo/voice placeholder —
+  // if so we don't render it as a text line (the media itself is the content).
+  const isPlaceholderBody = msg.body === '📷 Photo' || msg.body === '🎤 Voice message';
+
   // Long-press → report. Disabled for own messages (no point reporting self).
   return (
     <TouchableOpacity
@@ -364,6 +423,25 @@ function MessageBubble({ msg, isMe, onReport }: {
             durationMs={msg.voice_duration_ms ?? null}
             tint={isMe ? 'self' : 'other'}
           />
+        ) : imageUri ? (
+          <>
+            <TouchableOpacity onPress={() => setZoom(true)} activeOpacity={0.9}>
+              <Image source={{ uri: imageUri }} style={styles.bubbleImage} resizeMode="cover" />
+            </TouchableOpacity>
+            {/* A caption only renders if the sender typed real text (not the
+                "📷 Photo" placeholder body the server stores). */}
+            {!isPlaceholderBody && msg.body ? (
+              <Text style={[styles.bubbleBody, isMe && { color: '#000' }, { marginTop: 6 }]}>
+                {censorText(msg.body, censor)}
+              </Text>
+            ) : null}
+            {/* Full-screen tap-to-zoom viewer. */}
+            <Modal visible={zoom} transparent animationType="fade" onRequestClose={() => setZoom(false)}>
+              <TouchableOpacity style={styles.zoomBackdrop} activeOpacity={1} onPress={() => setZoom(false)}>
+                <Image source={{ uri: imageUri }} style={styles.zoomImage} resizeMode="contain" />
+              </TouchableOpacity>
+            </Modal>
+          </>
         ) : (
           <Text style={[styles.bubbleBody, isMe && { color: '#000' }]}>{censorText(msg.body, censor)}</Text>
         )}
@@ -406,6 +484,11 @@ const styles = StyleSheet.create({
   bubbleName: { color: C.gold, fontSize: 11, fontWeight: '700', marginBottom: 3 },
   bubbleBody: { color: C.text, fontSize: 14, lineHeight: 20 },
   bubbleTime: { color: C.textDim, fontSize: 10, marginTop: 4, textAlign: 'right' },
+  // Inline image preview in a chat bubble — fixed footprint, cover-cropped.
+  // Tapping opens the full-screen zoom modal.
+  bubbleImage: { width: 200, height: 200, borderRadius: 8, backgroundColor: C.bg },
+  zoomBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' },
+  zoomImage: { width: '100%', height: '100%' },
 
   inputRow: {
     flexDirection: 'row', padding: 12, gap: 8, alignItems: 'center',
@@ -431,6 +514,14 @@ const styles = StyleSheet.create({
   },
   micBtnActive: { backgroundColor: C.red, borderColor: C.red },
   micGlyph: { fontSize: 18 },
+
+  // Photo-attach button — same footprint as mic/send for a tidy composer.
+  imgBtn: {
+    width: 44, height: 40, borderRadius: 6,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  imgGlyph: { fontSize: 18 },
 
   // Recording-in-progress UI — replaces the text input + send button while
   // the user is holding the mic.

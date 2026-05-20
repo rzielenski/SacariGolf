@@ -428,6 +428,11 @@ export const api = {
       voiceMime?: string;
       /** Clip length in ms, captured at record time. Server clamps to 60s. */
       voiceDurationMs?: number;
+      /** Base64-encoded image (JPEG/PNG/WebP). Server caps at 4 MB and
+       *  writes to /uploads/chat/, returning image_url on the message. */
+      imageBase64?: string;
+      /** Image MIME type — defaults server-side to image/jpeg. */
+      imageMime?: string;
     }) => request<any>('POST', '/messages', body),
     /** Report a message for abuse. Both DMs and channel messages route
      *  here via the `kind` discriminator. Idempotent — repeat reports

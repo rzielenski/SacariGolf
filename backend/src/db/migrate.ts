@@ -909,6 +909,13 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     //
     // Idempotent: after the first run there are no bidirectional pairs left,
     // so re-running deletes nothing.
+    name: 'messages.image_url',
+    sql: `
+      ALTER TABLE messages         ADD COLUMN IF NOT EXISTS image_url TEXT;
+      ALTER TABLE direct_messages  ADD COLUMN IF NOT EXISTS image_url TEXT;
+    `,
+  },
+  {
     name: 'friends.dedupe_backfill',
     sql: `
       -- (a) Self-friendships should never exist; remove any.
