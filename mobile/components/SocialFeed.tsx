@@ -269,6 +269,10 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
   // Default ON: the censor is opt-OUT. If the user record hasn't loaded
   // yet (anon home tab) we still censor — fail safe.
   const censor = user?.censor_offensive_language !== false;
+  // Comment thread state lives on the card so the count badge updates
+  // live after you add/delete without re-fetching the whole feed.
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [commentCount, setCommentCount] = useState<number>(post.comment_count ?? 0);
   const when = relativeTime(post.created_at);
   const authorAvatar = post.author_avatar
     ? (post.author_avatar.startsWith('http') ? post.author_avatar : `${API_BASE}${post.author_avatar}`)
@@ -335,7 +339,163 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
           {post.body && <Text style={s.caption}>{censorText(post.body, censor)}</Text>}
         </>
       )}
+
+      {/* Comment bar — opens the thread for ANY post (yours or others').
+          Shows a live count once there are comments. */}
+      <TouchableOpacity
+        style={s.commentBar}
+        onPress={() => setCommentsOpen(true)}
+        activeOpacity={0.7}
+      >
+        <Text style={s.commentBarText}>
+          💬 {commentCount > 0
+            ? `${commentCount} comment${commentCount === 1 ? '' : 's'}`
+            : 'Comment'}
+        </Text>
+      </TouchableOpacity>
+
+      <CommentsModal
+        visible={commentsOpen}
+        postId={post.post_id}
+        censor={censor}
+        onClose={() => setCommentsOpen(false)}
+        onCountChange={setCommentCount}
+      />
     </TouchableOpacity>
+  );
+}
+
+/** Comments thread for one post — bottom sheet with the list + a composer.
+ *  Mirrors the round-comments UX in the scorecard modal. Loads on open,
+ *  optimistic-ish (refetches after each mutation), and reports the new
+ *  count back up so the card's badge stays in sync. */
+function CommentsModal({
+  visible, postId, censor, onClose, onCountChange,
+}: {
+  visible: boolean;
+  postId: string;
+  censor: boolean;
+  onClose: () => void;
+  onCountChange: (n: number) => void;
+}) {
+  const [comments, setComments] = useState<any[] | null>(null);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const rows = await api.posts.comments(postId);
+      setComments(rows);
+      onCountChange(rows.length);
+    } catch {
+      setComments([]);
+    }
+  }, [postId, onCountChange]);
+
+  useEffect(() => { if (visible) load(); }, [visible, load]);
+
+  const submit = async () => {
+    const body = draft.trim();
+    if (!body || sending) return;
+    setSending(true);
+    try {
+      await api.posts.addComment(postId, body);
+      setDraft('');
+      await load();
+    } catch (e: any) {
+      Alert.alert('Could not comment', e?.message ?? 'Try again.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const remove = (commentId: string) => {
+    Alert.alert('Delete comment?', '', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: async () => {
+          try {
+            await api.posts.deleteComment(postId, commentId);
+            await load();
+          } catch (e: any) { Alert.alert('Error', e?.message ?? 'Try again.'); }
+        },
+      },
+    ]);
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={s.composeHeader}>
+          <TouchableOpacity onPress={onClose}>
+            <Text style={s.composeCancel}>Close</Text>
+          </TouchableOpacity>
+          <Text style={s.composeTitle}>Comments</Text>
+          <View style={{ width: 44 }} />
+        </View>
+
+        <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+          {comments === null ? (
+            <ActivityIndicator color={C.gold} style={{ marginTop: 24 }} />
+          ) : comments.length === 0 ? (
+            <Text style={s.commentsEmpty}>No comments yet — be the first.</Text>
+          ) : (
+            comments.map((cm) => (
+              <View key={cm.comment_id} style={s.commentRow}>
+                <TouchableOpacity onPress={() => router.push(`/user/${cm.user_id}` as any)}>
+                  {cm.avatar_url ? (
+                    <Image
+                      source={{ uri: cm.avatar_url.startsWith('http') ? cm.avatar_url : `${API_BASE}${cm.avatar_url}` }}
+                      style={s.commentAvatar}
+                    />
+                  ) : (
+                    <View style={[s.commentAvatar, s.avatarFallback]}>
+                      <Text style={s.avatarFallbackText}>{censorText(cm.username ?? '?', censor)[0]?.toUpperCase()}</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.commentAuthor}>{censorText(cm.username, censor)}</Text>
+                  <Text style={s.commentBody}>{censorText(cm.body, censor)}</Text>
+                  <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
+                </View>
+                {cm.mine && (
+                  <TouchableOpacity onPress={() => remove(cm.comment_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={s.deleteX}>×</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ))
+          )}
+        </ScrollView>
+
+        <View style={s.commentComposer}>
+          <TextInput
+            style={s.commentInput}
+            value={draft}
+            onChangeText={setDraft}
+            placeholder="Add a comment…"
+            placeholderTextColor={C.textMuted}
+            maxLength={280}
+            multiline
+          />
+          <TouchableOpacity
+            style={[s.commentSendBtn, (!draft.trim() || sending) && { opacity: 0.4 }]}
+            onPress={submit}
+            disabled={!draft.trim() || sending}
+            activeOpacity={0.7}
+          >
+            {sending
+              ? <ActivityIndicator color={C.bg} size="small" />
+              : <Text style={s.commentSendText}>Post</Text>}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
   );
 }
 
@@ -661,4 +821,35 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center',
   },
   composeImageRemoveText: { color: '#fff', fontSize: 18, fontWeight: '900', lineHeight: 20 },
+
+  // ── Comments ──────────────────────────────────────────────────────────
+  commentBar: {
+    marginTop: 12, paddingTop: 10,
+    borderTopWidth: 1, borderTopColor: C.border + '88',
+  },
+  commentBarText: { color: C.textMuted, fontSize: 13, fontWeight: '700' },
+  commentsEmpty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 24, fontStyle: 'italic' },
+  commentRow: {
+    flexDirection: 'row', gap: 10, alignItems: 'flex-start',
+    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border + '55',
+  },
+  commentAvatar: { width: 32, height: 32, borderRadius: 16 },
+  commentAuthor: { color: C.text, fontWeight: '800', fontSize: 13 },
+  commentBody: { color: C.text, fontSize: 14, lineHeight: 19, marginTop: 2 },
+  commentTime: { color: C.textDim, fontSize: 10, marginTop: 3 },
+  commentComposer: {
+    flexDirection: 'row', alignItems: 'flex-end', gap: 8,
+    paddingHorizontal: 12, paddingVertical: 10,
+    borderTopWidth: 1, borderTopColor: C.border,
+  },
+  commentInput: {
+    flex: 1, color: C.text, fontSize: 15, maxHeight: 100,
+    backgroundColor: C.card, borderRadius: 18, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 14, paddingVertical: 9,
+  },
+  commentSendBtn: {
+    backgroundColor: C.gold, borderRadius: 18,
+    paddingHorizontal: 16, paddingVertical: 10, minWidth: 56, alignItems: 'center',
+  },
+  commentSendText: { color: C.bg, fontWeight: '900', fontSize: 13 },
 });

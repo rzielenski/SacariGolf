@@ -1518,9 +1518,9 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   // intentionally excluded — they're not relationships yet.
   const { rows: followCounts } = await pool.query(
     `SELECT
-       (SELECT COUNT(*)::int FROM friends
+       (SELECT COUNT(DISTINCT friend_id)::int FROM friends
          WHERE user_id = $1 AND status = 'accepted') AS following_count,
-       (SELECT COUNT(*)::int FROM friends
+       (SELECT COUNT(DISTINCT user_id)::int FROM friends
          WHERE friend_id = $1 AND status = 'accepted') AS followers_count`,
     [req.params.id]
   );
@@ -1562,15 +1562,19 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
  * following list. Useful for navigating the social graph from a profile.
  */
 router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // DISTINCT ON guards against a stray bidirectional duplicate row showing
+  // the same person twice (the dedupe_backfill migration removes these, but
+  // belt-and-suspenders so the UI never double-lists).
   const { rows } = await pool.query(
-    `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.created_at
+    `SELECT DISTINCT ON (u.user_id)
+            u.user_id, u.username, u.elo, u.avatar_url, f.created_at
        FROM friends f
        JOIN users u ON u.user_id = f.friend_id
       WHERE f.user_id = $1 AND f.status = 'accepted'
-      ORDER BY f.created_at DESC
-      LIMIT 500`,
+      ORDER BY u.user_id, f.created_at DESC`,
     [req.params.id]
   );
+  rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   return res.json(rows);
 }));
 
@@ -1580,14 +1584,15 @@ router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Res
  */
 router.get('/:id/followers', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT u.user_id, u.username, u.elo, u.avatar_url, f.created_at
+    `SELECT DISTINCT ON (u.user_id)
+            u.user_id, u.username, u.elo, u.avatar_url, f.created_at
        FROM friends f
        JOIN users u ON u.user_id = f.user_id
       WHERE f.friend_id = $1 AND f.status = 'accepted'
-      ORDER BY f.created_at DESC
-      LIMIT 500`,
+      ORDER BY u.user_id, f.created_at DESC`,
     [req.params.id]
   );
+  rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   return res.json(rows);
 }));
 

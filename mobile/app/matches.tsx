@@ -72,10 +72,14 @@ function matchTypeLabel(type: string): string {
 }
 
 function resultBadge(m: ListedMatch): { label: string; color: string } | null {
-  if (m.is_practice) return { label: 'PRACTICE', color: C.textMuted };
+  // Order matters: an ACTIVE round reads "IN PROGRESS" regardless of type
+  // (so an in-progress practice round in the IN PROGRESS section is
+  // labeled correctly). Only a COMPLETED practice round gets the
+  // "PRACTICE" badge.
   if (m.cancelled)   return { label: 'CANCELLED', color: C.textDim };
   if (!m.completed)  return { label: 'IN PROGRESS', color: C.gold };
-  // Completed
+  if (m.is_practice) return { label: 'PRACTICE', color: C.textMuted };
+  // Completed, ranked
   if (m.winner_side == null && m.my_side != null) {
     return { label: 'TIE', color: C.blue };
   }
@@ -111,9 +115,17 @@ export default function MatchesHistoryScreen() {
   // Three bucketed groups for cleaner UX than one giant list. A "section
   // header" separator pattern would be more idiomatic but we're rendering
   // only 3 sections so inline headers in a flat FlatList is simpler.
-  const inProgress = matches.filter((m) => !m.completed && !m.cancelled && !m.is_practice);
+  //
+  // IN PROGRESS = every ACTIVE round, ranked OR practice. The previous
+  // version excluded practice here, so an in-progress practice round was
+  // buried in the PRACTICE bucket alongside finished ones and didn't read
+  // as a "current round." Now any round that isn't completed or cancelled
+  // shows up top as resumable — which is the whole point of this screen.
+  const inProgress = matches.filter((m) => !m.completed && !m.cancelled);
+  // RECENT = finished, ranked rounds.
   const completed  = matches.filter((m) =>  m.completed && !m.cancelled && !m.is_practice);
-  const practice   = matches.filter((m) =>  m.is_practice);
+  // PRACTICE = finished practice rounds only (active practice is in IN PROGRESS above).
+  const practice   = matches.filter((m) =>  m.completed && !m.cancelled && m.is_practice);
 
   const rows: ({ kind: 'header'; label: string; key: string } | { kind: 'row'; match: ListedMatch; key: string })[] = [];
   if (inProgress.length) {

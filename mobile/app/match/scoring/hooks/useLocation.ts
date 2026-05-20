@@ -50,6 +50,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import { Barometer } from 'expo-sensors';
 import { distMetres } from '../../../../lib/golfMath';
@@ -123,6 +124,9 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
   const fixBufferRef = useRef<BufferedFix[]>([]);
   /** Counts fixes seen so far this subscription, to drop the warm-up batch. */
   const fixesSeenRef = useRef(0);
+  /** Wall-clock of the LAST accepted display-path fix. Drives the
+   *  "GPS stale" UI indicator + the foreground-resume kick. */
+  const lastFixAtRef = useRef<number | null>(null);
 
   // Stash callback in a ref so we don't tear down the subscription
   // every time the parent re-renders with a new lambda.
@@ -251,6 +255,29 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
 
           // Display update — accept any non-invalid fix. The user-visible
           // map dot updates from this; tracked shot endpoints do not.
+          //
+          // Bad-fix filtering (added after a user reported the bottom-
+          // right "TO PIN" yardage was stuck at the last shot's endpoint
+          // distance for an entire hole — likely a single noisy fix
+          // landing far off, or an iOS-paused subscription returning a
+          // garbage 0/0 cached reading):
+          //   • drop NaN / non-finite coords
+          //   • drop the (0,0) "null island" sentinel — appears when iOS
+          //     hands back an uninitialised cached fix
+          //   • drop fixes with horizontal accuracy worse than 200m;
+          //     anything that bad is room-scale noise from a phone in a
+          //     deep pocket and would jump the user dot wildly
+          //   • drop fixes timestamped >30s in the past, regardless of
+          //     accuracy — they're cached stale-after-resume fixes
+          if (
+            !Number.isFinite(loc.coords.latitude)
+            || !Number.isFinite(loc.coords.longitude)
+            || (Math.abs(loc.coords.latitude) < 0.001 && Math.abs(loc.coords.longitude) < 0.001)
+            || (rawAcc >= 0 && rawAcc > 200)
+            || ageMs > 30_000
+          ) {
+            return;
+          }
           if (rawAcc >= 0) setGpsAccuracyM(rawAcc);
           const c: UserCoord = {
             latitude: loc.coords.latitude,
@@ -261,9 +288,119 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
           setOnCourse(near2);
           if (!near2) offCourseCb.current?.();
           setUserCoord(c);
+          lastFixAtRef.current = Date.now();
         },
       );
     })();
+
+    // ── GPS watchdog — restart a silently-dead watcher ───────────────
+    // The single biggest source of "TO PIN yardage stuck on the wrong
+    // value" bug reports: iOS pauses watchPositionAsync subscriptions
+    // when the app moves to inactive (even briefly — notification UI,
+    // proximity-sensor screen-off in pocket, system permission sheet)
+    // and does NOT auto-resume on return-to-active. The subscription
+    // object stays valid; it just never fires another callback. The
+    // app's `userCoord` is then frozen at whatever it was just before
+    // the pause. The user walks to the next hole, distance-to-pin
+    // doesn't update, and they think the app is broken.
+    //
+    // This interval polls every 10s. If we haven't received a fix in
+    // 25+ seconds, we tear down the watch and re-subscribe — that
+    // forces iOS to give us a brand-new live stream. Also runs the
+    // initial fresh `getCurrentPositionAsync` so userCoord catches up
+    // immediately rather than waiting for the watcher's first callback.
+    const watchdog = setInterval(async () => {
+      if (!active) return;
+      const last = lastFixAtRef.current;
+      const sinceMs = last == null ? Infinity : Date.now() - last;
+      if (sinceMs < 25_000) return;
+
+      // Tear down + restart the watch.
+      try { watchRef.current?.remove(); } catch { /* noop */ }
+      watchRef.current = null;
+      fixesSeenRef.current = 0;
+      try {
+        // Kick the chip first so the user sees an updated position
+        // immediately, even before the new watch starts firing.
+        const pos = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Highest,
+          maximumAge: 0,
+        } as any);
+        if (active && Number.isFinite(pos.coords.latitude)) {
+          // Guard against iOS handing back a cached driver-landing
+          // fix despite maximumAge:0 — if the returned timestamp is
+          // older than 10s, treat it as stale and let the new watch
+          // produce a fresh fix instead.
+          const ts = typeof pos.timestamp === 'number' ? pos.timestamp : Date.now();
+          if (Date.now() - ts < 10_000) {
+            setUserCoord({
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              altitude: pos.coords.altitude,
+            });
+            lastFixAtRef.current = Date.now();
+          }
+        }
+      } catch { /* silent — retry on next interval */ }
+      try {
+        watchRef.current = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.Highest, distanceInterval: 0, timeInterval: 1000 },
+          (loc) => {
+            if (!active) return;
+            const rawAcc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : -1;
+            const ts = typeof loc.timestamp === 'number' ? loc.timestamp : Date.now();
+            if (
+              !Number.isFinite(loc.coords.latitude)
+              || !Number.isFinite(loc.coords.longitude)
+              || (Math.abs(loc.coords.latitude) < 0.001 && Math.abs(loc.coords.longitude) < 0.001)
+              || (rawAcc >= 0 && rawAcc > 200)
+              || Date.now() - ts > 30_000
+            ) return;
+            if (rawAcc >= 0) setGpsAccuracyM(rawAcc);
+            setUserCoord({
+              latitude: loc.coords.latitude,
+              longitude: loc.coords.longitude,
+              altitude: loc.coords.altitude,
+            });
+            lastFixAtRef.current = Date.now();
+          },
+        );
+      } catch { /* silent */ }
+    }, 10_000);
+
+    // ── Foreground-resume listener ──────────────────────────────────────
+    // iOS aggressively pauses location subscriptions when the app moves
+    // to inactive/background — opening a system alert, the iOS chat
+    // notification, the music app, etc. expo-location does NOT
+    // auto-resume; the existing watchRef stays "alive" but stops firing
+    // callbacks. From the user's perspective the GPS just freezes and
+    // the "TO PIN" yardage gets stuck at whatever it was when they
+    // backgrounded.
+    //
+    // Fix: on every foreground transition, kick the GPS chip with a
+    // fresh getCurrentPositionAsync (forces a real fix) so the
+    // watchPositionAsync subscription wakes back up and userCoord
+    // resumes updating. Also re-arm a fresh watch if the previous one
+    // is dead (no fix in the last 15s while in foreground).
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (!active) return;
+      if (state !== 'active') return;
+      // Force a fresh fix — this kicks the subscription back on iOS.
+      Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Highest,
+        maximumAge: 0,
+      } as any).then((pos) => {
+        if (!active) return;
+        if (!Number.isFinite(pos.coords.latitude)) return;
+        const coord: UserCoord = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          altitude: pos.coords.altitude,
+        };
+        setUserCoord(coord);
+        lastFixAtRef.current = Date.now();
+      }).catch(() => { /* permission revoked or GPS denied — silent */ });
+    });
 
     return () => {
       active = false;
@@ -272,6 +409,8 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
       baroSubRef.current?.remove();
       baroSubRef.current = null;
       baroRelativeMRef.current = null;
+      appStateSub.remove();
+      clearInterval(watchdog);
     };
   }, [enabled, courseLat, courseLng]);
 
@@ -368,6 +507,45 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     return baroRelativeMRef.current;
   }, []);
 
+  /** Milliseconds since the last accepted display-path fix, or null when
+   *  we've never seen one. Drives the "GPS frozen" warning in the bottom
+   *  of the scoring screen so a stuck "TO PIN" yardage is visible to the
+   *  player rather than silently wrong. */
+  const getMsSinceLastFix = useCallback((): number | null => {
+    if (lastFixAtRef.current == null) return null;
+    return Date.now() - lastFixAtRef.current;
+  }, []);
+
+  /** Drop the rolling fix buffer. Called by the scoring screen on
+   *  current-hole change so a previous hole's fixes can't leak into the
+   *  next hole's getAveragedFix() — the spatial-still filter alone
+   *  doesn't help when the player walks 100+ yds between holes (every
+   *  old fix is outside STILL_RADIUS_M and gets discarded silently,
+   *  leaving the average with zero samples and falling back to whatever
+   *  single raw fix happened to be most recent). */
+  const resetFixBuffer = useCallback(() => {
+    fixBufferRef.current = [];
+  }, []);
+
+  /** Force a fresh GPS read. Used as a manual "Unstick GPS" affordance
+   *  when the foreground-resume kick wasn't enough — typically only
+   *  needed after iOS background-pauses the watch for several minutes. */
+  const refreshGps = useCallback(async () => {
+    try {
+      const pos = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Highest,
+        maximumAge: 0,
+      } as any);
+      if (!Number.isFinite(pos.coords.latitude)) return;
+      setUserCoord({
+        latitude: pos.coords.latitude,
+        longitude: pos.coords.longitude,
+        altitude: pos.coords.altitude,
+      });
+      lastFixAtRef.current = Date.now();
+    } catch { /* GPS denied / no signal — UI will keep showing the stale warning */ }
+  }, []);
+
   return {
     userCoord,
     onCourse,
@@ -376,5 +554,8 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     hasQualityFix,
     getAveragedFix,
     getRelativeAltitudeM,
+    getMsSinceLastFix,
+    refreshGps,
+    resetFixBuffer,
   };
 }

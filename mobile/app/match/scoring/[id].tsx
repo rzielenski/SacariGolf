@@ -221,6 +221,7 @@ export default function ScoringScreen() {
     userCoord, onCourse, locGranted,
     gpsAccuracyM, hasQualityFix,
     getAveragedFix, getRelativeAltitudeM,
+    getMsSinceLastFix, refreshGps, resetFixBuffer,
   } = useLocation({
     enabled: !selectingCourse,
     courseLat: course?.latitude,
@@ -1212,6 +1213,39 @@ export default function ScoringScreen() {
   const yardsToPin = (knownPin && userCoord)
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
     : null;
+
+  // ── Clear GPS fix buffer when the hole changes ──────────────────────
+  // Without this, fixes from the previous hole (recorded yards away)
+  // would survive in the buffer and either (a) get discarded silently
+  // by the spatial-still filter when the next finalize asks for an
+  // averaged fix, leaving zero samples to average from, or (b) bias
+  // the next averaged-fix toward the prior hole's location if the new
+  // hole started before any fresh fix arrived. Resetting on hole change
+  // ensures every shot finalize uses ONLY fixes from this hole.
+  useEffect(() => {
+    if (currentHoleNum == null) return;
+    resetFixBuffer();
+  }, [currentHoleNum, resetFixBuffer]);
+
+  // ── GPS staleness tick ──────────────────────────────────────────────
+  // Force a re-render every 5s so `gpsStaleSec` stays current even when
+  // no GPS fix is arriving (which is exactly the failure mode we need to
+  // visualise — without this tick, the screen would happily display a
+  // stuck userCoord with no indication that updates have stopped).
+  const [, setStaleTick] = useState(0);
+  useEffect(() => {
+    if (selectingCourse) return;
+    const id = setInterval(() => setStaleTick((n) => (n + 1) % 1000), 5000);
+    return () => clearInterval(id);
+  }, [selectingCourse]);
+  const gpsStaleSec = (() => {
+    const ms = getMsSinceLastFix();
+    if (ms == null) return null;
+    return Math.floor(ms / 1000);
+  })();
+  // Threshold: 15s without a fix in foreground = "frozen" — by then any
+  // displayed yardsToPin is reading off a stale userCoord.
+  const gpsLooksFrozen = gpsStaleSec != null && gpsStaleSec >= 15;
   // Keep the ref in sync so useShotTracking's lateral_yds fallback reads
   // the right pin on each finalize. Plain assignment in render is fine —
   // refs aren't reactive and we're just shipping the latest value through.
@@ -2789,9 +2823,19 @@ export default function ScoringScreen() {
           // Tappable: lets the user contribute another GPS reading to refine
           // the crowdsourced pin location. The backend median-blends across
           // all contributions, so the pin gets more accurate with each one.
+          // When GPS looks frozen (no fix in 15+s), tapping the chip instead
+          // forces a GPS refresh — so a stuck "TO PIN" yardage has a
+          // one-tap escape hatch.
           <TouchableOpacity
-            style={[styles.mapChipBase, styles.pinDistChip]}
+            style={[
+              styles.mapChipBase, styles.pinDistChip,
+              gpsLooksFrozen && { borderColor: C.red, backgroundColor: C.red + '22' },
+            ]}
             onPress={() => {
+              if (gpsLooksFrozen) {
+                refreshGps();
+                return;
+              }
               if (!userCoord || !currentHoleObj) return;
               const samples = pinSamplesByHole[currentHoleObj.hole_id] ?? null;
               Alert.alert(
@@ -2807,8 +2851,12 @@ export default function ScoringScreen() {
             }}
             activeOpacity={0.7}
           >
-            <Text style={styles.pinDistLabel}>TO PIN</Text>
-            <Text style={styles.pinDistVal}>{yardsToPin} yds</Text>
+            <Text style={[styles.pinDistLabel, gpsLooksFrozen && { color: C.red }]}>
+              {gpsLooksFrozen ? `GPS STUCK ${gpsStaleSec}s` : 'TO PIN'}
+            </Text>
+            <Text style={[styles.pinDistVal, gpsLooksFrozen && { color: C.red }]}>
+              {gpsLooksFrozen ? 'Tap to refresh' : `${yardsToPin} yds`}
+            </Text>
             {(() => {
               // Combined adjusted distance: weatherAdjustment.effective already
               // layers weather on top of the slope-adjusted base. If only slope

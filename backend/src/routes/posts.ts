@@ -21,6 +21,7 @@ import { randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { sendPush } from '../utils/notify';
 
 const router = Router();
 
@@ -323,6 +324,10 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        mp_me.strokes AS author_strokes,
        t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,
        c.course_name,
+       -- Comment count so the card can show "💬 N" without an extra
+       -- round-trip per post. Cheap correlated subquery; the
+       -- (post_id, created_at) index covers it.
+       (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = p.post_id) AS comment_count,
        CASE
          WHEN p.user_id = $1                       THEN 'self'
          WHEN p.user_id IN (SELECT uid FROM my_friends) THEN 'friend'
@@ -355,6 +360,82 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     // generic empty state.
     localUnavailable: scope === 'local' && centerLat == null,
   });
+}));
+
+// ─── Post comments ───────────────────────────────────────────────────────
+// Mirrors the round_comments endpoints in rounds.ts. Anyone who can see the
+// post (i.e. it's in their feed) can comment — we don't re-run the feed
+// audience query here; the post being fetchable is enough, and the feed
+// already gates who sees what. Comments themselves are public to anyone
+// viewing the post.
+
+// GET /posts/:id/comments → list, oldest first, each flagged `mine`.
+router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at,
+            (c.user_id = $2) AS mine
+       FROM post_comments c
+       JOIN users u ON u.user_id = c.user_id
+      WHERE c.post_id = $1
+      ORDER BY c.created_at ASC`,
+    [req.params.id, req.userId]
+  );
+  return res.json(rows);
+}));
+
+// POST /posts/:id/comments  body: { body }
+router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
+  if (!body) return res.status(400).json({ error: 'body required' });
+
+  // Verify the post exists + grab the owner for the push.
+  const { rows: postRows } = await pool.query(
+    `SELECT p.user_id AS owner_id, owner.push_token, owner.username AS owner_name,
+            actor.username AS actor_name
+       FROM posts p
+       JOIN users owner ON owner.user_id = p.user_id
+       JOIN users actor ON actor.user_id = $2
+      WHERE p.post_id = $1`,
+    [req.params.id, req.userId]
+  );
+  if (!postRows.length) return res.status(404).json({ error: 'post not found' });
+  const post = postRows[0];
+
+  const { rows } = await pool.query(
+    `INSERT INTO post_comments (post_id, user_id, body)
+     VALUES ($1, $2, $3) RETURNING comment_id, created_at`,
+    [req.params.id, req.userId, body]
+  );
+
+  // Notify the post owner (fire-and-forget). Skip if commenting on your
+  // own post or the owner has no push token.
+  if (post.owner_id !== req.userId && post.push_token) {
+    const preview = body.length > 100 ? body.slice(0, 97) + '…' : body;
+    sendPush(
+      [post.push_token],
+      `${post.actor_name} commented on your post`,
+      preview,
+      { type: 'post_comment', postId: req.params.id, commentId: rows[0].comment_id, fromUserId: req.userId },
+    ).catch(() => { /* swallow — push is best-effort */ });
+  }
+
+  return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
+}));
+
+// DELETE /posts/:id/comments/:commentId — your own comment, OR the post
+// owner can remove any comment on their post (basic moderation).
+router.delete('/:id/comments/:commentId', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rowCount } = await pool.query(
+    `DELETE FROM post_comments c
+      USING posts p
+      WHERE c.comment_id = $1
+        AND c.post_id = $2
+        AND p.post_id = c.post_id
+        AND (c.user_id = $3 OR p.user_id = $3)`,
+    [req.params.commentId, req.params.id, req.userId]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'not found or not yours' });
+  return res.json({ success: true });
 }));
 
 export default router;

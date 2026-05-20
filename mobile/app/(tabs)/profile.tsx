@@ -400,13 +400,12 @@ export default function ProfileScreen() {
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
         </View>
 
-        {/* Following / Followers strip — tappable, opens the same list
-            screens the public profile uses. Drives users into the social
-            graph from their own profile. */}
+        {/* Following / Followers strip — opens the swipeable Friends hub
+            (Followers · Following · Add Friends) at the tapped tab. */}
         <View style={styles.followRow}>
           <TouchableOpacity
             style={styles.followCol}
-            onPress={() => router.push(`/user/${user.user_id}/following` as any)}
+            onPress={() => router.push('/friends?tab=following' as any)}
             activeOpacity={0.7}
           >
             <Text style={styles.followNum}>{followingCount}</Text>
@@ -415,11 +414,20 @@ export default function ProfileScreen() {
           <View style={styles.followDivider} />
           <TouchableOpacity
             style={styles.followCol}
-            onPress={() => router.push(`/user/${user.user_id}/followers` as any)}
+            onPress={() => router.push('/friends?tab=followers' as any)}
             activeOpacity={0.7}
           >
             <Text style={styles.followNum}>{followersCount}</Text>
             <Text style={styles.followLabel}>Followers</Text>
+          </TouchableOpacity>
+          <View style={styles.followDivider} />
+          <TouchableOpacity
+            style={styles.followCol}
+            onPress={() => router.push('/friends?tab=add' as any)}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.followNum}>+</Text>
+            <Text style={styles.followLabel}>Add</Text>
           </TouchableOpacity>
         </View>
         {/* Open-beta note — small enough not to compete with the rank badge.

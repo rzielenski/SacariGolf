@@ -16,6 +16,15 @@ import { installOutboxDrainTriggers } from '../lib/outbox';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
+    // SDK 53+ split the old `shouldShowAlert` into two fields:
+    //   • shouldShowBanner — the heads-up banner while the app is OPEN
+    //   • shouldShowList   — whether it lands in Notification Center
+    // The deprecated `shouldShowAlert` is kept for older runtimes. Without
+    // the new fields, foreground notifications (e.g. a team-chat message
+    // arriving while you're in the app) were silently NOT displayed —
+    // which is a big part of "I'm not getting notifications."
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldShowAlert: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
@@ -101,32 +110,75 @@ function AuthGuard() {
   }, [user?.user_id]);
 
   // Route notification taps. The backend tags every push with a `data.type`
-  // — match invites carry `type: 'invite'` (see `invites.ts`). When the user
-  // taps the system notification we route them to where they can act on it:
-  //   • invite        → social tab (invites list at the top of the screen)
-  //   • matchFound    → match lobby (already covered by MatchFoundWatcher,
-  //                     but the explicit tap is a nicer UX than waiting for
-  //                     the poll)
-  // Other types are left for their own handlers / no-op.
+  // and we route to where the user can act on / view it:
+  //   • invite       → social tab (invite accept/decline list)
+  //   • matchFound   → match lobby
+  //   • round_started→ the friend's profile, which renders their LIVE
+  //                    in-progress round card + tap-to-spectate
+  //   • dm           → that 1:1 chat thread
+  //   • chat         → that match's chat room
+  //   • clan_chat    → that team's chat room
+  //
+  // CRITICAL: this listener also handles the case where the app was
+  // COLD-LAUNCHED by tapping a notification (not just tapped while
+  // running). `getLastNotificationResponseAsync()` below replays the tap
+  // that opened the app so a killed-app launch still deep-links correctly.
   useEffect(() => {
     if (!user) return;
-    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification?.request?.content?.data as any;
-      if (!data) return;
-      if (data.type === 'invite') {
-        // Social tab houses the pending-invites list at the top — landing
-        // here gives the player a one-tap accept/decline UI.
-        router.push('/(tabs)/social' as any);
-      } else if (data.type === 'matchFound' && typeof data.matchId === 'string') {
-        router.push(`/match/${data.matchId}` as any);
-      } else if (data.type === 'round_started' && typeof data.userId === 'string') {
-        // Friend started a round — open their profile, which renders the
-        // live in-progress round card with the running scorecard / spectate
-        // button. (matchId is on the push too if we ever want a deep-link
-        // straight to spectate mode.)
-        router.push(`/user/${data.userId}` as any);
+
+    const route = (data: any) => {
+      if (!data || typeof data !== 'object') return;
+      switch (data.type) {
+        case 'invite':
+          router.push('/(tabs)/social' as any);
+          break;
+        case 'matchFound':
+          if (typeof data.matchId === 'string') router.push(`/match/${data.matchId}` as any);
+          break;
+        case 'round_started':
+          // Friend started a round → their profile shows the live
+          // in-progress round card with the spectate button (the "live
+          // round" surface).
+          if (typeof data.userId === 'string') router.push(`/user/${data.userId}` as any);
+          break;
+        case 'dm':
+          // Open the 1:1 thread. fromName (when present) gives the chat
+          // header its title immediately instead of "Direct Message".
+          if (typeof data.fromUserId === 'string') {
+            const q = typeof data.fromName === 'string'
+              ? `?name=${encodeURIComponent(data.fromName)}` : '';
+            router.push(`/chat/dm/${data.fromUserId}${q}` as any);
+          }
+          break;
+        case 'chat':
+          // Match chat room.
+          if (typeof data.matchId === 'string') router.push(`/chat/match/${data.matchId}` as any);
+          break;
+        case 'clan_chat':
+          // Team chat room.
+          if (typeof data.clanId === 'string') router.push(`/chat/clan/${data.clanId}` as any);
+          break;
+        default:
+          break;
       }
+    };
+
+    const sub = Notifications.addNotificationResponseReceivedListener((response) => {
+      route(response.notification?.request?.content?.data);
     });
+
+    // Cold-launch replay: if the app was opened by tapping a notification
+    // while killed, addNotificationResponseReceivedListener won't fire for
+    // it — we have to pull the launching response explicitly. A short delay
+    // lets the router mount before we push.
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (response) {
+          setTimeout(() => route(response.notification?.request?.content?.data), 400);
+        }
+      })
+      .catch(() => { /* non-fatal */ });
+
     return () => sub.remove();
   }, [user?.user_id]);
 
@@ -197,6 +249,7 @@ export default function RootLayout() {
         <Stack.Screen name="bag" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="matches" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="teams"   options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="friends" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="course-request" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="user/[id]/following" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="user/[id]/followers" options={{ animation: 'slide_from_right', headerShown: true }} />

@@ -423,7 +423,15 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
      JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
      LEFT JOIN match_results mr ON mr.match_id = m.match_id
      WHERE m.superseded_by_match_id IS NULL
-     ORDER BY m.created_at DESC LIMIT 50`,
+     -- Active rounds (not completed AND not cancelled) sort to the TOP so
+     -- the LIMIT can never truncate a current/in-progress round off the
+     -- list — even for a player with hundreds of finished matches. Within
+     -- each group, newest first. Limit bumped to 100 for extra headroom on
+     -- the finished-match history below the actives.
+     ORDER BY
+       (m.completed = false AND m.cancelled = false) DESC,
+       m.created_at DESC
+     LIMIT 100`,
     [req.userId]
   );
   // Compute signed my_delta_elo per row, honoring perks.

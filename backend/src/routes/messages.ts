@@ -290,7 +290,14 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const senderName = senderRows[0]?.username ?? 'Someone';
     const { rows: recipRows } = await pool.query('SELECT push_token FROM users WHERE user_id = $1', [toUserId]);
     if (recipRows[0]?.push_token) {
-      await sendPush([recipRows[0].push_token], senderName, effectiveBody, { type: 'dm', fromUserId: req.userId });
+      await sendPush(
+        [recipRows[0].push_token],
+        senderName,
+        effectiveBody,
+        // fromName lets the tap handler open the DM thread with the
+        // correct header title immediately (instead of "Direct Message").
+        { type: 'dm', fromUserId: req.userId, fromName: senderName },
+      );
     }
     return res.status(201).json({ ...msg, username: senderName });
   }
@@ -323,6 +330,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const senderName = senderRows[0]?.username ?? 'Someone';
 
   let tokenRows: { push_token: string }[] = [];
+  // Room name for the push title — gives the recipient context ("which
+  // team is this?") instead of a bare sender name. Falls back to a
+  // generic label if the lookup misses.
+  let roomName = '';
   if (matchId) {
     const r = await pool.query(
       `SELECT u.push_token FROM match_players mp
@@ -331,6 +342,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       [matchId, req.userId]
     );
     tokenRows = r.rows;
+    const { rows: mr } = await pool.query(
+      `SELECT name, match_type FROM matches WHERE match_id = $1`, [matchId]
+    );
+    roomName = mr[0]?.name || `${mr[0]?.match_type ?? 'Match'} chat`;
   } else {
     const r = await pool.query(
       `SELECT u.push_token FROM clan_members cm
@@ -339,13 +354,22 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       [clanId, req.userId]
     );
     tokenRows = r.rows;
+    const { rows: cr } = await pool.query(
+      `SELECT name FROM clans WHERE clan_id = $1`, [clanId]
+    );
+    roomName = cr[0]?.name || 'Team chat';
   }
 
+  // Title shows the room ("Thunder Cats"), body shows "Alice: <message>"
+  // so the recipient sees who said what AND where, the standard
+  // group-chat notification shape.
   await sendPush(
     tokenRows.map((r) => r.push_token),
-    senderName,
-    effectiveBody,
-    matchId ? { type: 'chat', matchId } : { type: 'clan_chat', clanId }
+    roomName,
+    `${senderName}: ${effectiveBody}`,
+    matchId
+      ? { type: 'chat', matchId, fromName: senderName }
+      : { type: 'clan_chat', clanId, fromName: senderName, roomName },
   );
 
   return res.status(201).json({ ...msg, username: senderName });

@@ -878,6 +878,60 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON course_requests(status, created_at DESC);
     `,
   },
+  {
+    // Comments on social-feed posts. Mirrors the round_comments table
+    // (same shape: UUID PK, author FK, parent FK, ≤280-char body,
+    // timestamp) so the client + push pattern carry over 1:1. ON DELETE
+    // CASCADE on post_id means deleting a post cleans up its comment
+    // thread automatically.
+    name: 'post_comments.create_table',
+    sql: `
+      CREATE TABLE IF NOT EXISTS post_comments (
+        comment_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        post_id     UUID NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+        user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        body        TEXT NOT NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_post_comments_post_created
+        ON post_comments(post_id, created_at);
+    `,
+  },
+  {
+    // Friends data backfill / reconciliation. The friends table stores ONE
+    // directional row per friendship (user_id = initiator, friend_id =
+    // recipient; status flips pending → accepted on accept). But older data
+    // — created before the bidirectional-dedup guard landed in the
+    // send-request endpoint — can contain BOTH (A,B) and (B,A) rows for the
+    // same pair. That makes a single friend appear in both the Following
+    // and Followers lists and double-counts them. This collapses every
+    // bidirectional pair to a single canonical row and drops self-rows.
+    //
+    // Idempotent: after the first run there are no bidirectional pairs left,
+    // so re-running deletes nothing.
+    name: 'friends.dedupe_backfill',
+    sql: `
+      -- (a) Self-friendships should never exist; remove any.
+      DELETE FROM friends WHERE user_id = friend_id;
+
+      -- (b) Collapse bidirectional pairs. For each pair {X,Y} that has rows
+      --     in BOTH directions, delete the "weaker" row, keeping exactly
+      --     one. Priority for which to KEEP:
+      --       1. accepted beats pending (a real friendship wins)
+      --       2. same status → keep the earlier created_at (original intent)
+      --       3. exact tie → keep the lower user_id (deterministic)
+      --     The DELETE removes row f when its reverse row g is "better".
+      DELETE FROM friends f
+      USING friends g
+      WHERE f.user_id = g.friend_id
+        AND f.friend_id = g.user_id
+        AND (
+          (g.status = 'accepted' AND f.status <> 'accepted')
+          OR (g.status = f.status AND f.created_at > g.created_at)
+          OR (g.status = f.status AND f.created_at = g.created_at AND f.user_id > g.user_id)
+        );
+    `,
+  },
 ];
 
 export async function runMigrations() {

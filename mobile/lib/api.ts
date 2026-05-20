@@ -658,6 +658,18 @@ export const api = {
      *  the same user collapse via the DB unique constraint. */
     report: (id: string, reason?: string) =>
       request<{ success: true }>('POST', `/posts/${id}/report`, { reason }),
+    /** Comments on a post, oldest-first. Each row carries `mine` so the UI
+     *  can show a delete affordance on the viewer's own comments. */
+    comments: (id: string) => request<{
+      comment_id: string; user_id: string; username: string;
+      avatar_url: string | null; body: string; created_at: string; mine: boolean;
+    }[]>('GET', `/posts/${id}/comments`),
+    addComment: (id: string, body: string) =>
+      request<{ success: true; comment_id: string; created_at: string }>(
+        'POST', `/posts/${id}/comments`, { body },
+      ),
+    deleteComment: (id: string, commentId: string) =>
+      request<{ success: true }>('DELETE', `/posts/${id}/comments/${commentId}`),
   },
 
   tournaments: {
