@@ -1548,18 +1548,25 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   );
 
   // Follow counts. The "friends" table is directional with a single row per
-  // pair (status flips from 'pending' → 'accepted' after the recipient
-  // accepts). We expose it to clients in social-network terms:
-  //   • following  = accepted rows where THIS user initiated (user_id = id)
-  //   • followers  = accepted rows where THIS user was the recipient
-  // Sum of both = the user's total friend count. Pending requests are
-  // intentionally excluded — they're not relationships yet.
+  // pair (status flips 'pending' → 'accepted' after the recipient accepts).
+  // We expose it as a follow graph where SENDING a request = following that
+  // person immediately, and ACCEPTING one = following them back:
+  //   • following = people this user sent a request to (pending OR accepted)
+  //                 + people whose request this user accepted (follow-back)
+  //   • followers = people who sent this user a request (pending OR accepted)
+  //                 + people this user sent to who accepted (they followed back)
   const { rows: followCounts } = await pool.query(
     `SELECT
-       (SELECT COUNT(DISTINCT friend_id)::int FROM friends
-         WHERE user_id = $1 AND status = 'accepted') AS following_count,
-       (SELECT COUNT(DISTINCT user_id)::int FROM friends
-         WHERE friend_id = $1 AND status = 'accepted') AS followers_count`,
+       (SELECT COUNT(*)::int FROM (
+          SELECT friend_id AS oid FROM friends WHERE user_id = $1
+          UNION
+          SELECT user_id AS oid FROM friends WHERE friend_id = $1 AND status = 'accepted'
+        ) t) AS following_count,
+       (SELECT COUNT(*)::int FROM (
+          SELECT user_id AS oid FROM friends WHERE friend_id = $1
+          UNION
+          SELECT friend_id AS oid FROM friends WHERE user_id = $1 AND status = 'accepted'
+        ) t) AS followers_count`,
     [req.params.id]
   );
 
@@ -1606,21 +1613,24 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 }));
 
 /**
- * Following list — users that this user has sent (and had accepted) a
- * friend request to. Public; any authenticated user can view another's
- * following list. Useful for navigating the social graph from a profile.
+ * Following list — everyone this user follows. In our follow model, sending a
+ * friend request IS following that person (immediately, while still pending),
+ * and accepting someone's request follows them back. So following =
+ *   (a) anyone this user sent a request to (pending or accepted), plus
+ *   (b) anyone whose request this user accepted (the follow-back).
+ * DISTINCT ON collapses any stray bidirectional duplicate so nobody lists twice.
  */
 router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  // DISTINCT ON guards against a stray bidirectional duplicate row showing
-  // the same person twice (the dedupe_backfill migration removes these, but
-  // belt-and-suspenders so the UI never double-lists).
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, f.created_at
-       FROM friends f
-       JOIN users u ON u.user_id = f.friend_id
-      WHERE f.user_id = $1 AND f.status = 'accepted'
-      ORDER BY u.user_id, f.created_at DESC`,
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+       FROM (
+         SELECT friend_id AS other_id, created_at FROM friends WHERE user_id = $1
+         UNION
+         SELECT user_id  AS other_id, created_at FROM friends WHERE friend_id = $1 AND status = 'accepted'
+       ) x
+       JOIN users u ON u.user_id = x.other_id
+      ORDER BY u.user_id, x.created_at DESC`,
     [req.params.id]
   );
   rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
@@ -1628,17 +1638,22 @@ router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Res
 }));
 
 /**
- * Followers list — users that sent THIS user a friend request which was
- * accepted. Mirror of /following.
+ * Followers list — everyone who follows THIS user: (a) anyone who sent this
+ * user a request (pending or accepted) — sending is following — plus (b) anyone
+ * this user sent a request to who accepted it (they followed back). Mirror of
+ * /following.
  */
 router.get('/:id/followers', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, f.created_at
-       FROM friends f
-       JOIN users u ON u.user_id = f.user_id
-      WHERE f.friend_id = $1 AND f.status = 'accepted'
-      ORDER BY u.user_id, f.created_at DESC`,
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+       FROM (
+         SELECT user_id  AS other_id, created_at FROM friends WHERE friend_id = $1
+         UNION
+         SELECT friend_id AS other_id, created_at FROM friends WHERE user_id = $1 AND status = 'accepted'
+       ) x
+       JOIN users u ON u.user_id = x.other_id
+      ORDER BY u.user_id, x.created_at DESC`,
     [req.params.id]
   );
   rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
