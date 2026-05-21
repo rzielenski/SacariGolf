@@ -229,7 +229,10 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
           // The buffer is stricter than the display path.
 
           const isBufferQuality =
-            rawAcc >= 0
+            rawAcc > 0                    // strictly >0: a 0 (or −1 "unknown")
+                                          // accuracy would make the 1/acc²
+                                          // inverse-variance weight Infinity
+                                          // and poison the averaged fix to NaN
             && rawAcc <= ACCEPT_MAX_ACCURACY_M
             && ageMs <= STALE_FIX_MS
             && fixesSeenRef.current > WARMUP_FIXES;
@@ -472,6 +475,11 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     let sumAlt = 0, altW = 0;
     const baroSamples: number[] = [];
     for (const f of window) {
+      // Defensive: skip any fix that slipped in with non-positive accuracy
+      // (would yield an Infinite/NaN weight). The buffer gate already
+      // enforces accuracy > 0, but this keeps getAveragedFix safe in
+      // isolation.
+      if (!(f.accuracy > 0)) continue;
       const w = 1 / (f.accuracy * f.accuracy);
       sumLat += f.lat * w;
       sumLng += f.lng * w;

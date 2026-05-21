@@ -64,6 +64,12 @@ export interface ActiveShot {
   lie?: string;
   start: Pt;
   startedAt: string;
+  /** Hole the shot was STARTED on. The finalised shot is attributed to this
+   *  hole — not whatever hole is on screen when STOP is tapped — so swiping
+   *  to another hole mid-shot can't misfile it (or fabricate a cross-hole
+   *  segment). Optional for backward-compat with persisted/legacy active
+   *  shots; finalize falls back to the current hole when absent. */
+  holeNum?: number;
 }
 
 /** Per-hole stat detail, attached parallel to hole_scores in the rounds

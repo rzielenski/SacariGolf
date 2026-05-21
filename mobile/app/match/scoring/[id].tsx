@@ -85,6 +85,11 @@ export default function ScoringScreen() {
   const [teebox, setTeebox] = useState<Teebox | null>(null);
   const [course, setCourse] = useState<Course | null>(null);
   const [scores, setScores] = useState<number[]>([]);
+  // Hole indices the player has explicitly scored. Scores default to par, so
+  // an untouched hole is indistinguishable from a real par by value alone —
+  // this set is the only way to tell "entered par" from "never visited."
+  // Submit is blocked until every hole is in here (see handleSubmit).
+  const [enteredHoles, setEnteredHoles] = useState<Set<number>>(new Set());
   const [currentHole, setCurrentHole] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -303,12 +308,13 @@ export default function ScoringScreen() {
         scores,
         holeStats,
         currentHole,
+        entered: Array.from(enteredHoles),
         teeboxId: teebox?.teebox_id,
         courseId: course?.course_id,
         savedAt: Date.now(),
       }));
     } catch { /* best-effort — disk full, etc. */ }
-  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course]);
+  }, [SAVE_KEY, scores, holeStats, currentHole, enteredHoles, teebox, course]);
 
   // Debounced autosave whenever a tracked field changes. The 400ms window
   // smooths out rapid stroke +/- taps and stat slider drags. Crucially, the
@@ -538,7 +544,7 @@ export default function ScoringScreen() {
     const sorted = allSorted.slice(offset, offset + effectiveHoles);
 
     // Restore any saved in-progress draft on top of the fresh par defaults.
-    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
+    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[]; entered?: number[] } | null = null;
     try {
       const raw = await AsyncStorage.getItem(SAVE_KEY);
       if (raw) saved = JSON.parse(raw);
@@ -554,6 +560,7 @@ export default function ScoringScreen() {
         ? saved.holeStats
         : sorted.map(() => ({}))
     );
+    setEnteredHoles(new Set(Array.isArray(saved?.entered) ? saved!.entered : []));
     setCurrentHole(saved?.currentHole ?? 0);
     setSelectingCourse(false);
   }, [SAVE_KEY, numHoles, holesSubset]);
@@ -715,6 +722,7 @@ export default function ScoringScreen() {
     setHoles(h);
     setScores(h.map((hole) => hole.par));
     setHoleStats(h.map(() => ({})));
+    setEnteredHoles(new Set());
     setSelectingCourse(false);
     setCurrentHole(0);
     // Notify friends a round has started (idempotent — backend only fires once)
@@ -809,7 +817,7 @@ export default function ScoringScreen() {
 
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
-    getAveragedFix, getRelativeAltitudeM,
+    getAveragedFix, getRelativeAltitudeM, getMsSinceLastFix,
     // Aim = last tapped measure point (if any). Read off a ref so the hook
     // always sees the current value without re-subscribing.
     getAimPoint: () => measurePinRef.current,
@@ -1899,6 +1907,11 @@ export default function ScoringScreen() {
 
   // ── Scoring helpers ─────────────────────────────────────────────────────────
 
+  /** Mark a hole as explicitly scored by the player. Idempotent. */
+  const markEntered = (idx: number) => {
+    setEnteredHoles((prev) => (prev.has(idx) ? prev : new Set(prev).add(idx)));
+  };
+
   const adjustScore = (delta: number) => {
     // Guard against currentHole drifting out of bounds (e.g. holes were resliced
     // or scoring screen briefly mounts before holes load).
@@ -1909,6 +1922,7 @@ export default function ScoringScreen() {
       next[currentHole] = Math.max(1, Math.min(20, (next[currentHole] ?? fallbackPar) + delta));
       return next;
     });
+    markEntered(currentHole);
   };
 
   const goToHole = (dir: 1 | -1) => {
@@ -1927,6 +1941,25 @@ export default function ScoringScreen() {
   };
 
   const handleSubmit = () => {
+    // Block submission until every hole has been explicitly scored. Scores
+    // default to par, so without this a player could finalise a half-blank
+    // card as an all-par round. List the missing holes so they know where
+    // to go. (Forfeit is a separate path and is unaffected.)
+    const missing: number[] = [];
+    for (let i = 0; i < holes.length; i++) {
+      if (!enteredHoles.has(i)) missing.push(holes[i]?.hole_num ?? i + 1);
+    }
+    if (missing.length > 0) {
+      const preview = missing.slice(0, 12).join(', ');
+      Alert.alert(
+        'Finish your scorecard',
+        `Enter a score for every hole before submitting.\n\n`
+        + `${missing.length} hole${missing.length === 1 ? '' : 's'} still need a score: `
+        + `${preview}${missing.length > 12 ? '…' : ''}`,
+        [{ text: 'OK' }],
+      );
+      return;
+    }
     Alert.alert(
       'Submit Scores?',
       `Total: ${scores.reduce((a, b) => a + b, 0)} strokes`
@@ -3085,7 +3118,7 @@ export default function ScoringScreen() {
                 <TouchableOpacity
                   key={n}
                   style={[styles.quickBtn, score === n && { backgroundColor: C.gold }]}
-                  onPress={() => setScores((prev) => { const next = [...prev]; next[currentHole] = n; return next; })}
+                  onPress={() => { setScores((prev) => { const next = [...prev]; next[currentHole] = n; return next; }); markEntered(currentHole); }}
                 >
                   <Text style={[styles.quickBtnText, score === n && { color: '#000' }]}>{n}</Text>
                 </TouchableOpacity>

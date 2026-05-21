@@ -83,6 +83,12 @@ interface UseShotTrackingArgs {
    *  picked but we do know where the hole is. Absent on holes the player
    *  hasn't pinned yet AND the course catalog doesn't have a pin for. */
   getPinPoint?: () => { lat: number; lng: number } | null;
+  /** Optional: ms since the last accepted GPS fix (from useLocation). When
+   *  the GPS is frozen (iOS paused the watch, deep pocket, etc.) the
+   *  displayed position is stale; recording a shot from it produces a
+   *  0-yard or wildly-jumped phantom segment. We block START/STOP when this
+   *  exceeds STALE_FIX_TRACK_MS rather than silently logging garbage. */
+  getMsSinceLastFix?: () => number | null;
 }
 
 /** How far back into the rolling fix buffer we look when finalising a shot
@@ -91,9 +97,14 @@ interface UseShotTrackingArgs {
  *  that a walking-fast player doesn't average over a 5m arc. */
 const AVERAGE_WINDOW_MS = 2500;
 
+/** GPS older than this when TRACK is tapped is treated as frozen — we refuse
+ *  to start/stop a shot rather than record a phantom from a stale fix. */
+const STALE_FIX_TRACK_MS = 15_000;
+
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
   getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint,
+  getMsSinceLastFix,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
@@ -244,6 +255,13 @@ export function useShotTracking({
       Alert.alert('No GPS', 'Wait for a GPS lock before tracking shots.');
       return;
     }
+    // Reject a frozen fix — recording from a stale position logs a 0-yard
+    // or jumped phantom shot. Applies to both START and STOP.
+    const sinceFix = getMsSinceLastFix?.();
+    if (sinceFix != null && sinceFix > STALE_FIX_TRACK_MS) {
+      Alert.alert('GPS stale', "Your GPS hasn't updated recently. Wait for a fresh fix before tracking the shot.");
+      return;
+    }
     // STOP — finalize the active shot.
     if (activeShot) {
       const end = ptFromCoord();
@@ -310,11 +328,16 @@ export function useShotTracking({
           ? { lateral_yds, lateral_ref }
           : {}),
       };
+      // Attribute the shot to the hole it was STARTED on, not whatever hole
+      // is on screen now — guards against a mid-shot hole change misfiling
+      // it (and against a cross-hole start→end segment). Falls back to the
+      // current hole for legacy active shots persisted without holeNum.
+      const finalizeHole = activeShot.holeNum ?? currentHoleNum;
       setShotsByHole((prev) => {
-        const cur = prev[currentHoleNum] ?? [];
+        const cur = prev[finalizeHole] ?? [];
         const next = [...cur, newShot];
-        persistShots(currentHoleNum, next);
-        return { ...prev, [currentHoleNum]: next };
+        persistShots(finalizeHole, next);
+        return { ...prev, [finalizeHole]: next };
       });
       setActiveShot(null);
       setPendingClubState(null);
@@ -332,7 +355,7 @@ export function useShotTracking({
     }
     const start = ptFromCoord();
     if (!start) return;
-    setActiveShot({ club: pendingClub, start, startedAt: new Date().toISOString() });
+    setActiveShot({ club: pendingClub, start, startedAt: new Date().toISOString(), holeNum: currentHoleNum });
   };
 
   const cancelActiveShot = () => {
