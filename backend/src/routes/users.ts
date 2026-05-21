@@ -1427,19 +1427,57 @@ router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response
 
 router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const friendsOnly = req.query.friends === '1' || req.query.friends === 'true';
+  // mode: 'all' (overall ELO, default) or a match type (solo|duo|squad|ffa).
+  // The app tracks a single global ELO, so mode-specific boards instead
+  // rank by WINS in that mode (matches played as tiebreak) — the most
+  // meaningful per-mode ranking without per-mode ELO.
+  const rawMode = (req.query.mode as string) || 'all';
+  const VALID_MODES = new Set(['solo', 'duo', 'squad', 'ffa']);
+  const mode = VALID_MODES.has(rawMode) ? rawMode : 'all';
+
+  // Friends scope id-set, reused by both ELO and mode queries.
+  const friendScopeCte = `
+    WITH scope AS (
+      SELECT $1::uuid AS user_id
+      UNION
+      SELECT CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+        FROM friends f
+       WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
+    )`;
+
+  // ── Per-mode leaderboard (ranked by wins in that match type) ─────────
+  if (mode !== 'all') {
+    const scopeFilter = friendsOnly
+      ? 'mp.user_id IN (SELECT user_id FROM scope)'
+      : 'u.user_id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = $1)';
+    const sql = `
+      ${friendsOnly ? friendScopeCte : ''}
+      SELECT u.user_id, u.username, u.elo, u.avatar_url,
+             COUNT(*) FILTER (WHERE mr.winner_side = mp.side)::int AS mode_wins,
+             COUNT(*)::int AS mode_matches
+        FROM users u
+        JOIN match_players mp ON mp.user_id = u.user_id
+        JOIN matches m ON m.match_id = mp.match_id
+                      AND m.match_type = $2
+                      AND m.completed = true
+                      AND m.is_practice = false
+        LEFT JOIN match_results mr ON mr.match_id = m.match_id
+       WHERE ${scopeFilter}
+       GROUP BY u.user_id
+      HAVING COUNT(*) > 0
+       ORDER BY mode_wins DESC, mode_matches DESC, u.elo DESC
+       LIMIT 100`;
+    const { rows } = await pool.query(sql, [req.userId, mode]);
+    return res.json(rows);
+  }
+
+  // ── Overall ELO leaderboard (default) ───────────────────────────────
   if (friendsOnly) {
-    // Self + accepted friends, ranked by ELO. Friend rows are stored as a
-    // single direction with status='accepted' (the original requester being
-    // user_id, friend_id either side depending on who initiated).
     const { rows } = await pool.query(
-      `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
+      `${friendScopeCte}
+       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
        FROM users u
-       WHERE u.user_id = $1
-          OR u.user_id IN (
-            SELECT CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
-            FROM friends f
-            WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
-          )
+       WHERE u.user_id IN (SELECT user_id FROM scope)
        ORDER BY u.elo DESC
        LIMIT 100`,
       [req.userId]

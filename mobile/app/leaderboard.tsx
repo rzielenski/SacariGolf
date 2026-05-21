@@ -18,22 +18,31 @@ function EloColor(elo: number) {
   return '#cd7f32';
 }
 
+type Mode = 'all' | 'solo' | 'duo' | 'squad';
+const MODES: { key: Mode; label: string }[] = [
+  { key: 'all',   label: 'Overall' },
+  { key: 'solo',  label: 'Solo' },
+  { key: 'duo',   label: 'Duo' },
+  { key: 'squad', label: 'Squad' },
+];
+
 export default function LeaderboardScreen() {
   const { user } = useAuth();
   const [players, setPlayers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [scope, setScope] = useState<'global' | 'friends'>('global');
+  const [mode, setMode] = useState<Mode>('all');
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
-      setPlayers(await api.users.leaderboard(scope === 'friends'));
+      setPlayers(await api.users.leaderboard(scope === 'friends', mode));
     } catch { /* silent */ } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [scope]);
+  }, [scope, mode]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -50,6 +59,21 @@ export default function LeaderboardScreen() {
           {myRank > 0 && <Text style={styles.subtitle}>You are #{myRank}</Text>}
         </View>
         <View style={{ width: 60 }} />
+      </View>
+
+      {/* Mode selector — Overall ELO vs per-mode (ranked by wins). */}
+      <View style={styles.modeRow}>
+        {MODES.map((m) => (
+          <TouchableOpacity
+            key={m.key}
+            style={[styles.modeBtn, mode === m.key && styles.modeBtnActive]}
+            onPress={() => { setMode(m.key); setLoading(true); }}
+          >
+            <Text style={[styles.modeBtnText, mode === m.key && styles.modeBtnTextActive]}>
+              {m.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
 
       <View style={styles.scopeRow}>
@@ -79,11 +103,16 @@ export default function LeaderboardScreen() {
               player={item}
               rank={index + 1}
               isMe={item.user_id === user?.user_id}
+              mode={mode}
             />
           )}
           ListEmptyComponent={
             <View style={styles.centered}>
-              <Text style={styles.emptyText}>No players yet.</Text>
+              <Text style={styles.emptyText}>
+                {mode === 'all'
+                  ? 'No players yet.'
+                  : `No ${MODES.find((m) => m.key === mode)?.label.toLowerCase()} matches played yet.`}
+              </Text>
             </View>
           }
         />
@@ -92,17 +121,36 @@ export default function LeaderboardScreen() {
   );
 }
 
-function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: boolean }) {
+function PlayerRow({ player, rank, isMe, mode }: {
+  player: any; rank: number; isMe: boolean; mode: Mode;
+}) {
   const c = useCensor();
   const eloColor = EloColor(player.elo);
-  const winRate = player.total_matches > 0
-    ? Math.round((player.total_wins / player.total_matches) * 100)
-    : 0;
 
   const medalColor =
     rank === 1 ? C.gold :
     rank === 2 ? '#c0c0c0' :
     rank === 3 ? '#a1673a' : C.textDim;
+
+  // Overall board → ELO + win-rate meta. Mode board → wins + W/L meta.
+  let statValue: string;
+  let statLabel: string;
+  let metaLine: string;
+  if (mode === 'all') {
+    const winRate = player.total_matches > 0
+      ? Math.round((player.total_wins / player.total_matches) * 100)
+      : 0;
+    statValue = String(player.elo);
+    statLabel = 'ELO';
+    metaLine = `${player.total_matches}M · ${winRate}% WR`;
+  } else {
+    const wins = player.mode_wins ?? 0;
+    const matches = player.mode_matches ?? 0;
+    const wr = matches > 0 ? Math.round((wins / matches) * 100) : 0;
+    statValue = String(wins);
+    statLabel = 'WINS';
+    metaLine = `${matches} played · ${wr}% WR`;
+  }
 
   return (
     <TouchableOpacity
@@ -125,13 +173,11 @@ function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: bo
           <Text style={styles.username}>{c(player.username)}</Text>
           {isMe && <Text style={styles.youBadge}>You</Text>}
         </View>
-        <Text style={styles.meta}>
-          {player.total_matches}M · {winRate}% WR
-        </Text>
+        <Text style={styles.meta}>{metaLine}</Text>
       </View>
       <View style={styles.eloBox}>
-        <Text style={[styles.elo, { color: eloColor }]}>{player.elo}</Text>
-        <Text style={styles.eloLabel}>ELO</Text>
+        <Text style={[styles.elo, { color: eloColor }]}>{statValue}</Text>
+        <Text style={styles.eloLabel}>{statLabel}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -178,6 +224,15 @@ const styles = StyleSheet.create({
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   emptyText: { color: C.textMuted, fontSize: 15 },
+
+  modeRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingTop: 12 },
+  modeBtn: {
+    flex: 1, paddingVertical: 8, borderRadius: 6, alignItems: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  modeBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
+  modeBtnText: { color: C.textMuted, fontWeight: '800', fontSize: 12 },
+  modeBtnTextActive: { color: C.bg },
 
   scopeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 },
   scopeBtn: {

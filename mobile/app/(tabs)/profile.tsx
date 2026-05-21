@@ -477,22 +477,16 @@ export default function ProfileScreen() {
       </View>
 
       <View style={styles.miniRow}>
-        <PressableScale
-          onPress={() => {
-            // Pre-fill matches how we DISPLAY the handicap: a stored -2.4
-            // shows in the input as "+2.4". The parse side accepts both
-            // "+2.4" and "-2.4" so either input works.
-            const hi = user.handicap_index;
-            setManualHcapInput(hi == null ? '' : hi < 0 ? `+${(-hi).toFixed(1)}` : hi.toString());
-            setManualHcapModal(true);
-          }}
-          style={styles.miniCard}
-        >
-          <Text style={styles.miniLabel}>STARTING HCP</Text>
+        {/* Drinks Drunk — lifetime count logged via the 🍺 button while
+            scoring. Display-only (not interactive). Replaced the
+            "Starting HCP" tile per request. Shows 0 until the first round
+            with drinks logged is submitted. */}
+        <View style={styles.miniCard}>
+          <Text style={styles.miniLabel}>🍺 DRINKS DRUNK</Text>
           <Text style={styles.miniValue} numberOfLines={1}>
-            {fmtHandicap(user.handicap_index ?? null, 'Set')}
+            {totalBeers}
           </Text>
-        </PressableScale>
+        </View>
 
         <PressableScale onPress={() => router.push('/bag' as any)} style={styles.miniCard}>
           <Text style={styles.miniLabel}>MY BAG</Text>
@@ -545,9 +539,6 @@ export default function ProfileScreen() {
         <StatBox label="Losses" value={user.total_matches - user.total_wins - (user.total_ties ?? 0)} />
         <StatBox label="Ties" value={user.total_ties ?? 0} />
         <StatBox label="Win Rate" value={`${winRate}%`} />
-        {/* Drinks logged — private stat (only you + friends see it on a
-            profile). Shown once you've logged at least one. */}
-        {totalBeers > 0 && <StatBox label="🍺 Drinks Drunk" value={totalBeers} />}
       </View>
 
       {/* Full stats screen entry point — handicap, SG, normalized averages */}

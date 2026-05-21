@@ -375,7 +375,19 @@ export const api = {
       user_id: string; username: string; elo: number;
       avatar_url: string | null; created_at: string;
     }[]>('GET', `/users/${id}/followers`),
-    leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
+    /** Leaderboard. `mode` is 'all' (overall ELO, default) or a match type
+     *  (solo|duo|squad|ffa) — mode boards rank by wins in that mode.
+     *  `friendsOnly` scopes to self + accepted friends. */
+    leaderboard: (
+      friendsOnly = false,
+      mode: 'all' | 'solo' | 'duo' | 'squad' | 'ffa' = 'all',
+    ) => {
+      const q = new URLSearchParams();
+      if (friendsOnly) q.set('friends', '1');
+      if (mode !== 'all') q.set('mode', mode);
+      const qs = q.toString();
+      return request<any[]>('GET', `/users/leaderboard${qs ? `?${qs}` : ''}`);
+    },
     deleteAccount: () => request<any>('DELETE', '/users/me'),
     importShots: (body: {
       name?: string;
