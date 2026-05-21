@@ -388,6 +388,10 @@ export const api = {
       const qs = q.toString();
       return request<any[]>('GET', `/users/leaderboard${qs ? `?${qs}` : ''}`);
     },
+    /** Bump the lifetime "drinks drunk" tally by +1 or -1. Server clamps to
+     *  ≥0 and ignores magnitudes >1, so pass +1 / -1. Returns the new total. */
+    adjustDrinks: (delta: 1 | -1) =>
+      request<{ drinks: number }>('POST', '/users/me/drinks', { delta }),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
     importShots: (body: {
       name?: string;

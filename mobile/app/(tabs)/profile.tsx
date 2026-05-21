@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert,
   Image, Modal, ActivityIndicator, TextInput, FlatList, Linking,
@@ -62,8 +62,11 @@ export default function ProfileScreen() {
   const [bestRound, setBestRound] = useState<any | null>(null);
   const [followingCount, setFollowingCount] = useState(0);
   const [followersCount, setFollowersCount] = useState(0);
-  // Lifetime beers logged across rounds — a private stat (you + friends).
-  const [totalBeers, setTotalBeers] = useState(0);
+  // Lifetime "drinks drunk" — a private stat (you + friends) the user bumps
+  // by hand with the +/- on the profile tile. `drinksBusy` debounces taps
+  // so a fast double-tap can't race two writes out of order.
+  const [drinks, setDrinks] = useState(0);
+  const drinksBusy = useRef(false);
   // The user's teams (clans). Surfaced on the profile so the Teams sub-tab
   // didn't have to keep haunting the Social area after that tab was
   // refocused on chats only.
@@ -169,7 +172,7 @@ export default function ProfileScreen() {
         setBestRound(data.best_round ?? null);
         setFollowingCount(data.following_count ?? 0);
         setFollowersCount(data.followers_count ?? 0);
-        setTotalBeers(data.beer_stat?.total_beers ?? 0);
+        setDrinks(data.drinks ?? 0);
       })
       .catch(() => { });
     // Teams the user belongs to. Cheap call, runs alongside the profile
@@ -237,6 +240,25 @@ export default function ProfileScreen() {
       { text: 'Log out', style: 'destructive', onPress: logout },
     ]);
   };
+
+  // Bump the lifetime drinks tally. Optimistic — update the number instantly,
+  // then reconcile with the server's clamped value. A short busy-gate keeps
+  // rapid taps from racing two writes; the count never goes below 0.
+  const adjustDrinks = useCallback(async (delta: 1 | -1) => {
+    if (drinksBusy.current) return;
+    if (delta < 0 && drinks <= 0) return;
+    drinksBusy.current = true;
+    setDrinks((d) => Math.max(0, d + delta));
+    try {
+      const { drinks: server } = await api.users.adjustDrinks(delta);
+      setDrinks(server);
+    } catch {
+      // Roll back the optimistic change on failure.
+      setDrinks((d) => Math.max(0, d - delta));
+    } finally {
+      drinksBusy.current = false;
+    }
+  }, [drinks]);
 
   const changeUsername = () => {
     Alert.prompt(
@@ -477,15 +499,29 @@ export default function ProfileScreen() {
       </View>
 
       <View style={styles.miniRow}>
-        {/* Drinks Drunk — lifetime count logged via the 🍺 button while
-            scoring. Display-only (not interactive). Replaced the
-            "Starting HCP" tile per request. Shows 0 until the first round
-            with drinks logged is submitted. */}
+        {/* Drinks Drunk — a lifetime tally the user bumps by hand with the
+            +/- buttons. Replaced the per-round map counter (and the old
+            "Starting HCP" tile). Private stat: only you + friends see it. */}
         <View style={styles.miniCard}>
           <Text style={styles.miniLabel}>🍺 DRINKS DRUNK</Text>
-          <Text style={styles.miniValue} numberOfLines={1}>
-            {totalBeers}
-          </Text>
+          <View style={styles.drinksRow}>
+            <TouchableOpacity
+              style={[styles.drinksBtn, drinks <= 0 && styles.drinksBtnDisabled]}
+              onPress={() => adjustDrinks(-1)}
+              disabled={drinks <= 0}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.drinksBtnText}>−</Text>
+            </TouchableOpacity>
+            <Text style={styles.drinksValue} numberOfLines={1}>{drinks}</Text>
+            <TouchableOpacity
+              style={styles.drinksBtn}
+              onPress={() => adjustDrinks(1)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.drinksBtnText}>+</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <PressableScale onPress={() => router.push('/bag' as any)} style={styles.miniCard}>
@@ -1410,6 +1446,23 @@ const styles = StyleSheet.create({
   },
   miniLabel: { color: C.gold, fontSize: 10, fontWeight: '800', letterSpacing: 1.3 },
   miniValue: { color: C.text, fontSize: 14, fontWeight: '700', marginTop: 4 },
+
+  // Drinks-drunk stepper: − [count] + laid out across the tile.
+  drinksRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
+  drinksBtn: {
+    width: 30, height: 30, borderRadius: 8,
+    backgroundColor: C.gold + '22',
+    borderWidth: 1, borderColor: C.gold,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  drinksBtnDisabled: { opacity: 0.35 },
+  drinksBtnText: { color: C.gold, fontSize: 18, fontWeight: '900', lineHeight: 20 },
+  drinksValue: { color: C.text, fontSize: 20, fontWeight: '800', minWidth: 32, textAlign: 'center' },
 
   // Range Session CTA — wrapped in GlowCard which handles the pulsing
   // border + halo glow itself. We only set inner layout here (padding,

@@ -88,10 +88,6 @@ export default function ScoringScreen() {
   const [currentHole, setCurrentHole] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  // Beers logged this round → submitted with the scorecard and feeds the
-  // Beer Ranker leaderboards. Persisted in the draft so a mid-round
-  // app-kill doesn't lose the count.
-  const [beers, setBeers] = useState(0);
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
   // In-round invite modal — only used for practice rounds, where the host can
@@ -309,11 +305,10 @@ export default function ScoringScreen() {
         currentHole,
         teeboxId: teebox?.teebox_id,
         courseId: course?.course_id,
-        beers,
         savedAt: Date.now(),
       }));
     } catch { /* best-effort — disk full, etc. */ }
-  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course, beers]);
+  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course]);
 
   // Debounced autosave whenever a tracked field changes. The 400ms window
   // smooths out rapid stroke +/- taps and stat slider drags. Crucially, the
@@ -543,7 +538,7 @@ export default function ScoringScreen() {
     const sorted = allSorted.slice(offset, offset + effectiveHoles);
 
     // Restore any saved in-progress draft on top of the fresh par defaults.
-    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[]; beers?: number } | null = null;
+    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
     try {
       const raw = await AsyncStorage.getItem(SAVE_KEY);
       if (raw) saved = JSON.parse(raw);
@@ -560,7 +555,6 @@ export default function ScoringScreen() {
         : sorted.map(() => ({}))
     );
     setCurrentHole(saved?.currentHole ?? 0);
-    setBeers(typeof saved?.beers === 'number' ? saved.beers : 0);
     setSelectingCourse(false);
   }, [SAVE_KEY, numHoles, holesSubset]);
 
@@ -810,14 +804,6 @@ export default function ScoringScreen() {
       return rest;
     });
   };
-  // "Move heatmap" mode — when enabled, the next map tap *places* the aim
-  // point instead of dropping a measure pin. Drag-to-move on the Marker
-  // itself was unreliable on iOS (react-native-maps swallows the gesture
-  // when tracksViewChanges is off, and turning it on stutters), so this
-  // tap-to-set toggle is the canonical interaction. Native drag still
-  // works as a bonus when it does fire — both code paths feed setAimByHole.
-  const [movingAim, setMovingAim] = useState(false);
-
   const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const tracking = useShotTracking({
@@ -1012,8 +998,11 @@ export default function ScoringScreen() {
   useEffect(() => {
     if (selectingCourse) return;
     if (!course?.course_id) return;
+    // Wait for the match to load before deciding — we need to know whether
+    // it's a practice round (drives the perk text below) and we don't want
+    // to fire the once-per-mount warning against a half-loaded match.
+    if (!match) return;
     if (dataQualityShownRef.current) return;
-    if (match?.is_practice) return;
     dataQualityShownRef.current = true;
     api.courses.dataQuality(course.course_id)
       .then((dq) => {
@@ -1032,13 +1021,18 @@ export default function ScoringScreen() {
           lines.push(`Elevation: only ${dq.elevation_points} reference point${dq.elevation_points === 1 ? '' : 's'} on file.`);
         }
         lines.push('');
-        lines.push('Distances and slope may be less accurate until more rounds are played here.');
-        lines.push('');
-        lines.push('Earn a LUCKY ROUND perk this match by:');
-        lines.push('  • Marking the pin location on most holes you play');
-        lines.push('  • OR tagging shots on most holes you play');
-        lines.push('');
-        lines.push('Lucky Round = next ranked match doubles a win OR cancels a loss.');
+        lines.push('Distances and slope may be less accurate until more rounds are played here. Mark the pin on each green (tap the flag) to map it for everyone.');
+        // The Lucky Round perk only exists on ranked matches, so only dangle
+        // it there. Practice rounds still get the accuracy warning above —
+        // it's about distance reliability, which matters regardless of mode.
+        if (!match.is_practice) {
+          lines.push('');
+          lines.push('Earn a LUCKY ROUND perk this match by:');
+          lines.push('  • Marking the pin location on most holes you play');
+          lines.push('  • OR tagging shots on most holes you play');
+          lines.push('');
+          lines.push('Lucky Round = next ranked match doubles a win OR cancels a loss.');
+        }
         Alert.alert(
           'Course needs more data',
           lines.join('\n'),
@@ -1047,7 +1041,7 @@ export default function ScoringScreen() {
         );
       })
       .catch(() => { /* non-fatal */ });
-  }, [selectingCourse, course?.course_id, match?.is_practice]);
+  }, [selectingCourse, course?.course_id, match]);
 
   // ── Relative-elevation: collect samples + batch flush ──────────────────
   // Buffers each watchPositionAsync fix (skip repeats within ~3m horizontal).
@@ -1929,7 +1923,6 @@ export default function ScoringScreen() {
     Alert.alert(
       'Submit Scores?',
       `Total: ${scores.reduce((a, b) => a + b, 0)} strokes`
-      + (beers > 0 ? `\n🍺 ${beers} drink${beers === 1 ? '' : 's'} logged` : '')
       + `\n\nThis will finalise your round.`,
       [
         { text: 'Cancel', style: 'cancel' },
@@ -1945,7 +1938,6 @@ export default function ScoringScreen() {
       holeStats,
       courseId: course?.course_id,
       teeboxId: teebox?.teebox_id,
-      beers,
     };
     try {
       const result = await api.matches.submitScores(id, submitBody);
@@ -2177,21 +2169,23 @@ export default function ScoringScreen() {
             ignoreNextMapTap.current = false;
             return;
           }
-          // "Move heatmap" mode: the next map tap drops / repositions the
-          // aim point for this hole instead of placing a measure pin.
-          // Auto-exits the mode so the player can immediately tap again to
-          // measure something else without thinking about the toggle.
-          if (movingAim && currentHoleNum != null) {
-            const { latitude, longitude } = e.nativeEvent.coordinate;
-            setAimByHole((prev) => ({
-              ...prev,
-              [currentHoleNum]: { lat: latitude, lng: longitude },
-            }));
-            setMovingAim(false);
-            setFollowing(false);
-            return;
-          }
           setMeasurePin(e.nativeEvent.coordinate);
+          setFollowing(false);
+        }}
+        // Long-press anywhere on the map sets / moves the heatmap aim for
+        // this hole. The heatmap stays at the club's natural distance and
+        // only rotates to point toward the long-pressed spot (see the
+        // heatmapRings memo — only the bearing of this point is used). To
+        // then fine-tune, the player presses-and-holds the heatmap dot
+        // itself and slides it (the Marker is `draggable`); releasing drops
+        // it. This replaced the old "MOVE HEATMAP" tap-arm toggle.
+        onLongPress={(e) => {
+          if (currentHoleNum == null) return;
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          setAimByHole((prev) => ({
+            ...prev,
+            [currentHoleNum]: { lat: latitude, lng: longitude },
+          }));
           setFollowing(false);
         }}
         onPanDrag={() => setFollowing(false)}
@@ -2336,7 +2330,8 @@ export default function ScoringScreen() {
                 player's aim for this hole, so a deliberate "I'm playing
                 the left side of the fairway" gets credited as accurate
                 later, not as a lateral miss against fairway center.
-                Long-press the chip in the top-left of the map to reset. */}
+                Press-and-hold this dot and slide to fine-tune; long-press
+                empty map to jump it; "RESET AIM" chip clears it. */}
             <Marker
               coordinate={heatmapRings.center}
               anchor={{ x: 0.5, y: 0.5 }}
@@ -2551,16 +2546,6 @@ export default function ScoringScreen() {
           <Text style={[styles.scoreToPar, { color: scoreParColor }]}>
             {scoreToPar === 0 ? 'E' : scoreToPar > 0 ? `+${scoreToPar}` : `${scoreToPar}`}
           </Text>
-          {/* Beer counter — tap to add a beer, long-press to remove one.
-              Submitted with the round; feeds the Beer Ranker leaderboards. */}
-          <TouchableOpacity
-            style={styles.topBarBtn}
-            onPress={() => setBeers((b) => Math.min(50, b + 1))}
-            onLongPress={() => setBeers((b) => Math.max(0, b - 1))}
-            delayLongPress={350}
-          >
-            <Text style={styles.topBarBtnText}>🍺 {beers}</Text>
-          </TouchableOpacity>
           <TouchableOpacity style={styles.topBarBtn} onPress={() => setScorecardVisible(true)}>
             <Text style={styles.topBarBtnText}>Card</Text>
           </TouchableOpacity>
@@ -2681,31 +2666,25 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Heatmap aim controls — always-visible toggle so the player can
-          drop / move their target with a single tap. Native drag-to-move
-          on the heatmap Marker is also wired up, but iOS swallowed it
-          inconsistently during testing; this tap-to-place flow is the
-          canonical interaction.
-            • MOVE HEATMAP → arms the next map tap to set the aim.
-            • RESET AIM    → clears the manual aim (only shown when set). */}
+      {/* Heatmap aim controls. The aim is set by LONG-PRESSING the map
+          (rotates the heatmap toward that spot at the club's distance), and
+          fine-tuned by pressing-and-holding the heatmap dot and sliding it.
+          So the only button here is RESET, shown once an aim exists. A small
+          hint nudges the player toward the long-press gesture until they've
+          placed one. */}
       <View style={styles.aimChipRow}>
-        <TouchableOpacity
-          style={[styles.aimResetChip, movingAim && styles.aimResetChipArmed]}
-          onPress={() => setMovingAim((m) => !m)}
-          activeOpacity={0.7}
-        >
-          <Text style={[styles.aimResetChipText, movingAim && { color: C.bg }]}>
-            {movingAim ? 'TAP MAP TO PLACE' : '⌖ MOVE HEATMAP'}
-          </Text>
-        </TouchableOpacity>
-        {aimForCurrentHole && !movingAim && (
+        {aimForCurrentHole ? (
           <TouchableOpacity
             style={styles.aimResetChip}
             onPress={clearAim}
             activeOpacity={0.7}
           >
-            <Text style={styles.aimResetChipText}>✕ RESET</Text>
+            <Text style={styles.aimResetChipText}>✕ RESET AIM</Text>
           </TouchableOpacity>
+        ) : (
+          <View style={styles.aimHintChip}>
+            <Text style={styles.aimHintChipText}>⌖ Long-press map to aim</Text>
+          </View>
         )}
       </View>
 
@@ -3520,14 +3499,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 6,
     shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4,
   },
-  // When the player has tapped MOVE HEATMAP, the chip flips to a filled
-  // gold pill so it's obvious the next tap will be consumed by aim
-  // placement, not measure-pin placement.
-  aimResetChipArmed: {
-    backgroundColor: C.gold,
-    borderColor: C.gold,
-  },
   aimResetChipText: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 0.5 },
+  // Subtle, non-interactive nudge shown until the player has placed an aim,
+  // teaching the long-press gesture. Muted (not gold) so it doesn't read as
+  // a tappable button.
+  aimHintChip: {
+    backgroundColor: C.bg + 'cc',
+    borderRadius: 14, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 10, paddingVertical: 4,
+    flexDirection: 'row', alignItems: 'center',
+  },
+  aimHintChipText: { color: C.textMuted, fontWeight: '700', fontSize: 10, letterSpacing: 0.5 },
 
   // Ghost player endpoint label — silver, low-contrast so it sits behind
   // the real shot markers. Italic + lowercase for the wizardly vibe.

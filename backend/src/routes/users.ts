@@ -1502,7 +1502,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
-            u.bio, u.home_course_id,
+            u.bio, u.home_course_id, u.drinks,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u
      LEFT JOIN courses c ON c.course_id = u.home_course_id
@@ -1584,26 +1584,14 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     }
   }
 
-  // Beers stat — total + per-round average, derived from the rounds table.
-  // PRIVACY: only surfaced to the user themselves and their accepted
-  // friends (App Store posture — we don't broadcast an alcohol stat to
+  // Drinks-drunk stat — a lifetime tally the user adjusts by hand from their
+  // profile (users.drinks). PRIVACY: only surfaced to the user themselves and
+  // their accepted friends (App Store posture — we don't broadcast it to
   // strangers, and there's no public competition around it). Returned as
   // null for non-friends so the client simply doesn't render it.
-  let beerStat: { total_beers: number; beer_rounds: number; beers_per_round: number } | null = null;
+  let drinks: number | null = null;
   if (friendshipStatus === 'self' || friendshipStatus === 'friends') {
-    const { rows: beerRows } = await pool.query(
-      `SELECT COALESCE(SUM(beers), 0)::int AS total_beers,
-              COUNT(*) FILTER (WHERE beers > 0)::int AS beer_rounds
-         FROM rounds WHERE user_id = $1`,
-      [req.params.id]
-    );
-    const tot = beerRows[0]?.total_beers ?? 0;
-    const rds = beerRows[0]?.beer_rounds ?? 0;
-    beerStat = {
-      total_beers: tot,
-      beer_rounds: rds,
-      beers_per_round: rds > 0 ? Math.round((tot / rds) * 10) / 10 : 0,
-    };
+    drinks = (userInfo as any).drinks ?? 0;
   }
 
   return res.json({
@@ -1613,7 +1601,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     following_count: followCounts[0]?.following_count ?? 0,
     followers_count: followCounts[0]?.followers_count ?? 0,
     friendship_status: friendshipStatus,
-    beer_stat: beerStat,
+    drinks,
   });
 }));
 
@@ -2181,6 +2169,30 @@ router.post('/me/notifications/seen', requireAuth, wrap(async (req: AuthRequest,
     [req.userId]
   );
   return res.json({ success: true });
+}));
+
+/**
+ * Adjust the lifetime "drinks drunk" tally by +/- delta. The user bumps this
+ * by hand from their profile (the map-screen counter was retired). The count
+ * is clamped to [0, 100000] so a runaway long-press can't drive it negative
+ * or absurd. Returns the new total.
+ */
+router.post('/me/drinks', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const raw = Number((req.body ?? {}).delta);
+  if (!Number.isFinite(raw) || raw === 0) {
+    return res.status(400).json({ error: 'delta must be a non-zero number' });
+  }
+  // One tap = ±1; ignore any larger client-supplied magnitude to keep this
+  // honest (no scripted bulk inflation).
+  const delta = raw > 0 ? 1 : -1;
+  const { rows } = await pool.query(
+    `UPDATE users
+        SET drinks = LEAST(100000, GREATEST(0, drinks + $2))
+      WHERE user_id = $1
+      RETURNING drinks`,
+    [req.userId, delta]
+  );
+  return res.json({ drinks: rows[0]?.drinks ?? 0 });
 }));
 
 export default router;

@@ -927,6 +927,22 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Lifetime "Drinks Drunk" tally — a self-reported vanity counter the
+    // user adjusts directly from their profile (+/-), not per-round. Kept
+    // as a single column on users (was previously derived from
+    // rounds.beers, but the per-round logging UI was removed in favour of
+    // a profile stepper). Backfilled from any beers already logged on
+    // rounds so existing data isn't lost.
+    name: 'users.drinks',
+    sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS drinks INTEGER NOT NULL DEFAULT 0;
+      UPDATE users u
+         SET drinks = sub.total
+        FROM (SELECT user_id, COALESCE(SUM(beers),0)::int AS total FROM rounds GROUP BY user_id) sub
+       WHERE sub.user_id = u.user_id AND u.drinks = 0 AND sub.total > 0;
+    `,
+  },
+  {
     name: 'friends.dedupe_backfill',
     sql: `
       -- (a) Self-friendships should never exist; remove any.
