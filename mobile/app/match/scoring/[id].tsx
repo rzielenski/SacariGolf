@@ -797,13 +797,22 @@ export default function ScoringScreen() {
   aimRef.current = aimByHole;
   const aimForCurrentHole: { lat: number; lng: number } | null =
     currentHoleNum != null ? (aimByHole[currentHoleNum] ?? null) : null;
-  const clearAim = () => {
+  // Live heatmap drag. The draggable dot fires `onDrag` continuously while the
+  // finger slides (press-and-hold the dot, then move — no lift needed); we
+  // commit the new aim on each tick so the dispersion rings re-point in real
+  // time instead of only snapping when you release. State writes are throttled
+  // (~30ms) so a 60fps native drag doesn't flood React with re-renders and
+  // stutter — the native marker still follows the finger at full frame rate;
+  // only the polygon recompute is rate-limited. `force` bypasses the throttle
+  // for the final placement on drag-end.
+  const lastAimDragRef = useRef(0);
+  const commitAim = useCallback((lat: number, lng: number, force = false) => {
     if (currentHoleNum == null) return;
-    setAimByHole((prev) => {
-      const { [currentHoleNum]: _, ...rest } = prev;
-      return rest;
-    });
-  };
+    const now = Date.now();
+    if (!force && now - lastAimDragRef.current < 30) return;
+    lastAimDragRef.current = now;
+    setAimByHole((prev) => ({ ...prev, [currentHoleNum]: { lat, lng } }));
+  }, [currentHoleNum]);
   const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const tracking = useShotTracking({
@@ -2326,29 +2335,35 @@ export default function ScoringScreen() {
               strokeWidth={2}
               fillColor="rgba(255,242,0,0.12)"
             />
-            {/* Heatmap center marker is DRAGGABLE — moving it shifts the
-                player's aim for this hole, so a deliberate "I'm playing
-                the left side of the fairway" gets credited as accurate
-                later, not as a lateral miss against fairway center.
-                Press-and-hold this dot and slide to fine-tune; long-press
-                empty map to jump it; "RESET AIM" chip clears it. */}
+            {/* Heatmap aim handle — DRAGGABLE. Press-and-hold the dot and
+                slide; the dispersion rings re-point live (onDrag) so the
+                heatmap follows your finger in real time, no lift needed.
+                The handle's coordinate is bound to the aim point itself
+                (not the projected ring center) so the native drag and our
+                state stay in lockstep — without that the marker fights the
+                finger, snapping back toward the club-distance center. Until
+                an aim is placed it rests on the ring center as the grab
+                target. Releasing commits the final placement. */}
             <Marker
-              coordinate={heatmapRings.center}
+              coordinate={aimForCurrentHole
+                ? { latitude: aimForCurrentHole.lat, longitude: aimForCurrentHole.lng }
+                : heatmapRings.center}
               anchor={{ x: 0.5, y: 0.5 }}
               draggable
               tracksViewChanges={false}
-              onDragEnd={(e) => {
-                if (currentHoleNum == null) return;
+              onDragStart={() => setFollowing(false)}
+              onDrag={(e) => {
                 const { latitude, longitude } = e.nativeEvent.coordinate;
-                setAimByHole((prev) => ({
-                  ...prev,
-                  [currentHoleNum]: { lat: latitude, lng: longitude },
-                }));
+                commitAim(latitude, longitude);
+              }}
+              onDragEnd={(e) => {
+                const { latitude, longitude } = e.nativeEvent.coordinate;
+                commitAim(latitude, longitude, true);
               }}
             >
               {/* The outer transparent square is the actual TOUCH target —
-                  46×46pt is roughly an Apple-HIG fingertip. The inner View
-                  is the visible dot. Without the oversized wrapper the
+                  a generous fingertip area (see heatmapHitbox). The inner
+                  View is the visible dot. Without the oversized wrapper the
                   draggable hitbox is just the 8–14pt dot, which is brutal
                   to grab on a satellite tile. */}
               <View style={styles.heatmapHitbox}>
@@ -2375,13 +2390,14 @@ export default function ScoringScreen() {
             anchor={{ x: 0.5, y: 0.5 }}
             draggable
             tracksViewChanges={false}
-            onDragEnd={(e) => {
-              if (currentHoleNum == null) return;
+            onDragStart={() => setFollowing(false)}
+            onDrag={(e) => {
               const { latitude, longitude } = e.nativeEvent.coordinate;
-              setAimByHole((prev) => ({
-                ...prev,
-                [currentHoleNum]: { lat: latitude, lng: longitude },
-              }));
+              commitAim(latitude, longitude);
+            }}
+            onDragEnd={(e) => {
+              const { latitude, longitude } = e.nativeEvent.coordinate;
+              commitAim(latitude, longitude, true);
             }}
           >
             {/* Same fingertip-sized hitbox as the heatmap-rings center marker
@@ -2666,27 +2682,6 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Heatmap aim controls. The aim is set by LONG-PRESSING the map
-          (rotates the heatmap toward that spot at the club's distance), and
-          fine-tuned by pressing-and-holding the heatmap dot and sliding it.
-          So the only button here is RESET, shown once an aim exists. A small
-          hint nudges the player toward the long-press gesture until they've
-          placed one. */}
-      <View style={styles.aimChipRow}>
-        {aimForCurrentHole ? (
-          <TouchableOpacity
-            style={styles.aimResetChip}
-            onPress={clearAim}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.aimResetChipText}>✕ RESET AIM</Text>
-          </TouchableOpacity>
-        ) : (
-          <View style={styles.aimHintChip}>
-            <Text style={styles.aimHintChipText}>⌖ Long-press map to aim</Text>
-          </View>
-        )}
-      </View>
 
       {/* Club picker modal */}
       <Modal
@@ -3487,29 +3482,6 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   liveShotPillText: { fontFamily: F.serif, fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
-  aimChipRow: {
-    position: 'absolute', top: 184, left: 12, right: 12,
-    flexDirection: 'row', gap: 8,
-    zIndex: 6,
-  },
-  aimResetChip: {
-    backgroundColor: C.bg + 'ee',
-    borderRadius: 14, borderWidth: 1, borderColor: C.gold,
-    paddingHorizontal: 10, paddingVertical: 4,
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4,
-  },
-  aimResetChipText: { color: C.gold, fontWeight: '800', fontSize: 10, letterSpacing: 0.5 },
-  // Subtle, non-interactive nudge shown until the player has placed an aim,
-  // teaching the long-press gesture. Muted (not gold) so it doesn't read as
-  // a tappable button.
-  aimHintChip: {
-    backgroundColor: C.bg + 'cc',
-    borderRadius: 14, borderWidth: 1, borderColor: C.border,
-    paddingHorizontal: 10, paddingVertical: 4,
-    flexDirection: 'row', alignItems: 'center',
-  },
-  aimHintChipText: { color: C.textMuted, fontWeight: '700', fontSize: 10, letterSpacing: 0.5 },
 
   // Ghost player endpoint label — silver, low-contrast so it sits behind
   // the real shot markers. Italic + lowercase for the wizardly vibe.
