@@ -18,30 +18,22 @@ function EloColor(elo: number) {
   return '#cd7f32';
 }
 
-type Metric = 'elo' | 'beers' | 'beers_per_round';
-const METRICS: { key: Metric; label: string }[] = [
-  { key: 'elo',             label: 'ELO' },
-  { key: 'beers',           label: '🍺 Total' },
-  { key: 'beers_per_round', label: '🍺 / Round' },
-];
-
 export default function LeaderboardScreen() {
   const { user } = useAuth();
   const [players, setPlayers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [scope, setScope] = useState<'global' | 'friends'>('global');
-  const [metric, setMetric] = useState<Metric>('elo');
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
-      setPlayers(await api.users.leaderboard(scope === 'friends', metric));
+      setPlayers(await api.users.leaderboard(scope === 'friends'));
     } catch { /* silent */ } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [scope, metric]);
+  }, [scope]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -58,21 +50,6 @@ export default function LeaderboardScreen() {
           {myRank > 0 && <Text style={styles.subtitle}>You are #{myRank}</Text>}
         </View>
         <View style={{ width: 60 }} />
-      </View>
-
-      {/* Metric selector — ELO / Beer Ranker boards. */}
-      <View style={styles.metricRow}>
-        {METRICS.map((m) => (
-          <TouchableOpacity
-            key={m.key}
-            style={[styles.metricBtn, metric === m.key && styles.metricBtnActive]}
-            onPress={() => { setMetric(m.key); setLoading(true); }}
-          >
-            <Text style={[styles.metricBtnText, metric === m.key && styles.metricBtnTextActive]}>
-              {m.label}
-            </Text>
-          </TouchableOpacity>
-        ))}
       </View>
 
       <View style={styles.scopeRow}>
@@ -102,16 +79,11 @@ export default function LeaderboardScreen() {
               player={item}
               rank={index + 1}
               isMe={item.user_id === user?.user_id}
-              metric={metric}
             />
           )}
           ListEmptyComponent={
             <View style={styles.centered}>
-              <Text style={styles.emptyText}>
-                {metric === 'elo'
-                  ? 'No players yet.'
-                  : 'No beers logged yet — tap the 🍺 button while scoring a round to get on the board.'}
-              </Text>
+              <Text style={styles.emptyText}>No players yet.</Text>
             </View>
           }
         />
@@ -120,41 +92,17 @@ export default function LeaderboardScreen() {
   );
 }
 
-function PlayerRow({ player, rank, isMe, metric }: {
-  player: any; rank: number; isMe: boolean; metric: Metric;
-}) {
+function PlayerRow({ player, rank, isMe }: { player: any; rank: number; isMe: boolean }) {
   const c = useCensor();
   const eloColor = EloColor(player.elo);
+  const winRate = player.total_matches > 0
+    ? Math.round((player.total_wins / player.total_matches) * 100)
+    : 0;
 
   const medalColor =
     rank === 1 ? C.gold :
     rank === 2 ? '#c0c0c0' :
     rank === 3 ? '#a1673a' : C.textDim;
-
-  // Right-hand stat + sub-label depend on the active board.
-  let statValue: string;
-  let statLabel: string;
-  let statColor: string;
-  let metaLine: string;
-  if (metric === 'beers') {
-    statValue = String(player.total_beers ?? 0);
-    statLabel = 'BEERS';
-    statColor = '#e0a82e';
-    metaLine = `${player.beer_rounds ?? 0} round${(player.beer_rounds ?? 0) === 1 ? '' : 's'}`;
-  } else if (metric === 'beers_per_round') {
-    statValue = (player.beers_per_round ?? 0).toFixed(1);
-    statLabel = '🍺 / RD';
-    statColor = '#e0a82e';
-    metaLine = `${player.total_beers ?? 0} over ${player.beer_rounds ?? 0} rd`;
-  } else {
-    const winRate = player.total_matches > 0
-      ? Math.round((player.total_wins / player.total_matches) * 100)
-      : 0;
-    statValue = String(player.elo);
-    statLabel = 'ELO';
-    statColor = eloColor;
-    metaLine = `${player.total_matches}M · ${winRate}% WR`;
-  }
 
   return (
     <TouchableOpacity
@@ -177,11 +125,13 @@ function PlayerRow({ player, rank, isMe, metric }: {
           <Text style={styles.username}>{c(player.username)}</Text>
           {isMe && <Text style={styles.youBadge}>You</Text>}
         </View>
-        <Text style={styles.meta}>{metaLine}</Text>
+        <Text style={styles.meta}>
+          {player.total_matches}M · {winRate}% WR
+        </Text>
       </View>
       <View style={styles.eloBox}>
-        <Text style={[styles.elo, { color: statColor }]}>{statValue}</Text>
-        <Text style={styles.eloLabel}>{statLabel}</Text>
+        <Text style={[styles.elo, { color: eloColor }]}>{player.elo}</Text>
+        <Text style={styles.eloLabel}>ELO</Text>
       </View>
     </TouchableOpacity>
   );
@@ -228,15 +178,6 @@ const styles = StyleSheet.create({
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   emptyText: { color: C.textMuted, fontSize: 15 },
-
-  metricRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12 },
-  metricBtn: {
-    flex: 1, paddingVertical: 9, borderRadius: 6, alignItems: 'center',
-    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
-  },
-  metricBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
-  metricBtnText: { color: C.textMuted, fontWeight: '800', fontSize: 12 },
-  metricBtnTextActive: { color: C.bg },
 
   scopeRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 },
   scopeBtn: {

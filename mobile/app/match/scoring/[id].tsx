@@ -1929,7 +1929,7 @@ export default function ScoringScreen() {
     Alert.alert(
       'Submit Scores?',
       `Total: ${scores.reduce((a, b) => a + b, 0)} strokes`
-      + (beers > 0 ? `\n🍺 ${beers} beer${beers === 1 ? '' : 's'} logged` : '')
+      + (beers > 0 ? `\n🍺 ${beers} drink${beers === 1 ? '' : 's'} logged` : '')
       + `\n\nThis will finalise your round.`,
       [
         { text: 'Cancel', style: 'cancel' },

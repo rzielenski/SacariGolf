@@ -223,6 +223,12 @@ export default function UserProfileScreen() {
           value={fmtHandicap(handicap?.handicap_index ?? null)}
         />
         <Stat label="Course Records" value={courseRecords.length} />
+        {/* Drinks — only present in the API response for yourself + accepted
+            friends (server gates it), and only shown once they've logged
+            at least one. A private/friends stat, not a public board. */}
+        {profile.beer_stat && profile.beer_stat.total_beers > 0 && (
+          <Stat label="🍺 Drinks Drunk" value={profile.beer_stat.total_beers} />
+        )}
       </View>
 
       {/* Performance — only when this user has tracked any stats */}

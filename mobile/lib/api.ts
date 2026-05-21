@@ -375,21 +375,7 @@ export const api = {
       user_id: string; username: string; elo: number;
       avatar_url: string | null; created_at: string;
     }[]>('GET', `/users/${id}/followers`),
-    /** Leaderboard. `metric` picks the board:
-     *   • 'elo'             — ranked ELO (default)
-     *   • 'beers'           — lifetime beers logged on the course
-     *   • 'beers_per_round' — average beers per drinking round
-     *  `friendsOnly` scopes to self + accepted friends. */
-    leaderboard: (
-      friendsOnly = false,
-      metric: 'elo' | 'beers' | 'beers_per_round' = 'elo',
-    ) => {
-      const q = new URLSearchParams();
-      if (friendsOnly) q.set('friends', '1');
-      if (metric !== 'elo') q.set('metric', metric);
-      const qs = q.toString();
-      return request<any[]>('GET', `/users/leaderboard${qs ? `?${qs}` : ''}`);
-    },
+    leaderboard: (friendsOnly = false) => request<any[]>('GET', `/users/leaderboard${friendsOnly ? '?friends=1' : ''}`),
     deleteAccount: () => request<any>('DELETE', '/users/me'),
     importShots: (body: {
       name?: string;

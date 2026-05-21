@@ -62,6 +62,8 @@ export default function ProfileScreen() {
   const [bestRound, setBestRound] = useState<any | null>(null);
   const [followingCount, setFollowingCount] = useState(0);
   const [followersCount, setFollowersCount] = useState(0);
+  // Lifetime beers logged across rounds — a private stat (you + friends).
+  const [totalBeers, setTotalBeers] = useState(0);
   // The user's teams (clans). Surfaced on the profile so the Teams sub-tab
   // didn't have to keep haunting the Social area after that tab was
   // refocused on chats only.
@@ -167,6 +169,7 @@ export default function ProfileScreen() {
         setBestRound(data.best_round ?? null);
         setFollowingCount(data.following_count ?? 0);
         setFollowersCount(data.followers_count ?? 0);
+        setTotalBeers(data.beer_stat?.total_beers ?? 0);
       })
       .catch(() => { });
     // Teams the user belongs to. Cheap call, runs alongside the profile
@@ -542,6 +545,9 @@ export default function ProfileScreen() {
         <StatBox label="Losses" value={user.total_matches - user.total_wins - (user.total_ties ?? 0)} />
         <StatBox label="Ties" value={user.total_ties ?? 0} />
         <StatBox label="Win Rate" value={`${winRate}%`} />
+        {/* Drinks logged — private stat (only you + friends see it on a
+            profile). Shown once you've logged at least one. */}
+        {totalBeers > 0 && <StatBox label="🍺 Drinks Drunk" value={totalBeers} />}
       </View>
 
       {/* Full stats screen entry point — handicap, SG, normalized averages */}
