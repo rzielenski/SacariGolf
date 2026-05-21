@@ -725,6 +725,14 @@ export default function ScoringScreen() {
 
   const currentHoleNum = holes[currentHole]?.hole_num;
 
+  // Clear the measure/aim pin when moving to a new hole. The tapped point is
+  // hole-specific (a layup on hole 3 is meaningless on hole 4), and since the
+  // measure pin doubles as the heatmap aim, this resets the dispersion back
+  // to the green's pin line for each fresh hole.
+  useEffect(() => {
+    setMeasurePin(null);
+  }, [currentHole]);
+
   /** Compute a *normalized* (neutral-conditions) yardage for a finalised shot.
    *  Stored alongside the shot so per-club stats reflect the player's true
    *  club capability rather than what happened to land under that day's wind
@@ -785,40 +793,26 @@ export default function ScoringScreen() {
     return normalized;
   };
 
-  // ── Per-hole aim point (draggable heatmap target) ──────────────────────
-  // When the player wants to play (say) the left side of the fairway, they
-  // drop / drag the on-map heatmap crosshair to their target. The heatmap
-  // re-projects around that aim, and the snapshot is persisted on each
-  // shot so downstream lateral stats compare against THEIR centerline, not
-  // the fairway center. Cleared automatically when the player advances to
-  // the next hole (each hole has its own aim).
-  const [aimByHole, setAimByHole] = useState<Record<number, { lat: number; lng: number }>>({});
-  const aimRef = useRef(aimByHole);
-  aimRef.current = aimByHole;
-  const aimForCurrentHole: { lat: number; lng: number } | null =
-    currentHoleNum != null ? (aimByHole[currentHoleNum] ?? null) : null;
-  // Live heatmap drag. The draggable dot fires `onDrag` continuously while the
-  // finger slides (press-and-hold the dot, then move — no lift needed); we
-  // commit the new aim on each tick so the dispersion rings re-point in real
-  // time instead of only snapping when you release. State writes are throttled
-  // (~30ms) so a 60fps native drag doesn't flood React with re-renders and
-  // stutter — the native marker still follows the finger at full frame rate;
-  // only the polygon recompute is rate-limited. `force` bypasses the throttle
-  // for the final placement on drag-end.
-  const lastAimDragRef = useRef(0);
-  const commitAim = useCallback((lat: number, lng: number, force = false) => {
-    if (currentHoleNum == null) return;
-    const now = Date.now();
-    if (!force && now - lastAimDragRef.current < 30) return;
-    lastAimDragRef.current = now;
-    setAimByHole((prev) => ({ ...prev, [currentHoleNum]: { lat, lng } }));
-  }, [currentHoleNum]);
+  // ── Heatmap aim = the measure-distance tap ─────────────────────────────
+  // There's no separate "aim" gesture. The single tap that drops the yardage
+  // pin (measurePin) IS the aim: the dispersion heatmap rotates to point at
+  // that spot (staying at the club's natural distance), and the recorded
+  // lateral centerline measures against the same line. One interaction does
+  // both — "how far to that spot" and "point my dispersion there." No tap →
+  // aim defaults to the green's pin. Tapping elsewhere re-aims; "Clear" (or
+  // changing holes) resets it back to the pin.
+  const measurePinRef = useRef<{ lat: number; lng: number } | null>(null);
+  measurePinRef.current = measurePin
+    ? { lat: measurePin.latitude, lng: measurePin.longitude }
+    : null;
   const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
     getAveragedFix, getRelativeAltitudeM,
-    getAimPoint: () => (currentHoleNum != null ? aimRef.current[currentHoleNum] ?? null : null),
+    // Aim = last tapped measure point (if any). Read off a ref so the hook
+    // always sees the current value without re-subscribing.
+    getAimPoint: () => measurePinRef.current,
     // Pin fallback for the lateral_yds centerline. Read off a ref so the
     // hook gets the current hole's pin without needing the calling
     // component to memoize the callback.
@@ -1505,11 +1499,15 @@ export default function ScoringScreen() {
    */
   const heatmapRings = useMemo<{ sigma1: LL[]; sigma2: LL[]; center: LL } | null>(() => {
     if (!userIsPremium || !userCoord || !clubStats?.length) return null;
-    // The heatmap aim target — either the player's manually-dragged aim
-    // point for this hole, or the pin if they haven't dragged one. This is
-    // the centerline the ellipses point along.
+    // The heatmap aim target — the last tapped measure point (the yardage
+    // pin) if there is one, otherwise the green's pin. This is the
+    // centerline the ellipses point along. Tapping a new spot re-aims the
+    // dispersion there; only the BEARING of this point is used (the rings
+    // stay at the club's natural distance).
     const aimTarget: { lat: number; lng: number } | null =
-      aimForCurrentHole ?? (knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null);
+      measurePin
+        ? { lat: measurePin.latitude, lng: measurePin.longitude }
+        : (knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null);
     if (!aimTarget) return null;
     const club = activeShot?.club ?? pendingClub;
     if (!club) return null;
@@ -1642,7 +1640,7 @@ export default function ScoringScreen() {
     // laying up or aiming at the left side of a green: same club, same
     // expected distance, different line. Lateral offset is zeroed so the
     // ellipse sits squarely on the new aim line.
-    if (aimForCurrentHole) {
+    if (measurePin) {
       effectiveLateral = 0;
     }
     const center: LL = place(start, effectiveForward, effectiveLateral);
@@ -1677,9 +1675,9 @@ export default function ScoringScreen() {
     // player elevation calibration. Without these the ellipses would feel
     // stale relative to the pin's plays-like banner.
     weather, slopeAdjustment, yardsToPin, homeElevationFt,
-    // Re-roll when the player drags the heatmap aim — the center jumps to
-    // wherever they dropped the crosshair.
-    aimForCurrentHole,
+    // Re-roll when the player taps a new measure point — the heatmap
+    // re-aims toward wherever they last tapped.
+    measurePin?.latitude, measurePin?.longitude,
   ]);
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
@@ -2178,23 +2176,11 @@ export default function ScoringScreen() {
             ignoreNextMapTap.current = false;
             return;
           }
+          // The single tap that drops the yardage pin IS the heatmap aim —
+          // the dispersion rings re-point toward this spot (see the
+          // heatmapRings memo, which reads measurePin). No separate aim
+          // gesture, no draggable handle to fight the map.
           setMeasurePin(e.nativeEvent.coordinate);
-          setFollowing(false);
-        }}
-        // Long-press anywhere on the map sets / moves the heatmap aim for
-        // this hole. The heatmap stays at the club's natural distance and
-        // only rotates to point toward the long-pressed spot (see the
-        // heatmapRings memo — only the bearing of this point is used). To
-        // then fine-tune, the player presses-and-holds the heatmap dot
-        // itself and slides it (the Marker is `draggable`); releasing drops
-        // it. This replaced the old "MOVE HEATMAP" tap-arm toggle.
-        onLongPress={(e) => {
-          if (currentHoleNum == null) return;
-          const { latitude, longitude } = e.nativeEvent.coordinate;
-          setAimByHole((prev) => ({
-            ...prev,
-            [currentHoleNum]: { lat: latitude, lng: longitude },
-          }));
           setFollowing(false);
         }}
         onPanDrag={() => setFollowing(false)}
@@ -2335,77 +2321,23 @@ export default function ScoringScreen() {
               strokeWidth={2}
               fillColor="rgba(255,242,0,0.12)"
             />
-            {/* Heatmap aim handle — DRAGGABLE. Press-and-hold the dot and
-                slide; the dispersion rings re-point live (onDrag) so the
-                heatmap follows your finger in real time, no lift needed.
-                The handle's coordinate is bound to the aim point itself
-                (not the projected ring center) so the native drag and our
-                state stay in lockstep — without that the marker fights the
-                finger, snapping back toward the club-distance center. Until
-                an aim is placed it rests on the ring center as the grab
-                target. Releasing commits the final placement. */}
+            {/* Heatmap center dot — a non-interactive marker at the rings'
+                center. Aiming is done by tapping the map (the yardage pin),
+                so there's nothing to drag here; the dot just marks the
+                projected landing center. tappable={false} so a tap near it
+                falls through to MapView.onPress and re-aims. */}
             <Marker
-              coordinate={aimForCurrentHole
-                ? { latitude: aimForCurrentHole.lat, longitude: aimForCurrentHole.lng }
-                : heatmapRings.center}
+              coordinate={heatmapRings.center}
               anchor={{ x: 0.5, y: 0.5 }}
-              draggable
+              tappable={false}
               tracksViewChanges={false}
-              onDragStart={() => setFollowing(false)}
-              onDrag={(e) => {
-                const { latitude, longitude } = e.nativeEvent.coordinate;
-                commitAim(latitude, longitude);
-              }}
-              onDragEnd={(e) => {
-                const { latitude, longitude } = e.nativeEvent.coordinate;
-                commitAim(latitude, longitude, true);
-              }}
             >
-              {/* The outer transparent square is the actual TOUCH target —
-                  a generous fingertip area (see heatmapHitbox). The inner
-                  View is the visible dot. Without the oversized wrapper the
-                  draggable hitbox is just the 8–14pt dot, which is brutal
-                  to grab on a satellite tile. */}
-              <View style={styles.heatmapHitbox}>
-                <View style={[
-                  styles.heatmapCenterDot,
-                  aimForCurrentHole && styles.heatmapCenterDotAimed,
-                ]} />
-              </View>
+              <View style={[
+                styles.heatmapCenterDot,
+                measurePin && styles.heatmapCenterDotAimed,
+              ]} />
             </Marker>
           </>
-        )}
-
-        {/* Standalone aim crosshair — shown when the player has placed an
-            aim but the dispersion heatmap isn't renderable (e.g. brand-
-            new player without enough club stats, or before clubStats has
-            loaded). Keeps the dropped target visible so the player isn't
-            staring at a blank map wondering where their aim went. */}
-        {aimForCurrentHole && !heatmapRings && (
-          <Marker
-            coordinate={{
-              latitude:  aimForCurrentHole.lat,
-              longitude: aimForCurrentHole.lng,
-            }}
-            anchor={{ x: 0.5, y: 0.5 }}
-            draggable
-            tracksViewChanges={false}
-            onDragStart={() => setFollowing(false)}
-            onDrag={(e) => {
-              const { latitude, longitude } = e.nativeEvent.coordinate;
-              commitAim(latitude, longitude);
-            }}
-            onDragEnd={(e) => {
-              const { latitude, longitude } = e.nativeEvent.coordinate;
-              commitAim(latitude, longitude, true);
-            }}
-          >
-            {/* Same fingertip-sized hitbox as the heatmap-rings center marker
-                so the standalone aim is just as easy to grab. */}
-            <View style={styles.heatmapHitbox}>
-              <View style={styles.heatmapCenterDotAimed} />
-            </View>
-          </Marker>
         )}
 
         {/* Pin marker (center of green) for the current hole */}
@@ -3450,21 +3382,8 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#000',
     shadowColor: '#fff200', shadowOpacity: 0.8, shadowRadius: 4,
   },
-  // Invisible 90×90pt wrapper around the heatmap center dot. Way bigger
-  // than Apple's 44pt HIG minimum — the heatmap marker sits on top of a
-  // satellite tile (no nearby contrast to aim at) AND has to win the drag
-  // race against the map pan gesture, so a generous hitbox is the only
-  // way it feels reliable. The visible dot stays small (8–14pt) so the
-  // σ rings underneath aren't occluded.
-  heatmapHitbox: {
-    width: 90, height: 90,
-    alignItems: 'center', justifyContent: 'center',
-    // backgroundColor left undefined so the wrapper is fully transparent;
-    // a tinted debug background can be temporarily added here when
-    // troubleshooting hit testing.
-  },
-  // Larger and gold-tinted when the player has manually dragged the aim —
-  // signals "this is your committed aim point, not the auto-projected one."
+  // Larger and gold-tinted when the player has tapped a target — signals
+  // "the heatmap is aimed at your measure point, not the default pin line."
   heatmapCenterDotAimed: {
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: C.gold,
