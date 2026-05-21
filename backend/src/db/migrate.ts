@@ -916,6 +916,17 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Beers logged during a round — drives the "Beer Ranker" leaderboards
+    // (all-time total + per-round average). Stored per round so both
+    // leaderboards derive from a single source of truth (no denormalized
+    // counters to drift / double-count on score resubmits). NULL/0 = none
+    // logged, which is the default for every existing round.
+    name: 'rounds.beers',
+    sql: `
+      ALTER TABLE rounds ADD COLUMN IF NOT EXISTS beers INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
     name: 'friends.dedupe_backfill',
     sql: `
       -- (a) Self-friendships should never exist; remove any.

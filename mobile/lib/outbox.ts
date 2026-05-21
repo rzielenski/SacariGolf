@@ -40,6 +40,7 @@ type SubmitPayload = {
     holeStats: any[];
     courseId?: string;
     teeboxId?: string;
+    beers?: number;
   };
 };
 

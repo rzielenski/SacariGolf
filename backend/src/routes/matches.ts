@@ -543,11 +543,14 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
 
 // Submit scores for a round
 router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeScores, holeStats, courseId, teeboxId } = req.body;
+  const { holeScores, holeStats, courseId, teeboxId, beers } = req.body;
   if (!Array.isArray(holeScores) || holeScores.length === 0) {
     return res.status(400).json({ error: 'holeScores array required' });
   }
   const cleanStats = cleanHoleStats(holeStats, holeScores.length);
+  // Beers logged this round — clamp to a sane 0–50 so a buggy client can't
+  // poison the Beer Ranker leaderboards. Default 0 when omitted.
+  const beerCount = Math.max(0, Math.min(50, Math.round(Number(beers) || 0)));
 
   const totalScore = (holeScores as number[]).reduce((a, b) => a + b, 0);
   const client = await pool.connect();
@@ -616,11 +619,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
     // Upsert round (only for the submitting player; scramble teammates share the same final score)
     await client.query(
-      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (match_id, user_id)
-       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4`,
-      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type]
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9`,
+      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount]
     );
 
     // Update match_players for the submitting player

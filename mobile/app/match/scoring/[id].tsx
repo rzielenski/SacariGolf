@@ -88,6 +88,10 @@ export default function ScoringScreen() {
   const [currentHole, setCurrentHole] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // Beers logged this round → submitted with the scorecard and feeds the
+  // Beer Ranker leaderboards. Persisted in the draft so a mid-round
+  // app-kill doesn't lose the count.
+  const [beers, setBeers] = useState(0);
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
   // In-round invite modal — only used for practice rounds, where the host can
@@ -305,10 +309,11 @@ export default function ScoringScreen() {
         currentHole,
         teeboxId: teebox?.teebox_id,
         courseId: course?.course_id,
+        beers,
         savedAt: Date.now(),
       }));
     } catch { /* best-effort — disk full, etc. */ }
-  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course]);
+  }, [SAVE_KEY, scores, holeStats, currentHole, teebox, course, beers]);
 
   // Debounced autosave whenever a tracked field changes. The 400ms window
   // smooths out rapid stroke +/- taps and stat slider drags. Crucially, the
@@ -538,7 +543,7 @@ export default function ScoringScreen() {
     const sorted = allSorted.slice(offset, offset + effectiveHoles);
 
     // Restore any saved in-progress draft on top of the fresh par defaults.
-    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[] } | null = null;
+    let saved: { scores?: number[]; currentHole?: number; teeboxId?: string; courseId?: string; holeStats?: HoleStat[]; beers?: number } | null = null;
     try {
       const raw = await AsyncStorage.getItem(SAVE_KEY);
       if (raw) saved = JSON.parse(raw);
@@ -555,6 +560,7 @@ export default function ScoringScreen() {
         : sorted.map(() => ({}))
     );
     setCurrentHole(saved?.currentHole ?? 0);
+    setBeers(typeof saved?.beers === 'number' ? saved.beers : 0);
     setSelectingCourse(false);
   }, [SAVE_KEY, numHoles, holesSubset]);
 
@@ -1922,7 +1928,9 @@ export default function ScoringScreen() {
   const handleSubmit = () => {
     Alert.alert(
       'Submit Scores?',
-      `Total: ${scores.reduce((a, b) => a + b, 0)} strokes\n\nThis will finalise your round.`,
+      `Total: ${scores.reduce((a, b) => a + b, 0)} strokes`
+      + (beers > 0 ? `\n🍺 ${beers} beer${beers === 1 ? '' : 's'} logged` : '')
+      + `\n\nThis will finalise your round.`,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Submit', onPress: doSubmit },
@@ -1937,6 +1945,7 @@ export default function ScoringScreen() {
       holeStats,
       courseId: course?.course_id,
       teeboxId: teebox?.teebox_id,
+      beers,
     };
     try {
       const result = await api.matches.submitScores(id, submitBody);
@@ -2542,6 +2551,16 @@ export default function ScoringScreen() {
           <Text style={[styles.scoreToPar, { color: scoreParColor }]}>
             {scoreToPar === 0 ? 'E' : scoreToPar > 0 ? `+${scoreToPar}` : `${scoreToPar}`}
           </Text>
+          {/* Beer counter — tap to add a beer, long-press to remove one.
+              Submitted with the round; feeds the Beer Ranker leaderboards. */}
+          <TouchableOpacity
+            style={styles.topBarBtn}
+            onPress={() => setBeers((b) => Math.min(50, b + 1))}
+            onLongPress={() => setBeers((b) => Math.max(0, b - 1))}
+            delayLongPress={350}
+          >
+            <Text style={styles.topBarBtnText}>🍺 {beers}</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.topBarBtn} onPress={() => setScorecardVisible(true)}>
             <Text style={styles.topBarBtnText}>Card</Text>
           </TouchableOpacity>

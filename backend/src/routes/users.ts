@@ -1427,19 +1427,66 @@ router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response
 
 router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const friendsOnly = req.query.friends === '1' || req.query.friends === 'true';
+  // metric:
+  //   'elo'             — ranked ELO (default; back-compat with old clients)
+  //   'beers'           — lifetime total beers logged on the course
+  //   'beers_per_round' — average beers across rounds where any were logged
+  const metric = (req.query.metric as string) || 'elo';
+
+  // Friends scope: self + accepted friends. We build the id-set once and
+  // reuse it for whichever metric query runs.
+  const friendScopeCte = `
+    WITH scope AS (
+      SELECT $1::uuid AS user_id
+      UNION
+      SELECT CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+        FROM friends f
+       WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
+    )`;
+
+  // ── Beer leaderboards ───────────────────────────────────────────────
+  // Both derive from the rounds table (source of truth), aggregated per
+  // user. Only users who've logged at least one beer appear — a board full
+  // of 0.00s would be noise. `beer_rounds` = rounds where beers > 0; the
+  // per-round metric averages over THOSE rounds ("how you drink when you
+  // drink"), not all rounds, so a few dry rounds don't dilute the number.
+  if (metric === 'beers' || metric === 'beers_per_round') {
+    // Order by the raw aggregates (Postgres won't accept SELECT aliases
+    // inside an ORDER BY expression). Tiebreak per-round by total so a
+    // 1-round 10-beer player doesn't outrank a steady high-volume drinker
+    // on a coin-flip.
+    const orderExpr = metric === 'beers'
+      ? 'SUM(r.beers) DESC'
+      : '(SUM(r.beers)::float / NULLIF(COUNT(*) FILTER (WHERE r.beers > 0), 0)) DESC, SUM(r.beers) DESC';
+
+    const blockOrScope = friendsOnly
+      ? 'r.user_id IN (SELECT user_id FROM scope)'
+      : `u.user_id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = $1)`;
+
+    const sql = `
+      ${friendsOnly ? friendScopeCte : ''}
+      SELECT u.user_id, u.username, u.elo, u.avatar_url,
+             COALESCE(SUM(r.beers), 0)::int AS total_beers,
+             COUNT(*) FILTER (WHERE r.beers > 0)::int AS beer_rounds,
+             ROUND(SUM(r.beers)::numeric / NULLIF(COUNT(*) FILTER (WHERE r.beers > 0), 0), 1)::float AS beers_per_round
+        FROM users u
+        JOIN rounds r ON r.user_id = u.user_id AND r.beers > 0
+       WHERE ${blockOrScope}
+       GROUP BY u.user_id
+      HAVING SUM(r.beers) > 0
+       ORDER BY ${orderExpr}
+       LIMIT 100`;
+    const { rows } = await pool.query(sql, [req.userId]);
+    return res.json(rows);
+  }
+
+  // ── ELO leaderboard (default) ───────────────────────────────────────
   if (friendsOnly) {
-    // Self + accepted friends, ranked by ELO. Friend rows are stored as a
-    // single direction with status='accepted' (the original requester being
-    // user_id, friend_id either side depending on who initiated).
     const { rows } = await pool.query(
-      `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
+      `${friendScopeCte}
+       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
        FROM users u
-       WHERE u.user_id = $1
-          OR u.user_id IN (
-            SELECT CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
-            FROM friends f
-            WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
-          )
+       WHERE u.user_id IN (SELECT user_id FROM scope)
        ORDER BY u.elo DESC
        LIMIT 100`,
       [req.userId]
