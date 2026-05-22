@@ -25,7 +25,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
   FlatList, RefreshControl, Image, Modal, TextInput, ScrollView,
-  KeyboardAvoidingView, Platform,
+  KeyboardAvoidingView, Platform, Keyboard,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
@@ -381,6 +381,22 @@ function CommentsModal({
   const [comments, setComments] = useState<any[] | null>(null);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  // Keyboard height, tracked manually. KeyboardAvoidingView mis-measures its
+  // own frame inside a pageSheet Modal (the sheet is inset from the top of
+  // the window), so on iOS it under-shifts and the composer stays hidden
+  // behind the keyboard — you'd type blind. Instead we read the real keyboard
+  // height and pad the bottom of the modal by exactly that, lifting the
+  // composer to sit right above the keyboard regardless of presentation.
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return; // Android: adjustResize handles it
+    const show = Keyboard.addListener('keyboardWillShow', (e) =>
+      setKbHeight(e.endCoordinates?.height ?? 0));
+    const hide = Keyboard.addListener('keyboardWillHide', () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+  // Reset when the sheet closes so it reopens flush.
+  useEffect(() => { if (!visible) setKbHeight(0); }, [visible]);
 
   const load = useCallback(async () => {
     try {
@@ -426,10 +442,7 @@ function CommentsModal({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: C.bg }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
+      <View style={{ flex: 1, backgroundColor: C.bg, paddingBottom: kbHeight }}>
         <View style={s.composeHeader}>
           <TouchableOpacity onPress={onClose}>
             <Text style={s.composeCancel}>Close</Text>
@@ -438,7 +451,7 @@ function CommentsModal({
           <View style={{ width: 44 }} />
         </View>
 
-        <ScrollView contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
           {comments === null ? (
             <ActivityIndicator color={C.gold} style={{ marginTop: 24 }} />
           ) : comments.length === 0 ? (
@@ -494,7 +507,7 @@ function CommentsModal({
               : <Text style={s.commentSendText}>Post</Text>}
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }

@@ -226,7 +226,7 @@ export default function ScoringScreen() {
     userCoord, onCourse, locGranted,
     gpsAccuracyM, hasQualityFix,
     getAveragedFix, getRelativeAltitudeM,
-    getMsSinceLastFix, refreshGps, resetFixBuffer,
+    getMsSinceLastFix, refreshGps, resetFixBuffer, noteMapFix,
   } = useLocation({
     enabled: !selectingCourse,
     courseLat: course?.latitude,
@@ -2201,6 +2201,11 @@ export default function ScoringScreen() {
         showsMyLocationButton={false}
         showsCompass
         mapType="satellite"
+        // Feed react-native-maps' own (independent, reliable) location stream
+        // into userCoord. This is the same source as the blue user dot, which
+        // field reports showed staying live while the expo-location watch
+        // froze and left distances/measure-line stuck at a stale position.
+        onUserLocationChange={(e) => noteMapFix(e.nativeEvent.coordinate as any)}
         onPress={(e) => {
           // Suppress the single phantom tap that bleeds through from the
           // Clear button overlay. Consume the flag on the very next event so
@@ -2213,6 +2218,13 @@ export default function ScoringScreen() {
           // the dispersion rings re-point toward this spot (see the
           // heatmapRings memo, which reads measurePin). No separate aim
           // gesture, no draggable handle to fight the map.
+          //
+          // Recover-on-action: measuring is a stationary moment, exactly when
+          // iOS tends to pause the watch and freeze userCoord. If our last
+          // fix is stale, kick a fresh one NOW so the distance line is drawn
+          // from our real position, not "the last place we measured from."
+          const sinceFix = getMsSinceLastFix();
+          if (sinceFix != null && sinceFix > 5000) refreshGps();
           setMeasurePin(e.nativeEvent.coordinate);
           setFollowing(false);
         }}
@@ -2613,7 +2625,14 @@ export default function ScoringScreen() {
             !userCoord && { opacity: 0.4 },
             activeShot && styles.topChipTracking,
           ]}
-          onPress={onTrackPress}
+          onPress={() => {
+            // Recover-on-action: if GPS has gone stale (iOS paused the watch
+            // while we stood over the ball), kick a fresh fix so the next
+            // averaged-fix read isn't anchored to a frozen position.
+            const sinceFix = getMsSinceLastFix();
+            if (sinceFix != null && sinceFix > 5000) refreshGps();
+            onTrackPress();
+          }}
           onLongPress={onTrackLongPress}
           delayLongPress={500}
           disabled={!userCoord}

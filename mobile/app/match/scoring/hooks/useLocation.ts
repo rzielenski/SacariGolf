@@ -82,6 +82,12 @@ const FIX_BUFFER_LIMIT = 30;
  *  tight enough to reject walking-pace samples (1.5 m/s × 2.5s = 3.75m,
  *  so a walking sample 1+ seconds back is excluded). */
 const STILL_RADIUS_M = 6;
+/** If userCoord has been frozen (no accepted display fix) for this long, the
+ *  staleness filter is bypassed so the next available fix — even a cached,
+ *  old-timestamped one iOS hands back after pausing the watch — un-sticks the
+ *  position. A slightly-stale fix is far better than a position frozen at
+ *  "the last place you stood" until the app is restarted. */
+const STUCK_ESCAPE_MS = 15_000;
 
 interface BufferedFix {
   lat: number;
@@ -272,12 +278,23 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
           //     deep pocket and would jump the user dot wildly
           //   • drop fixes timestamped >30s in the past, regardless of
           //     accuracy — they're cached stale-after-resume fixes
+          // Staleness drop WITH an escape hatch. Normally we reject fixes
+          // whose own timestamp is >30s old (iOS hands back cached fixes
+          // after it pauses the watch — common when the player stands still
+          // to measure a distance or address a shot). But if userCoord has
+          // already been frozen for STUCK_ESCAPE_MS, accepting a
+          // stale-but-present fix is far better than staying frozen: it's the
+          // difference between "GPS catches up in a few seconds" and "stuck
+          // until app restart." A stationary player's cached position is, by
+          // definition, still roughly where they are.
+          const stuckMs = lastFixAtRef.current == null ? Infinity : Date.now() - lastFixAtRef.current;
+          const staleAndNotStuck = ageMs > 30_000 && stuckMs < STUCK_ESCAPE_MS;
           if (
             !Number.isFinite(loc.coords.latitude)
             || !Number.isFinite(loc.coords.longitude)
             || (Math.abs(loc.coords.latitude) < 0.001 && Math.abs(loc.coords.longitude) < 0.001)
             || (rawAcc >= 0 && rawAcc > 200)
-            || ageMs > 30_000
+            || staleAndNotStuck
           ) {
             return;
           }
@@ -329,20 +346,22 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
           accuracy: Location.Accuracy.Highest,
           maximumAge: 0,
         } as any);
-        if (active && Number.isFinite(pos.coords.latitude)) {
-          // Guard against iOS handing back a cached driver-landing
-          // fix despite maximumAge:0 — if the returned timestamp is
-          // older than 10s, treat it as stale and let the new watch
-          // produce a fresh fix instead.
-          const ts = typeof pos.timestamp === 'number' ? pos.timestamp : Date.now();
-          if (Date.now() - ts < 10_000) {
-            setUserCoord({
-              latitude: pos.coords.latitude,
-              longitude: pos.coords.longitude,
-              altitude: pos.coords.altitude,
-            });
-            lastFixAtRef.current = Date.now();
-          }
+        if (active && Number.isFinite(pos.coords.latitude)
+            && !(Math.abs(pos.coords.latitude) < 0.001 && Math.abs(pos.coords.longitude) < 0.001)) {
+          // We've had NO accepted fix for 25s+ to even reach here, so even a
+          // somewhat-cached position is a strict improvement over the frozen
+          // userCoord. This previously rejected anything >10s old — which,
+          // combined with the display filter dropping stale-timestamped
+          // fixes, could leave userCoord frozen indefinitely (only an app
+          // restart recovered it: the classic "distance stuck at the last
+          // place I stood" bug). Accept whatever we get; the fresh watch
+          // below refines it on its next real fix.
+          setUserCoord({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            altitude: pos.coords.altitude,
+          });
+          lastFixAtRef.current = Date.now();
         }
       } catch { /* silent — retry on next interval */ }
       try {
@@ -351,13 +370,17 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
           (loc) => {
             if (!active) return;
             const rawAcc = typeof loc.coords.accuracy === 'number' ? loc.coords.accuracy : -1;
-            const ts = typeof loc.timestamp === 'number' ? loc.timestamp : Date.now();
+            // NOTE: no timestamp-staleness drop here. This watch only exists
+            // because the watchdog already detected a freeze and restarted —
+            // re-applying the >30s filter would re-create the very deadlock
+            // we're recovering from (iOS hands back stale-ts cached fixes
+            // right after a pause). Accept any finite, non-null-island,
+            // not-absurdly-inaccurate fix so userCoord un-sticks.
             if (
               !Number.isFinite(loc.coords.latitude)
               || !Number.isFinite(loc.coords.longitude)
               || (Math.abs(loc.coords.latitude) < 0.001 && Math.abs(loc.coords.longitude) < 0.001)
               || (rawAcc >= 0 && rawAcc > 200)
-              || Date.now() - ts > 30_000
             ) return;
             if (rawAcc >= 0) setGpsAccuracyM(rawAcc);
             setUserCoord({
@@ -554,6 +577,57 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     } catch { /* GPS denied / no signal — UI will keep showing the stale warning */ }
   }, []);
 
+  /** Ingest a fix from react-native-maps' own native location stream
+   *  (MapView.onUserLocationChange). This is the SAME source that draws the
+   *  blue user dot — and crucially it's an INDEPENDENT subscription from our
+   *  expo-location watch. Field reports showed the blue dot staying live and
+   *  correct while distances/measure-line froze: that's expo-location's watch
+   *  going silent (iOS pause, etc.) while react-native-maps' stream kept
+   *  running. Feeding that live stream into the same pipeline (buffer +
+   *  userCoord + heartbeat) makes the displayed position resilient — if one
+   *  subscription stalls, the other keeps userCoord fresh. */
+  const noteMapFix = useCallback((coord: {
+    latitude?: number; longitude?: number; altitude?: number | null; accuracy?: number | null;
+  } | null | undefined) => {
+    if (!coord) return;
+    const lat = coord.latitude, lng = coord.longitude;
+    if (typeof lat !== 'number' || typeof lng !== 'number') return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    if (Math.abs(lat) < 0.001 && Math.abs(lng) < 0.001) return; // null island
+    const acc = typeof coord.accuracy === 'number' ? coord.accuracy : -1;
+    if (acc >= 0 && acc > 200) return;                          // room-scale noise
+    // Feed the averaging buffer too (only trustworthy-accuracy fixes), so
+    // shot tracking stays alive even if the expo watch is the one that stalled.
+    if (acc > 0 && acc <= ACCEPT_MAX_ACCURACY_M) {
+      const buf = fixBufferRef.current;
+      buf.push({
+        lat, lng,
+        altitude: coord.altitude ?? null,
+        accuracy: acc,
+        baroRelativeM: baroRelativeMRef.current,
+        capturedAt: Date.now(),
+      });
+      if (buf.length > FIX_BUFFER_LIMIT) buf.shift();
+      if (acc <= TRUST_ACCURACY_M) setHasQualityFix(true);
+    }
+    if (acc >= 0) setGpsAccuracyM(acc);
+    const cLat = courseLat ?? 0;
+    const near = !cLat || distMetres(lat, lng, cLat, courseLng ?? 0) <= ON_COURSE_METRES;
+    setOnCourse(near);
+    if (!near) offCourseCb.current?.();
+    setUserCoord((prev) => ({
+      latitude: lat,
+      longitude: lng,
+      // Preserve the last known altitude when a map fix doesn't carry one, so
+      // we never wipe a good GPS-altitude reading. Altitude is only the
+      // FALLBACK slope input anyway — barometer + crowdsourced course
+      // elevation are the primary sources — but keeping it intact means the
+      // map-fed path is never worse than the expo-fed path for slope.
+      altitude: typeof coord.altitude === 'number' ? coord.altitude : (prev?.altitude ?? null),
+    }));
+    lastFixAtRef.current = Date.now();
+  }, [courseLat, courseLng]);
+
   return {
     userCoord,
     onCourse,
@@ -565,5 +639,6 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
     getMsSinceLastFix,
     refreshGps,
     resetFixBuffer,
+    noteMapFix,
   };
 }

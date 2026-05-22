@@ -1592,12 +1592,13 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   }
 
   // Drinks-drunk stat — a lifetime tally the user adjusts by hand from their
-  // profile (users.drinks). PRIVACY: only surfaced to the user themselves and
-  // their accepted friends (App Store posture — we don't broadcast it to
-  // strangers, and there's no public competition around it). Returned as
-  // null for non-friends so the client simply doesn't render it.
+  // profile (users.drinks). PRIVACY: surfaced to the user themselves and anyone
+  // in their friend/follow graph — accepted friends AND pending follow
+  // connections in either direction (i.e. any friendship_status other than
+  // 'none'). Still hidden from total strangers. Returned as null when hidden so
+  // the client simply doesn't render it.
   let drinks: number | null = null;
-  if (friendshipStatus === 'self' || friendshipStatus === 'friends') {
+  if (friendshipStatus !== 'none') {
     drinks = (userInfo as any).drinks ?? 0;
   }
 
