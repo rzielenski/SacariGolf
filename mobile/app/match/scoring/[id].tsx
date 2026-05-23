@@ -307,7 +307,9 @@ export default function ScoringScreen() {
    * entered was lost because the in-memory state never touched disk.
    */
   const persistDraft = useCallback(async () => {
-    if (!teebox || !course) return;
+    // Require a real user so the draft is never written under the 'anon'
+    // SAVE_KEY (which the restore — keyed by the real user_id — would miss).
+    if (!teebox || !course || !user?.user_id) return;
     try {
       await AsyncStorage.setItem(SAVE_KEY, JSON.stringify({
         scores,
@@ -562,20 +564,53 @@ export default function ScoringScreen() {
       if (raw) saved = JSON.parse(raw);
     } catch { /* ignore */ }
 
+    // Server-side backstop: the /progress endpoint writes this player's
+    // partial scores to the rounds row on every change, and the match fetch
+    // returns MY OWN row un-redacted. If the on-device draft is missing or
+    // empty (cleared, clobbered, or a different device), we rebuild the round
+    // from the server so a closed-and-reopened round still comes back with
+    // every hole the player entered.
+    const myRow = (m as any).players?.find((p: any) => p.user_id === user?.user_id);
+    const serverScores: number[] | null = Array.isArray(myRow?.hole_scores) ? myRow.hole_scores : null;
+    const serverStats: any[] | null = Array.isArray(myRow?.hole_stats) ? myRow.hole_stats : null;
+    const localEntered = Array.isArray(saved?.entered) ? saved!.entered : [];
+    const par = sorted.map((h) => h.par);
+
     setMatch(m);
     setCourse(courseDetails);
     setTeebox(tb);
     setHoles(sorted);
-    setScores(saved?.scores ?? sorted.map((h) => h.par));
-    setHoleStats(
-      saved?.holeStats && Array.isArray(saved.holeStats)
-        ? saved.holeStats
-        : sorted.map(() => ({}))
-    );
-    setEnteredHoles(new Set(Array.isArray(saved?.entered) ? saved!.entered : []));
-    setCurrentHole(saved?.currentHole ?? 0);
+
+    if (saved?.scores && localEntered.length > 0) {
+      // On-device draft is the source of truth when it has entered holes —
+      // it's the only place that knows EXACTLY which holes were scored.
+      setScores(saved.scores);
+      setHoleStats(Array.isArray(saved.holeStats) ? saved.holeStats : sorted.map(() => ({})));
+      setEnteredHoles(new Set(localEntered));
+      setCurrentHole(saved.currentHole ?? 0);
+    } else if (serverScores && serverScores.length > 0) {
+      // Draft gone → rebuild from the server. We can't know which of the
+      // server's holes were "entered" vs par placeholders, so we treat every
+      // hole it has a score for as entered (recovers the round; the player
+      // can adjust any that were just placeholders).
+      const restored = [...par];
+      serverScores.forEach((s, i) => { if (i < restored.length && typeof s === 'number') restored[i] = s; });
+      setScores(restored);
+      setHoleStats(
+        serverStats && serverStats.length
+          ? sorted.map((_, i) => serverStats[i] ?? {})
+          : sorted.map(() => ({}))
+      );
+      setEnteredHoles(new Set(serverScores.map((_, i) => i).filter((i) => i < restored.length)));
+      setCurrentHole(Math.max(0, Math.min(serverScores.length - 1, sorted.length - 1)));
+    } else {
+      setScores(saved?.scores ?? par);
+      setHoleStats(Array.isArray(saved?.holeStats) ? saved!.holeStats : sorted.map(() => ({})));
+      setEnteredHoles(new Set(localEntered));
+      setCurrentHole(saved?.currentHole ?? 0);
+    }
     setSelectingCourse(false);
-  }, [SAVE_KEY, numHoles, holesSubset]);
+  }, [SAVE_KEY, numHoles, holesSubset, user?.user_id]);
 
   const load = useCallback(async () => {
     try {
