@@ -33,6 +33,7 @@ import { api, API_BASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { censorText } from '../lib/censor';
+import { MentionInput } from './MentionInput';
 
 interface Props {
   /** Anything that should render above the feed items inside the same
@@ -723,11 +724,11 @@ function ComposeModal({
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
-          <TextInput
+          <MentionInput
             style={s.composeInput}
             value={body}
             onChangeText={setBody}
-            placeholder="What's going on? Share a tip, a win, a wild miss…"
+            placeholder="What's going on? Share a tip, a win, a wild miss… tag a friend with @"
             placeholderTextColor={C.textMuted}
             multiline
             maxLength={1000}

@@ -22,6 +22,7 @@ import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
 import { Hole, Teebox, Course } from '../../../types';
 import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
 import { HoleScoreCelebration, CelebrationEvent, CelebrationKind } from '../../../components/HoleScoreCelebration';
+import { MentionInput } from '../../../components/MentionInput';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const COLLAPSED_H = 110;
@@ -3316,11 +3317,11 @@ export default function ScoringScreen() {
               {scores.reduce((a, b) => a + b, 0)} strokes
               {scoreToPar === 0 ? ' · E' : scoreToPar > 0 ? ` · +${scoreToPar}` : ` · ${scoreToPar}`}
             </Text>
-            <TextInput
+            <MentionInput
               style={styles.captionInput}
               value={roundCaption}
               onChangeText={setRoundCaption}
-              placeholder="Add a note… tag a friend with @username (optional)"
+              placeholder="Add a note… tag a friend with @ (optional)"
               placeholderTextColor={C.textMuted}
               maxLength={280}
               multiline
