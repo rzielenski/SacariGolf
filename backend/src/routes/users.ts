@@ -1962,6 +1962,11 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
       start: { lat: start.lat, lng: start.lng },
       end:   { lat: end.lat,   lng: end.lng },
       recorded_at,
+      // Persist the geometry directly so dispersion reads the real side-miss
+      // (+ = right) instead of treating every imported shot as on-line.
+      // total is the start→end hypotenuse: total² = carry² + lateral².
+      lateral_yds: Math.round(lateral),
+      total_yds: Math.round(Math.sqrt(dist * dist + lateral * lateral)),
     });
   }
 
@@ -1981,13 +1986,15 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
       await client.query(
         `INSERT INTO shots (
            user_id, match_id, hole_num, shot_index,
-           club, start_lat, start_lng, end_lat, end_lng, recorded_at, source
-         ) VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, 'launch_monitor')`,
+           club, start_lat, start_lng, end_lat, end_lng, recorded_at, source,
+           total_yds, lateral_yds, lateral_ref
+         ) VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8, 'launch_monitor', $9, $10, 'aim')`,
         [
           req.userId, i, s.club,
           s.start.lat, s.start.lng,
           s.end.lat,   s.end.lng,
           s.recorded_at,
+          s.total_yds, s.lateral_yds,
         ]
       );
     }

@@ -1012,6 +1012,34 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON post_mentions(mentioned_user_id, created_at DESC);
     `,
   },
+  {
+    // Backfill lateral/total for already-imported (launch-monitor / CSV)
+    // shots. They were synthesised with the carry projected due NORTH and
+    // the side-miss projected due EAST, but lateral_yds / total_yds were
+    // never stored — so the target-relative dispersion read them as 0
+    // ("every imported shot on line"). Recover them from the geometry:
+    //   • lateral (+ = right) = east component = Δlng · R · cos(lat)
+    //   • total                = hypotenuse of the north + east components
+    // Only touches imported shots still missing the values, so it's safe to
+    // re-run and won't clobber freshly-imported shots (which now store them).
+    name: 'shots.backfill_imported_lateral',
+    sql: `
+      UPDATE shots
+         SET lateral_yds = round(
+               (radians(end_lng - start_lng) * 6371000 * cos(radians(start_lat))) * 1.0936
+             )::int,
+             total_yds = round(
+               sqrt(
+                 power(radians(end_lat - start_lat) * 6371000, 2) +
+                 power(radians(end_lng - start_lng) * 6371000 * cos(radians(start_lat)), 2)
+               ) * 1.0936
+             )::int
+       WHERE source = 'launch_monitor'
+         AND lateral_yds IS NULL
+         AND start_lat IS NOT NULL AND start_lng IS NOT NULL
+         AND end_lat   IS NOT NULL AND end_lng   IS NOT NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {
