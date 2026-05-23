@@ -102,7 +102,7 @@ export function ThemeSongPicker({
     try {
       const { sound } = await Audio.Sound.createAsync(
         { uri: track.previewUrl },
-        { shouldPlay: true, volume: 0.85 },
+        { shouldPlay: true, volume: 1.0 },
       );
       soundRef.current = sound;
       setPlayingId(track.trackId);

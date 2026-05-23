@@ -376,6 +376,19 @@ export function useShotTracking({
     });
   };
 
+  /** Delete a specific tracked shot by hole + index (e.g. long-pressed on the
+   *  map). Re-persisting the trimmed array triggers the backend's atomic
+   *  per-hole replace, so the shot is removed from the map AND from stats. */
+  const deleteShotAt = (holeNum: number, index: number) => {
+    setShotsByHole((prev) => {
+      const cur = prev[holeNum] ?? [];
+      if (index < 0 || index >= cur.length) return prev;
+      const next = cur.filter((_, i) => i !== index);
+      persistShots(holeNum, next);
+      return { ...prev, [holeNum]: next };
+    });
+  };
+
   /** Merge server-side records into shotsByHole. Server wins for any hole
    *  it has data for; holes the server doesn't know about (e.g. an offline
    *  save that never reached the API) keep whatever was in the local cache.
@@ -438,6 +451,7 @@ export function useShotTracking({
     onTrackPress,
     onTrackLongPress,
     cancelActiveShot,
+    deleteShotAt,
     hydrate,
   };
 }

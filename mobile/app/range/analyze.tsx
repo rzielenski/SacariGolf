@@ -135,6 +135,15 @@ export default function RangeAnalyze() {
   const onPlaybackStatusUpdate = (s: AVPlaybackStatus) => {
     if (!s.isLoaded) return;
     setPlaybackTimeSec(s.positionMillis / 1000);
+    // expo-av resets the playback rate to 1.0 on every loop (and the `rate`
+    // prop doesn't reliably re-apply on the new architecture). Swing clips
+    // are short and loop constantly, so without re-applying here the slo-mo
+    // snaps back to full speed almost immediately and looks like it does
+    // nothing. The guard makes this a no-op once the live rate already
+    // matches the chosen rate, so it isn't spamming setRateAsync per frame.
+    if (s.isPlaying && Math.abs((s.rate ?? 1) - playbackRate) > 0.01) {
+      videoRef.current?.setRateAsync(playbackRate, true).catch(() => { });
+    }
   };
 
   if (swing === undefined) {

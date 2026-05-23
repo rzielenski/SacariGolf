@@ -18,7 +18,6 @@ import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS 
 import { useScorePanel } from './hooks/useScorePanel';
 import { useShotTracking } from './hooks/useShotTracking';
 import { useLocation } from './hooks/useLocation';
-import { useGhostPlayer, GHOST_NAME } from './hooks/useGhostPlayer';
 import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
 import { Hole, Teebox, Course } from '../../../types';
 import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
@@ -383,15 +382,17 @@ export default function ScoringScreen() {
   // their round Monday and Player B is playing the same match Saturday,
   // B's first poll returns A's full set of birdies/eagles/HIO.
   //
-  // GATING — events only fire when the local player has REACHED the
-  // corresponding hole. "Reached" = currentHole >= hole_num - 1 (since
-  // currentHole is 0-indexed). This means:
-  //   • Live play: A birdies hole 7 → A's screen fires it instantly
-  //     (they're on hole 7); B's screen fires it when B reaches hole 7,
-  //     not when A scored it.
-  //   • Async play: B opens the match on Saturday, currentHole = 0. All of
-  //     A's prior celebrations sit in the queue. As B advances through
-  //     each hole, the corresponding celebration fires on entry.
+  // GATING — a hole's celebration fires once the viewer has ADVANCED PAST
+  // that hole (i.e. is on the NEXT hole), or immediately if they're already
+  // past it. Same rule for the scorer and every opponent:
+  //   • Scorer: birdie hole 8 → fires when they move to hole 9 (not while
+  //     still standing on hole 8 entering the score).
+  //   • Opponent (live or async): fires when THEY reach hole 9 — so a friend
+  //     who plays the same match the next day sees it as they pass hole 8.
+  //   • Opponent already ahead: if they're on hole 9 when you birdie hole 2,
+  //     it fires the instant their next poll lands (they're already past it).
+  // On the FINAL hole there's no next hole to advance to, so a celebration
+  // there fires while the viewer is still on it.
   //
   // PERSISTENCE — celebration ids the local user has already SEEN are
   // mirrored to AsyncStorage so closing+reopening the match doesn't replay
@@ -439,12 +440,17 @@ export default function ScoringScreen() {
    *  event was dismissed. */
   const tryFireCelebration = useCallback(() => {
     if (celebrationEvent) return; // already showing one — wait for dismiss
-    const eligibleHoleMax = currentHole + 1; // currentHole is 0-indexed
+    // Eligible once the viewer is PAST the celebration's hole (on the next
+    // hole). currentHole is 0-indexed, so "on hole 9" = currentHole 8, which
+    // makes a hole-8 (1-indexed) celebration eligible (8 <= 8). On the last
+    // hole there's no next hole, so include the current hole directly.
+    const onLastHole = currentHole >= holes.length - 1;
+    const eligibleHoleMax = onLastHole ? currentHole + 1 : currentHole;
     const idx = pendingRef.current.findIndex((e) => e.hole <= eligibleHoleMax);
     if (idx < 0) return;
     const [next] = pendingRef.current.splice(idx, 1);
     setCelebrationEvent(next);
-  }, [celebrationEvent, currentHole]);
+  }, [celebrationEvent, currentHole, holes.length]);
 
   const fetchCelebrations = useCallback(async () => {
     if (selectingCourse) return;
@@ -829,7 +835,7 @@ export default function ScoringScreen() {
   const {
     shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
     setClubPickerVisible, pickClubManual, pickClubAuto, isManualPick,
-    onTrackPress, onTrackLongPress, cancelActiveShot,
+    onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt,
   } = tracking;
 
   // ── Capture barometric anchor on FIRST track press of the round ────────
@@ -1261,17 +1267,6 @@ export default function ScoringScreen() {
   // the right pin on each finalize. Plain assignment in render is fine —
   // refs aren't reactive and we're just shipping the latest value through.
   knownPinRef.current = knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null;
-
-  // Ghost player — procedurally generated "slightly better" opponent whose
-  // path appears faintly on the map for the player to chase. Pure visual,
-  // no scoring impact. See hooks/useGhostPlayer.ts.
-  const ghost = useGhostPlayer({
-    holeId: currentHoleObj?.hole_id ?? null,
-    holePar: currentHoleObj?.par ?? null,
-    knownPin: knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null,
-    userCoord,
-    userHandicap: user?.handicap_index,
-  });
 
   // ── Relative-elevation: pin lookup ─────────────────────────────────────
   // Pulls the cached relative elevation at the current hole's pin, if any
@@ -1916,10 +1911,16 @@ export default function ScoringScreen() {
     // Guard against currentHole drifting out of bounds (e.g. holes were resliced
     // or scoring screen briefly mounts before holes load).
     if (currentHole < 0 || currentHole >= holes.length) return;
-    const fallbackPar = holes[currentHole]?.par ?? 4;
+    const par = holes[currentHole]?.par ?? 4;
+    // First touch on an unscored hole enters it at par (the delta is ignored
+    // on that tap), so a single +/- never skips past par from a blank hole.
+    // After that, +/- steps by one stroke, clamped to a sane range.
+    const firstTouch = !enteredHoles.has(currentHole);
     setScores((prev) => {
       const next = [...prev];
-      next[currentHole] = Math.max(1, Math.min(20, (next[currentHole] ?? fallbackPar) + delta));
+      next[currentHole] = firstTouch
+        ? par
+        : Math.max(1, Math.min(20, (next[currentHole] ?? par) + delta));
       return next;
     });
     markEntered(currentHole);
@@ -2155,10 +2156,17 @@ export default function ScoringScreen() {
   // ── Scoring view ─────────────────────────────────────────────────────────────
 
   const hole = holes[currentHole];
+  // Holes start UNSCORED — shown as "—" until the player picks a score.
+  // `score` is the numeric editing base (par); `scoreDisplay`/`sl` only show
+  // a real value once the hole has been entered.
+  const holeEntered = enteredHoles.has(currentHole);
   const score = scores[currentHole] ?? hole.par;
-  const sl = scoreLabel(score, hole.par);
-  const totalScore = scores.reduce((a, b) => a + b, 0);
-  const totalPar = holes.reduce((a, h) => a + h.par, 0);
+  const scoreDisplay = holeEntered ? String(score) : '—';
+  const sl = holeEntered ? scoreLabel(score, hole.par) : { color: C.textDim, label: '' };
+  // Totals count ONLY holes the player has actually scored, so the running
+  // to-par reflects holes played rather than par-filled blanks.
+  const totalScore = scores.reduce((a, s, i) => (enteredHoles.has(i) ? a + s : a), 0);
+  const totalPar = holes.reduce((a, h, i) => (enteredHoles.has(i) ? a + h.par : a), 0);
   const scoreToPar = totalScore - totalPar;
   const isLastHole = currentHole === holes.length - 1;
 
@@ -2166,8 +2174,8 @@ export default function ScoringScreen() {
   const back = holes.slice(9);
   const frontParTotal = front.reduce((a, h) => a + h.par, 0);
   const backParTotal = back.reduce((a, h) => a + h.par, 0);
-  const frontScoreTotal = front.reduce((a, h, i) => a + (scores[i] ?? h.par), 0);
-  const backScoreTotal = back.reduce((a, h, i) => a + (scores[9 + i] ?? h.par), 0);
+  const frontScoreTotal = front.reduce((a, h, i) => (enteredHoles.has(i) ? a + (scores[i] ?? h.par) : a), 0);
+  const backScoreTotal = back.reduce((a, h, i) => (enteredHoles.has(9 + i) ? a + (scores[9 + i] ?? h.par) : a), 0);
 
   const cLat = course?.latitude ?? 0;
   const cLng = course?.longitude ?? 0;
@@ -2227,6 +2235,38 @@ export default function ScoringScreen() {
           if (sinceFix != null && sinceFix > 5000) refreshGps();
           setMeasurePin(e.nativeEvent.coordinate);
           setFollowing(false);
+        }}
+        // Long-press near a tracked shot to delete it. react-native-maps
+        // Markers don't expose onLongPress, so we hit-test the long-pressed
+        // coordinate against this hole's shot endpoints and act on the
+        // nearest within ~18m. A long-press on empty map does nothing.
+        onLongPress={(e) => {
+          if (currentHoleNum == null || currentShots.length === 0) return;
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          let bestIdx = -1;
+          let bestDist = Infinity;
+          currentShots.forEach((s, i) => {
+            const d = Math.min(
+              distMetres(latitude, longitude, s.end.lat, s.end.lng),
+              distMetres(latitude, longitude, s.start.lat, s.start.lng),
+            );
+            if (d < bestDist) { bestDist = d; bestIdx = i; }
+          });
+          const HIT_M = 18; // ~20 yds — generous for a fingertip long-press
+          if (bestIdx < 0 || bestDist > HIT_M) return;
+          const shotNum = bestIdx + 1;
+          Alert.alert(
+            `Delete shot ${shotNum}?`,
+            'This removes the tracked shot from the map and your stats.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Delete',
+                style: 'destructive',
+                onPress: () => deleteShotAt(currentHoleNum, bestIdx),
+              },
+            ],
+          );
         }}
         onPanDrag={() => setFollowing(false)}
       >
@@ -2398,45 +2438,6 @@ export default function ScoringScreen() {
           </Marker>
         )}
 
-        {/* Ghost player path — slightly-better fictional opponent, rendered
-            faintly behind the user's real shots. No interaction. Drawn as
-            a dashed silver polyline ending with a small "GHOST_NAME" label. */}
-        {ghost?.shots.length ? (
-          <>
-            {ghost.shots.map((g, i) => (
-              <Polyline
-                key={`ghost-${i}`}
-                coordinates={[
-                  { latitude: g.start.lat, longitude: g.start.lng },
-                  { latitude: g.end.lat,   longitude: g.end.lng },
-                ]}
-                strokeColor={g.isPutt ? '#d8d8d855' : '#d8d8d8aa'}
-                strokeWidth={g.isPutt ? 2 : 3}
-                lineDashPattern={[6, 6]}
-                lineCap="round"
-              />
-            ))}
-            {/* Endpoint marker — small silver dot with the ghost's name. */}
-            <Marker
-              coordinate={{
-                latitude:  ghost.shots[ghost.shots.length - 1].end.lat,
-                longitude: ghost.shots[ghost.shots.length - 1].end.lng,
-              }}
-              anchor={{ x: 0.5, y: 1 }}
-              tappable={false}
-              tracksViewChanges={false}
-            >
-              <View style={styles.ghostLabel}>
-                <Text style={styles.ghostLabelText}>{GHOST_NAME}</Text>
-                <Text style={styles.ghostLabelScore}>
-                  {ghost.targetScore === (currentHoleObj?.par ?? 0)
-                    ? 'par'
-                    : `+${ghost.targetScore - (currentHoleObj?.par ?? 0)}`}
-                </Text>
-              </View>
-            </Marker>
-          </>
-        ) : null}
 
         {/* Saved shots for the current hole — each as a colored start→end
             polyline, with a numbered start dot and end dot. */}
@@ -2452,9 +2453,15 @@ export default function ScoringScreen() {
                 strokeColor={color}
                 strokeWidth={4}
               />
+              {/* tappable={false} lets a press/long-press on the dot fall
+                  through to MapView.onLongPress, which hit-tests the shot
+                  endpoints and offers to delete the nearest — so you can
+                  long-press the dot itself to remove that shot. */}
               <Marker
                 coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
                 anchor={{ x: 0.5, y: 0.5 }}
+                tappable={false}
+                tracksViewChanges={false}
               >
                 <View style={[styles.shotDot, { backgroundColor: color }]}>
                   <Text style={styles.shotDotText}>{i + 1}</Text>
@@ -2463,6 +2470,8 @@ export default function ScoringScreen() {
               <Marker
                 coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
                 anchor={{ x: 0.5, y: 0.5 }}
+                tappable={false}
+                tracksViewChanges={false}
               >
                 <View style={[styles.shotEndDot, { borderColor: color }]} />
               </Marker>
@@ -3088,7 +3097,7 @@ export default function ScoringScreen() {
                 <Text style={styles.holeSummaryPar}>  Par {hole.par}{hole.yardage ? `  ·  ${hole.yardage} yds` : ''}</Text>
               </Text>
               <View style={styles.scoreSummaryRow}>
-                <Text style={[styles.scoreSummaryNum, { color: sl.color }]}>{score}</Text>
+                <Text style={[styles.scoreSummaryNum, { color: sl.color }]}>{scoreDisplay}</Text>
                 <Text style={[styles.scoreSummaryLabel, { color: sl.color }]}>{sl.label}</Text>
               </View>
             </View>
@@ -3125,7 +3134,7 @@ export default function ScoringScreen() {
                 <Text style={styles.scoreBtnText}>−</Text>
               </TouchableOpacity>
               <View style={styles.scoreCenter}>
-                <Text style={styles.scoreNum}>{score}</Text>
+                <Text style={styles.scoreNum}>{scoreDisplay}</Text>
               </View>
               <TouchableOpacity style={styles.scoreBtn} onPress={() => adjustScore(1)}>
                 <Text style={styles.scoreBtnText}>+</Text>
@@ -3136,10 +3145,10 @@ export default function ScoringScreen() {
               {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
                 <TouchableOpacity
                   key={n}
-                  style={[styles.quickBtn, score === n && { backgroundColor: C.gold }]}
+                  style={[styles.quickBtn, holeEntered && score === n && { backgroundColor: C.gold }]}
                   onPress={() => { setScores((prev) => { const next = [...prev]; next[currentHole] = n; return next; }); markEntered(currentHole); }}
                 >
-                  <Text style={[styles.quickBtnText, score === n && { color: '#000' }]}>{n}</Text>
+                  <Text style={[styles.quickBtnText, holeEntered && score === n && { color: '#000' }]}>{n}</Text>
                 </TouchableOpacity>
               ))}
             </View>
@@ -3231,6 +3240,7 @@ export default function ScoringScreen() {
             </View>
 
             {holes.map((h, i) => {
+              const sEntered = enteredHoles.has(i);
               const s = scores[i] ?? h.par;
               const isActive = i === currentHole;
               return (
@@ -3244,7 +3254,7 @@ export default function ScoringScreen() {
                     <Text style={[styles.scCell, styles.scStatCol, styles.scText]}>{h.par}</Text>
                     <Text style={[styles.scCell, styles.scStatCol, styles.scText]}>{h.yardage ?? '—'}</Text>
                     <Text style={[styles.scCell, styles.scStatCol, styles.scText]}>{h.handicap ?? '—'}</Text>
-                    <Text style={[styles.scCell, styles.scScoreCol, styles.scScore, { color: scoreColor(s, h.par) }]}>{s}</Text>
+                    <Text style={[styles.scCell, styles.scScoreCol, styles.scScore, { color: sEntered ? scoreColor(s, h.par) : C.textDim }]}>{sEntered ? s : '—'}</Text>
                   </View>
                   {(i === 8 && holes.length > 9) && (
                     <View style={styles.subtotalRow}>
@@ -3454,30 +3464,6 @@ const styles = StyleSheet.create({
   },
   liveShotPillText: { fontFamily: F.serif, fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
 
-  // Ghost player endpoint label — silver, low-contrast so it sits behind
-  // the real shot markers. Italic + lowercase for the wizardly vibe.
-  ghostLabel: {
-    backgroundColor: '#1a1a1ad9',
-    borderColor: '#d8d8d8',
-    borderWidth: 1,
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    alignItems: 'center',
-  },
-  ghostLabelText: {
-    color: '#e8e8e8',
-    fontSize: 9,
-    fontWeight: '700',
-    fontStyle: 'italic',
-    letterSpacing: 0.3,
-  },
-  ghostLabelScore: {
-    color: '#c8c8c8',
-    fontSize: 8,
-    fontWeight: '600',
-    marginTop: 1,
-  },
   shotEndDot: {
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: '#fff', borderWidth: 3,

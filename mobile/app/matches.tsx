@@ -21,10 +21,14 @@ import {
   TouchableOpacity, View,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { useCensor } from '../lib/censor';
 import { C, F } from '../lib/colors';
+
+/** Local cache of the My Matches list so the screen populates with no signal. */
+const MATCHES_CACHE_KEY = 'coc_matches_cache';
 
 // Server returns Match objects without a course_name on the top-level row;
 // it's nested in players[]. We don't have players[] in /matches list, so
@@ -120,8 +124,17 @@ export default function MatchesHistoryScreen() {
     try {
       const data = await api.matches.list();
       setMatches(data as ListedMatch[]);
+      // Cache the list so My Matches loads with no signal. Each match's own
+      // scoring screen additionally caches its full snapshot on first open
+      // (match_cache_<id>), so a current round can be resumed offline.
+      AsyncStorage.setItem(MATCHES_CACHE_KEY, JSON.stringify(data)).catch(() => { });
     } catch {
-      // silent — the screen surfaces an empty state if the load fails
+      // Offline / fetch failed → fall back to the last cached list so the
+      // player can still see and open their current matches without service.
+      try {
+        const raw = await AsyncStorage.getItem(MATCHES_CACHE_KEY);
+        if (raw) setMatches(JSON.parse(raw) as ListedMatch[]);
+      } catch { /* nothing cached yet */ }
     } finally {
       setLoading(false);
       setRefreshing(false);

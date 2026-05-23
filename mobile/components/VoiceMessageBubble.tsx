@@ -78,7 +78,7 @@ export function VoiceMessageBubble({ url, durationMs, tint = 'other' }: Props) {
         const fullUrl = url.startsWith('http') ? url : `${API_BASE}${url}`;
         const { sound } = await Audio.Sound.createAsync(
           { uri: fullUrl },
-          { shouldPlay: true, progressUpdateIntervalMillis: 150 },
+          { shouldPlay: true, volume: 1.0, progressUpdateIntervalMillis: 150 },
           onStatus,
         );
         soundRef.current = sound;

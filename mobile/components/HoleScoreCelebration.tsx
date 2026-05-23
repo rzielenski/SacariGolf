@@ -161,7 +161,7 @@ export function HoleScoreCelebration({ event, onDismiss }: Props) {
         await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
         const { sound } = await Audio.Sound.createAsync(
           { uri: event.themePreview! },
-          { shouldPlay: true, volume: 0.8 },
+          { shouldPlay: true, volume: 1.0 },
         );
         if (cancelled) {
           await sound.unloadAsync();

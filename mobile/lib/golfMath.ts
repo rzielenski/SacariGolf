@@ -44,9 +44,9 @@ export function bearingDeg(lat1: number, lng1: number, lat2: number, lng2: numbe
 }
 
 /** Project a start coord forward along a bearing by `forwardYds` and then
- *  perpendicular by `lateralYds` (positive = right of bearing). Used by the
- *  heatmap and the ghost-player path generator to place synthetic shots on
- *  a real-world coordinate. Lateral perpendicular = bearing + 90°. */
+ *  perpendicular by `lateralYds` (positive = right of bearing). Generic
+ *  geo helper for placing a synthetic point at a known offset from a
+ *  real-world coordinate. Lateral perpendicular = bearing + 90°. */
 export function projectYards(
   startLat: number, startLng: number,
   bearingDegrees: number,

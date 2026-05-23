@@ -118,7 +118,7 @@ export function MatchFoundIntro({
         await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
         const { sound } = await Audio.Sound.createAsync(
           { uri: opponentTheme },
-          { shouldPlay: true, volume: 0.7 },
+          { shouldPlay: true, volume: 1.0 },
         );
         if (cancelled) {
           await sound.unloadAsync();
