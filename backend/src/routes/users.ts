@@ -2113,6 +2113,21 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
     notes.push({ type: 'match_result', title: won ? 'Victory!' : 'Defeat', body: won ? `You won your ${r.match_type} match (+${r.delta_elo} ELO)` : `You lost your ${r.match_type} match (-${r.delta_elo} ELO)`, data: { matchId: r.match_id }, created_at: r.created_at, won });
   }
 
+  // Post @mentions — someone tagged this user in a feed post (3-day window).
+  try {
+    const { rows: mentions } = await pool.query(
+      `SELECT pm.post_id, pm.created_at, au.username AS from_name
+         FROM post_mentions pm
+         JOIN posts p  ON p.post_id = pm.post_id
+         JOIN users au ON au.user_id = pm.author_user_id
+        WHERE pm.mentioned_user_id = $1
+          AND pm.created_at > NOW() - INTERVAL '3 days'
+        ORDER BY pm.created_at DESC LIMIT 10`,
+      [req.userId]
+    );
+    for (const r of mentions) notes.push({ type: 'mention', title: 'You were tagged', body: `${r.from_name} tagged you in a post`, data: { postId: r.post_id }, created_at: r.created_at });
+  } catch { /* table may not exist on older deployments */ }
+
   notes.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
   // Chat unreads — fold into the bell badge so the user sees an alert when a

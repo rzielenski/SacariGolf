@@ -158,6 +158,13 @@ function AuthGuard() {
           // Team chat room.
           if (typeof data.clanId === 'string') router.push(`/chat/clan/${data.clanId}` as any);
           break;
+        case 'post':
+        case 'mention':
+          // Tagged in a post → open the feed (home tab). There's no
+          // per-post screen, so we land the user on the feed where the
+          // post they were tagged in appears.
+          router.push('/(tabs)/' as any);
+          break;
         default:
           break;
       }

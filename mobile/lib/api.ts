@@ -568,6 +568,9 @@ export const api = {
       courseId?: string; teeboxId?: string;
       /** Beers logged this round — feeds the Beer Ranker leaderboards. */
       beers?: number;
+      /** Optional note attached to the round → becomes the body of the
+       *  'round' feed post. Supports @username mentions. */
+      caption?: string;
     }) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),

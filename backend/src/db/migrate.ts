@@ -966,6 +966,52 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         );
     `,
   },
+  {
+    // Case-insensitive username uniqueness. The base schema already has an
+    // exact-match UNIQUE on username, so the only possible collisions differ
+    // by case (e.g. "Rich" vs "rich"). Resolve those first — keep the
+    // earliest account's name, suffix later ones with a short uid fragment —
+    // then add a unique index on lower(username) so @mentions resolve to
+    // exactly one user and case-variant impersonation is impossible.
+    name: 'users.username_ci_unique',
+    sql: `
+      WITH dupes AS (
+        SELECT user_id,
+               row_number() OVER (PARTITION BY lower(username)
+                                  ORDER BY created_at, user_id) AS rn
+          FROM users
+      )
+      UPDATE users u
+         SET username = left(u.username, 14) || '_' || left(replace(u.user_id::text, '-', ''), 4)
+        FROM dupes d
+       WHERE d.user_id = u.user_id AND d.rn > 1;
+      CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uniq
+        ON users (lower(username));
+    `,
+  },
+  {
+    // Optional one-line note the player attaches to a round when submitting;
+    // becomes the body of the 'round' feed post created at match resolution.
+    name: 'rounds.caption',
+    sql: `ALTER TABLE rounds ADD COLUMN IF NOT EXISTS caption TEXT;`,
+  },
+  {
+    // @mentions in feed posts (text/photo posts and round captions). One row
+    // per (post, mentioned user); drives the "you were tagged" notification
+    // surfaced in GET /users/me/notifications.
+    name: 'post_mentions.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS post_mentions (
+        post_id           UUID NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+        mentioned_user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        author_user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, mentioned_user_id)
+      );
+      CREATE INDEX IF NOT EXISTS post_mentions_user_idx
+        ON post_mentions(mentioned_user_id, created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   View, Text, StyleSheet, TouchableOpacity, ScrollView,
   Alert, ActivityIndicator, Animated, Dimensions, TextInput, Modal,
-  PanResponder, AppState,
+  PanResponder, AppState, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import MapView, { Marker, Polyline, Polygon, Circle, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -92,6 +92,11 @@ export default function ScoringScreen() {
   const [currentHole, setCurrentHole] = useState(0);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // Optional note the player attaches to their round at submit — becomes the
+  // body of the feed post (supports @username mentions). Captured in a small
+  // modal that doubles as the final submit confirmation.
+  const [captionModalVisible, setCaptionModalVisible] = useState(false);
+  const [roundCaption, setRoundCaption] = useState('');
   const [forfeiting, setForfeiting] = useState(false);
   const [scorecardVisible, setScorecardVisible] = useState(false);
   // In-round invite modal — only used for practice rounds, where the host can
@@ -1961,24 +1966,21 @@ export default function ScoringScreen() {
       );
       return;
     }
-    Alert.alert(
-      'Submit Scores?',
-      `Total: ${scores.reduce((a, b) => a + b, 0)} strokes`
-      + `\n\nThis will finalise your round.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Submit', onPress: doSubmit },
-      ]
-    );
+    // Open the caption modal — it shows the total, lets the player add an
+    // optional note (with @mentions) for their feed post, and is the final
+    // "Post Round" confirmation.
+    setCaptionModalVisible(true);
   };
 
   const doSubmit = async () => {
+    setCaptionModalVisible(false);
     setSubmitting(true);
     const submitBody = {
       holeScores: scores,
       holeStats,
       courseId: course?.course_id,
       teeboxId: teebox?.teebox_id,
+      caption: roundCaption.trim() || undefined,
     };
     try {
       const result = await api.matches.submitScores(id, submitBody);
@@ -3294,6 +3296,58 @@ export default function ScoringScreen() {
           screen because <Modal> escapes the local view tree — so it'll
           paint over the scorecard modal, the club picker, etc. */}
       <HoleScoreCelebration event={celebrationEvent} onDismiss={advanceCelebration} />
+
+      {/* Submit / round-caption modal. Doubles as the final "post your round"
+          confirmation: shows the total, takes an optional note that becomes
+          the body of the feed post (with @username mentions), then submits. */}
+      <Modal
+        visible={captionModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCaptionModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.captionBackdrop}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <View style={styles.captionCard}>
+            <Text style={styles.captionTitle}>Post your round</Text>
+            <Text style={styles.captionSubtitle}>
+              {scores.reduce((a, b) => a + b, 0)} strokes
+              {scoreToPar === 0 ? ' · E' : scoreToPar > 0 ? ` · +${scoreToPar}` : ` · ${scoreToPar}`}
+            </Text>
+            <TextInput
+              style={styles.captionInput}
+              value={roundCaption}
+              onChangeText={setRoundCaption}
+              placeholder="Add a note… tag a friend with @username (optional)"
+              placeholderTextColor={C.textMuted}
+              maxLength={280}
+              multiline
+              autoFocus
+            />
+            <Text style={styles.captionHint}>This finalises your round.</Text>
+            <View style={styles.captionBtnRow}>
+              <TouchableOpacity
+                style={styles.captionCancelBtn}
+                onPress={() => setCaptionModalVisible(false)}
+                disabled={submitting}
+              >
+                <Text style={styles.captionCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.captionPostBtn, submitting && { opacity: 0.5 }]}
+                onPress={doSubmit}
+                disabled={submitting}
+              >
+                {submitting
+                  ? <ActivityIndicator color={C.bg} size="small" />
+                  : <Text style={styles.captionPostText}>Post Round</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -3303,6 +3357,36 @@ export default function ScoringScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   centered: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center' },
+
+  // Round-caption / submit confirmation modal.
+  captionBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center', alignItems: 'center', padding: 24,
+  },
+  captionCard: {
+    width: '100%', maxWidth: 420, backgroundColor: C.card,
+    borderRadius: 14, borderWidth: 1, borderColor: C.border, padding: 18,
+  },
+  captionTitle: { color: C.text, fontSize: 18, fontWeight: '900' },
+  captionSubtitle: { color: C.gold, fontSize: 13, fontWeight: '700', marginTop: 2 },
+  captionInput: {
+    color: C.text, fontSize: 15, lineHeight: 21, minHeight: 80, maxHeight: 160,
+    textAlignVertical: 'top', marginTop: 14,
+    backgroundColor: C.bg, borderRadius: 10, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 12, paddingVertical: 10,
+  },
+  captionHint: { color: C.textMuted, fontSize: 11, marginTop: 8 },
+  captionBtnRow: { flexDirection: 'row', gap: 10, marginTop: 16 },
+  captionCancelBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
+    borderWidth: 1, borderColor: C.border,
+  },
+  captionCancelText: { color: C.textMuted, fontWeight: '700', fontSize: 14 },
+  captionPostBtn: {
+    flex: 2, paddingVertical: 12, borderRadius: 10, alignItems: 'center',
+    backgroundColor: C.gold,
+  },
+  captionPostText: { color: C.bg, fontWeight: '900', fontSize: 14 },
 
   // Course selection
   backBtn: { marginBottom: 10, marginTop: 60, paddingHorizontal: 20 },

@@ -22,6 +22,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
+import { processMentions } from '../utils/mentions';
 
 const router = Router();
 
@@ -100,6 +101,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     unlinkFeedImage(imageUrl);
     throw err;
   }
+  // Tag anyone @mentioned in the body — records the mention + pushes them a
+  // "tagged you" notification. Fire-and-forget; never blocks the response.
+  if (text) processMentions(rows[0].post_id, req.userId!, text);
   return res.status(201).json(rows[0]);
 }));
 

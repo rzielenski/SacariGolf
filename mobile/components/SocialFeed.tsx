@@ -323,9 +323,15 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
         )}
       </View>
 
-      {post.kind === 'round' && <RoundCardBody post={post} />}
+      {post.kind === 'round' && (
+        <>
+          <RoundCardBody post={post} />
+          {/* Optional note the player attached at submit (may @mention others). */}
+          {post.body && <MentionText text={post.body} censor={censor} style={s.caption} />}
+        </>
+      )}
       {post.kind === 'text' && post.body && (
-        <Text style={s.bodyText}>{censorText(post.body, censor)}</Text>
+        <MentionText text={post.body} censor={censor} style={s.bodyText} />
       )}
       {post.kind === 'photo' && (
         <>
@@ -336,7 +342,7 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
               resizeMode="cover"
             />
           )}
-          {post.body && <Text style={s.caption}>{censorText(post.body, censor)}</Text>}
+          {post.body && <MentionText text={post.body} censor={censor} style={s.caption} />}
         </>
       )}
 
@@ -509,6 +515,44 @@ function CommentsModal({
         </View>
       </View>
     </Modal>
+  );
+}
+
+// Splits on @mentions while KEEPING the tokens (capturing group), so we can
+// render the handles in gold and make them tappable. 3–20 chars matches the
+// username rules + the server-side mention parser.
+const MENTION_SPLIT = /(@[a-zA-Z0-9_]{3,20})/g;
+const MENTION_TEST = /^@[a-zA-Z0-9_]{3,20}$/;
+
+/** Resolve a tapped @handle to a user and open their profile. Best-effort —
+ *  a misspelled handle that matches nobody just no-ops. */
+function openMentionedUser(token: string) {
+  const handle = token.replace(/^@/, '').toLowerCase();
+  api.users.search(handle)
+    .then((rows: any[]) => {
+      const u = (rows ?? []).find((r) => r.username?.toLowerCase() === handle);
+      if (u) router.push(`/user/${u.user_id}` as any);
+    })
+    .catch(() => { /* silent */ });
+}
+
+/** Renders a post body with @mentions highlighted + tappable. Censoring is
+ *  applied first (usernames are alphanumeric so they survive the censor). */
+function MentionText({ text, censor, style }: { text: string; censor: boolean; style?: any }) {
+  const censored = censorText(text, censor);
+  const parts = censored.split(MENTION_SPLIT);
+  return (
+    <Text style={style}>
+      {parts.map((part, i) =>
+        MENTION_TEST.test(part) ? (
+          <Text key={i} style={s.mention} onPress={() => openMentionedUser(part)}>
+            {part}
+          </Text>
+        ) : (
+          part
+        ),
+      )}
+    </Text>
   );
 }
 
@@ -774,6 +818,7 @@ const s = StyleSheet.create({
   reportFlag: { color: C.textMuted, fontSize: 15, paddingHorizontal: 8 },
 
   bodyText: { color: C.text, fontSize: 15, lineHeight: 21 },
+  mention: { color: C.gold, fontWeight: '700' },
 
   photo: {
     width: '100%', aspectRatio: 1, borderRadius: 6,

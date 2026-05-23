@@ -41,6 +41,7 @@ type SubmitPayload = {
     courseId?: string;
     teeboxId?: string;
     beers?: number;
+    caption?: string;
   };
 };
 

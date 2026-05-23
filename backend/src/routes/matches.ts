@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
+import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
 
 const router = Router();
@@ -543,7 +544,7 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
 
 // Submit scores for a round
 router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { holeScores, holeStats, courseId, teeboxId, beers } = req.body;
+  const { holeScores, holeStats, courseId, teeboxId, beers, caption } = req.body;
   if (!Array.isArray(holeScores) || holeScores.length === 0) {
     return res.status(400).json({ error: 'holeScores array required' });
   }
@@ -551,6 +552,12 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
   // Beers logged this round — clamp to a sane 0–50 so a buggy client can't
   // poison the Beer Ranker leaderboards. Default 0 when omitted.
   const beerCount = Math.max(0, Math.min(50, Math.round(Number(beers) || 0)));
+  // Optional note attached to the round → becomes the body of the 'round'
+  // feed post created at resolution (and is scanned for @mentions there).
+  // Trimmed + capped so a buggy client can't store a novel.
+  const roundCaption = typeof caption === 'string' && caption.trim()
+    ? caption.trim().slice(0, 280)
+    : null;
 
   const totalScore = (holeScores as number[]).reduce((a, b) => a + b, 0);
   const client = await pool.connect();
@@ -619,11 +626,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
     // Upsert round (only for the submitting player; scramble teammates share the same final score)
     await client.query(
-      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers, caption)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (match_id, user_id)
-       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9`,
-      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount]
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10`,
+      [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]
     );
 
     // Update match_players for the submitting player
@@ -970,8 +977,10 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       // Reuses the same allPlayerIds list we built earlier for the perk
       // lookup so we don't re-traverse the two side arrays.
       await client.query(
-        `INSERT INTO posts (user_id, kind, match_id)
-         SELECT unnest($1::uuid[]), 'round', $2`,
+        `INSERT INTO posts (user_id, kind, match_id, body)
+         SELECT pid, 'round', $2, r.caption
+           FROM unnest($1::uuid[]) AS pid
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
         [allPlayerIds, matchId]
       );
       return {
@@ -1170,8 +1179,10 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       // Auto-post a 'round' card to each Arena player's feed — one batch
       // INSERT to keep round-trip count flat regardless of field size.
       await client.query(
-        `INSERT INTO posts (user_id, kind, match_id)
-         SELECT unnest($1::uuid[]), 'round', $2`,
+        `INSERT INTO posts (user_id, kind, match_id, body)
+         SELECT pid, 'round', $2, r.caption
+           FROM unnest($1::uuid[]) AS pid
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
         [players.map((p) => p.user_id), matchId]
       );
       return {
@@ -1377,6 +1388,26 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         }
       } catch (e) {
         console.error('match_result push failed:', e);
+      }
+    }
+
+    // Process @mentions in this match's round-caption posts. Round posts are
+    // created at resolution (above), so this only runs once the match is
+    // resolved. Best-effort + post-commit so it never blocks the score save.
+    if (result) {
+      try {
+        const { rows: rposts } = await pool.query(
+          `SELECT p.post_id, p.user_id, p.body
+             FROM posts p
+            WHERE p.match_id = $1 AND p.kind = 'round' AND p.body IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM post_mentions pm WHERE pm.post_id = p.post_id)`,
+          [req.params.id]
+        );
+        for (const rp of rposts) {
+          await processMentions(rp.post_id, rp.user_id, rp.body);
+        }
+      } catch (e) {
+        console.error('round-caption mention processing failed:', e);
       }
     }
 

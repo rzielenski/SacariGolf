@@ -351,6 +351,9 @@ export default function ProfileScreen() {
     setNotifVisible(false);
     if (notif.type === 'match_result' || notif.type === 'match_invite') {
       router.push(`/match/${notif.data.matchId}` as any);
+    } else if (notif.type === 'mention') {
+      // Tagged in a post → open the feed (home tab). No per-post screen.
+      router.push('/(tabs)/' as any);
     }
     // friend_request and clan_invite handled in social tab
   };
@@ -360,6 +363,7 @@ export default function ProfileScreen() {
     if (type === 'match_invite') return 'MA';
     if (type === 'clan_invite') return 'CL';
     if (type === 'match_result') return 'RS';
+    if (type === 'mention') return '@';
     return '·';
   };
 
