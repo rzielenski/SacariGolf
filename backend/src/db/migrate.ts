@@ -1040,6 +1040,25 @@ const MIGRATIONS: { name: string; sql: string }[] = [
          AND end_lat   IS NOT NULL AND end_lng   IS NOT NULL;
     `,
   },
+  {
+    // Lost/found golf-ball log — one row per ball the player taps to log.
+    // Drives the "Ball Count" running tally + leaderboard. kind = 'found'
+    // adds to the count, 'lost' subtracts; net = found − lost is the
+    // headline number. Stored as individual events (not a denormalized
+    // counter) so an undo is just deleting the most recent row and the
+    // leaderboard always derives from a single source of truth.
+    name: 'ball_log.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS ball_log (
+        log_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind       TEXT NOT NULL CHECK (kind IN ('found', 'lost')),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS ball_log_user_idx
+        ON ball_log(user_id, created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

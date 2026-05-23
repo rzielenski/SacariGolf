@@ -17,6 +17,8 @@ import premiumRouter from './routes/premium';
 import weatherRouter from './routes/weather';
 import tournamentsRouter from './routes/tournaments';
 import postsRouter from './routes/posts';
+import seasonsRouter from './routes/seasons';
+import ballsRouter from './routes/balls';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
 
@@ -44,6 +46,8 @@ app.use('/premium', premiumRouter);
 app.use('/weather', weatherRouter);
 app.use('/tournaments', tournamentsRouter);
 app.use('/posts', postsRouter);
+app.use('/seasons', seasonsRouter);
+app.use('/balls', ballsRouter);
 
 // Catch unhandled errors so the server doesn't crash
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

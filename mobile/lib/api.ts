@@ -430,6 +430,61 @@ export const api = {
     }>('POST', '/premium/redeem', { code }),
   },
 
+  seasons: {
+    /** Active season + the caller's division, progress to the next tier, and
+     *  their season record (wins/ties/losses/points). */
+    current: () => request<{
+      season: { id: string; name: string; starts_at: string; ends_at: string; days_left: number };
+      divisions: { key: string; name: string; color: string }[];
+      me: {
+        elo: number;
+        division: { key: string; name: string; color: string; min: number; max: number | null };
+        next_division: { key: string; name: string; color: string; min: number } | null;
+        elo_to_next: number | null;
+        record: { matches: number; wins: number; ties: number; losses: number; points: number };
+      };
+    }>('GET', '/seasons/current'),
+    /** Season standings, ranked by points. `division` filters to a tier
+     *  (key, or 'all'); omit to default to the caller's own division.
+     *  `friendsOnly` scopes to self + accepted friends. */
+    standings: (division?: string, friendsOnly = false) => {
+      const q = new URLSearchParams();
+      if (division) q.set('division', division);
+      if (friendsOnly) q.set('scope', 'friends');
+      const qs = q.toString();
+      return request<{
+        season: { id: string; name: string; starts_at: string; ends_at: string; days_left: number };
+        division: string | null;
+        standings: {
+          user_id: string; username: string; avatar_url: string | null; elo: number;
+          matches: number; wins: number; ties: number; losses: number; points: number;
+          rank: number; division_key: string;
+        }[];
+      }>('GET', `/seasons/current/standings${qs ? `?${qs}` : ''}`);
+    },
+  },
+
+  balls: {
+    /** Caller's running ball count (found, lost, net) + recent log entries. */
+    me: () => request<{
+      found: number; lost: number; net: number;
+      recent: { log_id: string; kind: 'found' | 'lost'; created_at: string }[];
+    }>('GET', '/balls/me'),
+    /** Log one found or lost ball. Returns the updated totals. */
+    log: (kind: 'found' | 'lost') =>
+      request<{ found: number; lost: number; net: number }>('POST', '/balls/log', { kind }),
+    /** Undo the most recent log entry. Returns the updated totals. */
+    undo: () =>
+      request<{ found: number; lost: number; net: number }>('POST', '/balls/undo'),
+    /** Ball-count leaderboard, ranked by net (found − lost). `friendsOnly`
+     *  scopes to self + accepted friends. */
+    leaderboard: (friendsOnly = false) =>
+      request<{
+        user_id: string; username: string; avatar_url: string | null;
+        found: number; lost: number; net: number; rank: number;
+      }[]>('GET', `/balls/leaderboard${friendsOnly ? '?friends=1' : ''}`),
+  },
+
   messages: {
     list: (params: { matchId?: string; clanId?: string; toUserId?: string }) => {
       const q = params.matchId ? `matchId=${params.matchId}` : params.clanId ? `clanId=${params.clanId}` : `toUserId=${params.toUserId}`;

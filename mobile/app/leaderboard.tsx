@@ -61,6 +61,18 @@ export default function LeaderboardScreen() {
         <View style={{ width: 60 }} />
       </View>
 
+      {/* Season ladder entry — the competitive divisions + monthly standings. */}
+      <TouchableOpacity style={styles.seasonBanner} onPress={() => router.push('/seasons' as any)} activeOpacity={0.8}>
+        <Text style={styles.seasonBannerText}>🏆  Season Ladder — divisions & monthly standings</Text>
+        <Text style={styles.seasonBannerChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Ball-count entry — running found/lost tally + leaderboard. */}
+      <TouchableOpacity style={styles.ballBanner} onPress={() => router.push('/balls' as any)} activeOpacity={0.8}>
+        <Text style={styles.ballBannerText}>⛳  Ball Count — log found & lost balls</Text>
+        <Text style={styles.ballBannerChev}>›</Text>
+      </TouchableOpacity>
+
       {/* Mode selector — Overall ELO vs per-mode (ranked by wins). */}
       <View style={styles.modeRow}>
         {MODES.map((m) => (
@@ -224,6 +236,22 @@ const styles = StyleSheet.create({
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   emptyText: { color: C.textMuted, fontSize: 15 },
+
+  seasonBanner: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginHorizontal: 16, marginTop: 12, paddingHorizontal: 14, paddingVertical: 12,
+    borderRadius: 8, backgroundColor: C.gold + '18', borderWidth: 1, borderColor: C.gold,
+  },
+  seasonBannerText: { color: C.gold, fontWeight: '800', fontSize: 13, flex: 1 },
+  seasonBannerChev: { color: C.gold, fontSize: 20, fontWeight: '900' },
+
+  ballBanner: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginHorizontal: 16, marginTop: 8, paddingHorizontal: 14, paddingVertical: 12,
+    borderRadius: 8, backgroundColor: C.green + '18', borderWidth: 1, borderColor: C.green,
+  },
+  ballBannerText: { color: C.green, fontWeight: '800', fontSize: 13, flex: 1 },
+  ballBannerChev: { color: C.green, fontSize: 20, fontWeight: '900' },
 
   modeRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingTop: 12 },
   modeBtn: {
