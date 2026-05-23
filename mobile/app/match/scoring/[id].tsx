@@ -1596,10 +1596,10 @@ export default function ScoringScreen() {
     // only WHERE the scatter lands. So we shift the centroid and keep the
     // axes untouched.
     let effectiveForward = baseForward;
-    // Effective lateral offset to apply to the ellipse center. Defaults to
-    // the (small) per-club systematic bias from the dispersion mean; when
-    // the player drags the aim manually we zero this out and pin the
-    // center to the aim coordinate instead.
+    // Lateral offset of the ellipse center from the aim line = the club's
+    // systematic left/right bias (the mean of the per-shot lateral misses,
+    // + = right). This is what slides the cluster onto the side the player
+    // actually misses to, so the center lands on their AVERAGE shot.
     let effectiveLateral = meanLat;
 
     // ── Weather: wind / temperature / altitude / rain ─────────────────
@@ -1640,18 +1640,15 @@ export default function ScoringScreen() {
     }
 
     const start: LL = { latitude: userCoord.latitude, longitude: userCoord.longitude };
-    // When the user manually places an aim, we use that point's BEARING
-    // (already captured into `aimBearing` above) but keep `effectiveForward`
-    // pinned to the club's condition-adjusted carry. The semantic is "I'm
-    // aiming this direction for THIS club" — the heatmap rotates around
-    // the player at the club's natural distance, it does NOT stretch out
-    // to wherever the user tapped. That's exactly the case for someone
-    // laying up or aiming at the left side of a green: same club, same
-    // expected distance, different line. Lateral offset is zeroed so the
-    // ellipse sits squarely on the new aim line.
-    if (measurePin) {
-      effectiveLateral = 0;
-    }
+    // The aim (measure point / pin) only sets the DIRECTION the dispersion
+    // points along — `aimBearing`, captured above. It does NOT re-center the
+    // cluster onto the line. The center is the player's AVERAGE shot for this
+    // club: forward by the condition-adjusted carry, and offset laterally by
+    // `meanLat` — the club's systematic left/right bias. So a 9-iron that
+    // consistently leaks right is centered RIGHT of the aim line, sitting over
+    // where the shots actually land, instead of being snapped back onto the
+    // centerline. (Previously this was zeroed whenever an aim was set, which
+    // hid the bias — the exact "all shots right but heatmap on the line" bug.)
     const center: LL = place(start, effectiveForward, effectiveLateral);
 
     // Sample 60 points around each σ ellipse perimeter. In the (lateral,
