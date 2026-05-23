@@ -580,7 +580,7 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // blow up memory; the most recent 5000 are plenty for stats.
   const { rows: shotRows } = await pool.query(
     `SELECT shot_id, club, start_lat, start_lng, end_lat, end_lng,
-            plays_like_yds, recorded_at
+            plays_like_yds, recorded_at, total_yds, lateral_yds
        FROM shots
       WHERE user_id = $1
         AND club IS NOT NULL
@@ -598,6 +598,10 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       end:   { lat: s.end_lat,   lng: s.end_lng },
       plays_like_yds: s.plays_like_yds,
       recorded_at: s.recorded_at,
+      // Client-computed at record time: signed perpendicular offset from the
+      // aim/pin line, and the raw start→end distance it was derived from.
+      total_yds: s.total_yds,
+      lateral_yds: s.lateral_yds,
     })),
   }];
 
@@ -612,6 +616,8 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     plays_like_yds: number | null;
     shot_id: string | null;
     recorded_at: string | null;
+    total_yds: number | null;
+    lateral_yds: number | null;
   };
   const byClub = new Map<string, ShotVec[]>();
 
@@ -641,6 +647,8 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     shot_id: string | null;
     plays_like_yds: number | null;
     recorded_at: string | null;
+    total_yds: number | null;
+    lateral_yds: number | null;
   };
   const eachShotSegment = (rawShots: any[]): Segment[] => {
     if (!rawShots.length) return [];
@@ -652,6 +660,8 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
           shot_id: s.shot_id ?? null,
           plays_like_yds: typeof s.plays_like_yds === 'number' ? s.plays_like_yds : null,
           recorded_at: s.recorded_at ?? null,
+          total_yds: typeof s.total_yds === 'number' ? s.total_yds : null,
+          lateral_yds: typeof s.lateral_yds === 'number' ? s.lateral_yds : null,
         }));
     }
     // Legacy: points where shots[i] = "where shot i+1 was hit FROM"
@@ -664,6 +674,7 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       out.push({
         start: cur, end: nxt, club: cur.club,
         shot_id: null, plays_like_yds: null, recorded_at: null,
+        total_yds: null, lateral_yds: null,
       });
     }
     return out;
@@ -686,6 +697,8 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
         plays_like_yds: seg.plays_like_yds,
         shot_id: seg.shot_id,
         recorded_at: seg.recorded_at,
+        total_yds: seg.total_yds,
+        lateral_yds: seg.lateral_yds,
       });
       byClub.set(seg.club, arr);
     }
@@ -707,78 +720,45 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
 
   const clubs: any[] = [];
   for (const [club, vecs] of byClub.entries()) {
-    if (vecs.length < 2) {
-      // Not enough samples to call a "median direction"; still report distance.
-      const yds = vecs.map(ydsFor);
-      clubs.push({
-        club,
-        shots: vecs.length,
-        avg_yds:    Math.round(yds.reduce((a, b) => a + b, 0) / yds.length),
-        median_yds: Math.round(median(yds)),
-        // Dispersion needs ≥2 samples to define a frame, but we still
-        // surface the individual shots so the client can list + delete them.
-        dispersion: vecs.map(v => ({
-          shot_id: v.shot_id,
-          recorded_at: v.recorded_at,
-          dist_yds: Math.round(ydsFor(v)),
-          lateral_yds: 0,
-          long_yds: 0,
-        })),
-      });
-      continue;
-    }
-    // Median bearing — circular median. Crude but fine: rotate so shot 0
-    // points "north" (using its bearing as reference), then take the median
-    // of the angular offsets, then add back. This avoids the wrap-around at
-    // ±π for typical sub-180° spreads.
-    const refB = vecs[0].bearing;
-    const offsets = vecs.map(v => {
-      let o = v.bearing - refB;
-      while (o > Math.PI) o -= 2 * Math.PI;
-      while (o < -Math.PI) o += 2 * Math.PI;
-      return o;
-    });
-    const medB = refB + median(offsets);
-
-    // For stat aggregates we use plays-like yds when present; for the
-    // heatmap projection we still use raw GPS geometry so the dispersion
-    // pattern reflects WHERE shots actually landed (plays-like is a
-    // distance-only adjustment, not a position).
     const statYds = vecs.map(ydsFor);
     const medYds = median(statYds);
 
-    // Dispersion frame: forward axis = median bearing.
+    // LATERAL is the signed perpendicular distance from the ball to the line
+    // the player was aiming along — start→aim (the tapped "measure" point)
+    // when they set one, else start→pin. The client computes it at record
+    // time against that exact line and stores it on the shot, so we use it
+    // directly here.
     //
-    //   • lateral_yds → signed perpendicular offset (+ = right of aim line)
-    //   • long_yds    → signed forward offset from median forward landing
-    //                   (+ = long, − = short). Pure GEOMETRY: derived from
-    //                   the shot's projection onto the median bearing.
-    //   • dist_yds    → always-positive ABSOLUTE distance the shot covered.
-    //                   Uses plays_like_yds when present (normalized to
-    //                   neutral conditions), else raw GPS great-circle yds.
+    // We deliberately do NOT re-derive a reference from the club's median
+    // bearing anymore — that was the old behaviour and produced absurd values
+    // (e.g. "274 yds left" for a wedge), because shots aimed at DIFFERENT
+    // targets across holes got measured against a meaningless average
+    // direction. Worse, it used raw GPS distance for lateral while showing
+    // plays-like for distance, so a GPS-drifted shot read as a sane distance
+    // but a wild miss.
     //
-    // Bug history: dist_yds used to fall back to fwd_yds (the forward
-    // projection), so a shot hit sideways or backwards from the player's
-    // typical direction for that club would show a NEGATIVE dist_yds in
-    // the per-shot list ("my 150yd 7-iron shows as −25"). dist_yds is now
-    // independent of bearing; it answers "how far did the ball travel"
-    // not "how far forward of my median did it land".
-    const dispersion = vecs.map(v => {
-      let off = v.bearing - medB;
-      while (off > Math.PI) off -= 2 * Math.PI;
-      while (off < -Math.PI) off += 2 * Math.PI;
-      const totalYds = v.dist_m * M_TO_YDS;
-      const fwd_yds  = totalYds * Math.cos(off);
-      const lat_yds  = totalYds * Math.sin(off);
-      const distAbs  = v.plays_like_yds != null ? v.plays_like_yds : totalYds;
-      return {
-        shot_id: v.shot_id,
-        recorded_at: v.recorded_at,
-        lateral_yds: Math.round(lat_yds),
-        long_yds:    Math.round(fwd_yds - medYds), // signed forward offset
-        dist_yds:    Math.round(distAbs),          // always positive
-      };
+    // FORWARD (along-track) distance falls straight out of the right triangle
+    // formed by the shot and the aim line:
+    //     total² = lateral² + forward²  →  forward = √(total² − lateral²)
+    // so we never need the aim bearing again. long_yds is each shot's forward
+    // offset from the club's median forward landing. Shots tracked without any
+    // aim/pin reference have no stored lateral → treated as on-line (0).
+    const geom = vecs.map((v) => {
+      const total = v.total_yds != null ? v.total_yds : v.dist_m * M_TO_YDS;
+      const lateral = v.lateral_yds != null ? v.lateral_yds : 0;
+      const forward = Math.sqrt(Math.max(0, total * total - lateral * lateral));
+      const distAbs = v.plays_like_yds != null ? v.plays_like_yds : total;
+      return { lateral, forward, distAbs };
     });
+    const medForward = median(geom.map((g) => g.forward));
+
+    const dispersion = vecs.map((v, i) => ({
+      shot_id: v.shot_id,
+      recorded_at: v.recorded_at,
+      lateral_yds: Math.round(geom[i].lateral),
+      long_yds:    Math.round(geom[i].forward - medForward),
+      dist_yds:    Math.round(geom[i].distAbs),
+    }));
 
     clubs.push({
       club,

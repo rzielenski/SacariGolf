@@ -494,11 +494,13 @@ function CommentsModal({
         </ScrollView>
 
         <View style={s.commentComposer}>
-          <TextInput
+          <MentionInput
             style={s.commentInput}
+            containerStyle={{ flex: 1 }}
+            dropdownAbove
             value={draft}
             onChangeText={setDraft}
-            placeholder="Add a comment…"
+            placeholder="Add a comment… @ to tag"
             placeholderTextColor={C.textMuted}
             maxLength={280}
             multiline

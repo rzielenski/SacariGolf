@@ -12,6 +12,7 @@ import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
 import { VoiceMessageBubble } from '../../../components/VoiceMessageBubble';
 import { UserAvatar } from '../../../components/UserAvatar';
+import { MentionInput } from '../../../components/MentionInput';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { censorText } from '../../../lib/censor';
 
@@ -31,6 +32,10 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  // Chat participants — used as the @mention autocomplete source so you can
+  // tag people who are actually IN this chat (incl. non-friend opponents).
+  // DMs fall back to the friends list (only the one partner anyway).
+  const [participants, setParticipants] = useState<{ user_id: string; username: string; avatar_url?: string | null }[]>([]);
   const listRef = useRef<FlatList>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -73,6 +78,26 @@ export default function ChatScreen() {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 100);
     }
   }, [messages.length]);
+
+  // Load this chat's roster for the @mention autocomplete (excluding self).
+  useEffect(() => {
+    let cancelled = false;
+    const toPerson = (p: any) => ({ user_id: p.user_id, username: p.username, avatar_url: p.avatar_url });
+    const apply = (rows: any[]) => {
+      if (cancelled) return;
+      setParticipants(
+        rows.map(toPerson).filter((p) => p.user_id && p.username && p.user_id !== user?.user_id),
+      );
+    };
+    if (type === 'match') {
+      api.matches.get(id).then((m) => apply(m?.players ?? [])).catch(() => { });
+    } else if (type === 'clan') {
+      api.clans.get(id).then((c) => apply(c?.members ?? [])).catch(() => { });
+    } else {
+      setParticipants([]); // DM → MentionInput falls back to friends
+    }
+    return () => { cancelled = true; };
+  }, [type, id, user?.user_id]);
 
   const sendText = async () => {
     const trimmed = text.trim();
@@ -334,11 +359,14 @@ export default function ChatScreen() {
           </Animated.View>
         ) : (
           <>
-            <TextInput
+            <MentionInput
               style={styles.input}
+              containerStyle={{ flex: 1 }}
+              dropdownAbove
+              people={type === 'dm' ? undefined : participants}
               value={text}
               onChangeText={setText}
-              placeholder="Message..."
+              placeholder="Message… @ to tag"
               placeholderTextColor={C.textMuted}
               returnKeyType="send"
               onSubmitEditing={sendText}

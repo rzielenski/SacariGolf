@@ -423,6 +423,11 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
     ).catch(() => { /* swallow — push is best-effort */ });
   }
 
+  // Tag anyone @mentioned in the comment. Records the mention + pushes them a
+  // "tagged you" notification that routes to the feed (the post is publicly
+  // viewable, so anyone can be mentioned). Fire-and-forget.
+  processMentions(req.params.id, req.userId!, body);
+
   return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
 }));
 

@@ -34,6 +34,18 @@ interface Props {
   autoFocus?: boolean;
   /** Extra style for the suggestion dropdown (e.g. to cap its height). */
   dropdownStyle?: any;
+  /** Outer wrapper style — pass `{ flex: 1 }` when the input sits in a row
+   *  next to a send button (chat / comment composers). */
+  containerStyle?: any;
+  /** Render the dropdown ABOVE the input (absolutely) instead of below.
+   *  Use for bottom-anchored composers so suggestions pop upward. */
+  dropdownAbove?: boolean;
+  /** Optional people to suggest from instead of the user's friends — e.g.
+   *  the participants of a match/clan chat, so non-friend opponents show up. */
+  people?: Friend[];
+  // Pass-through TextInput extras used by the chat composer.
+  returnKeyType?: 'send' | 'done' | 'default';
+  onSubmitEditing?: () => void;
 }
 
 /** If the caret sits inside an `@handle` token, return the partial handle and
@@ -58,7 +70,8 @@ function getActiveMention(text: string, cursor: number): { partial: string; star
 
 export function MentionInput({
   value, onChangeText, style, placeholder, placeholderTextColor,
-  multiline, maxLength, autoFocus, dropdownStyle,
+  multiline, maxLength, autoFocus, dropdownStyle, containerStyle,
+  dropdownAbove, people, returnKeyType, onSubmitEditing,
 }: Props) {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [cursor, setCursor] = useState(0);
@@ -67,17 +80,20 @@ export function MentionInput({
   const [forcedSel, setForcedSel] = useState<{ start: number; end: number } | undefined>(undefined);
   const justPickedRef = useRef(false);
 
+  // Only fetch friends if the caller didn't supply an explicit people list.
   useEffect(() => {
+    if (people) return;
     let cancelled = false;
     api.users.friends()
       .then((rows: any[]) => { if (!cancelled) setFriends(Array.isArray(rows) ? rows : []); })
       .catch(() => { /* no friends / offline — dropdown just won't show */ });
     return () => { cancelled = true; };
-  }, []);
+  }, [people]);
 
+  const source = people ?? friends;
   const active = getActiveMention(value, cursor);
   const suggestions = active
-    ? friends
+    ? source
         .filter((f) => f.username?.toLowerCase().startsWith(active.partial.toLowerCase()))
         .slice(0, 6)
     : [];
@@ -93,8 +109,25 @@ export function MentionInput({
     setForcedSel({ start: pos, end: pos });
   };
 
+  const dropdown = suggestions.length > 0 ? (
+    <View style={[mi.dropdown, dropdownAbove && mi.dropdownAbove, dropdownStyle]}>
+      {suggestions.map((f) => (
+        <TouchableOpacity
+          key={f.user_id}
+          style={mi.row}
+          activeOpacity={0.7}
+          onPress={() => pick(f)}
+        >
+          <UserAvatar username={f.username} avatarUrl={f.avatar_url ?? null} size={28} borderRadius={14} />
+          <Text style={mi.name} numberOfLines={1}>@{f.username}</Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  ) : null;
+
   return (
-    <View>
+    <View style={containerStyle}>
+      {dropdownAbove && dropdown}
       <TextInput
         style={style}
         value={value}
@@ -111,22 +144,10 @@ export function MentionInput({
         multiline={multiline}
         maxLength={maxLength}
         autoFocus={autoFocus}
+        returnKeyType={returnKeyType}
+        onSubmitEditing={onSubmitEditing}
       />
-      {suggestions.length > 0 && (
-        <View style={[mi.dropdown, dropdownStyle]}>
-          {suggestions.map((f) => (
-            <TouchableOpacity
-              key={f.user_id}
-              style={mi.row}
-              activeOpacity={0.7}
-              onPress={() => pick(f)}
-            >
-              <UserAvatar username={f.username} avatarUrl={f.avatar_url ?? null} size={28} borderRadius={14} />
-              <Text style={mi.name} numberOfLines={1}>@{f.username}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
+      {!dropdownAbove && dropdown}
     </View>
   );
 }
@@ -139,6 +160,22 @@ const mi = StyleSheet.create({
     borderWidth: 1,
     borderColor: C.border,
     overflow: 'hidden',
+  },
+  // Bottom-anchored composers (chat / comments): float the list above the
+  // input so it doesn't shove the row or get clipped under the keyboard.
+  dropdownAbove: {
+    position: 'absolute',
+    bottom: '100%',
+    left: 0,
+    right: 0,
+    marginTop: 0,
+    marginBottom: 6,
+    zIndex: 50,
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: -2 },
   },
   row: {
     flexDirection: 'row',

@@ -160,9 +160,10 @@ function AuthGuard() {
           break;
         case 'post':
         case 'mention':
-          // Tagged in a post → open the feed (home tab). There's no
-          // per-post screen, so we land the user on the feed where the
-          // post they were tagged in appears.
+        case 'post_comment':
+          // Tagged in a post/comment, or someone commented on your post →
+          // open the feed (home tab). There's no per-post screen, so we land
+          // the user on the feed where the post + comments appear.
           router.push('/(tabs)/' as any);
           break;
         default:
