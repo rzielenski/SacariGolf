@@ -10,7 +10,9 @@ CREATE TABLE users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT,
   google_id TEXT UNIQUE,
-  elo INTEGER NOT NULL DEFAULT 1200,
+  -- New players start at the bottom of the ladder (Wood 4 = 100 ELO floor)
+  -- and climb. See backend/src/routes/seasons.ts + mobile/lib/rank.ts.
+  elo INTEGER NOT NULL DEFAULT 100,
   total_matches INTEGER NOT NULL DEFAULT 0,
   total_wins INTEGER NOT NULL DEFAULT 0,
   total_ties INTEGER NOT NULL DEFAULT 0,

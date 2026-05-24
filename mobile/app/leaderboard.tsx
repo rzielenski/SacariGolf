@@ -9,14 +9,7 @@ import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
 import { useCensor } from '../lib/censor';
-
-function EloColor(elo: number) {
-  if (elo >= 2000) return '#a8d8f0';
-  if (elo >= 1800) return '#c0c0d0';
-  if (elo >= 1600) return C.gold;
-  if (elo >= 1400) return '#c0c0c0';
-  return '#cd7f32';
-}
+import { rankForElo } from '../lib/rank';
 
 type Mode = 'all' | 'solo' | 'duo' | 'squad';
 const MODES: { key: Mode; label: string }[] = [
@@ -137,7 +130,8 @@ function PlayerRow({ player, rank, isMe, mode }: {
   player: any; rank: number; isMe: boolean; mode: Mode;
 }) {
   const c = useCensor();
-  const eloColor = EloColor(player.elo);
+  const r = rankForElo(player.elo);
+  const eloColor = r.color;
 
   const medalColor =
     rank === 1 ? C.gold :
@@ -152,8 +146,8 @@ function PlayerRow({ player, rank, isMe, mode }: {
     const winRate = player.total_matches > 0
       ? Math.round((player.total_wins / player.total_matches) * 100)
       : 0;
-    statValue = String(player.elo);
-    statLabel = 'ELO';
+    statValue = r.isObsidian ? String(player.elo) : r.shortLabel;
+    statLabel = r.isObsidian ? 'ELO' : 'RANK';
     metaLine = `${player.total_matches}M · ${winRate}% WR`;
   } else {
     const wins = player.mode_wins ?? 0;

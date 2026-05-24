@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sacari Ladder Crests — gothic metal</title>
+  <style>
+    :root { --bg:#000; --card:#0b0b0e; --border:#1d1c18; --text:#ebe9df; --textMuted:#9a978a; --gold:#d4a93f; }
+    * { box-sizing: border-box; }
+    body {
+      margin:0; background: radial-gradient(circle at 50% -10%, #16131c 0%, #000 55%);
+      color: var(--text); font-family:'Georgia','Times New Roman',serif; padding: 26px 22px 44px;
+    }
+    h1 { font-size: 25px; margin: 0 0 4px; letter-spacing: 1px; }
+    .sub { color: var(--textMuted); font-size: 13px; margin: 0 0 22px; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; max-width: 1100px; }
+    .cardT { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 8px 14px; display: flex; flex-direction: column; align-items: center; overflow: visible; }
+    .emblem { position: relative; overflow: visible; }
+    .layer { position: absolute; }
+    .shieldClip { clip-path: polygon(6% 0, 94% 0, 100% 17%, 100% 42%, 50% 100%, 0 42%, 0 17%); }
+    .sheen { position:absolute; inset:0; background: linear-gradient(115deg, transparent 38%, rgba(255,255,255,0.55) 49%, transparent 60%); transform: translateX(-130%); animation: sweep 4.2s ease-in-out infinite; }
+    @keyframes sweep { 0% { transform: translateX(-130%);} 55%,100% { transform: translateX(130%);} }
+    .avatar { position:absolute; border-radius:50%; display:flex; align-items:center; justify-content:center;
+      background: radial-gradient(circle at 38% 30%, #20202a, #050507); font-weight:900; font-family:Georgia,serif; overflow:hidden; }
+    .crown { position:absolute; left:0; right:0; text-align:center; font-weight:900; line-height:1;
+      -webkit-background-clip:text; background-clip:text; color:transparent; text-shadow:none;
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.8)); }
+    .gem { position:absolute; transform: rotate(45deg); animation: twinkle 2.6s ease-in-out infinite; }
+    @keyframes twinkle { 0%,100%{ filter: brightness(0.85);} 50%{ filter: brightness(1.5);} }
+    .blade { position:absolute; clip-path: polygon(0 50%, 100% 0, 86% 50%, 100% 100%); }
+    .name { font-size: 17px; font-weight: 900; margin-top: 12px; }
+    .band { color: var(--gold); font-size: 11px; font-weight: 700; margin-top: 3px; }
+    .divs { color: var(--textMuted); font-size: 10px; margin-top: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Sacari Ladder Crests — gothic metal</h1>
+  <p class="sub">Tarnished, desaturated metal with a dark outline + a cold glint sweep (the "glimmer"). Wings, helm-crown and a faceted gem stack as you climb. Inspired by the LoL ranked emblems, themed to Sacari's blades.</p>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    // Dull / gothic metal palettes: edge (dark outline), base (shadowed metal),
+    // mid (body), glint (catch-light), gem (jewel).
+    const TIERS = [
+      { id:'wood',     name:'Wood',     edge:'#160f08', base:'#2e2118', mid:'#5b4636', glint:'#8a6a47', gem:'#9c7b4f', band:'100 – 300',   divs:'Wood 4 → 1' },
+      { id:'bronze',   name:'Bronze',   edge:'#180d05', base:'#2e1d0f', mid:'#774b27', glint:'#b8793c', gem:'#d99a55', band:'300 – 500',   divs:'Bronze 4 → 1' },
+      { id:'silver',   name:'Silver',   edge:'#0c0e11', base:'#20242a', mid:'#586069', glint:'#aeb6c2', gem:'#d6dde6', band:'500 – 700',   divs:'Silver 4 → 1' },
+      { id:'gold',     name:'Gold',     edge:'#171005', base:'#2a2008', mid:'#7a5e1e', glint:'#c79f37', gem:'#e8c25a', band:'700 – 900',   divs:'Gold 4 → 1' },
+      { id:'platinum', name:'Platinum', edge:'#091514', base:'#14302e', mid:'#2f6f6a', glint:'#62bdb4', gem:'#8fe0d6', band:'900 – 1100',  divs:'Plat 4 → 1' },
+      { id:'ruby',     name:'Ruby',     edge:'#150508', base:'#2e0a16', mid:'#7a1730', glint:'#c0274e', gem:'#e85a7a', band:'1100 – 1300', divs:'Ruby 4 → 1' },
+      { id:'diamond',  name:'Diamond',  edge:'#0a141a', base:'#16252e', mid:'#3f6f88', glint:'#79b4d4', gem:'#cfeaff', band:'1300 – 1500', divs:'Diamond 4 → 1' },
+      { id:'obsidian', name:'Obsidian', edge:'#0a0612', base:'#150f22', mid:'#4a3878', glint:'#8a6fd0', gem:'#b89dff', band:'1500 +',      divs:'no divisions · raw ELO' },
+    ];
+    const rankOf = id => TIERS.findIndex(t => t.id === id);
+
+    function metal(t, deg) {
+      return `linear-gradient(${deg}deg, ${t.edge} 0%, ${t.base} 24%, ${t.mid} 46%, ${t.glint} 52%, ${t.mid} 60%, ${t.base} 82%, ${t.edge} 100%)`;
+    }
+
+    function buildCrest(t, size) {
+      const r = rankOf(t.id);
+      const f = {
+        crown: r>=2, crownSide: r>=4, crownTall: r>=6,
+        wings: r>=3, wingCount: r>=6 ? 3 : r>=3 ? 2 : 1,
+        anyWings: r>=3, gem: r>=1, gemBig: r>=4, apex: r===7,
+      };
+      const SW = Math.round(size*1.5), SH = Math.round(size*1.7);
+      const cW = Math.round(size*2.5), cH = Math.round(size*2.25);
+      const cx = cW/2;
+      const shieldTop = Math.round(size*0.46), shieldLeft = Math.round(cx - SW/2);
+      const avSize = Math.round(size*0.92);
+      const avTop = shieldTop + Math.round(size*0.30), avLeft = Math.round(cx - avSize/2);
+      const avCY = avTop + avSize/2;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'emblem';
+      wrap.style.width = cW+'px'; wrap.style.height = cH+'px';
+      // Gothic depth: a soft dark drop, plus a faint colored rim only at high tiers.
+      wrap.style.filter = (r>=6 ? `drop-shadow(0 0 7px ${t.mid}aa) ` : r>=4 ? `drop-shadow(0 0 4px ${t.mid}77) ` : '') + 'drop-shadow(0 3px 5px rgba(0,0,0,0.85))';
+      const add = h => wrap.insertAdjacentHTML('beforeend', h);
+
+      // ── WINGS (symmetric bladed fan behind the shield) ──
+      if (f.anyWings) {
+        const L = Math.round(size*1.0), Th = Math.round(size*0.2);
+        const anchorY = avTop + Math.round(size*0.16);
+        const angles = f.wingCount===3 ? [-26,-7,13] : f.wingCount===2 ? [-20,3] : [-9];
+        angles.forEach((a,i)=>{
+          const yy = anchorY - Th/2 + i*Math.round(size*0.015);
+          // left blade — tip points left, hinged at the shield's left edge
+          add(`<div class="layer" style="width:${L}px;height:${Th}px;top:${yy}px;left:${shieldLeft-L}px;background:${metal(t,90)};clip-path:polygon(0 50%,100% 0,88% 50%,100% 100%);transform:rotate(${a}deg);transform-origin:right center"></div>`);
+          // right blade — mirror
+          add(`<div class="layer" style="width:${L}px;height:${Th}px;top:${yy}px;left:${shieldLeft+SW}px;background:${metal(t,270)};clip-path:polygon(100% 50%,0 0,12% 50%,0 100%);transform:rotate(${-a}deg);transform-origin:left center"></div>`);
+        });
+      }
+
+      // ── HELM-CROWN (clip-path metal shape) ──
+      if (f.crown) {
+        const cw = Math.round(size*(f.crownTall?1.0:0.8)), ch = Math.round(size*(f.crownTall?0.5:0.4));
+        const top = shieldTop - ch*0.82, left = cx - cw/2;
+        add(`<div class="layer" style="width:${cw}px;height:${ch}px;top:${top}px;left:${left}px;background:${metal(t,180)};clip-path:polygon(5% 100%,5% 48%,22% 28%,33% 60%,50% 12%,67% 60%,78% 28%,95% 48%,95% 100%)"></div>`);
+        if (f.crownSide) {
+          const gz = Math.round(size*0.13);
+          add(`<div class="gem" style="top:${top+ch*0.34}px;left:${cx-gz/2}px;width:${gz}px;height:${gz}px;border-radius:2px;background:radial-gradient(circle at 40% 35%,#fff,${t.gem} 42%,${t.mid} 78%);box-shadow:0 0 ${gz*0.5}px ${t.gem}"></div>`);
+        }
+      }
+      // ── APEX spike (obsidian) ──
+      if (f.apex) {
+        const sw = Math.round(size*0.2), sh = Math.round(size*0.52);
+        add(`<div class="layer" style="width:${sw}px;height:${sh}px;top:${shieldTop - size*1.02}px;left:${cx-sw/2}px;background:${metal(t,180)};clip-path:polygon(50% 0,100% 100%,50% 76%,0 100%)"></div>`);
+      }
+
+      // ── SHIELD (edge layer + gradient face + sheen) ──
+      add(`<div class="layer shieldClip" style="top:${shieldTop}px;left:${shieldLeft}px;width:${SW}px;height:${SH}px;background:${t.edge}"></div>`);
+      const inset = Math.max(2, Math.round(size*0.045));
+      add(`<div class="layer shieldClip" style="top:${shieldTop+inset}px;left:${shieldLeft+inset}px;width:${SW-inset*2}px;height:${SH-inset*2}px;background:${metal(t,150)};overflow:hidden">`+
+          `<div class="sheen" style="animation-delay:${r*0.25}s"></div></div>`);
+
+      // ── AVATAR medallion (on top of shield) ──
+      add(`<div class="avatar" style="top:${avTop}px;left:${avLeft}px;width:${avSize}px;height:${avSize}px;font-size:${Math.round(avSize*0.42)}px;color:${t.glint};box-shadow:0 0 0 ${Math.max(1.5,size*0.03)}px ${t.edge}, inset 0 1px 3px rgba(0,0,0,0.7)">r</div>`);
+
+      // ── GEM (faceted, twinkles) ──
+      if (f.gem) {
+        const gz = Math.round(size*(f.gemBig?0.30:0.22));
+        const gx = cx - gz/2, gy = avTop + avSize - gz*0.35;
+        add(`<div class="gem" style="top:${gy}px;left:${gx}px;width:${gz}px;height:${gz}px;border-radius:${Math.round(gz*0.18)}px;`+
+            `background: radial-gradient(circle at 38% 32%, #fff 0%, ${t.gem} 34%, ${t.mid} 70%, ${t.edge} 100%);`+
+            `box-shadow:0 0 ${gz*0.4}px ${t.gem}aa, inset 0 0 ${gz*0.2}px rgba(255,255,255,0.5)"></div>`);
+      }
+
+      return wrap;
+    }
+
+    const grid = document.getElementById('grid');
+    for (const t of TIERS) {
+      const card = document.createElement('div');
+      card.className = 'cardT';
+      card.appendChild(buildCrest(t, 74));
+      card.insertAdjacentHTML('beforeend',
+        `<div class="name" style="color:${t.mid}">${t.name}</div>
+         <div class="band">${t.band} ELO</div>
+         <div class="divs">${t.divs}</div>`);
+      grid.appendChild(card);
+    }
+  </script>
+</body>
+</html>

@@ -442,6 +442,10 @@ export const api = {
         next_division: { key: string; name: string; color: string; min: number } | null;
         elo_to_next: number | null;
         record: { matches: number; wins: number; ties: number; losses: number; points: number };
+        /** Consecutive ranked wins this season (current) + best run (best). */
+        streak: { current: number; best: number };
+        /** Placement on-ramp progress for the season. */
+        placement: { played: number; required: number; placing: boolean };
       };
     }>('GET', '/seasons/current'),
     /** Season standings, ranked by points. `division` filters to a tier
@@ -459,6 +463,8 @@ export const api = {
           user_id: string; username: string; avatar_url: string | null; elo: number;
           matches: number; wins: number; ties: number; losses: number; points: number;
           rank: number; division_key: string;
+          /** Player's current consecutive-win streak this season (🔥). */
+          current_streak: number;
         }[];
       }>('GET', `/seasons/current/standings${qs ? `?${qs}` : ''}`);
     },

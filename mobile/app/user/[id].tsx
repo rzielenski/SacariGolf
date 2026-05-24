@@ -13,14 +13,7 @@ import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
 import { fmtHandicap } from '../../lib/golfMath';
 import { useCensor } from '../../lib/censor';
-
-function EloRank(elo: number): { label: string; color: string } {
-  if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
-  if (elo >= 1800) return { label: 'Platinum', color: '#c0c0d0' };
-  if (elo >= 1600) return { label: 'Gold', color: C.gold };
-  if (elo >= 1400) return { label: 'Silver', color: '#c0c0c0' };
-  return { label: 'Bronze', color: '#cd7f32' };
-}
+import { rankForElo, rankHeadline } from '../../lib/rank';
 
 export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -108,7 +101,7 @@ export default function UserProfileScreen() {
     );
   }
 
-  const rank = EloRank(profile.elo);
+  const rank = rankForElo(profile.elo);
   const winRate = profile.total_matches > 0 ? Math.round((profile.total_wins / profile.total_matches) * 100) : 0;
   const joined = new Date(profile.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
@@ -135,7 +128,7 @@ export default function UserProfileScreen() {
         </RankCrest>
         <Text style={styles.username}>{c(profile.username)}</Text>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
-          <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label} · {profile.elo} ELO</Text>
+          <Text style={[styles.rankLabel, { color: rank.color }]}>{rankHeadline(profile.elo)}</Text>
         </View>
 
         {/* Following / Followers strip — tappable, opens a list of each

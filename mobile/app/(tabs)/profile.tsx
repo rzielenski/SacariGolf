@@ -18,17 +18,10 @@ import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest } from '../../components/RankCrest';
+import { rankForElo } from '../../lib/rank';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { GlowCard } from '../../components/ui/GlowCard';
-
-function EloRank(elo: number): { label: string; color: string; next: number } {
-  if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0', next: 9999 };
-  if (elo >= 1800) return { label: 'Platinum', color: '#c0c0d0', next: 2000 };
-  if (elo >= 1600) return { label: 'Gold', color: C.gold, next: 1800 };
-  if (elo >= 1400) return { label: 'Silver', color: '#c0c0c0', next: 1600 };
-  return { label: 'Bronze', color: '#cd7f32', next: 1400 };
-}
 
 function ProgressBar({ value, max, color }: { value: number; max: number; color: string }) {
   const pct = Math.min(value / max, 1);
@@ -225,14 +218,10 @@ export default function ProfileScreen() {
 
   if (!user) return null;
 
-  const rank = EloRank(user.elo);
+  const rank = rankForElo(user.elo);
   const winRate = user.total_matches > 0
     ? Math.round((user.total_wins / user.total_matches) * 100)
     : 0;
-
-  const rankBase = rank.label === 'Bronze' ? 1000 : rank.label === 'Silver' ? 1400 : rank.label === 'Gold' ? 1600 : rank.label === 'Platinum' ? 1800 : 2000;
-  const rankProgress = rank.next < 9999 ? user.elo - rankBase : 0;
-  const rankTotal = rank.next < 9999 ? rank.next - rankBase : 1;
 
   const handleLogout = () => {
     Alert.alert('Log out', 'Are you sure?', [
@@ -558,16 +547,16 @@ export default function ProfileScreen() {
         </GlowCard>
       </PressableScale>
 
-      {/* ELO Progress */}
+      {/* Rank progress */}
       <View style={styles.card}>
         <View style={styles.cardRow}>
-          <Text style={styles.eloNum}>{user.elo}</Text>
-          <Text style={styles.eloLabel}>ELO</Text>
+          <Text style={styles.eloNum}>{rank.isObsidian ? user.elo : rank.lp}</Text>
+          <Text style={styles.eloLabel}>{rank.isObsidian ? 'ELO' : 'LP'}</Text>
         </View>
-        {rank.next < 9999 && (
+        {!rank.isObsidian && rank.next && (
           <>
-            <ProgressBar value={rankProgress} max={rankTotal} color={rank.color} />
-            <Text style={styles.progressText}>{user.elo} / {rank.next} → next rank</Text>
+            <ProgressBar value={rank.lp} max={rank.lpNeeded ?? 50} color={rank.color} />
+            <Text style={styles.progressText}>{rank.lpToNext} LP → {rank.next.label}</Text>
           </>
         )}
       </View>

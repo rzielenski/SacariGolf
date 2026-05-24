@@ -9,6 +9,7 @@ import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
 import { useCensor } from '../lib/censor';
+import { rankForElo, rankHeadline } from '../lib/rank';
 
 type SeasonData = Awaited<ReturnType<typeof api.seasons.current>>;
 type StandingRow = Awaited<ReturnType<typeof api.seasons.standings>>['standings'][number];
@@ -50,13 +51,10 @@ export default function SeasonsScreen() {
         : `${season.days_left} day${season.days_left === 1 ? '' : 's'} left`)
     : '';
 
-  // Progress through the current division band → fill ratio for the bar.
-  const bandFill = (() => {
-    if (!me) return 0;
-    const { min, max } = me.division;
-    if (max == null) return 1; // top tier, maxed
-    return Math.max(0, Math.min(1, (me.elo - min) / (max - min)));
-  })();
+  // Sub-division rank (Wood 4 → Obsidian) derived from the raw ELO. The bar
+  // fills toward the next division (or sits full for Obsidian's open climb).
+  const myRank = me ? rankForElo(me.elo) : null;
+  const bandFill = myRank ? myRank.progress : 0;
 
   return (
     <View style={styles.container}>
@@ -87,29 +85,48 @@ export default function SeasonsScreen() {
             <View>
               {/* Division hero */}
               {me && (
-                <View style={[styles.hero, { borderColor: me.division.color }]}>
-                  <Text style={[styles.heroDivision, { color: me.division.color }]}>
-                    {me.division.name.toUpperCase()}
+                <View style={[styles.hero, { borderColor: myRank?.color ?? me.division.color }]}>
+                  <Text style={[styles.heroDivision, { color: myRank?.color ?? me.division.color }]}>
+                    {(myRank?.label ?? me.division.name).toUpperCase()}
                   </Text>
-                  <Text style={styles.heroElo}>{me.elo} ELO</Text>
+                  <Text style={styles.heroElo}>
+                    {myRank?.isObsidian ? `${me.elo} ELO` : `${myRank?.lp ?? 0} LP`}
+                  </Text>
                   <Text style={styles.heroRecord}>
                     {me.record.wins}–{me.record.losses}–{me.record.ties}
                     <Text style={styles.heroPoints}>  ·  {me.record.points} pts this season</Text>
                   </Text>
 
+                  {/* Win streak (🔥) — only once it's a genuine streak (2+). */}
+                  {me.streak.current >= 2 && (
+                    <View style={styles.streakChip}>
+                      <Text style={styles.streakChipText}>🔥 {me.streak.current} WIN STREAK</Text>
+                      {me.streak.best > me.streak.current && (
+                        <Text style={styles.streakBest}>best {me.streak.best}</Text>
+                      )}
+                    </View>
+                  )}
+
                   {/* Progress to next division */}
                   <View style={styles.barTrack}>
-                    <View style={[styles.barFill, { width: `${bandFill * 100}%`, backgroundColor: me.division.color }]} />
+                    <View style={[styles.barFill, { width: `${bandFill * 100}%`, backgroundColor: myRank?.color ?? me.division.color }]} />
                   </View>
-                  {me.next_division && me.elo_to_next != null ? (
+                  {myRank && !myRank.isObsidian && myRank.next ? (
                     <Text style={styles.heroNext}>
-                      {me.elo_to_next} ELO to{' '}
-                      <Text style={{ color: me.next_division.color, fontWeight: '900' }}>
-                        {me.next_division.name}
+                      {myRank.lpToNext} LP to{' '}
+                      <Text style={{ color: myRank.next.color, fontWeight: '900' }}>
+                        {myRank.next.label}
                       </Text>
                     </Text>
                   ) : (
-                    <Text style={styles.heroNext}>Top division — defend your rank 🏆</Text>
+                    <Text style={styles.heroNext}>Obsidian — no ceiling, just keep climbing 🏆</Text>
+                  )}
+
+                  {/* Placement on-ramp (LoL/Overwatch-style). */}
+                  {me.placement.placing && (
+                    <Text style={styles.heroPlacement}>
+                      Placement {me.placement.played}/{me.placement.required} — win to lock in your season rank
+                    </Text>
                   )}
                 </View>
               )}
@@ -206,8 +223,9 @@ function StandingRowView({ row, isMe, censor }: { row: StandingRow; isMe: boolea
         <View style={styles.nameRow}>
           <Text style={styles.username}>{censor(row.username)}</Text>
           {isMe && <Text style={styles.youBadge}>You</Text>}
+          {row.current_streak >= 2 && <Text style={styles.streakBadge}>🔥{row.current_streak}</Text>}
         </View>
-        <Text style={styles.meta}>{row.wins}–{row.losses}–{row.ties} · {row.elo} ELO</Text>
+        <Text style={styles.meta}>{row.wins}–{row.losses}–{row.ties} · {rankHeadline(row.elo)}</Text>
       </View>
       <View style={styles.ptsBox}>
         <Text style={styles.pts}>{row.points}</Text>
@@ -248,6 +266,15 @@ const styles = StyleSheet.create({
   },
   barFill: { height: '100%', borderRadius: 4 },
   heroNext: { color: C.textMuted, fontSize: 12, fontWeight: '700', marginTop: 8 },
+  heroPlacement: { color: C.goldLight, fontSize: 11, fontWeight: '700', marginTop: 8, textAlign: 'center' },
+
+  streakChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8,
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12,
+    backgroundColor: '#ff6a0022', borderWidth: 1, borderColor: '#ff8a3d',
+  },
+  streakChipText: { color: '#ff8a3d', fontWeight: '900', fontSize: 12, letterSpacing: 0.5 },
+  streakBest: { color: C.textMuted, fontWeight: '700', fontSize: 10 },
 
   divRow: { gap: 8, paddingBottom: 4 },
   divChip: {
@@ -279,6 +306,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.gold + '22', borderRadius: 4,
     paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: C.gold,
   },
+  streakBadge: { color: '#ff8a3d', fontSize: 11, fontWeight: '900' },
   meta: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   ptsBox: { alignItems: 'center', minWidth: 44 },
   pts: { fontFamily: F.serif, fontSize: 20, fontWeight: '700', color: C.gold },

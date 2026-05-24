@@ -40,15 +40,27 @@ export interface Division {
   max: number;
 }
 
-// Bands tuned around the 1200 starting ELO: new players land in Bronze and
-// climb a tier roughly every ~200 ELO. Diamond is the elite ceiling.
+// 8-tier ladder (mirrors mobile/lib/rank.ts). New players start at the 100-ELO
+// floor (Wood); each tier spans 200 ELO and is split client-side into 4
+// divisions of 50 LP. Obsidian (1500+) is the open-ended elite tier. These
+// bands are TIER-level — the sub-division (Wood 4 → Wood 1) is derived on the
+// client from the raw ELO; here we only need the tier for filters/labels.
 const DIVISIONS: Division[] = [
-  { key: 'bronze',   name: 'Bronze',   color: '#cd7f32', min: 0,        max: 1300 },
-  { key: 'silver',   name: 'Silver',   color: '#c0c0c0', min: 1300,     max: 1500 },
-  { key: 'gold',     name: 'Gold',     color: '#e8b923', min: 1500,     max: 1700 },
-  { key: 'platinum', name: 'Platinum', color: '#9fb8c8', min: 1700,     max: 1900 },
-  { key: 'diamond',  name: 'Diamond',  color: '#a8d8f0', min: 1900,     max: Infinity },
+  { key: 'wood',     name: 'Wood',     color: '#9c7b4f', min: 0,    max: 300 },
+  { key: 'bronze',   name: 'Bronze',   color: '#c8863f', min: 300,  max: 500 },
+  { key: 'silver',   name: 'Silver',   color: '#aeb6c2', min: 500,  max: 700 },
+  { key: 'gold',     name: 'Gold',     color: '#d4a93f', min: 700,  max: 900 },
+  { key: 'platinum', name: 'Platinum', color: '#74bd9a', min: 900,  max: 1100 },
+  { key: 'ruby',     name: 'Ruby',     color: '#d83a5e', min: 1100, max: 1300 },
+  { key: 'diamond',  name: 'Diamond',  color: '#a89cf0', min: 1300, max: 1500 },
+  { key: 'obsidian', name: 'Obsidian', color: '#e8623a', min: 1500, max: Infinity },
 ];
+
+// Placement matches (League of Legends / Overwatch convention): the first N
+// ranked matches of a season "place" the player before their season standing
+// is considered locked in. Purely motivational here — it gates nothing, it
+// just gives a new season a satisfying on-ramp.
+const PLACEMENT_MATCHES = 5;
 
 function divisionForElo(elo: number): Division {
   return DIVISIONS.find((d) => elo >= d.min && elo < d.max) ?? DIVISIONS[0];
@@ -119,6 +131,39 @@ router.get('/current', requireAuth, wrap(async (req: AuthRequest, res: Response)
   );
   const record = recRows[0] ?? { matches: 0, wins: 0, ties: 0, losses: 0, points: 0 };
 
+  // ── Ranked-ladder polish borrowed from competitive games ────────────────
+  //   • WIN STREAKS (Hearthstone / Destiny 2 Valor): the player's trailing run
+  //     of consecutive ranked wins this season, plus their best run. Only a win
+  //     extends the current streak; a loss or tie ends it.
+  //   • PLACEMENTS (League of Legends / Overwatch): how far through the
+  //     PLACEMENT_MATCHES on-ramp the player is this season.
+  const { rows: outcomeRows } = await pool.query(
+    `SELECT CASE
+              WHEN mr.winner_side = mp.side THEN 'win'
+              WHEN mr.winner_side IS NULL   THEN 'tie'
+              ELSE 'loss'
+            END AS outcome
+       FROM match_results mr
+       JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
+       JOIN match_players mp ON mp.match_id = mr.match_id AND mp.user_id = $1
+      WHERE mr.created_at >= $2 AND mr.created_at < $3
+      ORDER BY mr.created_at DESC`,
+    [req.userId, season.starts_at, season.ends_at]
+  );
+  // outcomeRows is newest→oldest. Current streak = leading run of wins.
+  let currentStreak = 0;
+  for (const r of outcomeRows) {
+    if (r.outcome === 'win') currentStreak += 1;
+    else break;
+  }
+  // Best streak = longest run of consecutive wins anywhere this season.
+  let bestStreak = 0, run = 0;
+  for (const r of outcomeRows) {
+    if (r.outcome === 'win') { run += 1; if (run > bestStreak) bestStreak = run; }
+    else run = 0;
+  }
+  const played = record.matches ?? 0;
+
   return res.json({
     season,
     divisions: DIVISIONS.map((d) => ({ key: d.key, name: d.name, color: d.color })),
@@ -133,6 +178,12 @@ router.get('/current', requireAuth, wrap(async (req: AuthRequest, res: Response)
       next_division: next ? { key: next.key, name: next.name, color: next.color, min: next.min } : null,
       elo_to_next: next ? Math.max(0, next.min - elo) : null,
       record,
+      streak: { current: currentStreak, best: bestStreak },
+      placement: {
+        played,
+        required: PLACEMENT_MATCHES,
+        placing: played < PLACEMENT_MATCHES,
+      },
     },
   });
 }));
@@ -175,11 +226,31 @@ router.get('/current/standings', requireAuth, wrap(async (req: AuthRequest, res:
          JOIN match_players mp ON mp.match_id = mr.match_id
         WHERE mr.created_at >= $1 AND mr.created_at < $2
         GROUP BY mp.user_id
+     ),
+     -- Per-user current win streak (Hearthstone-style 🔥). Number each user's
+     -- ranked results newest-first; the streak is the count of leading wins
+     -- before the first non-win row. No non-win → every result was a win.
+     ranked AS (
+       SELECT mp.user_id,
+              (mr.winner_side IS NULL OR mr.winner_side <> mp.side) AS not_won,
+              row_number() OVER (PARTITION BY mp.user_id ORDER BY mr.created_at DESC) AS rn
+         FROM match_results mr
+         JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
+         JOIN match_players mp ON mp.match_id = mr.match_id
+        WHERE mr.created_at >= $1 AND mr.created_at < $2
+     ),
+     streaks AS (
+       SELECT user_id,
+              COALESCE(MIN(rn) FILTER (WHERE not_won) - 1, COUNT(*))::int AS current_streak
+         FROM ranked
+        GROUP BY user_id
      )
      SELECT u.user_id, u.username, u.avatar_url, u.elo,
-            s.matches, s.wins, s.ties, s.losses, s.points
+            s.matches, s.wins, s.ties, s.losses, s.points,
+            COALESCE(st.current_streak, 0) AS current_streak
        FROM season s
        JOIN users u ON u.user_id = s.user_id
+       LEFT JOIN streaks st ON st.user_id = s.user_id
       WHERE u.elo >= $3 AND u.elo < $4
         ${friendClause}
       ORDER BY s.points DESC, s.wins DESC, s.matches ASC, u.elo DESC

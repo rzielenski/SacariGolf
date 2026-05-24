@@ -1059,6 +1059,50 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON ball_log(user_id, created_at DESC);
     `,
   },
+  {
+    // One-shot migration bookkeeping. The migration runner has no applied-table
+    // (it relies on IF NOT EXISTS idempotency), but the ELO rescale below is a
+    // population-wide transform that is NOT safe to re-run once live ratings
+    // diverge — so it needs a real "has this run?" flag.
+    name: 'migration_flags.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS migration_flags (
+        name       TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
+  {
+    // Ladder overhaul: new players start at the Wood 4 floor (100), not 1200.
+    name: 'users.elo_default_100',
+    sql: `ALTER TABLE users ALTER COLUMN elo SET DEFAULT 100;`,
+  },
+  {
+    // Rebase the existing population onto the new ladder. Linear-scale every
+    // user's ELO so the LAST-place player lands at Wood 4 / 0 LP (100) and the
+    // FIRST-place player at Silver 2 / 0 LP (600), preserving the spread between
+    // everyone. Guarded by migration_flags so it runs EXACTLY once — re-running
+    // after ratings move would corrupt earned progress. If everyone shares one
+    // ELO (no spread), they all reset to the 100 floor.
+    name: 'users.elo_rescale_wood_silver2',
+    sql: `
+      DO $$
+      DECLARE lo numeric; hi numeric;
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM migration_flags WHERE name = 'elo_rescale_wood_silver2_v1') THEN
+          SELECT MIN(elo), MAX(elo) INTO lo, hi FROM users;
+          IF hi IS NOT NULL THEN
+            IF hi <= lo THEN
+              UPDATE users SET elo = 100;
+            ELSE
+              UPDATE users SET elo = round(100 + (elo - lo) / (hi - lo) * 500)::int;
+            END IF;
+          END IF;
+          INSERT INTO migration_flags(name) VALUES ('elo_rescale_wood_silver2_v1');
+        END IF;
+      END $$;
+    `,
+  },
 ];
 
 export async function runMigrations() {

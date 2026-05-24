@@ -30,6 +30,7 @@ import { SocialFeed } from '../../components/SocialFeed';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { GlowCard } from '../../components/ui/GlowCard';
 import { useCensor } from '../../lib/censor';
+import { rankForElo } from '../../lib/rank';
 
 function EloRank(elo: number): { label: string; color: string } {
   if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
@@ -119,8 +120,10 @@ export default function HomeScreen() {
             }
           }}
         >
-          <Text style={styles.eloNum}>{user.elo}</Text>
-          <Text style={styles.eloLabel}>ELO Rating</Text>
+          <Text style={styles.eloNum}>{rankForElo(user.elo).label}</Text>
+          <Text style={styles.eloLabel}>
+            {rankForElo(user.elo).isObsidian ? `${user.elo} ELO` : `${rankForElo(user.elo).lp} LP`}
+          </Text>
         </TouchableOpacity>
         <View style={styles.eloDivider} />
         <View style={styles.eloStat}>
