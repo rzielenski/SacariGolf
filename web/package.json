@@ -5,6 +5,7 @@
   "description": "Public web profiles for Sacari Golf (sacarigolf.com/u/<username>). Standalone from the mobile app and API. Server-rendered for rich link previews and SEO. Reads the same Postgres database read-only.",
   "main": "server.js",
   "scripts": {
+    "build": "echo \"no build step needed\"",
     "start": "node server.js"
   },
   "dependencies": {
