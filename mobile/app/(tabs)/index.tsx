@@ -120,7 +120,9 @@ export default function HomeScreen() {
             }
           }}
         >
-          <Text style={styles.eloNum}>{rankForElo(user.elo).label}</Text>
+          <Text style={styles.eloNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.5}>
+            {rankForElo(user.elo).label}
+          </Text>
           <Text style={styles.eloLabel}>
             {rankForElo(user.elo).isObsidian ? `${user.elo} ELO` : `${rankForElo(user.elo).lp} LP`}
           </Text>

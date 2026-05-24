@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, ActivityIndicator,
+  TextInput, ActivityIndicator, Alert,
 } from 'react-native';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../../lib/api';
 import { C } from '../../lib/colors';
 import { Course } from '../../types';
 import { Divider } from '../../components/Flourish';
+
+// One-time tip shown the first time the Courses tab is opened, nudging users to
+// request any course that's missing from the still-growing catalog.
+const COURSE_TIP_KEY = 'courses_request_tip_seen_v1';
 
 export default function CoursesScreen() {
   const [query, setQuery] = useState('');
@@ -16,6 +21,24 @@ export default function CoursesScreen() {
   const [searching, setSearching] = useState(false);
   const [nearby, setNearby] = useState<Course[]>([]);
   const [loadingNearby, setLoadingNearby] = useState(false);
+
+  // First-visit tip: point users at the +Request flow for missing courses.
+  useEffect(() => {
+    (async () => {
+      try {
+        if (await AsyncStorage.getItem(COURSE_TIP_KEY)) return;
+        await AsyncStorage.setItem(COURSE_TIP_KEY, '1');
+        Alert.alert(
+          "Don't see your course?",
+          'Our course list is still growing. If you can’t find yours, tap “+ Request” at the top right and add the course details — we’ll get it added within the next couple of days.',
+          [
+            { text: 'Maybe later', style: 'cancel' },
+            { text: 'Request a course', onPress: () => router.push('/course-request' as any) },
+          ],
+        );
+      } catch { /* ignore */ }
+    })();
+  }, []);
 
   // Load nearby courses on mount
   useEffect(() => {

@@ -69,7 +69,24 @@ export function RankCrest({
           style={{ position: 'absolute', width: footprint, height: footprint }}
           resizeMode="contain"
         />
-        <View style={{ position: 'absolute', left: avLeft, top: avTop }}>{avatar}</View>
+        <View style={{ position: 'absolute', left: avLeft, top: avTop, width: size, height: size }}>
+          {avatar}
+          {/* Blend the photo into the medallion: a two-step dark edge vignette
+              fades the hard circle into the well, and a faint tier-color wash
+              unifies the bright avatar with the crest's palette. */}
+          <View pointerEvents="none" style={{
+            position: 'absolute', width: size, height: size, borderRadius: radius,
+            borderColor: 'rgba(0,0,0,0.22)', borderWidth: Math.max(4, size * 0.14),
+          }} />
+          <View pointerEvents="none" style={{
+            position: 'absolute', width: size, height: size, borderRadius: radius,
+            borderColor: 'rgba(0,0,0,0.45)', borderWidth: Math.max(2, size * 0.06),
+          }} />
+          <View pointerEvents="none" style={{
+            position: 'absolute', width: size, height: size, borderRadius: radius,
+            backgroundColor: rank.color + '1c',
+          }} />
+        </View>
       </View>
     );
   }
