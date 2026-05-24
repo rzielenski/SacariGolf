@@ -269,6 +269,7 @@ function renderCourse({ course, teeboxes, topRounds }) {
   <section class="page-head">
     <h1>${esc(course.course_name)}</h1>
     ${loc ? `<p>${esc(loc)}</p>` : ''}
+    <a class="cta-ghost" href="/course/${esc(course.course_id)}/pins">Add or correct pin locations</a>
   </section>
   ${tees ? `<section class="tees">
     <h2>Tees</h2>
@@ -538,8 +539,62 @@ function renderClubs({ sg, clubs }) {
   return page({ title: 'Club stats. Sacari Golf', description: 'Your club distances and dispersion.', active: 'account', authed: true, body });
 }
 
+function renderCoursePins({ course, holes }) {
+  const lat = course.latitude != null ? Number(course.latitude) : null;
+  const lng = course.longitude != null ? Number(course.longitude) : null;
+  let center = (lat != null && lng != null) ? [lat, lng] : null;
+  if (!center) {
+    const wp = (holes || []).find((h) => h.pin_lat != null && h.pin_lng != null);
+    if (wp) center = [Number(wp.pin_lat), Number(wp.pin_lng)];
+  }
+  const loc = [course.city, course.state].filter(Boolean).join(', ');
+  const data = {
+    postUrl: `/course/${course.course_id}/pins`,
+    center,
+    holes: (holes || []).map((h) => ({
+      n: h.hole_num, par: h.par,
+      lat: h.pin_lat != null ? Number(h.pin_lat) : null,
+      lng: h.pin_lng != null ? Number(h.pin_lng) : null,
+    })),
+  };
+  const holeBtns = (holes || []).map((h) =>
+    `<button type="button" class="hole-btn${h.pin_lat != null ? ' has-pin' : ''}" data-n="${h.hole_num}">
+      <span class="hole-n">${esc(h.hole_num)}</span><span class="hole-par">Par ${h.par != null ? esc(h.par) : '-'}</span>
+    </button>`).join('');
+  const json = JSON.stringify(data).replace(/</g, '\\u003c');
+
+  const body = `
+  <section class="page-head">
+    <h1>Place pin locations</h1>
+    <p>${esc(course.course_name)}${loc ? ' · ' + esc(loc) : ''}</p>
+    <a class="cta-ghost" href="/course/${esc(course.course_id)}">Back to course</a>
+  </section>
+  <section class="pins">
+    <ol class="pin-steps">
+      <li>Pick a hole below.</li>
+      <li>Zoom into the green and click the cup location on the satellite map. You can drag the pin to fine-tune.</li>
+      <li>Press Save. Accurate pins give everyone better distances.</li>
+    </ol>
+    ${(holes && holes.length) ? `
+    <div class="hole-grid">${holeBtns}</div>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <div id="map" class="pin-map"></div>
+    <div class="pin-bar">
+      <div id="pin-info" class="pin-info">Select a hole to begin.</div>
+      <button id="pin-save" class="cta" disabled>Save pin</button>
+    </div>
+    <div id="pin-msg" class="pin-msg"></div>
+    <script>window.PIN_DATA = ${json};</script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="/pins.js" defer></script>
+    ` : '<div class="empty">This course has no hole data yet.</div>'}
+  </section>`;
+
+  return page({ title: `Place pins · ${course.course_name}. Sacari Golf`, description: 'Add crowd-sourced pin locations on Sacari Golf.', active: 'courses', authed: true, body });
+}
+
 module.exports = {
   renderHome, renderLeaderboard, renderCoursesIndex, renderCourse,
   renderProfile, renderStatic, renderNotFound, esc,
-  renderLogin, renderDashboard, renderClubs,
+  renderLogin, renderDashboard, renderClubs, renderCoursePins,
 };

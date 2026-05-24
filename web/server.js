@@ -20,8 +20,17 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const { rankForElo, medallionFor } = require('./rank');
-const { backendLogin, apiGet, apiGetSafe, setSession, clearSession, requireAuth } = require('./auth');
+const { backendLogin, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth } = require('./auth');
 const R = require('./render');
+
+/** CSRF guard for state-changing requests: when the browser sends an Origin,
+ *  it must match our host. Combined with the sameSite=lax session cookie this
+ *  blocks cross-site forged posts. */
+function sameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // same-origin navigations may omit Origin
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+}
 
 const PORT = process.env.PORT || 4000;
 const BACKEND_URL = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
@@ -40,6 +49,7 @@ app.disable('x-powered-by');
 app.set('trust proxy', true); // Railway terminates TLS; needed for secure cookies
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: false })); // login form posts
+app.use(express.json()); // pin editor AJAX posts
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -98,6 +108,61 @@ app.get('/account/clubs', requireAuth, async (req, res) => {
     if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
     console.error('clubs error:', err);
     res.status(500).send(R.renderNotFound());
+  }
+});
+
+// ----- Pin editor (crowdsourced pin placement) ------------------------------
+app.get('/course/:id/pins', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('course')); return; }
+  try {
+    const { rows: cRows } = await pool.query(
+      `SELECT course_id, course_name, club_name, city, state, latitude, longitude
+         FROM courses WHERE course_id = $1`,
+      [id]
+    );
+    if (!cRows.length) { res.status(404).send(R.renderNotFound('course')); return; }
+    const { rows: holes } = await pool.query(
+      `SELECT h.hole_num,
+              MAX(h.par) AS par,
+              BOOL_OR(h.pin_lat IS NOT NULL) AS has_pin,
+              (ARRAY_AGG(h.pin_lat) FILTER (WHERE h.pin_lat IS NOT NULL))[1] AS pin_lat,
+              (ARRAY_AGG(h.pin_lng) FILTER (WHERE h.pin_lng IS NOT NULL))[1] AS pin_lng
+         FROM teeboxes t JOIN holes h ON h.teebox_id = t.teebox_id
+        WHERE t.course_id = $1
+        GROUP BY h.hole_num ORDER BY h.hole_num`,
+      [id]
+    );
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderCoursePins({ course: cRows[0], holes }));
+  } catch (err) {
+    console.error('pins page error:', err);
+    res.status(500).send(R.renderNotFound('course'));
+  }
+});
+
+app.post('/course/:id/pins', requireAuth, async (req, res) => {
+  if (!sameOrigin(req)) { res.status(403).json({ error: 'bad origin' }); return; }
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(400).json({ error: 'bad course id' }); return; }
+  const holeNum = Number(req.body && req.body.holeNum);
+  const lat = Number(req.body && req.body.lat);
+  const lng = Number(req.body && req.body.lng);
+  if (!Number.isInteger(holeNum) || holeNum < 1 || holeNum > 18
+   || !Number.isFinite(lat) || !Number.isFinite(lng)
+   || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    res.status(400).json({ error: 'Invalid hole or coordinates' });
+    return;
+  }
+  try {
+    const result = await apiPost('/courses/admin/set-pins', req.token, {
+      courseId: id, pins: [{ holeNum, lat, lng }],
+    });
+    res.json({ ok: (result.updated || 0) > 0, ...result });
+  } catch (err) {
+    if (err.code === 401) { res.status(401).json({ error: 'Session expired. Log in again.' }); return; }
+    console.error('set-pin error:', err);
+    res.status(500).json({ error: 'Could not save pin' });
   }
 });
 

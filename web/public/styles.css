@@ -144,6 +144,26 @@ main { flex: 1; width: 100%; }
 .hero-small { font-size: 2rem; font-weight: 900; }
 .lead { color: var(--muted); line-height: 1.6; }
 
+/* Pin editor */
+.pins { max-width: 820px; margin: 0 auto; padding: 8px 18px 44px; }
+.pin-steps { color: var(--muted); line-height: 1.6; padding-left: 20px; margin: 0 0 16px; }
+.hole-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.hole-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 9px 4px; cursor: pointer;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: inherit; }
+.hole-btn:hover { border-color: var(--gold); }
+.hole-btn.sel { border-color: var(--gold); background: rgba(212,169,63,0.16); }
+.hole-btn.has-pin { border-color: var(--good); }
+.hole-btn.has-pin::after { content: '\2713'; color: var(--good); font-size: 0.7rem; }
+.hole-n { font-weight: 900; font-size: 1.1rem; }
+.hole-par { color: var(--muted); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.5px; }
+.pin-map { height: 58vh; min-height: 360px; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+.leaflet-container { background: #111; }
+.pin-bar { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+.pin-info { flex: 1; color: var(--text); font-size: 0.92rem; min-width: 200px; }
+.pin-bar .cta { border: 0; cursor: pointer; font-family: inherit; }
+.pin-bar .cta:disabled { opacity: 0.45; cursor: default; }
+.pin-msg { color: var(--gold); font-size: 0.88rem; margin-top: 10px; min-height: 1.2em; }
+
 /* Auth + dashboard */
 .auth { max-width: 420px; }
 .form { display: flex; flex-direction: column; gap: 14px; margin: 20px 0 8px; text-align: left; }

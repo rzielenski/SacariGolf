@@ -39,6 +39,21 @@ async function apiGetSafe(path, token) {
   catch { return null; }
 }
 
+async function apiPost(path, token, body) {
+  const r = await fetch(`${BACKEND_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error || `api ${r.status}`);
+    err.code = r.status;
+    throw err;
+  }
+  return data;
+}
+
 function setSession(req, res, token) {
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
   res.cookie(COOKIE, token, {
@@ -62,4 +77,4 @@ function requireAuth(req, res, next) {
   next();
 }
 
-module.exports = { backendLogin, apiGet, apiGetSafe, setSession, clearSession, requireAuth, COOKIE };
+module.exports = { backendLogin, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth, COOKIE };
