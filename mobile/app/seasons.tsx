@@ -119,13 +119,13 @@ export default function SeasonsScreen() {
                       </Text>
                     </Text>
                   ) : (
-                    <Text style={styles.heroNext}>Obsidian — no ceiling, just keep climbing 🏆</Text>
+                    <Text style={styles.heroNext}>Obsidian: no ceiling, just keep climbing 🏆</Text>
                   )}
 
                   {/* Placement on-ramp (LoL/Overwatch-style). */}
                   {me.placement.placing && (
                     <Text style={styles.heroPlacement}>
-                      Placement {me.placement.played}/{me.placement.required} — win to lock in your season rank
+                      Placement {me.placement.played}/{me.placement.required}. Win to lock in your season rank
                     </Text>
                   )}
                 </View>

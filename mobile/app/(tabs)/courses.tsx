@@ -30,7 +30,7 @@ export default function CoursesScreen() {
         await AsyncStorage.setItem(COURSE_TIP_KEY, '1');
         Alert.alert(
           "Don't see your course?",
-          'Our course list is still growing. If you can’t find yours, tap “+ Request” at the top right and add the course details — we’ll get it added within the next couple of days.',
+          'Our course list is still growing. If you can’t find yours, tap “+ Request” at the top right and add the course details. We’ll get it added within the next couple of days.',
           [
             { text: 'Maybe later', style: 'cancel' },
             { text: 'Request a course', onPress: () => router.push('/course-request' as any) },

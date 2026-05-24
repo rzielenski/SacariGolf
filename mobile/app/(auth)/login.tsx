@@ -204,7 +204,7 @@ export default function LoginScreen() {
           )}
 
           {step === 'newuser' && (
-            <Text style={styles.eloNote}>You'll start in Wood — climb the ranks</Text>
+            <Text style={styles.eloNote}>You'll start in Wood and climb the ranks</Text>
           )}
         </Animated.View>
       </ScrollView>

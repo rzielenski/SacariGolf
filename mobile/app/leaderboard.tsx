@@ -56,13 +56,13 @@ export default function LeaderboardScreen() {
 
       {/* Season ladder entry — the competitive divisions + monthly standings. */}
       <TouchableOpacity style={styles.seasonBanner} onPress={() => router.push('/seasons' as any)} activeOpacity={0.8}>
-        <Text style={styles.seasonBannerText}>🏆  Season Ladder — divisions & monthly standings</Text>
+        <Text style={styles.seasonBannerText}>🏆  Season Ladder · divisions & monthly standings</Text>
         <Text style={styles.seasonBannerChev}>›</Text>
       </TouchableOpacity>
 
       {/* Ball-count entry — running found/lost tally + leaderboard. */}
       <TouchableOpacity style={styles.ballBanner} onPress={() => router.push('/balls' as any)} activeOpacity={0.8}>
-        <Text style={styles.ballBannerText}>⛳  Ball Count — log found & lost balls</Text>
+        <Text style={styles.ballBannerText}>⛳  Ball Count · log found & lost balls</Text>
         <Text style={styles.ballBannerChev}>›</Text>
       </TouchableOpacity>
 
