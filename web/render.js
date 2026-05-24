@@ -4,10 +4,11 @@
  */
 'use strict';
 
-const { TIERS } = require('./rank');
+const { TIERS, medallionFor } = require('./rank');
 
 const APP_STORE_URL = process.env.APP_STORE_URL || '';
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
+const BACKEND_URL = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -30,15 +31,19 @@ function fmtHandicap(h) {
 }
 function toParClass(n) { return n == null ? '' : n <= 0 ? 'good' : 'bad'; }
 
-function nav(active) {
+function nav(active, authed) {
   const link = (href, key, label) =>
     `<a class="${active === key ? 'on' : ''}" href="${href}">${label}</a>`;
+  const account = authed
+    ? `${link('/account', 'account', 'My Account')}<a href="/logout">Log out</a>`
+    : link('/login', 'login', 'Log in');
   const cta = APP_STORE_URL ? `<a class="nav-cta" href="${esc(APP_STORE_URL)}">Get the app</a>` : '';
   return `<header class="topbar">
     <a class="brand" href="/">SACARI<span>GOLF</span></a>
     <nav class="nav">
       ${link('/leaderboard', 'leaderboard', 'Rankings')}
       ${link('/courses', 'courses', 'Courses')}
+      ${account}
       ${cta}
     </nav>
   </header>`;
@@ -57,7 +62,7 @@ function foot() {
   </footer>`;
 }
 
-function page({ title, description, ogImage, ogUrl, body, active, bodyClass }) {
+function page({ title, description, ogImage, ogUrl, body, active, bodyClass, authed }) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -78,7 +83,7 @@ ${ogImage ? `<meta name="twitter:image" content="${esc(ogImage)}" />` : ''}
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body class="${bodyClass || ''}">
-${nav(active)}
+${nav(active, authed)}
 <main>${body}</main>
 ${foot()}
 </body>
@@ -368,7 +373,173 @@ function renderNotFound(what) {
   return page({ title: 'Not found. Sacari Golf', description: 'Page not found.', active: '', body });
 }
 
+// ----- Authenticated pages --------------------------------------------------
+const CLUB_LABELS = {
+  driver: 'Driver', '3w': '3 Wood', '5w': '5 Wood', '7w': '7 Wood', hybrid: 'Hybrid',
+  '2i': '2 Iron', '3i': '3 Iron', '4i': '4 Iron', '5i': '5 Iron', '6i': '6 Iron',
+  '7i': '7 Iron', '8i': '8 Iron', '9i': '9 Iron', pw: 'Pitching Wedge', gw: 'Gap Wedge',
+  sw: 'Sand Wedge', lw: 'Lob Wedge', putter: 'Putter',
+};
+function clubLabel(c) { return CLUB_LABELS[c] || (c ? String(c).toUpperCase() : 'Club'); }
+function sgFmt(n) { if (n == null || isNaN(n)) return 'NR'; const r = Math.round(n * 10) / 10; return (r > 0 ? '+' : '') + r; }
+function pctFmt(n) { return n == null ? 'NR' : `${n}%`; }
+function numFmt(n) { return n == null ? 'NR' : String(n); }
+
+function crestBlock(d) {
+  return `<div class="crest crest-sm">
+    <img class="crest-img" src="/crests/${esc(d.rank.tier.key)}.png" alt="${esc(d.rank.tier.name)} crest" />
+    ${avatarLayer(d)}
+  </div>`;
+}
+
+function renderLogin({ error }) {
+  const body = `
+  <section class="card auth">
+    <h1 class="hero-small">Log in</h1>
+    <p class="lead">Sign in with your Sacari account to see your stats on the web.</p>
+    ${error ? `<div class="form-error">${esc(error)}</div>` : ''}
+    <form method="post" action="/login" class="form">
+      <label class="field">Email<input type="email" name="email" autocomplete="email" required /></label>
+      <label class="field">Password<input type="password" name="password" autocomplete="current-password" required /></label>
+      <button class="cta" type="submit">Log in</button>
+    </form>
+    <p class="muted-note">New here? Create your account in the app, then log in.${APP_STORE_URL ? ` <a href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}</p>
+  </section>`;
+  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, body });
+}
+
+function renderDashboard({ me, rank, season, stats, ball }) {
+  const d = { rank, medallion: medallionFor(rank.tier.key), username: me.username, avatarUrl: me.avatar_url ? BACKEND_URL + me.avatar_url : null };
+  const losses = Math.max(0, (me.total_matches || 0) - (me.total_wins || 0) - (me.total_ties || 0));
+  const winRate = me.total_matches > 0 ? Math.round((me.total_wins / me.total_matches) * 100) : 0;
+  const rankLine = rank.isObsidian ? `Obsidian ${rank.displayElo}` : rank.label;
+
+  let seasonCard = '';
+  if (season && season.me && season.me.record) {
+    const rec = season.me.record;
+    const sl = Math.max(0, (rec.matches || 0) - (rec.wins || 0) - (rec.ties || 0));
+    const st = season.me.streak || { current: 0, best: 0 };
+    seasonCard = `<div class="dash-card">
+      <div class="dash-card-title">This season${season.season ? ' · ' + esc(season.season.name) : ''}</div>
+      <div class="stats">
+        ${statCell('Record', `${rec.wins || 0}-${sl}-${rec.ties || 0}`)}
+        ${statCell('Points', numFmt(rec.points))}
+        ${statCell('Streak', String(st.current || 0))}
+        ${statCell('Best streak', String(st.best || 0))}
+      </div>
+    </div>`;
+  }
+
+  let perf;
+  if (stats && stats.rounds_count > 0) {
+    perf = `<div class="dash-card">
+      <div class="dash-card-title">Performance · ${stats.rounds_count} rounds, ${stats.holes_played} holes</div>
+      <div class="stats">
+        ${statCell('GIR', pctFmt(stats.gir_pct))}
+        ${statCell('Fairways', pctFmt(stats.fw_hit_pct))}
+        ${statCell('Putts/Rd', numFmt(stats.avg_putts_per_round))}
+        ${statCell('3-putts', numFmt(stats.three_putt_count))}
+        ${statCell('Up &amp; Down', pctFmt(stats.up_and_down_pct))}
+        ${statCell('Avg/Hole', numFmt(stats.avg_strokes_per_hole))}
+      </div>
+    </div>
+    ${stats.sg_per_round ? `<div class="dash-card">
+      <div class="dash-card-title">Strokes gained per round</div>
+      <div class="stats">
+        ${statCell('Off tee', sgFmt(stats.sg_per_round.off_tee))}
+        ${statCell('Approach', sgFmt(stats.sg_per_round.approach))}
+        ${statCell('Around grn', sgFmt(stats.sg_per_round.around_green))}
+        ${statCell('Putting', sgFmt(stats.sg_per_round.putting))}
+        ${statCell('Total', sgFmt(stats.sg_per_round.total))}
+      </div>
+    </div>` : ''}`;
+  } else {
+    perf = `<div class="dash-card"><div class="dash-card-title">Performance</div><p class="muted-note">No tracked rounds yet. Play and track a round in the app and your stats show up here.</p></div>`;
+  }
+
+  const ballCard = ball ? `<div class="dash-card">
+      <div class="dash-card-title">Ball count</div>
+      <div class="stats">
+        ${statCell('Found', numFmt(ball.found))}
+        ${statCell('Lost', numFmt(ball.lost))}
+        ${statCell('Net', `${ball.net > 0 ? '+' : ''}${ball.net}`)}
+      </div>
+    </div>` : '';
+
+  const body = `
+  <section class="dash">
+    <div class="dash-head">
+      ${crestBlock(d)}
+      <div class="dash-id">
+        <h1 class="name">${esc(me.username)}</h1>
+        <div class="rank" style="color:${esc(rank.color)}">${esc(rankLine)}</div>
+        <div class="dash-actions">
+          <a class="cta-ghost" href="/u/${encodeURIComponent(me.username)}">Public profile</a>
+          <a class="cta-ghost" href="/account/clubs">Club stats</a>
+        </div>
+      </div>
+    </div>
+    <div class="stats">
+      ${statCell('Lifetime', `${me.total_wins || 0}-${losses}-${me.total_ties || 0}`)}
+      ${statCell('Win rate', `${winRate}%`)}
+      ${statCell('Handicap', fmtHandicap(me.handicap_index))}
+      ${statCell('Since', fmtDate(me.created_at))}
+    </div>
+    ${seasonCard}
+    ${perf}
+    ${ballCard}
+  </section>`;
+
+  return page({ title: `${me.username} · My Account. Sacari Golf`, description: 'Your Sacari Golf stats.', active: 'account', authed: true, body });
+}
+
+function renderClubs({ sg, clubs }) {
+  const sgBlock = sg && sg.sg_per_round ? `<div class="dash-card">
+      <div class="dash-card-title">Strokes gained (advanced) · ${sg.rounds_used} rounds, ${sg.shots_used} shots</div>
+      <div class="stats">
+        ${statCell('Off tee', sgFmt(sg.sg_per_round.off_tee))}
+        ${statCell('Approach', sgFmt(sg.sg_per_round.approach))}
+        ${statCell('Around grn', sgFmt(sg.sg_per_round.around_green))}
+        ${statCell('Putting', sgFmt(sg.sg_per_round.putting))}
+        ${statCell('Total', sgFmt(sg.sg_per_round.total))}
+      </div>
+    </div>` : '';
+
+  const rows = (clubs || []).map((c) => {
+    const disp = Array.isArray(c.dispersion) ? c.dispersion : [];
+    let tendency = 'NR';
+    if (disp.length) {
+      const lat = disp.reduce((a, b) => a + (b.lateral_yds || 0), 0) / disp.length;
+      const r = Math.round(lat);
+      tendency = Math.abs(r) < 1 ? 'Straight' : `${Math.abs(r)} yd ${r > 0 ? 'R' : 'L'}`;
+    }
+    return `<tr>
+      <td>${esc(clubLabel(c.club))}</td>
+      <td>${numFmt(c.shots)}</td>
+      <td>${numFmt(c.median_yds)}</td>
+      <td>${numFmt(c.avg_yds)}</td>
+      <td>${esc(tendency)}</td>
+    </tr>`;
+  }).join('');
+
+  const body = `
+  <section class="page-head">
+    <h1>Club stats</h1>
+    <p>Distances and shot tendencies from every shot you have tracked.</p>
+    <a class="cta-ghost" href="/account">Back to account</a>
+  </section>
+  <section class="tees">
+    ${sgBlock}
+    ${rows
+      ? `<table class="tee-table"><thead><tr><th>Club</th><th>Shots</th><th>Median</th><th>Avg</th><th>Tendency</th></tr></thead><tbody>${rows}</tbody></table>`
+      : '<div class="empty">No tracked shots yet. Track shots in the app to build your club profile.</div>'}
+  </section>`;
+
+  return page({ title: 'Club stats. Sacari Golf', description: 'Your club distances and dispersion.', active: 'account', authed: true, body });
+}
+
 module.exports = {
   renderHome, renderLeaderboard, renderCoursesIndex, renderCourse,
   renderProfile, renderStatic, renderNotFound, esc,
+  renderLogin, renderDashboard, renderClubs,
 };

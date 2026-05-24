@@ -17,8 +17,10 @@ require('dotenv').config();
 
 const path = require('path');
 const express = require('express');
+const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const { rankForElo, medallionFor } = require('./rank');
+const { backendLogin, apiGet, apiGetSafe, setSession, clearSession, requireAuth } = require('./auth');
 const R = require('./render');
 
 const PORT = process.env.PORT || 4000;
@@ -35,9 +37,69 @@ const pool = new Pool({
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', true); // Railway terminates TLS; needed for secure cookies
+app.use(cookieParser());
+app.use(express.urlencoded({ extended: false })); // login form posts
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
+
+// ----- Auth: login / logout -------------------------------------------------
+app.get('/login', (req, res) => {
+  if (req.cookies && req.cookies.sg_token) { res.redirect('/account'); return; }
+  res.send(R.renderLogin({}));
+});
+
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    res.status(400).send(R.renderLogin({ error: 'Enter your email and password.' }));
+    return;
+  }
+  try {
+    const { token } = await backendLogin(String(email), String(password));
+    setSession(req, res, token);
+    res.redirect('/account');
+  } catch (err) {
+    res.status(401).send(R.renderLogin({ error: err.message || 'Invalid email or password.' }));
+  }
+});
+
+app.get('/logout', (_req, res) => { clearSession(res); res.redirect('/'); });
+
+// ----- Authenticated account dashboard --------------------------------------
+app.get('/account', requireAuth, async (req, res) => {
+  try {
+    const me = await apiGet('/users/me', req.token);
+    const [season, stats, ball] = await Promise.all([
+      apiGetSafe('/seasons/current', req.token),
+      apiGetSafe(`/users/${me.user_id}/stats`, req.token),
+      apiGetSafe('/balls/me', req.token),
+    ]);
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderDashboard({ me, rank: rankForElo(me.elo), season, stats, ball }));
+  } catch (err) {
+    if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
+    console.error('account error:', err);
+    res.status(500).send(R.renderNotFound());
+  }
+});
+
+app.get('/account/clubs', requireAuth, async (req, res) => {
+  try {
+    const me = await apiGet('/users/me', req.token);
+    const [sg, clubStats] = await Promise.all([
+      apiGetSafe(`/users/${me.user_id}/sg-advanced`, req.token),
+      apiGetSafe(`/users/${me.user_id}/club-stats`, req.token),
+    ]);
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderClubs({ sg, clubs: clubStats ? clubStats.clubs : [] }));
+  } catch (err) {
+    if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
+    console.error('clubs error:', err);
+    res.status(500).send(R.renderNotFound());
+  }
+});
 
 // ----- Home -----------------------------------------------------------------
 app.get('/', (_req, res) => {
