@@ -62,7 +62,7 @@ function foot() {
   </footer>`;
 }
 
-function page({ title, description, ogImage, ogUrl, body, active, bodyClass, authed }) {
+function page({ title, description, ogImage, ogUrl, body, active, bodyClass, authed, bare }) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -83,9 +83,9 @@ ${ogImage ? `<meta name="twitter:image" content="${esc(ogImage)}" />` : ''}
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body class="${bodyClass || ''}">
-${nav(active, authed)}
+${bare ? '' : nav(active, authed)}
 <main>${body}</main>
-${foot()}
+${bare ? '' : foot()}
 </body>
 </html>`;
 }
@@ -395,18 +395,35 @@ function crestBlock(d) {
 
 function renderLogin({ error }) {
   const body = `
-  <section class="card auth">
-    <h1 class="hero-small">Log in</h1>
-    <p class="lead">Sign in with your Sacari account to see your stats on the web.</p>
-    ${error ? `<div class="form-error">${esc(error)}</div>` : ''}
-    <form method="post" action="/login" class="form">
-      <label class="field">Email<input type="email" name="email" autocomplete="email" required /></label>
-      <label class="field">Password<input type="password" name="password" autocomplete="current-password" required /></label>
-      <button class="cta" type="submit">Log in</button>
-    </form>
-    <p class="muted-note">New here? Create your account in the app, then log in.${APP_STORE_URL ? ` <a href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}</p>
-  </section>`;
-  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, body });
+  <div class="login-wrap">
+    <aside class="login-brand">
+      <a class="brand brand-lg" href="/">SACARI<span>GOLF</span></a>
+      <img class="login-crest" src="/crests/diamond.png" alt="Sacari Golf crest" />
+      <h2 class="login-tag">Competitive golf, ranked.</h2>
+      <p class="login-sub">Climb from Wood to Obsidian, track every shot, and battle clans. Your account, on the web.</p>
+    </aside>
+    <main class="login-panel">
+      <div class="login-card">
+        <h1>Welcome back</h1>
+        <p class="login-card-sub">Log in to see your rank, stats, and clubs.</p>
+        ${error ? `<div class="form-error">${esc(error)}</div>` : ''}
+        <form method="post" action="/login" class="form">
+          <label class="field">
+            <span class="field-label">Email</span>
+            <span class="input-wrap"><span class="input-icon">@</span><input type="email" name="email" placeholder="you@email.com" autocomplete="email" required /></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Password</span>
+            <span class="input-wrap"><span class="input-icon">&#9679;</span><input type="password" name="password" placeholder="Your password" autocomplete="current-password" required /></span>
+          </label>
+          <button class="login-btn" type="submit">Log in</button>
+        </form>
+        <p class="muted-note">New here? Create your account in the app, then log in.${APP_STORE_URL ? ` <a href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}</p>
+        <a class="login-home" href="/">&larr; Back to sacarigolf.com</a>
+      </div>
+    </main>
+  </div>`;
+  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
