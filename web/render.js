@@ -9,6 +9,10 @@ const { TIERS, medallionFor } = require('./rank');
 const APP_STORE_URL = process.env.APP_STORE_URL || '';
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
 const BACKEND_URL = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
+// Cache-buster for static assets, fixed at server start. Each deploy/restart
+// gives a new value so browsers fetch fresh CSS/JS instead of a stale cached
+// copy (static files are served with a 1h cache).
+const ASSET_V = Date.now();
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -80,7 +84,7 @@ ${ogUrl ? `<meta property="og:url" content="${esc(ogUrl)}" />` : ''}
 <meta name="twitter:title" content="${esc(title)}" />
 <meta name="twitter:description" content="${esc(description)}" />
 ${ogImage ? `<meta name="twitter:image" content="${esc(ogImage)}" />` : ''}
-<link rel="stylesheet" href="/styles.css" />
+<link rel="stylesheet" href="/styles.css?v=${ASSET_V}" />
 </head>
 <body class="${bodyClass || ''}">
 ${bare ? '' : nav(active, authed)}
@@ -402,7 +406,7 @@ function renderLogin({ error }) {
       <h2 class="login-tag">Competitive golf, ranked.</h2>
       <p class="login-sub">Climb from Wood to Obsidian, track every shot, and battle clans. Your account, on the web.</p>
     </aside>
-    <main class="login-panel">
+    <section class="login-panel">
       <div class="login-card">
         <h1>Welcome back</h1>
         <p class="login-card-sub">Log in to see your rank, stats, and clubs.</p>
@@ -421,9 +425,9 @@ function renderLogin({ error }) {
         <p class="muted-note">New here? Create your account in the app, then log in.${APP_STORE_URL ? ` <a href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}</p>
         <a class="login-home" href="/">&larr; Back to sacarigolf.com</a>
       </div>
-    </main>
+    </section>
   </div>`;
-  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, body });
+  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, bodyClass: 'login-body', body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
@@ -603,7 +607,7 @@ function renderCoursePins({ course, holes }) {
     <div id="pin-msg" class="pin-msg"></div>
     <script>window.PIN_DATA = ${json};</script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <script src="/pins.js" defer></script>
+    <script src="/pins.js?v=${ASSET_V}" defer></script>
     ` : '<div class="empty">This course has no hole data yet.</div>'}
   </section>`;
 
