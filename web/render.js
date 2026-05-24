@@ -401,8 +401,7 @@ function renderLogin({ error }) {
   const body = `
   <div class="login-wrap">
     <aside class="login-brand">
-      <a class="brand brand-lg" href="/">SACARI<span>GOLF</span></a>
-      <img class="login-crest" src="/crests/diamond.png" alt="Sacari Golf crest" />
+      <a href="/" class="login-logo-link"><img class="login-logo" src="/logo.jpg?v=${ASSET_V}" alt="Sacari Golf" /></a>
       <h2 class="login-tag">Competitive golf, ranked.</h2>
       <p class="login-sub">Climb from Wood to Obsidian, track every shot, and battle clans. Your account, on the web.</p>
     </aside>
