@@ -26,9 +26,12 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   if (!matchInfo.length) return res.status(404).json({ error: 'Match not found' });
   if (matchInfo[0].completed) return res.status(409).json({ error: 'Match already completed' });
 
+  // 3-day window: a challenged friend has 3 days to accept and play before
+  // the match rejoins the open matchmaking pool. Matches the challenge-grace
+  // period enforced in the auto-pairing paths.
   await pool.query(
     `INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
+     VALUES ($1, $2, $3, NOW() + INTERVAL '3 days')
      ON CONFLICT (match_id, to_user_id) DO NOTHING`,
     [matchId, req.userId, toUserId]
   );

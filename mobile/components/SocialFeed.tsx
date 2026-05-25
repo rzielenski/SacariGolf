@@ -572,9 +572,15 @@ function RoundCardBody({ post }: { post: any }) {
   const teeboxPar       = typeof post.teebox_par       === 'number' ? post.teebox_par       : null;
   const teeboxNumHoles  = typeof post.teebox_num_holes === 'number' ? post.teebox_num_holes : null;
   const matchNumHoles   = typeof post.match_num_holes  === 'number' ? post.match_num_holes  : null;
+  // Pro-rate by the holes the player ACTUALLY played (their hole_scores
+  // length), not the match's num_holes — those can disagree (e.g. an 18-hole
+  // round logged on a match record that says 9 holes), which made an 18-hole
+  // score read against 9-hole par. Fall back to match num_holes if missing.
+  const holesPlayed = typeof post.author_holes_played === 'number' && post.author_holes_played > 0
+    ? post.author_holes_played : matchNumHoles;
   let par: number | null = teeboxPar;
-  if (teeboxPar != null && teeboxNumHoles && matchNumHoles && matchNumHoles !== teeboxNumHoles) {
-    par = Math.round(teeboxPar * (matchNumHoles / teeboxNumHoles));
+  if (teeboxPar != null && teeboxNumHoles && holesPlayed && holesPlayed !== teeboxNumHoles) {
+    par = Math.round(teeboxPar * (holesPlayed / teeboxNumHoles));
   }
   const overUnder = (typeof strokes === 'number' && typeof par === 'number')
     ? strokes - par : null;

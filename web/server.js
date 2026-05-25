@@ -221,6 +221,25 @@ app.get('/courses', async (req, res) => {
   }
 });
 
+// JSON autocomplete for the course search box (type-ahead).
+app.get('/api/courses/search', async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 60).replace(/[%_]/g, '') : '';
+  if (q.length < 2) { res.json([]); return; }
+  try {
+    const { rows } = await pool.query(
+      `SELECT course_id, course_name, city, state, country FROM courses
+        WHERE course_name ILIKE $1 OR city ILIKE $1
+        ORDER BY course_name LIMIT 8`,
+      [`${q}%`]
+    );
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json(rows);
+  } catch (err) {
+    console.error('course search error:', err);
+    res.status(500).json([]);
+  }
+});
+
 // ----- Course detail --------------------------------------------------------
 app.get('/course/:id', async (req, res) => {
   const id = String(req.params.id || '');

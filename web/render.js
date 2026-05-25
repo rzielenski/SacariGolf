@@ -230,12 +230,16 @@ function renderCoursesIndex({ popular, results, q }) {
   <section class="page-head">
     <h1>Courses</h1>
     <p>Browse courses played on Sacari, see tee info and the best rounds posted at each.</p>
-    <form class="course-search" method="get" action="/courses">
-      <input type="text" name="q" value="${searchVal}" placeholder="Search course, club, city..." />
-      <button type="submit">Search</button>
-    </form>
+    <div class="course-search-wrap">
+      <form class="course-search" method="get" action="/courses" autocomplete="off">
+        <input type="text" name="q" id="course-q" value="${searchVal}" placeholder="Search course, club, city..." autocomplete="off" />
+        <button type="submit">Search</button>
+      </form>
+      <div class="ac-list" id="course-ac" hidden></div>
+    </div>
   </section>
-  <section class="courses">${listing}</section>`;
+  <section class="courses">${listing}</section>
+  <script src="/courses.js?v=${ASSET_V}" defer></script>`;
 
   return page({
     title: q ? `Courses matching "${q}". Sacari Golf` : 'Golf Courses. Sacari Golf',

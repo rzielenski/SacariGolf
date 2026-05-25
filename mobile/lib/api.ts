@@ -621,6 +621,9 @@ export const api = {
       format?: string;
       numHoles?: number;
       holesSubset?: 'front' | 'back' | 'full';
+      /** Direct challenge to one friend: the server attaches the invite
+       *  atomically and skips auto-pairing, so it never grabs a stranger. */
+      challengeUserId?: string;
     }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: {

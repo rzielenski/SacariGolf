@@ -97,6 +97,16 @@ main { flex: 1; width: 100%; }
 .lb-rec { color: var(--muted); font-size: 0.85rem; min-width: 60px; text-align: right; }
 
 /* Courses */
+.course-search-wrap { position: relative; max-width: 460px; margin-top: 16px; }
+.course-search-wrap .course-search { margin-top: 0; }
+.ac-list { position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 30;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  box-shadow: 0 14px 30px rgba(0,0,0,0.6); }
+.ac-item { display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.ac-item:last-child { border-bottom: 0; }
+.ac-item:hover { background: var(--card-alt); }
+.ac-name { color: var(--text); font-weight: 700; font-size: 0.95rem; }
+.ac-loc { color: var(--gold); font-size: 0.78rem; }
 .course-search { display: flex; gap: 8px; margin-top: 16px; max-width: 460px; }
 .course-search input { flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text);
   border-radius: 6px; padding: 11px 14px; font-size: 15px; }

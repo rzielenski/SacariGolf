@@ -327,6 +327,10 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        mp_me.side  AS author_side,
        mp_me.strokes AS author_strokes,
        t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,
+       -- Holes the author ACTUALLY played (their hole_scores length). The card
+       -- pro-rates par by this, not match.num_holes, since the two can disagree
+       -- (e.g. an 18-hole round on a match record that says 9 holes).
+       array_length(r_me.hole_scores, 1) AS author_holes_played,
        c.course_name,
        -- Comment count so the card can show "💬 N" without an extra
        -- round-trip per post. Cheap correlated subquery; the
@@ -348,6 +352,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      LEFT JOIN matches m         ON m.match_id = p.match_id
      LEFT JOIN match_results mr  ON mr.match_id = p.match_id
      LEFT JOIN match_players mp_me ON mp_me.match_id = p.match_id AND mp_me.user_id = p.user_id
+     LEFT JOIN rounds r_me         ON r_me.match_id = p.match_id AND r_me.user_id = p.user_id
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
      WHERE TRUE${beforeClause}${scopeClause}

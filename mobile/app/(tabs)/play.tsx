@@ -265,13 +265,11 @@ export default function PlayScreen() {
         name: challengeUserId
           ? `${numHoles}-hole challenge from ${user?.username ?? 'a friend'}`
           : undefined,
+        // Direct challenge: the server attaches the invite in the same
+        // transaction and skips auto-pairing, so the match waits for this
+        // friend (3-day window) instead of grabbing a random opponent.
+        challengeUserId: challengeUserId ?? undefined,
       });
-      // Direct-challenge flow: fire off the invite the moment the match
-      // exists. Non-fatal if it fails — the inviter still has a real match
-      // and can share the ID manually.
-      if (challengeUserId) {
-        api.invites.send(match.match_id, challengeUserId).catch(() => { });
-      }
       // Single, consistent post-creation destination for every flow:
       // the match lobby. From there the player can tap "Start Scoring",
       // share the match ID, or invite more friends. Avoids the old split

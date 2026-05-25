@@ -79,6 +79,18 @@ export async function runPairingPass() {
             SELECT 1 FROM match_players mp
             WHERE mp.match_id = m.match_id AND mp.side != 1
           )
+          -- Direct-challenge grace: hold a SOLO match open while it has an
+          -- active challenge invite (a friend was challenged within the last
+          -- 3 days). After the window lapses it rejoins the pool and this pass
+          -- pairs it with the best available option.
+          AND (
+            m.match_type <> 'solo'
+            OR NOT EXISTS (
+              SELECT 1 FROM match_invites mi
+              WHERE mi.match_id = m.match_id AND mi.status = 'pending'
+                AND mi.created_at > NOW() - INTERVAL '3 days'
+            )
+          )
         ORDER BY m.created_at ASC`
     );
 
@@ -131,6 +143,15 @@ export async function runPairingPass() {
                    WHERE mp_a.match_id = $1
                      AND mp_b.match_id = m2.match_id
                 )
+              )
+            )
+            -- Never grab a SOLO opponent match that has an active challenge.
+            AND (
+              $2 <> 'solo'
+              OR NOT EXISTS (
+                SELECT 1 FROM match_invites mi
+                WHERE mi.match_id = m2.match_id AND mi.status = 'pending'
+                  AND mi.created_at > NOW() - INTERVAL '3 days'
               )
             )
           ORDER BY ABS(

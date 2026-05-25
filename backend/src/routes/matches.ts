@@ -69,7 +69,12 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 //   • scramble     — Existing team format (one final team score per side)
 const VALID_FORMATS = new Set(['stroke', 'stableford', 'match_play', 'skins', 'scramble']);
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset } = req.body;
+  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId } = req.body;
+  // A direct challenge to one friend. When set, the match is earmarked for
+  // them (invite created in the same transaction) and auto-pairing is skipped,
+  // so it can never grab a stranger before/while the friend is invited.
+  const challengeTarget = (typeof challengeUserId === 'string' && challengeUserId && challengeUserId !== req.userId)
+    ? challengeUserId : null;
   if (!matchType) return res.status(400).json({ error: 'matchType required' });
   // Scramble remains team-only; the rest are open to any match type.
   let resolvedFormat = 'stroke';
@@ -120,6 +125,18 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       [match.match_id, req.userId, teeboxId || null]
     );
 
+    // Direct challenge: attach the invite to the chosen opponent inside the
+    // same transaction, before any auto-pairing can run. Combined with the
+    // auto-pair skip below, the match waits for this friend (3-day window).
+    if (challengeTarget) {
+      await client.query(
+        `INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '3 days')
+         ON CONFLICT (match_id, to_user_id) DO NOTHING`,
+        [match.match_id, req.userId, challengeTarget]
+      );
+    }
+
     // Auto-invite clan members for duo/squad matches
     if ((matchType === 'duo' || matchType === 'squad') && clanId) {
       const { rows: memberRows } = await client.query(
@@ -168,7 +185,8 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     try {
     // Arena (ffa) matches are invite-only — never auto-paired against
     // strangers. The host invites friends; accepters join as new sides.
-    if (!isPractice && matchType !== 'ffa') {
+    // Direct challenges also skip auto-pair — they wait for the invited friend.
+    if (!isPractice && matchType !== 'ffa' && !challengeTarget) {
       // Find candidate opponent matches:
       //   • same match_type, format, num_holes
       //   • still open (not completed, not cancelled, not superseded)
@@ -215,6 +233,18 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
                                           AND cm_them.clan_id = cm_me.clan_id
                  WHERE mp_cand.match_id = m.match_id
                )
+             )
+           )
+           -- Direct-challenge grace: never auto-pair against a SOLO match that
+           -- has an active challenge invite (a friend was challenged within the
+           -- last 3 days). It rejoins the pool once the invite is answered or
+           -- the 3-day window lapses.
+           AND (
+             $2 <> 'solo'
+             OR NOT EXISTS (
+               SELECT 1 FROM match_invites mi
+               WHERE mi.match_id = m.match_id AND mi.status = 'pending'
+                 AND mi.created_at > NOW() - INTERVAL '3 days'
              )
            )
          ORDER BY ABS(
@@ -287,6 +317,27 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     }
 
     await client.query('COMMIT');
+
+    // Notify a directly-challenged friend (best-effort, after commit).
+    if (challengeTarget) {
+      try {
+        const { rows: pushRows } = await pool.query(
+          `SELECT u.push_token, me.username AS from_name
+             FROM users u, users me
+            WHERE u.user_id = $1 AND me.user_id = $2`,
+          [challengeTarget, req.userId]
+        );
+        if (pushRows[0]?.push_token) {
+          await sendPush(
+            [pushRows[0].push_token],
+            'Match Challenge',
+            `${pushRows[0].from_name} challenged you to a match — accept within 3 days!`,
+            { type: 'invite', matchId: match.match_id }
+          );
+        }
+      } catch { /* push is best-effort */ }
+    }
+
     return res.status(201).json({ ...match, auto_paired: !!autoPairedOpponentMatchId });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -639,6 +690,25 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
        WHERE match_id = $3 AND user_id = $4`,
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
+
+    // Reconcile the match's hole count with what was ACTUALLY played. A match
+    // created as 9 holes where the player logged all 18 (or vice versa) left a
+    // stale num_holes that made par, hole-by-hole scoring, and the feed card
+    // read against the wrong number of holes. Snap it to the real round length
+    // (only the two valid lengths) and fix holes_subset to match. ELO is
+    // unaffected — it derives each player's holes from their own hole_scores.
+    const playedHoles = holeScores.length;
+    if ((playedHoles === 9 || playedHoles === 18) && playedHoles !== matchRows[0].num_holes) {
+      const newSubset = playedHoles === 18
+        ? 'full'
+        : (matchRows[0].holes_subset === 'back' ? 'back' : 'front');
+      await client.query(
+        `UPDATE matches SET num_holes = $2, holes_subset = $3 WHERE match_id = $1`,
+        [req.params.id, playedHoles, newSubset]
+      );
+      matchRows[0].num_holes = playedHoles;
+      matchRows[0].holes_subset = newSubset;
+    }
 
     // Contribution reward: if a majority of the holes the player played were
     // contributed to via EITHER pin marking OR shot tracking, grant a
@@ -1213,6 +1283,20 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const myP = allPlayers[0];
       const myHolesPlayed = holeScores.length;
 
+      // Direct-challenge grace: if THIS match was a challenge to a specific
+      // friend (a pending invite from the last 3 days) and the challenger
+      // finished first, do NOT auto-pair with a stranger. Hold it open so the
+      // challenged friend still has time to accept and play. After 3 days the
+      // invite lapses and the every-minute pairing pass matches it with the
+      // best available option.
+      const { rows: chalRows } = await client.query(
+        `SELECT 1 FROM match_invites
+          WHERE match_id = $1 AND status = 'pending'
+            AND created_at > NOW() - INTERVAL '3 days' LIMIT 1`,
+        [req.params.id]
+      );
+      const holdForChallenge = chalRows.length > 0;
+
       const pendingPoolQuery = (holesFilter: 'same' | 'different') => client.query(
         `SELECT mp.match_id AS opp_match_id, mp.user_id, mp.strokes, mp.teebox_id,
                 u.username, u.elo, u.total_matches,
@@ -1231,6 +1315,12 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
              SELECT 1 FROM match_players mp2
              WHERE mp2.match_id = mp.match_id AND mp2.user_id != mp.user_id
            )
+           -- Don't grab a candidate that is itself an active challenge match.
+           AND NOT EXISTS (
+             SELECT 1 FROM match_invites mi
+             WHERE mi.match_id = mp.match_id AND mi.status = 'pending'
+               AND mi.created_at > NOW() - INTERVAL '3 days'
+           )
          ORDER BY ABS(u.elo - $3)
          LIMIT 1
          FOR UPDATE SKIP LOCKED`,
@@ -1238,11 +1328,15 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       );
 
       // Prefer same-format (9v9 or 18v18). Fall back to cross-format only if pool is empty.
-      let { rows: candidates } = await pendingPoolQuery('same');
+      // Skip entirely while holding for a challenged friend.
+      let candidates: any[] = [];
       let isCrossFormat = false;
-      if (!candidates.length) {
-        ({ rows: candidates } = await pendingPoolQuery('different'));
-        isCrossFormat = candidates.length > 0;
+      if (!holdForChallenge) {
+        ({ rows: candidates } = await pendingPoolQuery('same'));
+        if (!candidates.length) {
+          ({ rows: candidates } = await pendingPoolQuery('different'));
+          isCrossFormat = candidates.length > 0;
+        }
       }
 
       if (candidates.length > 0) {
