@@ -545,7 +545,12 @@ export default function MatchLobbyScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setGuestModalOpen(false)}
       >
-        <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 20, paddingTop: 28, paddingBottom: 60 }}>
+        <ScrollView
+          style={{ flex: 1, backgroundColor: C.bg }}
+          contentContainerStyle={{ padding: 20, paddingTop: 28, paddingBottom: 60 }}
+          automaticallyAdjustKeyboardInsets
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <Text style={{ color: C.text, fontSize: 20, fontWeight: '900' }}>Guest Scorecards</Text>
             <TouchableOpacity onPress={() => setGuestModalOpen(false)}>

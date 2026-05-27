@@ -11,6 +11,7 @@ import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
+import { AvatarViewer } from '../../components/AvatarViewer';
 import { fmtHandicap } from '../../lib/golfMath';
 import { useCensor } from '../../lib/censor';
 import { rankForElo, rankHeadline } from '../../lib/rank';
@@ -27,6 +28,7 @@ export default function UserProfileScreen() {
   const [activeRound, setActiveRound] = useState<any | null>(null);
   const [courseRecords, setCourseRecords] = useState<any[]>([]);
   const [spectating, setSpectating] = useState(false);
+  const [viewingAvatar, setViewingAvatar] = useState(false);
   const [stats, setStats] = useState<any | null>(null);
   const [insights, setInsights] = useState<any | null>(null);
 
@@ -119,7 +121,14 @@ export default function UserProfileScreen() {
       <View style={styles.headerSection}>
         <RankCrest elo={profile.elo} size={96} style={{ marginBottom: 8 }}>
           {profile.avatar_url ? (
-            <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
+            // Tap to view the photo full-screen — same pattern as a Find.
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => setViewingAvatar(true)}
+              style={{ width: '100%', height: '100%' }}
+            >
+              <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
+            </TouchableOpacity>
           ) : (
             <View style={styles.avatarLetterBg}>
               <Text style={styles.avatarText}>{c(profile.username)[0]?.toUpperCase() ?? '?'}</Text>
@@ -527,6 +536,12 @@ export default function UserProfileScreen() {
         userId={profile?.user_id}
         username={profile?.username}
         onClose={() => setSpectating(false)}
+      />
+
+      <AvatarViewer
+        uri={viewingAvatar && profile?.avatar_url ? `${API_BASE}${profile.avatar_url}` : null}
+        username={c(profile.username)}
+        onClose={() => setViewingAvatar(false)}
       />
     </ScrollView>
   );

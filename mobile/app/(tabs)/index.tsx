@@ -212,7 +212,7 @@ export default function HomeScreen() {
         >
           <Text style={styles.openBetaLabel}>★  PREMIUM UNLOCKED  ★</Text>
           <Text style={styles.openBetaMsg}>
-            Every paid feature is free for you during open beta — a gift from Richard while we collect course data. Tap to see what's included.
+            As a thanks for being in our first 100 users, premium is on the house. Tap to see what's included.
           </Text>
         </TouchableOpacity>
       )}

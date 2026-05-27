@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
-  ActivityIndicator, Alert, Modal, RefreshControl,
+  ActivityIndicator, Alert, Modal, RefreshControl, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { router, Stack } from 'expo-router';
 import { api } from '../lib/api';
@@ -163,7 +163,12 @@ function CreateModal({ visible, onClose, onCreated }: { visible: boolean; onClos
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 20, paddingTop: 28 }}>
+      <ScrollView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        contentContainerStyle={{ padding: 20, paddingTop: 28 }}
+        automaticallyAdjustKeyboardInsets
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text style={s.modalTitle}>New Tournament</Text>
           <TouchableOpacity onPress={onClose}><Text style={s.cancel}>Cancel</Text></TouchableOpacity>
@@ -222,7 +227,10 @@ function JoinModal({ visible, onClose, onJoined }: { visible: boolean; onClose: 
   };
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={{ flex: 1, backgroundColor: C.bg, padding: 20, paddingTop: 28 }}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: C.bg, padding: 20, paddingTop: 28 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text style={s.modalTitle}>Join Tournament</Text>
           <TouchableOpacity onPress={onClose}><Text style={s.cancel}>Cancel</Text></TouchableOpacity>
@@ -241,7 +249,7 @@ function JoinModal({ visible, onClose, onJoined }: { visible: boolean; onClose: 
         <TouchableOpacity style={[s.submitBtn, submitting && { opacity: 0.6 }]} disabled={submitting} onPress={submit}>
           {submitting ? <ActivityIndicator color="#000" /> : <Text style={s.submitBtnText}>Join</Text>}
         </TouchableOpacity>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

@@ -45,7 +45,7 @@ const SLIDES: { mark: string; title: string; body: string; emphasis?: boolean }[
   {
     mark: 'V',
     title: 'Premium is on the House',
-    body: "Every paid feature is unlocked for free during open beta — heatmaps, weather-adjusted distances, deep stats, the works. It's Richard's way of saying thanks while we build out the course data. Have fun.",
+    body: "As a thanks for being in our first 100 users, premium is on the house. Heatmaps, weather-adjusted distances, deep stats, the works. No card, no expiry. Enjoy.",
     emphasis: true,
   },
 ];
@@ -101,7 +101,7 @@ export default function OnboardingScreen() {
             <Text style={s.body}>{slide.body}</Text>
             {slide.emphasis && (
               <View style={s.giftRibbon}>
-                <Text style={s.giftRibbonText}>★  OPEN BETA  ★</Text>
+                <Text style={s.giftRibbonText}>★  ALL FREE  ★</Text>
               </View>
             )}
           </View>

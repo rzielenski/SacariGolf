@@ -113,7 +113,12 @@ export default function PremiumScreen() {
   };
 
   return (
-    <ScrollView style={s.container} contentContainerStyle={s.content}>
+    <ScrollView
+      style={s.container}
+      contentContainerStyle={s.content}
+      automaticallyAdjustKeyboardInsets
+      keyboardShouldPersistTaps="handled"
+    >
       <Stack.Screen options={{ title: 'Premium', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
 
       {loading ? (
@@ -137,7 +142,7 @@ export default function PremiumScreen() {
               </Text>
               <Text style={s.activeSub}>
                 {(user as any)?.premium_plan === 'open_beta'
-                  ? "Every paid feature below is unlocked for free during open beta. It's a gift from Richard while we collect course data — no card, no expiry. Enjoy."
+                  ? "As a thanks for being in our first 100 users, premium is on the house. Every paid feature below is unlocked, no card, no expiry. Enjoy."
                   : (daysLeft != null ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining` : 'Lifetime access')}
               </Text>
             </View>

@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator,
-  Alert, Modal, TextInput, RefreshControl,
+  Alert, Modal, TextInput, RefreshControl, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { useAuth } from '../lib/auth';
@@ -274,7 +274,10 @@ function CreateTeamModal({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={s.modalContainer}>
+      <KeyboardAvoidingView
+        style={s.modalContainer}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
         <View style={s.modalHeader}>
           <TouchableOpacity onPress={onClose}>
             <Text style={{ color: C.textMuted, fontSize: 15 }}>Cancel</Text>
@@ -336,7 +339,7 @@ function CreateTeamModal({
             </View>
           )}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

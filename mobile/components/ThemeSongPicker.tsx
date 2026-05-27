@@ -159,6 +159,7 @@ export function ThemeSongPicker({
         <FlatList
           data={results}
           keyExtractor={(r) => String(r.trackId)}
+          keyboardShouldPersistTaps="handled"
           renderItem={({ item }) => {
             const playing = playingId === item.trackId;
             return (

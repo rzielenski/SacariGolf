@@ -1103,6 +1103,77 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       END $$;
     `,
   },
+  {
+    // Golf Club of Newport, NY (Herkimer County). Two 18-hole tee sets off
+    // the supplied scorecards, both Par 72 on the same physical holes, so
+    // per-hole par and handicap are identical between tees and only the
+    // yardages differ:
+    //   Black 6792 yds, White ("Regular") 5988 yds, Rating 68.8 / Slope 129.
+    //
+    // NOTE: the 68.8 / 129 rating belongs to the White set. The Black rating
+    // is carried as a placeholder pending confirmation, since a 6792-yard tee
+    // rates harder than 68.8. Update the Black course_rating/slope_rating once
+    // the real figures are known.
+    //
+    // Note on the back nine: each card prints OUT 36 / IN 36 / TOT 72, so the
+    // back must carry two par 5s. Hole 18 is one; the only reading consistent
+    // with the printed IN 36 makes hole 17 (the longest non-18 hole on the
+    // back) the second par 5. Front nine sums to 36 as printed.
+    //
+    // ON CONFLICT DO NOTHING throughout so re-deploys / restores are no-ops.
+    name: 'seed.golf_club_of_newport_ny',
+    sql: `
+      INSERT INTO courses (course_id, course_name, club_name, address, city, state, country, latitude, longitude) VALUES
+        ('a4000000-0000-0000-0000-000000000001', 'Golf Club of Newport', 'Golf Club of Newport', 'Newport, NY', 'Newport', 'NY', 'United States', 43.183905, -75.046470)
+      ON CONFLICT (course_id) DO NOTHING;
+
+      INSERT INTO teeboxes (teebox_id, course_id, name, gender, course_rating, slope_rating, total_yards, num_holes, par) VALUES
+        ('b4000000-0000-0000-0000-000000000001', 'a4000000-0000-0000-0000-000000000001', 'Black', 'male', 68.8, 129, 6792, 18, 72),
+        ('b4000000-0000-0000-0000-000000000002', 'a4000000-0000-0000-0000-000000000001', 'White', 'male', 68.8, 129, 5988, 18, 72)
+      ON CONFLICT (teebox_id) DO NOTHING;
+
+      INSERT INTO holes (teebox_id, hole_num, par, yardage, handicap) VALUES
+        ('b4000000-0000-0000-0000-000000000001',  1, 4, 371,  9),
+        ('b4000000-0000-0000-0000-000000000001',  2, 4, 440,  3),
+        ('b4000000-0000-0000-0000-000000000001',  3, 4, 352, 13),
+        ('b4000000-0000-0000-0000-000000000001',  4, 3, 212, 15),
+        ('b4000000-0000-0000-0000-000000000001',  5, 5, 538,  5),
+        ('b4000000-0000-0000-0000-000000000001',  6, 4, 393,  1),
+        ('b4000000-0000-0000-0000-000000000001',  7, 3, 130, 17),
+        ('b4000000-0000-0000-0000-000000000001',  8, 5, 483,  7),
+        ('b4000000-0000-0000-0000-000000000001',  9, 4, 455, 11),
+        ('b4000000-0000-0000-0000-000000000001', 10, 4, 399, 12),
+        ('b4000000-0000-0000-0000-000000000001', 11, 4, 421, 16),
+        ('b4000000-0000-0000-0000-000000000001', 12, 4, 392,  2),
+        ('b4000000-0000-0000-0000-000000000001', 13, 3, 212, 18),
+        ('b4000000-0000-0000-0000-000000000001', 14, 4, 351, 10),
+        ('b4000000-0000-0000-0000-000000000001', 15, 4, 400,  6),
+        ('b4000000-0000-0000-0000-000000000001', 16, 3, 210, 14),
+        ('b4000000-0000-0000-0000-000000000001', 17, 5, 452,  4),
+        ('b4000000-0000-0000-0000-000000000001', 18, 5, 581,  8),
+        -- White ("Regular") tees, 5988 yds. Same physical holes as Black, so
+        -- par and handicap match; only the yardages change.
+        ('b4000000-0000-0000-0000-000000000002',  1, 4, 328,  9),
+        ('b4000000-0000-0000-0000-000000000002',  2, 4, 370,  3),
+        ('b4000000-0000-0000-0000-000000000002',  3, 4, 309, 13),
+        ('b4000000-0000-0000-0000-000000000002',  4, 3, 173, 15),
+        ('b4000000-0000-0000-0000-000000000002',  5, 5, 490,  5),
+        ('b4000000-0000-0000-0000-000000000002',  6, 4, 371,  1),
+        ('b4000000-0000-0000-0000-000000000002',  7, 3, 110, 17),
+        ('b4000000-0000-0000-0000-000000000002',  8, 5, 451,  7),
+        ('b4000000-0000-0000-0000-000000000002',  9, 4, 357, 11),
+        ('b4000000-0000-0000-0000-000000000002', 10, 4, 331, 12),
+        ('b4000000-0000-0000-0000-000000000002', 11, 4, 396, 16),
+        ('b4000000-0000-0000-0000-000000000002', 12, 4, 348,  2),
+        ('b4000000-0000-0000-0000-000000000002', 13, 3, 158, 18),
+        ('b4000000-0000-0000-0000-000000000002', 14, 4, 312, 10),
+        ('b4000000-0000-0000-0000-000000000002', 15, 4, 400,  6),
+        ('b4000000-0000-0000-0000-000000000002', 16, 3, 150, 14),
+        ('b4000000-0000-0000-0000-000000000002', 17, 5, 412,  4),
+        ('b4000000-0000-0000-0000-000000000002', 18, 5, 522,  8)
+      ON CONFLICT (teebox_id, hole_num) DO NOTHING;
+    `,
+  },
 ];
 
 export async function runMigrations() {

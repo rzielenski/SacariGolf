@@ -234,7 +234,12 @@ export default function CourseInfoScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setReportOpen(false)}
       >
-        <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 20, paddingTop: 30 }}>
+        <ScrollView
+          style={{ flex: 1, backgroundColor: C.bg }}
+          contentContainerStyle={{ padding: 20, paddingTop: 30 }}
+          automaticallyAdjustKeyboardInsets
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
             <Text style={{ color: C.text, fontSize: 20, fontWeight: '900' }}>Report Incorrect Data</Text>
             <TouchableOpacity onPress={() => setReportOpen(false)}>

@@ -122,6 +122,7 @@ export function FollowList({
         <FlatList
           data={data ?? []}
           keyExtractor={(u) => u.user_id}
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingBottom: 40 }}
           ListHeaderComponent={Header}
           ListEmptyComponent={

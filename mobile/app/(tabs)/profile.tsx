@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert,
   Image, Modal, ActivityIndicator, TextInput, FlatList, Linking,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Notifications from 'expo-notifications';
@@ -454,7 +455,7 @@ export default function ProfileScreen() {
             once we flip the flag off in backend/src/utils/openBeta.ts. */}
         {(user as any)?.premium_plan === 'open_beta' && (
           <Text style={styles.openBetaNote}>
-            ★ Premium is free for everyone while we collect course data — thanks for testing.
+            ★ Premium is on the house for our first 100 users. Enjoy.
           </Text>
         )}
       </View>
@@ -969,7 +970,10 @@ export default function ProfileScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setBioModalVisible(false)}
       >
-        <View style={styles.notifContainer}>
+        <KeyboardAvoidingView
+          style={styles.notifContainer}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
           <View style={styles.notifHeader}>
             <TouchableOpacity onPress={() => setBioModalVisible(false)}>
               <Text style={{ color: C.textMuted, fontSize: 15 }}>Cancel</Text>
@@ -996,7 +1000,7 @@ export default function ProfileScreen() {
               maxLength={280}
             />
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Home Course Modal */}
@@ -1037,6 +1041,7 @@ export default function ProfileScreen() {
           <FlatList
             data={homeCourseResults}
             keyExtractor={(c) => c.course_id}
+            keyboardShouldPersistTaps="handled"
             contentContainerStyle={{ padding: 20 }}
             renderItem={({ item }) => (
               <TouchableOpacity style={styles.searchResRow} onPress={() => setHomeCourse(item)}>
@@ -1153,7 +1158,10 @@ export default function ProfileScreen() {
         presentationStyle="pageSheet"
         onRequestClose={() => setManualHcapModal(false)}
       >
-        <View style={styles.manualHcapContainer}>
+        <KeyboardAvoidingView
+          style={styles.manualHcapContainer}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
           <View style={styles.manualHcapHeader}>
             <TouchableOpacity onPress={() => setManualHcapModal(false)}>
               <Text style={styles.manualHcapCancel}>Cancel</Text>
@@ -1206,7 +1214,7 @@ export default function ProfileScreen() {
               maxLength={5}
             />
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </ScrollView>
   );

@@ -369,7 +369,11 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+      <ScrollView
+        contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
+        automaticallyAdjustKeyboardInsets
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={s.totalsCard}>
           <View style={s.totalCell}>
             <Text style={s.totalLabel}>SCORE</Text>

@@ -471,7 +471,11 @@ export default function ClanDetailScreen() {
             </TouchableOpacity>
           </View>
 
-          <ScrollView style={styles.modalBody}>
+          <ScrollView
+            style={styles.modalBody}
+            automaticallyAdjustKeyboardInsets
+            keyboardShouldPersistTaps="handled"
+          >
             <Text style={styles.fieldLabel}>Name</Text>
             <TextInput
               style={styles.input}
