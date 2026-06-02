@@ -1174,6 +1174,23 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ON CONFLICT (teebox_id, hole_num) DO NOTHING;
     `,
   },
+  {
+    // Track authorship of user-built courses. When a player adds a course
+    // themselves through the in-app builder (POST /courses), we stamp who
+    // submitted it and whether an admin has verified the data since. Both
+    // columns are nullable / default-false so the ~27k seed-imported and
+    // bulk-imported rows remain untouched.
+    //   created_by_user_id  → NULL for seed / API imports
+    //   verified            → TRUE only after a human review
+    name: 'courses.user_authored',
+    sql: `
+      ALTER TABLE courses
+        ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS verified           BOOLEAN NOT NULL DEFAULT FALSE;
+      CREATE INDEX IF NOT EXISTS courses_created_by_idx
+        ON courses(created_by_user_id) WHERE created_by_user_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {

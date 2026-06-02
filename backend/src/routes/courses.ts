@@ -4,6 +4,9 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
 import { sendEmail } from '../utils/email';
+import {
+  estimateRatingSlope, looksPlausibleRating, validateTeebox, HoleInput,
+} from '../utils/courseEstimate';
 
 const router = Router();
 
@@ -40,6 +43,210 @@ router.get('/search', requireAuth, wrap(async (req: Request, res: Response) => {
     [`%${q}%`, `%${q}%`, limit]
   );
   return res.json(rows);
+}));
+
+/**
+ * User-built course. The in-app builder posts here with a structured
+ * payload (course meta + N teeboxes, each with per-hole par/yardage/HCP);
+ * we validate, fill in any missing course rating/slope from the length
+ * heuristic in utils/courseEstimate.ts, and insert course + teeboxes +
+ * holes in a single transaction. Rows are stamped with
+ *   created_by_user_id = the submitter
+ *   verified           = FALSE
+ * so an admin can audit later, and so the UI can surface a
+ * "user-submitted, scores may not feed handicap" hint until verified.
+ *
+ * Per-user rate-limit: max 5 courses in any rolling 24 hours.
+ *
+ * Body shape:
+ *   {
+ *     courseName: string,
+ *     city?: string, state?: string, country?: string, address?: string,
+ *     latitude?: number, longitude?: number,
+ *     numHoles: 9 | 18,
+ *     teeboxes: [{
+ *       name: string,                   // e.g. "Black"
+ *       gender?: 'male' | 'female',     // default 'male'
+ *       courseRating?: number,          // optional; estimated when blank/implausible
+ *       slopeRating?: number,           // optional; estimated when blank/implausible
+ *       holes: [{ hole_num, par, yardage?, handicap? }]
+ *     }]
+ *   }
+ *
+ * Response:
+ *   { success: true, course_id, teebox_ids: string[],
+ *     warnings: string[], estimated_teebox_ids: string[] }
+ */
+router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const body = req.body ?? {};
+
+  // ── Course meta ───────────────────────────────────────────────────────
+  const courseName = String(body.courseName ?? '').trim().slice(0, 200);
+  if (!courseName) return res.status(400).json({ error: 'Course name is required.' });
+
+  const city    = body.city    ? String(body.city).trim().slice(0, 120)    : null;
+  const state   = body.state   ? String(body.state).trim().slice(0, 120)   : null;
+  const country = body.country ? String(body.country).trim().slice(0, 120) : 'United States';
+  const address = body.address ? String(body.address).trim().slice(0, 500) : null;
+
+  const lat = body.latitude  != null && body.latitude  !== '' ? Number(body.latitude)  : null;
+  const lng = body.longitude != null && body.longitude !== '' ? Number(body.longitude) : null;
+  if (lat != null && (!Number.isFinite(lat) || lat < -90  || lat > 90))  return res.status(400).json({ error: 'Invalid latitude.' });
+  if (lng != null && (!Number.isFinite(lng) || lng < -180 || lng > 180)) return res.status(400).json({ error: 'Invalid longitude.' });
+
+  const numHoles = body.numHoles === 9 ? 9 : 18;
+
+  const teeboxesIn = Array.isArray(body.teeboxes) ? body.teeboxes : [];
+  if (teeboxesIn.length === 0) return res.status(400).json({ error: 'At least one tee set is required.' });
+  if (teeboxesIn.length > 6)   return res.status(400).json({ error: 'Max 6 tee sets per course.' });
+
+  // ── Per-user rate-limit ───────────────────────────────────────────────
+  // The courses table doesn't carry a created_at timestamp, so we gate on
+  // lifetime user-authored count rather than a rolling 24h window. Keep
+  // the cap generous: 25 entries is plenty for an enthusiastic contributor
+  // and well above what a spammer would bother with before hitting it.
+  const { rows: limitRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM courses WHERE created_by_user_id = $1`,
+    [req.userId]
+  );
+  if ((limitRows[0]?.n ?? 0) >= 25) {
+    return res.status(429).json({
+      error: 'You have created the cap of 25 courses already. Reach out and we will lift the limit.',
+    });
+  }
+
+  // ── Validate + shape every teebox ─────────────────────────────────────
+  interface ShapedTeebox {
+    name: string;
+    gender: 'male' | 'female';
+    course_rating: number;
+    slope_rating: number;
+    total_yards: number | null;
+    num_holes: number;
+    par: number;
+    estimated_rating: boolean;
+    holes: HoleInput[];
+  }
+  const shaped: ShapedTeebox[] = [];
+  const allWarnings: string[] = [];
+
+  for (const tb of teeboxesIn) {
+    const tbName: string = String(tb.name ?? '').trim().slice(0, 60) || 'Tee';
+    const gender: 'male' | 'female' = tb.gender === 'female' ? 'female' : 'male';
+
+    const holesIn: HoleInput[] = Array.isArray(tb.holes)
+      ? tb.holes.map((h: any, i: number) => ({
+          hole_num: Number(h.hole_num ?? i + 1),
+          par:      Number(h.par),
+          yardage:  h.yardage  != null && h.yardage  !== '' ? Number(h.yardage)  : null,
+          handicap: h.handicap != null && h.handicap !== '' ? Number(h.handicap) : null,
+        }))
+      : [];
+
+    const declaredPar   = tb.par         != null ? Number(tb.par)         : null;
+    const declaredYards = tb.totalYards  != null ? Number(tb.totalYards)  : null;
+
+    const { hardErrors, warnings } = validateTeebox(
+      tbName, numHoles, holesIn, declaredPar, declaredYards,
+    );
+    if (hardErrors.length) {
+      return res.status(400).json({ error: 'Validation failed', details: hardErrors });
+    }
+    allWarnings.push(...warnings);
+
+    const computedPar   = holesIn.reduce((s, h) => s + (Number.isFinite(h.par)     ? h.par     : 0), 0);
+    const computedYards = holesIn.reduce((s, h) => s + (Number.isFinite(h.yardage as number) ? (h.yardage as number) : 0), 0);
+
+    // Trust user rating/slope iff they're inside the plausible window.
+    // Otherwise (blank, zero, garbage) estimate from par + computed yards.
+    const userRating = tb.courseRating != null && tb.courseRating !== '' ? Number(tb.courseRating) : null;
+    const userSlope  = tb.slopeRating  != null && tb.slopeRating  !== '' ? Number(tb.slopeRating)  : null;
+    const fullPlausible = looksPlausibleRating(userRating, userSlope)
+                          && userRating != null && userSlope != null;
+
+    let rating: number;
+    let slope: number;
+    let estimated = false;
+    if (fullPlausible) {
+      rating = userRating as number;
+      slope  = userSlope as number;
+    } else {
+      const est = estimateRatingSlope(computedPar || (numHoles === 9 ? 36 : 72), computedYards, gender);
+      // If they gave one of the two, prefer the user's plausible value.
+      rating = (userRating != null && userRating >= 55 && userRating <= 80) ? userRating : est.rating;
+      slope  = (userSlope  != null && userSlope  >= 55 && userSlope  <= 155) ? userSlope  : est.slope;
+      estimated = !fullPlausible;
+    }
+
+    shaped.push({
+      name: tbName,
+      gender,
+      course_rating: rating,
+      slope_rating:  slope,
+      total_yards:   computedYards > 0 ? computedYards : null,
+      num_holes:     numHoles,
+      par:           computedPar,
+      estimated_rating: estimated,
+      holes: holesIn,
+    });
+  }
+
+  // ── Insert (course → teeboxes → holes) in a single transaction ────────
+  const client = await pool.connect();
+  let courseId: string;
+  const teeboxIds: string[] = [];
+  const estimatedTeeboxIds: string[] = [];
+  try {
+    await client.query('BEGIN');
+
+    const courseRes = await client.query(
+      `INSERT INTO courses
+         (course_name, club_name, address, city, state, country,
+          latitude, longitude, created_by_user_id, verified)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE)
+       RETURNING course_id`,
+      [courseName, courseName, address, city, state, country, lat, lng, req.userId],
+    );
+    courseId = courseRes.rows[0].course_id;
+
+    for (const tb of shaped) {
+      const tbRes = await client.query(
+        `INSERT INTO teeboxes
+           (course_id, name, gender, course_rating, slope_rating,
+            total_yards, num_holes, par)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING teebox_id`,
+        [courseId, tb.name, tb.gender, tb.course_rating, tb.slope_rating,
+         tb.total_yards, tb.num_holes, tb.par],
+      );
+      const tbId = tbRes.rows[0].teebox_id;
+      teeboxIds.push(tbId);
+      if (tb.estimated_rating) estimatedTeeboxIds.push(tbId);
+
+      for (const h of tb.holes) {
+        await client.query(
+          `INSERT INTO holes (teebox_id, hole_num, par, yardage, handicap)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [tbId, h.hole_num, h.par, h.yardage ?? null, h.handicap ?? null],
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  return res.json({
+    success: true,
+    course_id: courseId,
+    teebox_ids: teeboxIds,
+    estimated_teebox_ids: estimatedTeeboxIds,
+    warnings: allWarnings,
+  });
 }));
 
 router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {

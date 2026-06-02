@@ -552,6 +552,32 @@ export const api = {
     }) => request<{ success: true; request_id: string; duplicate?: boolean }>(
       'POST', '/courses/request', body,
     ),
+    /**
+     * Submit a fully-built course (the in-app builder path). Server
+     * validates, fills in missing rating/slope from a length heuristic
+     * when needed, and inserts course + teeboxes + holes in one
+     * transaction. Returns the new course_id plus any soft warnings the
+     * server flagged ("par 6 on hole 4 is unusual but accepted", etc.).
+     */
+    create: (body: {
+      courseName: string;
+      city?: string; state?: string; country?: string; address?: string;
+      latitude?: number | null; longitude?: number | null;
+      numHoles: 9 | 18;
+      teeboxes: Array<{
+        name: string;
+        gender?: 'male' | 'female';
+        courseRating?: number | null;
+        slopeRating?:  number | null;
+        holes: Array<{ hole_num: number; par: number; yardage?: number | null; handicap?: number | null }>;
+      }>;
+    }) => request<{
+      success: true;
+      course_id: string;
+      teebox_ids: string[];
+      estimated_teebox_ids: string[];
+      warnings: string[];
+    }>('POST', '/courses', body),
     reportCorrection: (id: string, body: {
       field: string;
       suggestedValue: string;
