@@ -101,6 +101,59 @@ export function fmtHandicap(
 
 // ─── Score display ──────────────────────────────────────────────────────────
 
+/**
+ * Pro-rate a teebox's full par to the number of holes a player actually
+ * completed. Teeboxes in the DB store their full-layout par (par 72 for
+ * an 18-hole teebox, par 36 for a 9-hole teebox). A 9-hole round of an
+ * 18-hole teebox should compare against ~36, not 72, otherwise a 41
+ * (over par for 9) reads as "−31" for the day.
+ *
+ *   parForHolesPlayed(72,  9) → 36
+ *   parForHolesPlayed(72, 18) → 72
+ *   parForHolesPlayed(70,  9) → 35   (rounded; assumes even nines)
+ *
+ * Returns null when teeboxPar is null. Falls back to teeboxPar when
+ * holesPlayed is null/unknown so legacy callsites keep their old behaviour
+ * (and 18-hole rounds, the common case, are unaffected).
+ */
+export function parForHolesPlayed(
+  teeboxPar: number | null | undefined,
+  holesPlayed: number | null | undefined,
+  teeboxNumHoles: number = 18,
+): number | null {
+  if (teeboxPar == null) return null;
+  if (holesPlayed == null || holesPlayed <= 0) return teeboxPar;
+  if (holesPlayed >= teeboxNumHoles)           return teeboxPar;
+  return Math.round(teeboxPar * (holesPlayed / teeboxNumHoles));
+}
+
+/**
+ * Total score relative to the par of the holes actually played. Negative
+ * = under par, 0 = even, positive = over. Use this everywhere a round's
+ * "to par" is displayed; never compute `total_score - teebox_par` raw,
+ * because that breaks every 9-hole round of an 18-hole teebox.
+ */
+export function toParForHolesPlayed(
+  totalScore: number | null | undefined,
+  teeboxPar: number | null | undefined,
+  holesPlayed: number | null | undefined,
+  teeboxNumHoles: number = 18,
+): number | null {
+  if (totalScore == null) return null;
+  const par = parForHolesPlayed(teeboxPar, holesPlayed, teeboxNumHoles);
+  if (par == null) return null;
+  return totalScore - par;
+}
+
+/** Format a `to par` integer the way scorecards do: "+3", "E", "−2".
+ *  Returns "—" for null. */
+export function fmtToPar(toPar: number | null | undefined): string {
+  if (toPar == null) return '—';
+  if (toPar > 0) return `+${toPar}`;
+  if (toPar === 0) return 'E';
+  return String(toPar);
+}
+
 /** Friendly label + accent color for a strokes-vs-par result.
  *  Hole-in-one wins over the par-3 eagle interpretation. */
 export function scoreLabel(strokes: number, par: number): { label: string; color: string } {

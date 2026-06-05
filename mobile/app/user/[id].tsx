@@ -12,7 +12,7 @@ import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
 import { AvatarViewer } from '../../components/AvatarViewer';
-import { fmtHandicap } from '../../lib/golfMath';
+import { fmtHandicap, parForHolesPlayed, toParForHolesPlayed, fmtToPar } from '../../lib/golfMath';
 import { useCensor } from '../../lib/censor';
 import { rankForElo, rankHeadline } from '../../lib/rank';
 
@@ -421,72 +421,84 @@ export default function UserProfileScreen() {
         </>
       )}
 
-      {/* Best round */}
-      {profile.best_round && (
-        <>
-          <OrnamentTitle title="Best Round" />
-          <TouchableOpacity
-            style={[styles.roundCard, { borderColor: C.gold }]}
-            onPress={() => profile.best_round.hole_scores?.length
-              ? openScorecard(profile.best_round)
-              : profile.best_round.course_id && router.push(`/course/${profile.best_round.course_id}` as any)}
-          >
-            <View style={{ flex: 1 }}>
-              <Text style={styles.roundCourseName}>{profile.best_round.course_name ?? 'Unknown course'}</Text>
-              <Text style={styles.roundMeta}>
-                {profile.best_round.teebox_name} · {profile.best_round.num_holes} holes · Par {profile.best_round.teebox_par}
-              </Text>
-              <Text style={styles.roundDate}>
-                {new Date(profile.best_round.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-              </Text>
-            </View>
-            <View style={styles.roundScoreBox}>
-              <Text style={[styles.roundScore, { color: C.gold }]}>{profile.best_round.total_score}</Text>
-              <Text style={[styles.roundToPar, { color: profile.best_round.to_par <= 0 ? C.green : C.red }]}>
-                {profile.best_round.to_par > 0 ? `+${profile.best_round.to_par}` : profile.best_round.to_par === 0 ? 'E' : profile.best_round.to_par}
-              </Text>
-            </View>
-          </TouchableOpacity>
-        </>
-      )}
+      {/* Best round. To-par + the displayed par get pro-rated to the holes
+          the player actually completed — a 9-hole round of an 18-hole
+          teebox compares against ~36, not 72 (see lib/golfMath.ts). */}
+      {profile.best_round && (() => {
+        const br = profile.best_round;
+        const played = br.hole_scores?.length ?? br.num_holes ?? null;
+        const effPar = parForHolesPlayed(br.teebox_par, played);
+        const toPar  = toParForHolesPlayed(br.total_score, br.teebox_par, played);
+        return (
+          <>
+            <OrnamentTitle title="Best Round" />
+            <TouchableOpacity
+              style={[styles.roundCard, { borderColor: C.gold }]}
+              onPress={() => br.hole_scores?.length
+                ? openScorecard(br)
+                : br.course_id && router.push(`/course/${br.course_id}` as any)}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roundCourseName}>{br.course_name ?? 'Unknown course'}</Text>
+                <Text style={styles.roundMeta}>
+                  {br.teebox_name} · {played ?? br.num_holes} holes · Par {effPar ?? br.teebox_par}
+                </Text>
+                <Text style={styles.roundDate}>
+                  {new Date(br.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                </Text>
+              </View>
+              <View style={styles.roundScoreBox}>
+                <Text style={[styles.roundScore, { color: C.gold }]}>{br.total_score}</Text>
+                <Text style={[styles.roundToPar, { color: (toPar ?? 0) <= 0 ? C.green : C.red }]}>
+                  {fmtToPar(toPar)}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </>
+        );
+      })()}
 
       {/* Recent rounds */}
       <OrnamentTitle title="Recent Rounds" />
       {profile.recent_rounds?.length === 0 ? (
         <Text style={styles.empty}>No rounds played yet.</Text>
       ) : (
-        profile.recent_rounds?.map((r: any) => (
-          <TouchableOpacity
-            key={r.round_id}
-            style={styles.roundCard}
-            onPress={() => r.hole_scores?.length
-              ? openScorecard(r)
-              : r.course_id && router.push(`/course/${r.course_id}` as any)}
-          >
-            <View style={{ flex: 1 }}>
-              <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
-              <Text style={styles.roundMeta}>
-                {r.teebox_name ?? '—'} · {r.num_holes ?? r.hole_scores?.length ?? '?'} holes
-                {r.format === 'scramble' ? ' · Scramble' : ''}
-              </Text>
-              <Text style={styles.roundDate}>
-                {new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-              </Text>
-            </View>
-            <View style={styles.roundScoreBox}>
-              <Text style={styles.roundScore}>{r.total_score}</Text>
-              {r.teebox_par != null && (
-                <Text style={[styles.roundToPar, {
-                  color: r.total_score - r.teebox_par < 0 ? C.green :
-                         r.total_score - r.teebox_par > 0 ? C.red : C.text,
-                }]}>
-                  {r.total_score - r.teebox_par > 0 ? `+${r.total_score - r.teebox_par}` :
-                   r.total_score - r.teebox_par === 0 ? 'E' : r.total_score - r.teebox_par}
+        profile.recent_rounds?.map((r: any) => {
+          // Pro-rate par to the holes actually played (front 9 of an 18-hole
+          // teebox compares against ~36, not the full 72).
+          const played = r.hole_scores?.length ?? r.num_holes ?? null;
+          const toPar  = toParForHolesPlayed(r.total_score, r.teebox_par, played);
+          return (
+            <TouchableOpacity
+              key={r.round_id}
+              style={styles.roundCard}
+              onPress={() => r.hole_scores?.length
+                ? openScorecard(r)
+                : r.course_id && router.push(`/course/${r.course_id}` as any)}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.roundCourseName}>{r.course_name ?? 'Unknown'}</Text>
+                <Text style={styles.roundMeta}>
+                  {r.teebox_name ?? '—'} · {played ?? '?'} holes
+                  {r.format === 'scramble' ? ' · Scramble' : ''}
                 </Text>
-              )}
-            </View>
-          </TouchableOpacity>
-        ))
+                <Text style={styles.roundDate}>
+                  {new Date(r.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                </Text>
+              </View>
+              <View style={styles.roundScoreBox}>
+                <Text style={styles.roundScore}>{r.total_score}</Text>
+                {toPar != null && (
+                  <Text style={[styles.roundToPar, {
+                    color: toPar < 0 ? C.green : toPar > 0 ? C.red : C.text,
+                  }]}>
+                    {fmtToPar(toPar)}
+                  </Text>
+                )}
+              </View>
+            </TouchableOpacity>
+          );
+        })
       )}
 
       {/* Block button — required by App Store Guideline 1.2 for UGC apps.
