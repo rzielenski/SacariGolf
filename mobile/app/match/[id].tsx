@@ -210,6 +210,33 @@ export default function MatchLobbyScreen() {
     }
   };
 
+  /** Direct forfeit — counts as a loss, full ELO penalty. Used when the
+   *  Cancel path is blocked because an opponent has already submitted a
+   *  score, AND when the user explicitly hits the Forfeit button. */
+  const doForfeit = async () => {
+    setCancelling(true);
+    try {
+      await api.matches.forfeit(id);
+      try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${id}`); } catch { }
+      router.replace('/(tabs)/' as any);
+    } catch (e: any) {
+      Alert.alert('Could not forfeit', e?.message ?? 'Try again.');
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const handleForfeitMatch = () => {
+    Alert.alert(
+      'Forfeit Match',
+      "Your opponent has already submitted their round, so this match can't be cancelled. Forfeiting counts as a loss and takes the full ELO penalty.",
+      [
+        { text: 'Keep Playing', style: 'cancel' },
+        { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
+      ],
+    );
+  };
+
   const handleCancelMatch = () => {
     Alert.alert(
       'Cancel Match',
@@ -226,7 +253,23 @@ export default function MatchLobbyScreen() {
               try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${id}`); } catch { }
               router.replace('/(tabs)/' as any);
             } catch (e: any) {
-              Alert.alert('Error', e.message);
+              // 409 race: an opponent might submit in the same second the
+              // user taps Cancel, even though the button below gates on
+              // their player.completed. Surface a direct Forfeit offer
+              // instead of just an error toast.
+              const msg = String(e?.message ?? '');
+              if (/forfeit/i.test(msg)) {
+                Alert.alert(
+                  "Can't cancel any more",
+                  "Your opponent just submitted their round. Forfeit instead?",
+                  [
+                    { text: 'Keep Playing', style: 'cancel' },
+                    { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
+                  ],
+                );
+              } else {
+                Alert.alert('Error', msg || 'Try again.');
+              }
             } finally {
               setCancelling(false);
             }
@@ -525,18 +568,30 @@ export default function MatchLobbyScreen() {
         <Text style={styles.chatBtnText}>Match Chat</Text>
       </TouchableOpacity>
 
-      {/* Cancel Match — only when no player has submitted scores */}
-      {!isCompleted && !(match.players?.some((p) => p.completed)) && (
-        <TouchableOpacity
-          style={styles.cancelBtn}
-          onPress={handleCancelMatch}
-          disabled={cancelling}
-        >
-          {cancelling
-            ? <ActivityIndicator color={C.red} size="small" />
-            : <Text style={styles.cancelBtnText}>Cancel Match</Text>}
-        </TouchableOpacity>
-      )}
+      {/* Cancel OR Forfeit. We surface whichever exit is actually available:
+            • Nobody has submitted yet     → Cancel Match (no penalty, deletes the match)
+            • Someone else has submitted   → Forfeit Match (counts as a loss, full ELO penalty)
+            • I have already submitted     → button hidden, my round is locked in
+            • Match is completed           → button hidden
+          Without this split the button used to disappear the moment an
+          opponent submitted, leaving the player with no way to exit the
+          match short of running out the 24h auto-cancel cron. */}
+      {!isCompleted && !myPlayer?.completed && (() => {
+        const othersCompleted = !!match.players?.some(
+          (p) => p.user_id !== user?.user_id && p.completed,
+        );
+        return (
+          <TouchableOpacity
+            style={styles.cancelBtn}
+            onPress={othersCompleted ? handleForfeitMatch : handleCancelMatch}
+            disabled={cancelling}
+          >
+            {cancelling
+              ? <ActivityIndicator color={C.red} size="small" />
+              : <Text style={styles.cancelBtnText}>{othersCompleted ? 'Forfeit Match' : 'Cancel Match'}</Text>}
+          </TouchableOpacity>
+        );
+      })()}
 
       {/* Guest scorecards modal — host enters strokes for non-account players */}
       <Modal

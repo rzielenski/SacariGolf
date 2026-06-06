@@ -331,6 +331,26 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        -- pro-rates par by this, not match.num_holes, since the two can disagree
        -- (e.g. an 18-hole round on a match record that says 9 holes).
        array_length(r_me.hole_scores, 1) AS author_holes_played,
+       -- Sum of the par of the actual holes the author played, computed
+       -- identically to how the scorecard / round-recap modal does it
+       -- (see components/Scorecard.tsx buildGridData). Sums teebox holes
+       -- across the played slice:
+       --     full / front 9 → hole_num 1 .. N
+       --     back 9         → hole_num 10 .. 9 + N
+       -- where N = array_length(hole_scores, 1).
+       -- Using the per-hole pars (not pro-rating teebox.par by hole count)
+       -- removes a whole class of feed-vs-recap mismatches — every previous
+       -- "post shows +23 when the recap says +3" bug came from the pro-rate
+       -- shortcut disagreeing with the recap's hole-by-hole sum on edge
+       -- data (asymmetric nines, partial hole_scores, stale match.num_holes).
+       (SELECT SUM(h.par)::int
+          FROM holes h
+         WHERE h.teebox_id = mp_me.teebox_id
+           AND h.hole_num >= CASE WHEN m.holes_subset = 'back' THEN 10 ELSE 1 END
+           AND h.hole_num <  CASE WHEN m.holes_subset = 'back' THEN 10 ELSE 1 END
+                           + COALESCE(array_length(r_me.hole_scores, 1),
+                                      t.num_holes, m.num_holes, 18)
+       ) AS author_played_par,
        c.course_name,
        -- Comment count so the card can show "💬 N" without an extra
        -- round-trip per post. Cheap correlated subquery; the

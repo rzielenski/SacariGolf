@@ -20,12 +20,10 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Alert,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
-import { Match } from '../../types';
 import { SocialFeed } from '../../components/SocialFeed';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { GlowCard } from '../../components/ui/GlowCard';
@@ -46,10 +44,13 @@ export default function HomeScreen() {
   const eloTapCount = useRef(0);
   const eloTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [perkCount, setPerkCount] = useState(0);
-  // Resumable round: an in-progress match where the player has saved local
-  // scoring progress (via "Save & Leave") but hasn't submitted yet. Showing
-  // a top-of-home banner makes coming back to it a single tap.
-  const [resumable, setResumable] = useState<Match | null>(null);
+  // Count of in-progress matches (not completed, not cancelled). The chip
+  // routes the user to the Resume picker when there's more than one, or
+  // straight into the match when there's exactly one. We don't gate on
+  // local AsyncStorage progress any more — a match created on this device
+  // but never opened, or accepted on another device, is still resumable.
+  const [resumeCount, setResumeCount] = useState(0);
+  const [singleResumeId, setSingleResumeId] = useState<string | null>(null);
 
   const loadHomeData = useCallback(async () => {
     try {
@@ -58,15 +59,9 @@ export default function HomeScreen() {
     try {
       const matches = await api.matches.list();
       const list = Array.isArray(matches) ? matches : [];
-      // Find any not-yet-completed match the user has local progress for.
-      // The scoring screen writes `scores_${userId}_${matchId}` on Save & Leave.
-      try {
-        const keys = await AsyncStorage.getAllKeys();
-        const myPrefix = `scores_${user?.user_id ?? ''}_`;
-        const ids = keys.filter((k) => k.startsWith(myPrefix)).map((k) => k.slice(myPrefix.length));
-        const candidates = list.filter((m: any) => !m.completed && ids.includes(m.match_id));
-        setResumable(candidates[0] ?? null);
-      } catch { setResumable(null); }
+      const actives = list.filter((m: any) => !m.completed && !m.cancelled);
+      setResumeCount(actives.length);
+      setSingleResumeId(actives.length === 1 ? actives[0].match_id : null);
     } catch { /* silent */ }
     try {
       const rows = await api.users.perks();
@@ -166,19 +161,22 @@ export default function HomeScreen() {
         </PressableScale>
       )}
 
-      {/* Resume-round chip — sole occupant of the status row now that
-          lucky perks have been promoted to the ELO card. Full-width when
-          present so it reads as the unmissable "finish what you started"
-          banner above the feed. */}
-      {resumable && (
+      {/* Resume-round chip — visible whenever the user has any open match.
+          With one in progress we deep-link straight into it; with several
+          we route to the Resume picker so they can pick the right one. */}
+      {resumeCount > 0 && (
         <View style={styles.statusRow}>
           <PressableScale
-            onPress={() => router.push(`/match/${resumable.match_id}` as any)}
+            onPress={() => router.push((singleResumeId
+              ? `/match/${singleResumeId}`
+              : '/resume') as any)}
             style={{ flex: 1 }}
           >
             <GlowCard color={C.gold} style={[styles.statusChip, styles.statusChipGold]}>
               <View style={styles.statusChipDot} />
-              <Text style={styles.statusChipLabel} numberOfLines={1}>RESUME ROUND</Text>
+              <Text style={styles.statusChipLabel} numberOfLines={1}>
+                {resumeCount > 1 ? `RESUME ROUND (${resumeCount})` : 'RESUME ROUND'}
+              </Text>
               <Text style={styles.statusChipChev}>›</Text>
             </GlowCard>
           </PressableScale>

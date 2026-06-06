@@ -70,6 +70,22 @@ export default function PlayScreen() {
   const [joinId, setJoinId] = useState('');
   const [joining, setJoining] = useState(false);
   const [matchType, setMatchType] = useState<MatchType>('solo');
+  // Active-match count for the "Resume Round" banner at the top of the
+  // type step. Cheap one-shot fetch on mount; the banner just routes the
+  // player to /resume (or straight into the only active match) so they
+  // can't accidentally start a second round while one's still open.
+  const [resumeCount, setResumeCount] = useState(0);
+  const [singleResumeId, setSingleResumeId] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await api.matches.list();
+        const actives = (Array.isArray(list) ? list : []).filter((m: any) => !m.completed && !m.cancelled);
+        setResumeCount(actives.length);
+        setSingleResumeId(actives.length === 1 ? actives[0].match_id : null);
+      } catch { /* silent — banner just stays hidden */ }
+    })();
+  }, []);
   const [numHoles, setNumHoles] = useState<9 | 18>(18);
   // Front vs back is asked AFTER the user picks 9 holes — only meaningful
   // when playing a 9-hole subset of an 18-hole teebox.
@@ -312,6 +328,32 @@ export default function PlayScreen() {
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
+        {/* Resume Round banner — visible whenever the player has any open
+            match. Sits above the title so a half-finished round is the
+            first thing they see when they open the Play tab. */}
+        {resumeCount > 0 && (
+          <TouchableOpacity
+            style={styles.resumeBanner}
+            onPress={() => router.push((singleResumeId
+              ? `/match/${singleResumeId}`
+              : '/resume') as any)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.resumeDot} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.resumeLabel}>
+                {resumeCount > 1 ? `RESUME ROUND (${resumeCount})` : 'RESUME ROUND'}
+              </Text>
+              <Text style={styles.resumeSub}>
+                {resumeCount > 1
+                  ? 'Pick which one to continue.'
+                  : 'Pick up where you left off.'}
+              </Text>
+            </View>
+            <Text style={styles.resumeChev}>›</Text>
+          </TouchableOpacity>
+        )}
+
         <Text style={styles.title}>
           {challengeUserId ? 'Challenge a Friend' : 'Start a Round'}
         </Text>
@@ -807,6 +849,23 @@ const styles = StyleSheet.create({
   scrollContent: { padding: 20, paddingTop: 60, paddingBottom: 80 },
   title: { color: C.text, fontSize: 26, fontWeight: '900', marginBottom: 4 },
   subtitle: { color: C.textMuted, fontSize: 14, marginBottom: 24 },
+
+  resumeBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: C.gold + '18',
+    borderColor: C.gold, borderWidth: 1,
+    borderRadius: 10, padding: 14,
+    marginBottom: 18,
+  },
+  resumeDot: {
+    width: 10, height: 10, borderRadius: 5,
+    backgroundColor: C.gold,
+  },
+  resumeLabel: {
+    color: C.gold, fontSize: 13, fontWeight: '900', letterSpacing: 1.2,
+  },
+  resumeSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  resumeChev: { color: C.gold, fontSize: 24, fontWeight: '300', paddingHorizontal: 4 },
   backBtn: { marginBottom: 12 },
   backBtnText: { color: C.gold, fontSize: 16 },
 

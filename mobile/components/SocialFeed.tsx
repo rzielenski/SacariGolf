@@ -562,25 +562,32 @@ function MentionText({ text, censor, style }: { text: string; censor: boolean; s
 /** Round card body — pulls from the server-joined match fields. */
 function RoundCardBody({ post }: { post: any }) {
   const strokes = post.author_strokes;
-  // Pro-rate par to the number of holes actually played. Previously this
-  // used `teebox_par` raw, which is always the FULL teebox par (18-hole
-  // par on most teeboxes). A 9-hole round of an 18-hole teebox would
-  // then read "−31" or similar nonsense. Pro-rating by hole-count gets
-  // us the right answer on every standard layout (front 9 ≈ back 9
-  // par; the tiny asymmetry on courses like Lake Pleasant red — 37/36
-  // — is within rounding tolerance for a feed card).
+  // Par is the SUM of the per-hole pars across the slice of holes the
+  // author actually played, computed server-side in the same way the
+  // round-recap scorecard does it (see backend/src/routes/posts.ts +
+  // mobile/components/Scorecard.tsx buildGridData). Every previous "post
+  // says +23 but the recap says +3" bug came from this card pro-rating
+  // teebox.par by hole-count instead of summing real per-hole pars; the
+  // two disagreed on partial scoring, asymmetric nines, and stale
+  // match.num_holes. We now use the recap's number directly.
+  //
+  // Fallback: posts created before the server started returning this
+  // field, or against a course that lacks per-hole data, fall back to
+  // the old pro-rate. That keeps historical posts non-blank.
   const teeboxPar       = typeof post.teebox_par       === 'number' ? post.teebox_par       : null;
   const teeboxNumHoles  = typeof post.teebox_num_holes === 'number' ? post.teebox_num_holes : null;
   const matchNumHoles   = typeof post.match_num_holes  === 'number' ? post.match_num_holes  : null;
-  // Pro-rate by the holes the player ACTUALLY played (their hole_scores
-  // length), not the match's num_holes — those can disagree (e.g. an 18-hole
-  // round logged on a match record that says 9 holes), which made an 18-hole
-  // score read against 9-hole par. Fall back to match num_holes if missing.
+  const playedPar       = typeof post.author_played_par === 'number' && post.author_played_par > 0
+    ? post.author_played_par : null;
   const holesPlayed = typeof post.author_holes_played === 'number' && post.author_holes_played > 0
     ? post.author_holes_played : matchNumHoles;
-  let par: number | null = teeboxPar;
-  if (teeboxPar != null && teeboxNumHoles && holesPlayed && holesPlayed !== teeboxNumHoles) {
-    par = Math.round(teeboxPar * (holesPlayed / teeboxNumHoles));
+  let par: number | null = playedPar;
+  if (par == null) {
+    // Legacy fallback path — kept only for posts predating author_played_par.
+    par = teeboxPar;
+    if (teeboxPar != null && teeboxNumHoles && holesPlayed && holesPlayed !== teeboxNumHoles) {
+      par = Math.round(teeboxPar * (holesPlayed / teeboxNumHoles));
+    }
   }
   const overUnder = (typeof strokes === 'number' && typeof par === 'number')
     ? strokes - par : null;

@@ -1277,8 +1277,17 @@ router.get('/:id/insights', requireAuth, wrap(async (req: AuthRequest, res: Resp
   const mostPlayed = Object.values(courseRoundCount).sort((a, b) => b.n - a.n)[0] ?? null;
 
   // Recent trend: avg score-to-par for the last 5 vs the previous 5 rounds.
+  // Par is pro-rated to the holes actually played — a 9-hole round of an
+  // 18-hole teebox compares against ~36, not 72. Without this a single
+  // partial round drags the average wildly negative and flips the
+  // "improving" flag the wrong way.
   const { rows: trendRows } = await pool.query(
-    `SELECT r.round_id, r.total_score - t.par AS to_par, r.created_at
+    `SELECT r.round_id,
+            r.total_score
+              - ROUND(t.par::numeric
+                      * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
+                      / NULLIF(t.num_holes, 0)::numeric)::int AS to_par,
+            r.created_at
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
      JOIN teeboxes t ON t.teebox_id = r.teebox_id
@@ -1511,18 +1520,28 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     [req.params.id]
   );
 
-  // Best round (lowest score-to-par across all completed rounds)
+  // Best round (lowest score-to-par across all completed rounds). Par is
+  // pro-rated to the holes the player actually completed — without this,
+  // a 9-hole 41 on a par-72 teebox looks like a -31 round and beats every
+  // legitimate 18-hole entry. The same expression is used in SELECT and
+  // ORDER BY so the lowest-differential round actually wins.
   const { rows: bestRows } = await pool.query(
     `SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores, r.hole_stats,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
-            (r.total_score - t.par) AS to_par
+            (r.total_score
+              - ROUND(t.par::numeric
+                      * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
+                      / NULLIF(t.num_holes, 0)::numeric)::int) AS to_par
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
      LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
      LEFT JOIN courses c ON c.course_id = t.course_id
      WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND t.par IS NOT NULL
-     ORDER BY (r.total_score - t.par) ASC
+     ORDER BY (r.total_score
+                - ROUND(t.par::numeric
+                        * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
+                        / NULLIF(t.num_holes, 0)::numeric)::int) ASC
      LIMIT 1`,
     [req.params.id]
   );
