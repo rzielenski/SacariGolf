@@ -29,6 +29,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as ImagePicker from 'expo-image-picker';
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
@@ -132,6 +133,12 @@ export default function CourseBuilderScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [serverWarnings, setServerWarnings] = useState<string[]>([]);
 
+  // ── Scorecard scan state ───────────────────────────────────────────
+  // True while a photo is being OCR'd server-side. Drives the full-screen
+  // overlay so the user can't fire a second scan or edit half-populated
+  // fields mid-flight.
+  const [scanning, setScanning] = useState(false);
+
   // Seed the map's initial framing from the device's last-known location.
   // Only consults already-granted permission, so opening this screen never
   // pops a prompt on its own — the player triggers that explicitly via the
@@ -216,6 +223,122 @@ export default function CourseBuilderScreen() {
     }
   };
 
+  // ── Scorecard scan ──────────────────────────────────────────────────
+  // Apply a parsed scorecard to the form. Course meta only fills blanks (so a
+  // re-scan won't wipe what the user typed); tee sets + the hole grid are
+  // rebuilt wholesale from the scan since that's the whole point.
+  const applyScan = (parsed: Awaited<ReturnType<typeof api.courses.scanScorecard>>) => {
+    if (parsed.courseName && !courseName.trim()) setCourseName(parsed.courseName);
+    if (parsed.city && !city.trim()) setCity(parsed.city);
+    if (parsed.state && !stateField.trim()) setStateField(parsed.state);
+
+    const n: 9 | 18 = parsed.numHoles === 9 ? 9 : 18;
+    setNumHoles(n);
+
+    const tbs = parsed.teeboxes.length
+      ? parsed.teeboxes
+      : [{ name: 'Standard', gender: 'male' as const, courseRating: null, slopeRating: null, holes: [] }];
+
+    const newTees: TeeForm[] = tbs.map((tb) => ({
+      id: nextTeeId(),
+      name: (tb.name ?? '').trim() || 'Tee',
+      gender: tb.gender === 'female' ? 'female' : 'male',
+      rating: tb.courseRating != null ? String(tb.courseRating) : '',
+      slope: tb.slopeRating != null ? String(tb.slopeRating) : '',
+    }));
+
+    // Par + handicap are physical hole properties shared across tees; yardage
+    // is per-tee. Aggregate par/HCP from whichever tee reported them first.
+    const parByHole: string[] = Array(n).fill('');
+    const hcpByHole: string[] = Array(n).fill('');
+    const yardByHole: Record<string, string>[] = Array.from({ length: n }, () =>
+      Object.fromEntries(newTees.map((t) => [t.id, ''])),
+    );
+    tbs.forEach((tb, ti) => {
+      const teeId = newTees[ti]?.id;
+      if (!teeId) return;
+      for (const h of tb.holes ?? []) {
+        const idx = (h.hole_num ?? 0) - 1;
+        if (idx < 0 || idx >= n) continue;
+        if (h.par != null && !parByHole[idx]) parByHole[idx] = String(h.par);
+        if (h.handicap != null && !hcpByHole[idx]) hcpByHole[idx] = String(h.handicap);
+        if (h.yardage != null) yardByHole[idx][teeId] = String(h.yardage);
+      }
+    });
+
+    // Only trust scanned handicaps if they form a complete, unique 1..N set —
+    // a partial read would create duplicate rankings that block Step 2. Fall
+    // back to the 1..N default the manual flow uses otherwise.
+    const hcpComplete = hcpByHole.every((v) => v !== '') && new Set(hcpByHole).size === n;
+    const finalHcp = hcpComplete ? hcpByHole : Array.from({ length: n }, (_, i) => String(i + 1));
+
+    const newHoles: HoleForm[] = Array.from({ length: n }, (_, i) => ({
+      par: parByHole[i] || '4',
+      handicap: finalHcp[i],
+      yardages: yardByHole[i],
+    }));
+
+    setTeeForms(newTees);
+    setHoles(newHoles);
+  };
+
+  const runScan = async (source: 'camera' | 'library') => {
+    try {
+      let result: ImagePicker.ImagePickerResult;
+      if (source === 'camera') {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('Camera permission needed', 'Allow camera access to photograph a scorecard.');
+          return;
+        }
+        result = await ImagePicker.launchCameraAsync({ quality: 0.6, base64: true });
+      } else {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('Permission needed', 'Allow photo access to pick a scorecard.');
+          return;
+        }
+        result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.6,
+          base64: true,
+        });
+      }
+      if (result.canceled || !result.assets?.[0]?.base64) return;
+      const asset = result.assets[0];
+
+      setScanning(true);
+      const parsed = await api.courses.scanScorecard(asset.base64!, asset.mimeType ?? 'image/jpeg');
+      applyScan(parsed);
+
+      const teeCount = parsed.teeboxes.length;
+      Alert.alert(
+        'Scorecard read',
+        `Filled in ${teeCount} tee set${teeCount === 1 ? '' : 's'} and the hole grid. `
+          + 'Please check every value, then tap Next.',
+      );
+    } catch (e: any) {
+      Alert.alert(
+        'Couldn’t read that photo',
+        e?.message ?? 'Try a clearer, well-lit photo, or enter the course manually.',
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const pickAndScan = () => {
+    Alert.alert(
+      'Scan a scorecard',
+      'Take a photo of the paper scorecard (or pick one from your library) and we’ll fill in the tees and holes for you to review.',
+      [
+        { text: 'Take photo', onPress: () => runScan('camera') },
+        { text: 'Choose photo', onPress: () => runScan('library') },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
   // ── Step transitions / validation ───────────────────────────────────
   const canAdvanceStep1 = courseName.trim().length > 0
     && teeForms.length > 0
@@ -227,6 +350,29 @@ export default function CourseBuilderScreen() {
     if (teeForms.some((t) => !t.name.trim())) return 'Every tee set needs a name (e.g. Black, White, Red).';
     return null;
   }, [courseName, teeForms]);
+
+  // Scanning REPLACES the whole form, so it's offered only while the builder
+  // is still in its untouched initial state — i.e. strictly at the start of
+  // adding a course, never as a way to adjust info already entered. The moment
+  // the player types a name, edits a tee, or enters any hole data, the scan
+  // option disappears so it can't clobber their work. (It also never modifies
+  // an existing catalog course: this whole screen only ever creates a new,
+  // unverified one.)
+  const formUntouched = useMemo(() => {
+    if (courseName.trim() !== '') return false;
+    if (city.trim() !== '' || stateField.trim() !== '') return false;
+    if (coord !== null) return false;
+    if (numHoles !== 18) return false;
+    if (teeForms.length !== 1) return false;
+    const t = teeForms[0];
+    if (t.name !== 'Standard' || t.gender !== 'male' || t.rating !== '' || t.slope !== '') return false;
+    for (let i = 0; i < holes.length; i++) {
+      const h = holes[i];
+      if (h.par !== '4' || h.handicap !== String(i + 1)) return false;
+      if (Object.values(h.yardages).some((v) => v !== '')) return false;
+    }
+    return true;
+  }, [courseName, city, stateField, coord, numHoles, teeForms, holes]);
 
   // ── Step 2 → computed totals + soft warnings ───────────────────────
   const stepTotals = useMemo(() => {
@@ -346,6 +492,26 @@ export default function CourseBuilderScreen() {
             ))}
           </View>
 
+          {step === 1 && formUntouched && (
+            <>
+              <TouchableOpacity
+                style={s.scanCta}
+                onPress={pickAndScan}
+                activeOpacity={0.85}
+                disabled={scanning}
+              >
+                <Text style={s.scanCtaIcon}>📷</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.scanCtaTitle}>Scan a scorecard</Text>
+                  <Text style={s.scanCtaSub}>
+                    Snap a photo and we&apos;ll auto-fill the tees and holes for you to review.
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              <Text style={s.scanOr}>— or enter the details manually —</Text>
+            </>
+          )}
+
           {step === 1 && (
             <Step1
               courseName={courseName} setCourseName={setCourseName}
@@ -412,6 +578,14 @@ export default function CourseBuilderScreen() {
           )}
         </View>
       </KeyboardAvoidingView>
+
+      {scanning && (
+        <View style={s.scanOverlay}>
+          <ActivityIndicator color={C.gold} size="large" />
+          <Text style={s.scanOverlayText}>Reading your scorecard…</Text>
+          <Text style={s.scanOverlaySub}>This can take up to a minute.</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -760,6 +934,24 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   intro: { color: C.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 18 },
+
+  // Scorecard-scan CTA (top of step 1) + the in-progress overlay.
+  scanCta: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.gold + '1a', borderColor: C.gold, borderWidth: 1,
+    borderRadius: 12, padding: 14, marginBottom: 10,
+  },
+  scanCtaIcon: { fontSize: 26 },
+  scanCtaTitle: { color: C.gold, fontWeight: '900', fontSize: 15, letterSpacing: 0.3 },
+  scanCtaSub: { color: C.textMuted, fontSize: 12, lineHeight: 16, marginTop: 2 },
+  scanOr: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginBottom: 16, letterSpacing: 0.5 },
+  scanOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: C.bg + 'ee',
+    alignItems: 'center', justifyContent: 'center', gap: 10, padding: 30,
+  },
+  scanOverlayText: { color: C.text, fontSize: 16, fontWeight: '800', marginTop: 6 },
+  scanOverlaySub: { color: C.textMuted, fontSize: 12 },
 
   steps: { flexDirection: 'row', justifyContent: 'center', gap: 18, marginBottom: 18 },
   stepDot: {

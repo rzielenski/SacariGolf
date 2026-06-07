@@ -21,6 +21,7 @@ import seasonsRouter from './routes/seasons';
 import ballsRouter from './routes/balls';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
+import { startTwitterDigestSchedule } from './utils/twitterDigest';
 
 const app = express();
 app.use(cors());
@@ -66,5 +67,7 @@ runMigrations()
     // Kick off the hourly cleanup that auto-cancels stale (>24h idle) rounds.
     // Runs immediately once on boot too, in case we slept through a window.
     startCleanupSchedule();
+    // Once-a-day @Sacari Twitter/X recap (no-op until TWITTER_* env is set).
+    startTwitterDigestSchedule();
     app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
   });

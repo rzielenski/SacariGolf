@@ -1286,6 +1286,47 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       END $$;
     `,
   },
+  {
+    // Per-player opt-in for the automated @Sacari Twitter/X digest. Default
+    // FALSE — a player's name/score is only ever tweeted after they flip this
+    // on in settings (PATCH /users/me { shareToTwitter }). The daily digest
+    // folds everyone else into anonymous app-wide totals. See
+    // utils/twitterDigest.ts.
+    name: 'users.share_to_twitter',
+    sql: `ALTER TABLE users ADD COLUMN IF NOT EXISTS share_to_twitter BOOLEAN NOT NULL DEFAULT FALSE;`,
+  },
+  {
+    // One row per day the digest job has handled — idempotency guard so a
+    // restart or the 15-min scheduler tick never double-posts. digest_date is
+    // the local calendar date in DIGEST_TZ; tweet_id is NULL on a quiet day we
+    // deliberately skipped. See utils/twitterDigest.ts.
+    name: 'digest_log.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS digest_log (
+        digest_date DATE PRIMARY KEY,
+        tweet_id    TEXT,
+        posted_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
+  {
+    // Rate-limit + audit log for scorecard OCR scans. Every
+    // /courses/scan-scorecard call that actually reaches (and is billed by)
+    // the vision API logs a row here; the endpoint counts a user's rows in
+    // the trailing 24h and refuses past a daily cap, so a bored or malicious
+    // user can't run the Anthropic bill up by spamming scans. One row per
+    // billed attempt (not per course added), since every attempt costs a call.
+    name: 'scorecard_scans.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS scorecard_scans (
+        scan_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS scorecard_scans_user_created_idx
+        ON scorecard_scans(user_id, created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

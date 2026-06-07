@@ -120,6 +120,7 @@ async function singleAttempt<T>(
   path: string,
   body: object | undefined,
   auth: boolean,
+  timeoutMs: number,
 ): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (auth) {
@@ -135,7 +136,7 @@ async function singleAttempt<T>(
       headers,
       body: body ? JSON.stringify(body) : undefined,
     }),
-    15000,
+    timeoutMs,
   );
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
@@ -180,6 +181,9 @@ async function request<T>(
   path: string,
   body?: object,
   auth = true,
+  // Per-attempt timeout. Defaults to 15s; raise it for slow endpoints (e.g.
+  // the scorecard vision scan, which can take 30s+ for a busy 18-hole card).
+  timeoutMs = 15000,
 ): Promise<T> {
   // Idempotency policy: only methods that are safe to repeat get auto-retry
   // on network errors. POST is excluded because we can't distinguish
@@ -197,7 +201,7 @@ async function request<T>(
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const out = await singleAttempt<T>(method, path, body, auth);
+      const out = await singleAttempt<T>(method, path, body, auth, timeoutMs);
       noteFetchSuccess();
       return out;
     } catch (e) {
@@ -591,6 +595,29 @@ export const api = {
       estimated_teebox_ids: string[];
       warnings: string[];
     }>('POST', '/courses', body),
+    /**
+     * OCR a photo of a paper scorecard into structured tee/hole data the
+     * builder can pre-fill. The image is relayed to the server's vision model
+     * and discarded (not stored). Uses a long per-attempt timeout because a
+     * busy 18-hole card can take 30s+ to transcribe; POST so it never
+     * auto-retries (a re-fire would just burn another vision call).
+     */
+    scanScorecard: (imageBase64: string, mimeType: string) =>
+      request<{
+        courseName: string | null;
+        city: string | null;
+        state: string | null;
+        numHoles: 9 | 18;
+        teeboxes: Array<{
+          name: string;
+          gender: 'male' | 'female';
+          courseRating: number | null;
+          slopeRating: number | null;
+          holes: Array<{ hole_num: number; par: number | null; yardage: number | null; handicap: number | null }>;
+        }>;
+        warnings: string[];
+      }>('POST', '/courses/scan-scorecard', { imageBase64, mimeType }, true, 60000),
+
     reportCorrection: (id: string, body: {
       field: string;
       suggestedValue: string;

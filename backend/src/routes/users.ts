@@ -22,7 +22,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview,
-            u.clubs_in_bag, u.censor_offensive_language,
+            u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -44,9 +44,17 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
+
+  // Opt-in for the automated @Sacari Twitter/X daily digest. Booleanish; the
+  // DB defaults to FALSE so the only way a player's name/score gets tweeted is
+  // by explicitly turning this on.
+  if (shareToTwitter !== undefined) {
+    values.push(!!shareToTwitter);
+    updates.push(`share_to_twitter = $${values.length}`);
+  }
 
   // Content-safety toggle. Booleanish — accepts true/false, also 0/1 from
   // older clients. Defaults to TRUE in the DB so an explicit `false` is

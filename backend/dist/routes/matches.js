@@ -1,0 +1,1963 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const pool_1 = __importDefault(require("../db/pool"));
+const auth_1 = require("../middleware/auth");
+const notify_1 = require("../utils/notify");
+const mentions_1 = require("../utils/mentions");
+const asyncHandler_1 = require("../utils/asyncHandler");
+const router = (0, express_1.Router)();
+// ELO helpers
+function expectedScore(rA, rB) {
+    return 1 / (1 + Math.pow(10, (rB - rA) / 400));
+}
+function kFactor(totalMatches, elo) {
+    if (totalMatches < 30)
+        return 32;
+    if (elo >= 2400)
+        return 16;
+    return 24;
+}
+// Score differential scaled to an 18-hole equivalent so players on different
+// courses, different teeboxes, and different hole counts can be compared fairly.
+//
+//   18-hole round on an 18-hole teebox       → standard formula
+//   9-hole round on a 9-hole teebox          → standard formula on 9-hole rating, then ×2
+//   9-hole round on an 18-hole teebox        → use the FRONT or BACK 9 rating
+//                                              (caller provides via overrideRating);
+//                                              falls back to half the 18-hole rating
+//                                              when no front/back rating is available.
+//
+// The doubling converts a 9-hole "strokes over rating" into an 18-hole equivalent
+// so a 5-stroke-over diff on 9 holes is treated like a 10-stroke-over diff on 18.
+function diff18(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18, overrideRating, overrideSlope) {
+    let r = courseRating;
+    let s = slopeRating;
+    if (holesPlayed === 9 && teeboxHoles === 18) {
+        if (typeof overrideRating === 'number' && overrideRating > 0) {
+            r = overrideRating;
+            if (typeof overrideSlope === 'number' && overrideSlope > 0)
+                s = overrideSlope;
+        }
+        else {
+            r = courseRating / 2; // legacy fallback: half the 18-hole rating
+        }
+    }
+    const raw = (gross - r) * (113 / s);
+    return holesPlayed === 9 ? raw * 2 : raw;
+}
+// Kept for backwards compatibility / one place that still wants the un-doubled value
+function scoreDifferential(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18) {
+    const adjustedRating = courseRating * (holesPlayed / teeboxHoles);
+    return (gross - adjustedRating) * (113 / slopeRating);
+}
+// Create match
+// Allowed match formats. `stroke` is the default (gross score wins). The new
+// formats only affect HOW the winner is decided + how the result UI reads —
+// the underlying score arrays / shot tracks / handicap math don't change.
+//   • stableford   — Modified Stableford: -2/-1/0/1/2/3+ → 5/2/0/-1/-3/-3 pts (higher wins)
+//   • match_play   — One point per hole won (lower stroke wins the hole; halves get nothing)
+//   • skins        — Like match play, but ties carry the skin to the next hole
+//   • scramble     — Existing team format (one final team score per side)
+const VALID_FORMATS = new Set(['stroke', 'stableford', 'match_play', 'skins', 'scramble']);
+router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId } = req.body;
+    // A direct challenge to one friend. When set, the match is earmarked for
+    // them (invite created in the same transaction) and auto-pairing is skipped,
+    // so it can never grab a stranger before/while the friend is invited.
+    const challengeTarget = (typeof challengeUserId === 'string' && challengeUserId && challengeUserId !== req.userId)
+        ? challengeUserId : null;
+    if (!matchType)
+        return res.status(400).json({ error: 'matchType required' });
+    // Scramble remains team-only; the rest are open to any match type.
+    let resolvedFormat = 'stroke';
+    if (typeof format === 'string' && VALID_FORMATS.has(format)) {
+        if (format === 'scramble' && matchType !== 'duo' && matchType !== 'squad') {
+            resolvedFormat = 'stroke'; // silently downgrade — solo/ffa scramble doesn't make sense
+        }
+        else if ((format === 'match_play' || format === 'skins') && matchType === 'ffa') {
+            // match_play / skins are inherently 1v1 — for arena (3+ players) we
+            // fall back to stroke. Stableford works fine for N players (sum points).
+            resolvedFormat = 'stroke';
+        }
+        else {
+            resolvedFormat = format;
+        }
+    }
+    const resolvedNumHoles = (numHoles === 9) ? 9 : 18;
+    // Front vs back is only meaningful for 9-hole matches. 18-hole = 'full'.
+    // Default to 'front' if the client picked 9 but didn't say which.
+    const resolvedHolesSubset = resolvedNumHoles === 9
+        ? (holesSubset === 'back' ? 'back' : 'front')
+        : 'full';
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        // Squad matches: only clan leaders can create
+        if (matchType === 'squad' && clanId) {
+            const { rows: roleRows } = await client.query(`SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`, [clanId, req.userId]);
+            if (!roleRows.length || roleRows[0].role !== 'leader') {
+                await client.query('ROLLBACK');
+                return res.status(403).json({ error: 'Only the team leader can start a squad match' });
+            }
+        }
+        const { rows } = await client.query(`INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset]);
+        const match = rows[0];
+        await client.query(`INSERT INTO match_players (match_id, user_id, teebox_id, side)
+       VALUES ($1, $2, $3, 1)`, [match.match_id, req.userId, teeboxId || null]);
+        // Direct challenge: attach the invite to the chosen opponent inside the
+        // same transaction, before any auto-pairing can run. Combined with the
+        // auto-pair skip below, the match waits for this friend (3-day window).
+        if (challengeTarget) {
+            await client.query(`INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '3 days')
+         ON CONFLICT (match_id, to_user_id) DO NOTHING`, [match.match_id, req.userId, challengeTarget]);
+        }
+        // Auto-invite clan members for duo/squad matches
+        if ((matchType === 'duo' || matchType === 'squad') && clanId) {
+            const { rows: memberRows } = await client.query(`SELECT cm.user_id, u.push_token, u.username,
+                me.username AS my_name
+         FROM clan_members cm
+         JOIN users u ON u.user_id = cm.user_id
+         JOIN users me ON me.user_id = $2
+         WHERE cm.clan_id = $1 AND cm.user_id != $2`, [clanId, req.userId]);
+            const { rows: senderRows } = await client.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
+            const senderName = senderRows[0]?.username ?? 'Your partner';
+            for (const member of memberRows) {
+                await client.query(`INSERT INTO match_invites (match_id, from_user_id, to_user_id, expires_at)
+           VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours')
+           ON CONFLICT DO NOTHING`, [match.match_id, req.userId, member.user_id]);
+                if (member.push_token) {
+                    await (0, notify_1.sendPush)([member.push_token], `${matchType === 'duo' ? 'Duo' : 'Squad'} Match Invite`, `${senderName} is starting a ${matchType} match — accept within 24 hours!`, { type: 'invite', matchId: match.match_id });
+                }
+            }
+        }
+        // ── Auto-pairing on creation (solo, duo, squad) ─────────────────────
+        // Try to immediately pair this match against another open match in the
+        // pool. The MatchFoundWatcher on both phones detects `has_opponent`
+        // flipping and fires the VS intro animation — the user sees it the
+        // moment they create the match (or the moment their opponent's leader
+        // does, in which case it pops up on their existing match).
+        //
+        // Wrapped in try/catch so a transient error (e.g. cancelled column not
+        // yet migrated) only skips pairing instead of failing match creation.
+        let autoPairedOpponentMatchId = null;
+        try {
+            // Arena (ffa) matches are invite-only — never auto-paired against
+            // strangers. The host invites friends; accepters join as new sides.
+            // Direct challenges also skip auto-pair — they wait for the invited friend.
+            if (!isPractice && matchType !== 'ffa' && !challengeTarget) {
+                // Find candidate opponent matches:
+                //   • same match_type, format, num_holes
+                //   • still open (not completed, not cancelled, not superseded)
+                //   • created in the last 24 h (don't pair stale stuff)
+                //   • doesn't already have an opponent (no players on side != 1)
+                //   • doesn't include the creator as a player
+                // Sorted by ELO proximity using each team's average ELO.
+                const { rows: candidates } = await client.query(`SELECT m.match_id
+         FROM matches m
+         WHERE m.match_id != $1
+           AND m.match_type = $2
+           AND m.format = $3
+           AND m.num_holes = $4
+           AND m.completed = false
+           AND m.cancelled = false
+           AND m.superseded_by_match_id IS NULL
+           AND m.is_practice = false
+           AND m.created_at > NOW() - INTERVAL '24 hours'
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp_opp
+             WHERE mp_opp.match_id = m.match_id AND mp_opp.side != 1
+           )
+           -- Self-pair protection (always on): never pair against my own
+           -- user — that would auto-match me with myself.
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp_self
+             WHERE mp_self.match_id = m.match_id AND mp_self.user_id = $5
+           )
+           -- Same-team protection (DUO / SQUAD only): two clanmates would
+           -- never want their TEAM to play itself. But for solo matches,
+           -- two players who happen to share a clan should absolutely be
+           -- able to 1v1 — that's a normal "in-house" matchup, just like
+           -- two friends who play in the same league. The match_type test
+           -- gates the clan filter to only the team-vs-team formats.
+           AND (
+             $2 = 'solo'
+             OR (
+               NOT (m.clan_id IS NOT NULL AND m.clan_id = $6)
+               AND NOT EXISTS (
+                 SELECT 1 FROM match_players mp_cand
+                 JOIN clan_members cm_me ON cm_me.user_id = $5
+                 JOIN clan_members cm_them ON cm_them.user_id = mp_cand.user_id
+                                          AND cm_them.clan_id = cm_me.clan_id
+                 WHERE mp_cand.match_id = m.match_id
+               )
+             )
+           )
+           -- Direct-challenge grace: never auto-pair against a SOLO match that
+           -- has an active challenge invite (a friend was challenged within the
+           -- last 3 days). It rejoins the pool once the invite is answered or
+           -- the 3-day window lapses.
+           AND (
+             $2 <> 'solo'
+             OR NOT EXISTS (
+               SELECT 1 FROM match_invites mi
+               WHERE mi.match_id = m.match_id AND mi.status = 'pending'
+                 AND mi.created_at > NOW() - INTERVAL '3 days'
+             )
+           )
+         ORDER BY ABS(
+           COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
+                     JOIN users u ON u.user_id = mp_a.user_id
+                     WHERE mp_a.match_id = $1), 1200) -
+           COALESCE((SELECT AVG(u.elo) FROM match_players mp_b
+                     JOIN users u ON u.user_id = mp_b.user_id
+                     WHERE mp_b.match_id = m.match_id), 1200)
+         )
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`, [match.match_id, matchType, resolvedFormat, resolvedNumHoles, req.userId, clanId || null]);
+                if (candidates.length) {
+                    autoPairedOpponentMatchId = candidates[0].match_id;
+                    // Move opponent team's players into THIS match as side 2.
+                    await client.query(`INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed)
+           SELECT $1, user_id, teebox_id, 2, strokes, completed
+           FROM match_players
+           WHERE match_id = $2
+           ON CONFLICT (match_id, user_id) DO NOTHING`, [match.match_id, autoPairedOpponentMatchId]);
+                    // Migrate any pending invites from the opponent's match so their
+                    // teammates who haven't accepted yet end up on side 2 of THIS match.
+                    await client.query(`UPDATE match_invites SET match_id = $1
+           WHERE match_id = $2 AND status = 'pending'`, [match.match_id, autoPairedOpponentMatchId]);
+                    // Migrate the opponent's round (if any score data was already saved)
+                    await client.query(`UPDATE rounds SET match_id = $1
+           WHERE match_id = $2`, [match.match_id, autoPairedOpponentMatchId]);
+                    // Mark opponent's original match as superseded so it disappears from
+                    // their list and they only see THIS match (where they're side 2).
+                    await client.query(`UPDATE matches SET completed = true, superseded_by_match_id = $1
+           WHERE match_id = $2`, [match.match_id, autoPairedOpponentMatchId]);
+                    // Push-notify the opponent team that they've been matched.
+                    const { rows: oppPushRows } = await client.query(`SELECT u.push_token FROM match_players mp
+           JOIN users u ON u.user_id = mp.user_id
+           WHERE mp.match_id = $1 AND u.push_token IS NOT NULL`, [match.match_id]);
+                    const oppTokens = oppPushRows.map((r) => r.push_token).filter(Boolean);
+                    if (oppTokens.length) {
+                        await (0, notify_1.sendPush)(oppTokens, 'Match Found', `Your ${matchType} match has been paired with an opponent!`, { type: 'matchFound', matchId: match.match_id });
+                    }
+                }
+            }
+        }
+        catch (pairErr) {
+            // Pairing is best-effort — log and continue. The match is still valid
+            // without an opponent (player can wait for next pool sweep on their
+            // submission, or for the next opposing leader to create a match).
+            console.warn('[match-create] auto-pair failed:', pairErr);
+        }
+        await client.query('COMMIT');
+        // Notify a directly-challenged friend (best-effort, after commit).
+        if (challengeTarget) {
+            try {
+                const { rows: pushRows } = await pool_1.default.query(`SELECT u.push_token, me.username AS from_name
+             FROM users u, users me
+            WHERE u.user_id = $1 AND me.user_id = $2`, [challengeTarget, req.userId]);
+                if (pushRows[0]?.push_token) {
+                    await (0, notify_1.sendPush)([pushRows[0].push_token], 'Match Challenge', `${pushRows[0].from_name} challenged you to a match — accept within 3 days!`, { type: 'invite', matchId: match.match_id });
+                }
+            }
+            catch { /* push is best-effort */ }
+        }
+        return res.status(201).json({ ...match, auto_paired: !!autoPairedOpponentMatchId });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+    finally {
+        client.release();
+    }
+}));
+// Get match details
+router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { rows: matchRows } = await pool_1.default.query(`SELECT * FROM matches WHERE match_id = $1`, [req.params.id]);
+    if (!matchRows.length)
+        return res.status(404).json({ error: 'Match not found' });
+    const { rows: players } = await pool_1.default.query(`SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
+            u.username, u.elo, u.avatar_url, u.handicap_index,
+            t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
+            t.course_id, t.num_holes,
+            c.course_name,
+            r.round_id, r.hole_scores, r.hole_stats,
+            -- Personal theme song — falls back to this if no team theme.
+            u.theme_track_title   AS user_theme_title,
+            u.theme_track_artist  AS user_theme_artist,
+            u.theme_track_artwork AS user_theme_artwork,
+            u.theme_track_preview AS user_theme_preview,
+            -- Team attribution (for the match-found "VS" transition).
+            -- Picks the player's most-recently-joined team as their banner.
+            cl.clan_id,
+            cl.name              AS clan_name,
+            cl.elo               AS clan_elo,
+            cl.avatar_url        AS clan_avatar_url,
+            cl.theme_track_title AS clan_theme_title,
+            cl.theme_track_artist AS clan_theme_artist,
+            cl.theme_track_artwork AS clan_theme_artwork,
+            cl.theme_track_preview AS clan_theme_preview
+     FROM match_players mp
+     JOIN users u ON u.user_id = mp.user_id
+     LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     LEFT JOIN courses c ON c.course_id = t.course_id
+     LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+     LEFT JOIN LATERAL (
+       SELECT cl.clan_id, cl.name, cl.elo, cl.avatar_url,
+              cl.theme_track_title, cl.theme_track_artist,
+              cl.theme_track_artwork, cl.theme_track_preview
+         FROM clan_members cm
+         JOIN clans cl ON cl.clan_id = cm.clan_id
+        WHERE cm.user_id = mp.user_id
+        ORDER BY cm.joined_at DESC
+        LIMIT 1
+     ) cl ON true
+     WHERE mp.match_id = $1`, [req.params.id]);
+    const { rows: resultRows } = await pool_1.default.query(`SELECT * FROM match_results WHERE match_id = $1`, [req.params.id]);
+    // Pre-compute the requesting user's signed ELO delta so UIs don't have to
+    // figure out whether they were favored or not in a tie. Honor perk overrides.
+    let my_delta_elo = null;
+    let my_perk = null;
+    if (resultRows.length) {
+        const result = resultRows[0];
+        const me = players.find((p) => p.user_id === req.userId);
+        if (me) {
+            if (result.winner_side === null) {
+                const key = me.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+                my_delta_elo = result.details?.[key] ?? 0;
+            }
+            else {
+                my_delta_elo = result.winner_side === me.side ? result.delta_elo : -result.delta_elo;
+            }
+            // Apply perk override if I consumed one on this match
+            const perks = result.details?.perks ?? [];
+            my_perk = perks.find((pa) => pa.user_id === req.userId) ?? null;
+            if (my_perk)
+                my_delta_elo = my_perk.adjusted;
+        }
+    }
+    // ── Anti-cheat: hide opponent per-hole detail while the match is live ──
+    // Even if my opponent is my friend, I shouldn't be able to scout their
+    // round before mine is in. Redact hole_scores / hole_stats / strokes /
+    // round_id on any player whose side differs from mine until the match
+    // is completed. For Arena (ffa) every other player is a different side,
+    // so they're all hidden. Same-side teammates (duo/squad) stay visible —
+    // we're on the same team, our scores need to combine.
+    // NOTE: we ALWAYS leave the array length intact via a sanitized stub so
+    // the UI can still show "thru hole N" without leaking actual scores.
+    const matchCompleted = !!matchRows[0].completed;
+    const me = players.find((p) => p.user_id === req.userId);
+    const mySide = me?.side ?? null;
+    const redactedPlayers = players.map((p) => {
+        if (matchCompleted)
+            return p;
+        if (p.user_id === req.userId)
+            return p;
+        if (mySide != null && p.side === mySide)
+            return p;
+        const playedLen = Array.isArray(p.hole_scores) ? p.hole_scores.length : 0;
+        return {
+            ...p,
+            hole_scores: playedLen > 0 ? new Array(playedLen).fill(null) : [],
+            hole_stats: null,
+            strokes: null,
+            round_id: null,
+        };
+    });
+    return res.json({ ...matchRows[0], players: redactedPlayers, result: resultRows[0] || null, my_delta_elo, my_perk });
+}));
+// List my matches
+router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { rows } = await pool_1.default.query(`SELECT m.match_id, m.match_type, m.name, m.completed, m.cancelled,
+            m.created_at, m.is_practice,
+            mr.winner_side, mr.delta_elo, mr.details,
+            mp_me.side AS my_side, mp_me.strokes AS my_strokes,
+            -- Server-side record that the intro animation has fired for
+            -- THIS user on THIS match. Watcher uses this to decide whether
+            -- to play the VS reveal — guaranteed-once across devices.
+            mp_me.intro_shown_at,
+            -- True once an opponent has been added on the other side.
+            -- Powers the "match found" intro on the client — when this flips
+            -- from false to true between polls we know to fire the animation.
+            EXISTS(
+              SELECT 1 FROM match_players mp_opp
+              WHERE mp_opp.match_id = m.match_id
+                AND mp_opp.side != mp_me.side
+            ) AS has_opponent
+     FROM matches m
+     JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
+     LEFT JOIN match_results mr ON mr.match_id = m.match_id
+     WHERE m.superseded_by_match_id IS NULL
+     -- Active rounds (not completed AND not cancelled) sort to the TOP so
+     -- the LIMIT can never truncate a current/in-progress round off the
+     -- list — even for a player with hundreds of finished matches. Within
+     -- each group, newest first. Limit bumped to 100 for extra headroom on
+     -- the finished-match history below the actives.
+     ORDER BY
+       (m.completed = false AND m.cancelled = false) DESC,
+       m.created_at DESC
+     LIMIT 100`, [req.userId]);
+    // Compute signed my_delta_elo per row, honoring perks.
+    const decorated = rows.map((r) => {
+        let my_delta_elo = null;
+        if (r.delta_elo != null && r.my_side != null) {
+            if (r.winner_side == null) {
+                const key = r.my_side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+                my_delta_elo = r.details?.[key] ?? 0;
+            }
+            else {
+                my_delta_elo = r.winner_side === r.my_side ? r.delta_elo : -r.delta_elo;
+            }
+            const perks = r.details?.perks ?? [];
+            const myPerk = perks.find((pa) => pa.user_id === req.userId);
+            if (myPerk)
+                my_delta_elo = myPerk.adjusted;
+        }
+        return { ...r, my_delta_elo };
+    });
+    return res.json(decorated);
+}));
+// Join a match (opponent side)
+router.post('/:id/join', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { teeboxId } = req.body;
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        const { rows: matchRows } = await client.query(`SELECT * FROM matches WHERE match_id = $1 FOR UPDATE`, [req.params.id]);
+        if (!matchRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Match not found' });
+        }
+        const match = matchRows[0];
+        if (match.completed) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Match already completed' });
+        }
+        // Check if already in
+        const { rows: existingRows } = await client.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+        if (existingRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Already in match' });
+        }
+        const { rows: sideRows } = await client.query(`SELECT MAX(side) AS max_side FROM match_players WHERE match_id = $1`, [req.params.id]);
+        const nextSide = (sideRows[0].max_side || 0) + 1;
+        await client.query(`INSERT INTO match_players (match_id, user_id, teebox_id, side)
+       VALUES ($1, $2, $3, $4)`, [req.params.id, req.userId, teeboxId || null, nextSide]);
+        await client.query('COMMIT');
+        return res.json({ success: true, side: nextSide });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+    finally {
+        client.release();
+    }
+}));
+// Sanitise a hole_stats array — same length as scores, each entry has
+// putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null) plus the
+// optional advanced fields fairwayMiss / greenMiss / puttDistances. Bad input
+// is silently dropped rather than failing the whole submission.
+const FAIRWAY_MISS_VALUES = new Set(['left', 'right']);
+const GREEN_MISS_VALUES = new Set(['left', 'right', 'short', 'long']);
+// Putt distances are integer feet, range 0–120 (a 120-ft putt would be a
+// nearly-cross-green lag — any longer is almost certainly bad input).
+const PUTT_DIST_MAX_FT = 120;
+function cleanHoleStats(input, expectedLength) {
+    if (!Array.isArray(input))
+        return [];
+    return input.slice(0, expectedLength).map((h) => {
+        if (h == null || typeof h !== 'object')
+            return {};
+        const cleaned = {};
+        if (typeof h.putts === 'number' && h.putts >= 0 && h.putts <= 10)
+            cleaned.putts = Math.floor(h.putts);
+        if (typeof h.chips === 'number' && h.chips >= 0 && h.chips <= 10)
+            cleaned.chips = Math.floor(h.chips);
+        if (typeof h.gir === 'boolean')
+            cleaned.gir = h.gir;
+        if (typeof h.fairwayHit === 'boolean')
+            cleaned.fairwayHit = h.fairwayHit;
+        if (typeof h.fairwayMiss === 'string' && FAIRWAY_MISS_VALUES.has(h.fairwayMiss)) {
+            cleaned.fairwayMiss = h.fairwayMiss;
+        }
+        if (typeof h.greenMiss === 'string' && GREEN_MISS_VALUES.has(h.greenMiss)) {
+            cleaned.greenMiss = h.greenMiss;
+        }
+        if (Array.isArray(h.puttDistances)) {
+            // Cap at the player's putt count when known, else 10. Each entry is an
+            // integer feet value; reject negatives, oversized, and non-numeric.
+            const max = typeof cleaned.putts === 'number' ? cleaned.putts : 10;
+            const dists = h.puttDistances
+                .slice(0, max)
+                .map((d) => Math.round(Number(d)))
+                .filter((d) => Number.isFinite(d) && d >= 0 && d <= PUTT_DIST_MAX_FT);
+            if (dists.length)
+                cleaned.puttDistances = dists;
+        }
+        return cleaned;
+    });
+}
+// Submit scores for a round
+router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { holeScores, holeStats, courseId, teeboxId, beers, caption } = req.body;
+    if (!Array.isArray(holeScores) || holeScores.length === 0) {
+        return res.status(400).json({ error: 'holeScores array required' });
+    }
+    const cleanStats = cleanHoleStats(holeStats, holeScores.length);
+    // Beers logged this round — clamp to a sane 0–50 so a buggy client can't
+    // poison the Beer Ranker leaderboards. Default 0 when omitted.
+    const beerCount = Math.max(0, Math.min(50, Math.round(Number(beers) || 0)));
+    // Optional note attached to the round → becomes the body of the 'round'
+    // feed post created at resolution (and is scanned for @mentions there).
+    // Trimmed + capped so a buggy client can't store a novel.
+    const roundCaption = typeof caption === 'string' && caption.trim()
+        ? caption.trim().slice(0, 280)
+        : null;
+    const totalScore = holeScores.reduce((a, b) => a + b, 0);
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        // Get match + my player row
+        const { rows: matchRows } = await client.query(`SELECT m.*, mp.side, mp.teebox_id AS player_teebox
+       FROM matches m JOIN match_players mp ON mp.match_id = m.match_id
+       WHERE m.match_id = $1 AND mp.user_id = $2 FOR UPDATE`, [req.params.id, req.userId]);
+        if (!matchRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Match or player not found' });
+        }
+        if (matchRows[0].completed) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Match already completed' });
+        }
+        const matchFormat = matchRows[0].format ?? 'stroke';
+        const myeSide = matchRows[0].side;
+        const resolvedTeeboxId = teeboxId || matchRows[0].player_teebox;
+        // Validate hole count against teebox capacity to keep ELO math consistent.
+        // (Otherwise a client could submit 18 scores against a 9-hole teebox and
+        // diff18() would produce a hybrid result.)
+        if (resolvedTeeboxId) {
+            const { rows: teeRows } = await client.query(`SELECT num_holes FROM teeboxes WHERE teebox_id = $1`, [resolvedTeeboxId]);
+            const cap = teeRows[0]?.num_holes;
+            // Allow holeScores.length to exceed the teebox cap when it's an integer
+            // multiple — that's the "play this 9-hole course as 18" mode. Without
+            // this exception a doubled-up round would 400 at submit time. We still
+            // reject mismatched lengths (e.g. 12 scores on a 9-hole teebox) to
+            // catch real client bugs.
+            if (cap && holeScores.length > cap) {
+                const isDoubleUp = holeScores.length % cap === 0;
+                if (!isDoubleUp) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({ error: `Cannot submit ${holeScores.length} holes on a ${cap}-hole tee box` });
+                }
+            }
+        }
+        // Scramble: validate equal team sizes before accepting first submission
+        if (matchFormat === 'scramble') {
+            const { rows: sideCountRows } = await client.query(`SELECT side, COUNT(*) AS cnt FROM match_players WHERE match_id = $1 GROUP BY side`, [req.params.id]);
+            if (sideCountRows.length >= 2) {
+                const counts = sideCountRows.map((r) => parseInt(r.cnt, 10));
+                const allEqual = counts.every((c) => c === counts[0]);
+                if (!allEqual) {
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({ error: 'Scramble requires equal players on each side' });
+                }
+            }
+        }
+        // Upsert round (only for the submitting player; scramble teammates share the same final score)
+        await client.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers, caption)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (match_id, user_id)
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10`, [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]);
+        // Update match_players for the submitting player
+        await client.query(`UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+       WHERE match_id = $3 AND user_id = $4`, [totalScore, resolvedTeeboxId, req.params.id, req.userId]);
+        // Reconcile the match's hole count with what was ACTUALLY played. A match
+        // created as 9 holes where the player logged all 18 (or vice versa) left a
+        // stale num_holes that made par, hole-by-hole scoring, and the feed card
+        // read against the wrong number of holes. Snap it to the real round length
+        // (only the two valid lengths) and fix holes_subset to match. ELO is
+        // unaffected — it derives each player's holes from their own hole_scores.
+        const playedHoles = holeScores.length;
+        if ((playedHoles === 9 || playedHoles === 18) && playedHoles !== matchRows[0].num_holes) {
+            const newSubset = playedHoles === 18
+                ? 'full'
+                : (matchRows[0].holes_subset === 'back' ? 'back' : 'front');
+            await client.query(`UPDATE matches SET num_holes = $2, holes_subset = $3 WHERE match_id = $1`, [req.params.id, playedHoles, newSubset]);
+            matchRows[0].num_holes = playedHoles;
+            matchRows[0].holes_subset = newSubset;
+        }
+        // Contribution reward: if a majority of the holes the player played were
+        // contributed to via EITHER pin marking OR shot tracking, grant a
+        // 'lucky_round' perk. Two qualifying paths so a player who never marks
+        // pins (because they're filled already) can still earn through tracking,
+        // and vice-versa. Either path counts: pin-majority OR shot-majority.
+        let perkAwarded = false;
+        if (!matchRows[0].is_practice && Array.isArray(holeScores) && holeScores.length > 0 && resolvedTeeboxId) {
+            const holesPlayed = holeScores.length;
+            // Path A: pin-mark contributions — only counts holes where the player
+            // had the chance (pin still null or filled by them).
+            const { rows: opportunityRows } = await client.query(`SELECT COUNT(*)::int AS n FROM holes
+         WHERE teebox_id = $1
+           AND hole_num <= $2
+           AND (pin_lat IS NULL OR pin_set_by = $3)`, [resolvedTeeboxId, holesPlayed, req.userId]);
+            const pinOpportunity = opportunityRows[0]?.n ?? 0;
+            const { rows: pinRows } = await client.query(`SELECT COUNT(*)::int AS n FROM pin_contributions
+         WHERE user_id = $1 AND match_id = $2`, [req.userId, req.params.id]);
+            const pinContribs = pinRows[0]?.n ?? 0;
+            const pinMajority = pinOpportunity > 0 && pinContribs * 2 > pinOpportunity;
+            // Path B: shot-track contributions — distinct holes where this user
+            // recorded at least one shot in this match. Always available regardless
+            // of pin state, so a player on a fully-pinned course can still qualify.
+            const { rows: shotHoleRows } = await client.query(`SELECT COUNT(DISTINCT hole_num)::int AS n FROM shots
+         WHERE user_id = $1 AND match_id = $2 AND hole_num IS NOT NULL`, [req.userId, req.params.id]);
+            const shotHoles = shotHoleRows[0]?.n ?? 0;
+            const shotMajority = shotHoles * 2 > holesPlayed;
+            if (pinMajority || shotMajority) {
+                // Avoid double-awarding for the same match (duo/squad — multiple submitters)
+                const { rows: alreadyRows } = await client.query(`SELECT 1 FROM user_perks WHERE user_id = $1 AND earned_match_id = $2`, [req.userId, req.params.id]);
+                if (!alreadyRows.length) {
+                    await client.query(`INSERT INTO user_perks (user_id, perk_type, earned_match_id, earned_reason)
+             VALUES ($1, 'lucky_round', $2, $3)`, [
+                        req.userId,
+                        req.params.id,
+                        pinMajority && shotMajority ? 'pins+shots' : pinMajority ? 'pins' : 'shots',
+                    ]);
+                    perkAwarded = true;
+                }
+            }
+        }
+        // Scramble: mark ALL teammates on the same side as done with the same score,
+        // AND copy the submitter's rounds row to each so resolveElo's COALESCE on
+        // hole_scores.length doesn't fall back to 18 for their teammates.
+        if (matchFormat === 'scramble') {
+            await client.query(`UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+         WHERE match_id = $3 AND side = $4 AND user_id != $5`, [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]);
+            // Mirror the submitter's rounds row to each teammate so holes_played
+            // (derived from array_length(hole_scores, 1)) stays consistent. Also
+            // propagate hole_stats so derived stats (GIR, FW%, putts, SG) match.
+            await client.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type)
+         SELECT $1, mp.user_id, $2, $3, $4, $5, $6, $7
+         FROM match_players mp
+         WHERE mp.match_id = $1 AND mp.side = $8 AND mp.user_id != $9
+         ON CONFLICT (match_id, user_id)
+         DO UPDATE SET hole_scores = EXCLUDED.hole_scores, hole_stats = EXCLUDED.hole_stats, total_score = EXCLUDED.total_score, teebox_id = EXCLUDED.teebox_id`, [req.params.id, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, myeSide, req.userId]);
+        }
+        // Check if all players have submitted. Pull both the standard and the
+        // front/back ratings — the resolver below picks the right one based on
+        // matches.holes_subset.
+        const { rows: allPlayers } = await client.query(`SELECT mp.user_id, mp.side, mp.strokes, mp.teebox_id,
+              t.course_rating, t.slope_rating, t.par,
+              t.front_course_rating, t.front_slope_rating,
+              t.back_course_rating,  t.back_slope_rating,
+              t.num_holes AS teebox_num_holes,
+              r.hole_scores,
+              COALESCE(array_length(r.hole_scores, 1), 18) AS holes_played,
+              u.elo, u.total_matches
+       FROM match_players mp
+       JOIN users u ON u.user_id = mp.user_id
+       LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+       LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+       WHERE mp.match_id = $1`, [req.params.id]);
+        const holesSubsetForCalc = matchRows[0].holes_subset ?? 'full';
+        // Per-hole pars for the played holes, in hole order. Used by the
+        // hole-by-hole formats (stableford, match_play, skins) — stroke and
+        // scramble ignore this. We sample from the first player who has a teebox.
+        let parByHoleIdx = [];
+        {
+            const tbId = allPlayers.find((p) => p.teebox_id)?.teebox_id;
+            if (tbId) {
+                const { rows: holeRows } = await client.query(`SELECT hole_num, par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`, [tbId]);
+                const offset = holesSubsetForCalc === 'back' ? 9 : 0;
+                const want = matchRows[0].num_holes ?? 18;
+                parByHoleIdx = holeRows.slice(offset, offset + want).map((r) => r.par);
+            }
+        }
+        // ── Format-specific scoring ───────────────────────────────────────────
+        // For non-stroke formats we compute a "performance number" per side where
+        // LOWER IS ALWAYS BETTER, so the existing tie/win logic in resolveElo
+        // works without branching. For stableford we negate (more points = lower
+        // perf). For match_play / skins we negate hole wins.
+        function modifiedStablefordPoints(score, par) {
+            const d = score - par;
+            if (d <= -2)
+                return 5; // eagle or better
+            if (d === -1)
+                return 2; // birdie
+            if (d === 0)
+                return 0; // par
+            if (d === 1)
+                return -1; // bogey
+            return -3; // double or worse
+        }
+        function bestHoleScore(side, idx) {
+            let best = null;
+            for (const p of side) {
+                const s = p.hole_scores?.[idx];
+                if (typeof s !== 'number')
+                    continue;
+                if (best == null || s < best)
+                    best = s;
+            }
+            return best;
+        }
+        function computeFormatPerf(format, side1, side2) {
+            const N = parByHoleIdx.length;
+            if (!N)
+                return null;
+            if (format === 'stableford') {
+                // Sum of best-per-hole modified-stableford points per side.
+                let s1 = 0, s2 = 0;
+                for (let i = 0; i < N; i++) {
+                    const a = bestHoleScore(side1, i);
+                    const b = bestHoleScore(side2, i);
+                    if (a != null)
+                        s1 += modifiedStablefordPoints(a, parByHoleIdx[i]);
+                    if (b != null)
+                        s2 += modifiedStablefordPoints(b, parByHoleIdx[i]);
+                }
+                return { side1Perf: -s1, side2Perf: -s2, details: { s1Points: s1, s2Points: s2 } };
+            }
+            if (format === 'match_play') {
+                let s1Wins = 0, s2Wins = 0, halved = 0;
+                for (let i = 0; i < N; i++) {
+                    const a = bestHoleScore(side1, i);
+                    const b = bestHoleScore(side2, i);
+                    if (a == null || b == null)
+                        continue;
+                    if (a < b)
+                        s1Wins++;
+                    else if (b < a)
+                        s2Wins++;
+                    else
+                        halved++;
+                }
+                return { side1Perf: -s1Wins, side2Perf: -s2Wins, details: { s1Holes: s1Wins, s2Holes: s2Wins, halved } };
+            }
+            if (format === 'skins') {
+                // Each hole worth 1 skin. Halved holes carry the value into the next.
+                let s1Skins = 0, s2Skins = 0, carry = 1;
+                for (let i = 0; i < N; i++) {
+                    const a = bestHoleScore(side1, i);
+                    const b = bestHoleScore(side2, i);
+                    if (a == null || b == null) {
+                        continue;
+                    }
+                    const value = carry; // current hole worth this much
+                    if (a < b) {
+                        s1Skins += value;
+                        carry = 1;
+                    }
+                    else if (b < a) {
+                        s2Skins += value;
+                        carry = 1;
+                    }
+                    else {
+                        carry += 1;
+                    } // halved → roll over
+                }
+                return { side1Perf: -s1Skins, side2Perf: -s2Skins, details: { s1Skins, s2Skins } };
+            }
+            return null;
+        }
+        const allDone = allPlayers.every((p) => p.strokes != null);
+        let result = null;
+        const resolveElo = async (side1Players, side2Players, matchId, matchType) => {
+            const getDiff = (players, topN) => {
+                const diffs = players.map((p) => {
+                    if (!p.course_rating || !p.slope_rating)
+                        return p.strokes;
+                    // Pick the proper rating override for 9-hole rounds based on
+                    // whether the match was front, back, or full. Falls back to the
+                    // half-rating logic inside diff18 when front/back ratings aren't
+                    // populated for this teebox.
+                    const subset = holesSubsetForCalc;
+                    const overrideRating = subset === 'front' ? p.front_course_rating
+                        : subset === 'back' ? p.back_course_rating
+                            : null;
+                    const overrideSlope = subset === 'front' ? p.front_slope_rating
+                        : subset === 'back' ? p.back_slope_rating
+                            : null;
+                    return diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
+                }).sort((a, b) => a - b);
+                const used = topN ? diffs.slice(0, topN) : diffs;
+                return used.reduce((a, b) => a + b, 0) / used.length;
+            };
+            // If team sizes differ, compare using the smaller team's count (best N scores)
+            const compareCount = Math.min(side1Players.length, side2Players.length);
+            const strokeSide1Diff = getDiff(side1Players, compareCount);
+            const strokeSide2Diff = getDiff(side2Players, compareCount);
+            // Format override — for stableford / match_play / skins the winner is
+            // decided by the format-specific perf number (lower = better). When the
+            // helper returns null (missing pars or unknown format) we fall back to
+            // the standard stroke differential.
+            const formatPerf = computeFormatPerf(matchFormat, side1Players, side2Players);
+            const side1Diff = formatPerf ? formatPerf.side1Perf : strokeSide1Diff;
+            const side2Diff = formatPerf ? formatPerf.side2Perf : strokeSide2Diff;
+            const formatDetails = formatPerf?.details ?? null;
+            // Tie when the two differentials are within 0.05 of each other (about
+            // 1/20 of a stroke). Wider than the float-precision threshold so it
+            // catches genuine near-ties, narrower than 1 full stroke equivalent.
+            // Chess-style: actual score 0.5 for both sides. Higher-rated player
+            // loses ELO, lower-rated gains. delta = K × (0.5 − expected).
+            const isTie = Math.abs(side1Diff - side2Diff) < 0.05;
+            const side1Wins = !isTie && side1Diff < side2Diff;
+            const p1 = side1Players[0];
+            const p2 = side2Players[0];
+            const expA = expectedScore(p1.elo, p2.elo);
+            const k = kFactor(p1.total_matches, p1.elo);
+            const side1ActualScore = isTie ? 0.5 : (side1Wins ? 1 : 0);
+            const side1Delta = Math.round(k * (side1ActualScore - expA));
+            const side2Delta = -side1Delta;
+            // Track per-player perk applications to surface in the response
+            const perkApplications = [];
+            // Batch-fetch unused perks for everyone in this match. CRITICAL: exclude
+            // perks earned on THIS match — they're for the player's *next* match.
+            const allPlayerIds = [...side1Players, ...side2Players].map((p) => p.user_id);
+            const { rows: perkRows } = await client.query(`SELECT DISTINCT ON (user_id) user_id, perk_id
+         FROM user_perks
+         WHERE user_id = ANY($1)
+           AND consumed_at IS NULL
+           AND (earned_match_id IS NULL OR earned_match_id != $2)
+         ORDER BY user_id, earned_at ASC`, [allPlayerIds, matchId]);
+            const perkByUser = new Map(perkRows.map((r) => [r.user_id, r.perk_id]));
+            for (const p of [...side1Players, ...side2Players]) {
+                const onSide1 = side1Players.includes(p);
+                const baseChange = onSide1 ? side1Delta : side2Delta;
+                const won = !isTie && onSide1 === side1Wins;
+                // Check for an unused 'lucky_round' perk and apply it.
+                // - Loss  → set ELO change to 0 (loss prevention)
+                // - Win   → double the ELO gain
+                // - 0 ELO → don't consume (no benefit; nothing to absorb or double)
+                let eloChange = baseChange;
+                const perkId = perkByUser.get(p.user_id);
+                if (perkId && baseChange !== 0) {
+                    if (eloChange < 0)
+                        eloChange = 0;
+                    else
+                        eloChange = eloChange * 2;
+                    await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, matchId]);
+                    perkApplications.push({ user_id: p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+                }
+                await client.query(`UPDATE users
+           SET elo = GREATEST(100, elo + $1),
+               total_matches = total_matches + 1,
+               total_wins = total_wins + $2,
+               total_ties = total_ties + $3
+           WHERE user_id = $4`, [eloChange, won ? 1 : 0, isTie ? 1 : 0, p.user_id]);
+            }
+            await client.query(`INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+         side2_score_differential, delta_elo, details)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
+                matchId,
+                matchType,
+                isTie ? null : (side1Wins ? 1 : 2),
+                side1Diff,
+                side2Diff,
+                Math.abs(side1Delta),
+                JSON.stringify({
+                    side1Players: side1Players.map((p) => p.user_id),
+                    side2Players: side2Players.map((p) => p.user_id),
+                    tied: isTie,
+                    side1DeltaSignedElo: side1Delta,
+                    side2DeltaSignedElo: side2Delta,
+                    perks: perkApplications,
+                    // Stableford / match_play / skins details so the result screen
+                    // can render "12 to 9 in points" / "won 5&3" / "8 skins to 4" etc.
+                    format: matchFormat,
+                    formatDetails,
+                }),
+            ]);
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
+            // Auto-post a 'round' card to each player's feed in one batch INSERT
+            // (one row per player, all in one round-trip). Each friend's wall
+            // shows their own ELO swing / score line via the joined match row.
+            // Reuses the same allPlayerIds list we built earlier for the perk
+            // lookup so we don't re-traverse the two side arrays.
+            await client.query(`INSERT INTO posts (user_id, kind, match_id, body)
+         SELECT pid, 'round', $2, r.caption
+           FROM unnest($1::uuid[]) AS pid
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`, [allPlayerIds, matchId]);
+            return {
+                winnerSide: isTie ? null : (side1Wins ? 1 : 2),
+                tied: isTie,
+                deltaElo: Math.abs(side1Delta),
+                side1Diff,
+                side2Diff,
+                perks: perkApplications,
+            };
+        };
+        /**
+         * Arena (free-for-all) ELO resolution. Each player is on their own side.
+         * For N players we run N×(N−1)/2 virtual 1v1s and average each player's
+         * cumulative delta by (N−1) so the per-match ELO magnitude stays
+         * comparable to a regular 1v1. Mathematically equivalent to "every player
+         * plays every other player and we count the average outcome."
+         *
+         * Tie handling: differentials within 0.05 strokes of each other count as
+         * a draw for that pair (each gets 0.5). Standard chess-Elo tie semantics.
+         *
+         * Stableford support: when the match format is stableford we use the
+         * negated points sum as the "differential" so lower = better, matching
+         * the existing 1v1 path's convention.
+         */
+        const resolveEloFFA = async (players, matchId) => {
+            const N = players.length;
+            const useStableford = matchFormat === 'stableford' && parByHoleIdx.length > 0;
+            const entries = players.map((p) => {
+                if (useStableford) {
+                    // Sum of modified-stableford points across holes. Higher = better,
+                    // so we negate so the same "lower = better" comparator works.
+                    let pts = 0;
+                    const scores = p.hole_scores ?? [];
+                    for (let i = 0; i < parByHoleIdx.length; i++) {
+                        const s = scores[i];
+                        if (typeof s !== 'number')
+                            continue;
+                        pts += modifiedStablefordPoints(s, parByHoleIdx[i]);
+                    }
+                    return { p, diff: -pts, rawPoints: pts };
+                }
+                if (!p.course_rating || !p.slope_rating)
+                    return { p, diff: p.strokes };
+                const subset = holesSubsetForCalc;
+                const overrideRating = subset === 'front' ? p.front_course_rating
+                    : subset === 'back' ? p.back_course_rating
+                        : null;
+                const overrideSlope = subset === 'front' ? p.front_slope_rating
+                    : subset === 'back' ? p.back_slope_rating
+                        : null;
+                return {
+                    p,
+                    diff: diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope),
+                };
+            });
+            // Per-player accumulators
+            const deltaByUser = new Map(entries.map(e => [e.p.user_id, 0]));
+            const winsByUser = new Map(entries.map(e => [e.p.user_id, 0]));
+            const tiesByUser = new Map(entries.map(e => [e.p.user_id, 0]));
+            // Every unordered pair plays a "virtual 1v1". K factor uses the
+            // individual player's tenure / ELO (same as the existing path).
+            for (let i = 0; i < N; i++) {
+                for (let j = i + 1; j < N; j++) {
+                    const a = entries[i], b = entries[j];
+                    const tie = Math.abs(a.diff - b.diff) < 0.05;
+                    const aWins = !tie && a.diff < b.diff;
+                    const expA = expectedScore(a.p.elo, b.p.elo);
+                    const expB = 1 - expA;
+                    const kA = kFactor(a.p.total_matches, a.p.elo);
+                    const kB = kFactor(b.p.total_matches, b.p.elo);
+                    const actualA = tie ? 0.5 : (aWins ? 1 : 0);
+                    const actualB = 1 - actualA;
+                    deltaByUser.set(a.p.user_id, (deltaByUser.get(a.p.user_id) ?? 0) + kA * (actualA - expA));
+                    deltaByUser.set(b.p.user_id, (deltaByUser.get(b.p.user_id) ?? 0) + kB * (actualB - expB));
+                    if (tie) {
+                        tiesByUser.set(a.p.user_id, (tiesByUser.get(a.p.user_id) ?? 0) + 1);
+                        tiesByUser.set(b.p.user_id, (tiesByUser.get(b.p.user_id) ?? 0) + 1);
+                    }
+                    else if (aWins) {
+                        winsByUser.set(a.p.user_id, (winsByUser.get(a.p.user_id) ?? 0) + 1);
+                    }
+                    else {
+                        winsByUser.set(b.p.user_id, (winsByUser.get(b.p.user_id) ?? 0) + 1);
+                    }
+                }
+            }
+            // Normalise so a tournament-of-N gives roughly the same per-match ELO
+            // swing as a 1v1 (avoids 8-player arenas blowing your rating by ±100).
+            const divisor = Math.max(1, N - 1);
+            // Sort entries by differential (best → worst) to compute placements.
+            const placement = [...entries].sort((a, b) => a.diff - b.diff);
+            const placementByUser = new Map();
+            placement.forEach((e, idx) => placementByUser.set(e.p.user_id, idx + 1));
+            // Perks: same as 1v1 — a 'lucky_round' perk converts a net-negative
+            // result into 0 and doubles a net-positive result.
+            const allPlayerIds = players.map(p => p.user_id);
+            const { rows: perkRows } = await client.query(`SELECT DISTINCT ON (user_id) user_id, perk_id
+         FROM user_perks
+         WHERE user_id = ANY($1)
+           AND consumed_at IS NULL
+           AND (earned_match_id IS NULL OR earned_match_id != $2)
+         ORDER BY user_id, earned_at ASC`, [allPlayerIds, matchId]);
+            const perkByUser = new Map(perkRows.map((r) => [r.user_id, r.perk_id]));
+            const perkApplications = [];
+            for (const e of entries) {
+                const baseRaw = (deltaByUser.get(e.p.user_id) ?? 0) / divisor;
+                const baseChange = Math.round(baseRaw);
+                let eloChange = baseChange;
+                const perkId = perkByUser.get(e.p.user_id);
+                if (perkId && baseChange !== 0) {
+                    if (eloChange < 0)
+                        eloChange = 0;
+                    else
+                        eloChange = eloChange * 2;
+                    await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, matchId]);
+                    perkApplications.push({ user_id: e.p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+                }
+                const place = placementByUser.get(e.p.user_id) ?? 0;
+                const isWinner = place === 1;
+                const tiedForFirst = placement.filter(x => Math.abs(x.diff - placement[0].diff) < 0.05).length > 1;
+                await client.query(`UPDATE users
+           SET elo = GREATEST(100, elo + $1),
+               total_matches = total_matches + 1,
+               total_wins = total_wins + $2,
+               total_ties = total_ties + $3
+           WHERE user_id = $4`, [
+                    eloChange,
+                    isWinner && !tiedForFirst ? 1 : 0,
+                    isWinner && tiedForFirst ? 1 : 0,
+                    e.p.user_id,
+                ]);
+            }
+            // Build a placements array for the result UI: { user_id, side, place,
+            // strokes, diff }, sorted by placement.
+            const placements = placement.map((e) => ({
+                user_id: e.p.user_id,
+                side: e.p.side,
+                place: placementByUser.get(e.p.user_id) ?? 0,
+                strokes: e.p.strokes,
+                diff: e.diff,
+                delta_elo_signed: Math.round((deltaByUser.get(e.p.user_id) ?? 0) / divisor),
+                stableford_points: e.rawPoints,
+            }));
+            // For the match_results row we record the winner's side; rendering code
+            // that needs the full ordering reads `details.placements`.
+            const winnerSide = placement[0].p.side;
+            const isOverallTie = placements.length > 1
+                && Math.abs(placements[0].diff - placements[1].diff) < 0.05;
+            await client.query(`INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+         side2_score_differential, delta_elo, details)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
+                matchId,
+                'ffa',
+                isOverallTie ? null : winnerSide,
+                placements[0]?.diff ?? null,
+                placements[1]?.diff ?? null,
+                // Biggest single ELO swing in the field — used as the "this match
+                // was worth ±X" headline.
+                Math.max(...placements.map(p => Math.abs(p.delta_elo_signed))),
+                JSON.stringify({
+                    ffa: true,
+                    placements,
+                    tied: isOverallTie,
+                    perks: perkApplications,
+                    format: matchFormat,
+                }),
+            ]);
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
+            // Auto-post a 'round' card to each Arena player's feed — one batch
+            // INSERT to keep round-trip count flat regardless of field size.
+            await client.query(`INSERT INTO posts (user_id, kind, match_id, body)
+         SELECT pid, 'round', $2, r.caption
+           FROM unnest($1::uuid[]) AS pid
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`, [players.map((p) => p.user_id), matchId]);
+            return {
+                ffa: true,
+                winnerSide: isOverallTie ? null : winnerSide,
+                tied: isOverallTie,
+                placements,
+                perks: perkApplications,
+            };
+        };
+        if (allDone && !matchRows[0].is_practice && allPlayers.length >= 2) {
+            // Multiple players already in match — resolve normally.
+            const sides = {};
+            for (const p of allPlayers) {
+                if (!sides[p.side])
+                    sides[p.side] = [];
+                sides[p.side].push(p);
+            }
+            if (matchRows[0].match_type === 'ffa') {
+                // Arena — every player on their own side, N-way ranked resolution.
+                result = await resolveEloFFA(allPlayers, req.params.id);
+            }
+            else if (Object.keys(sides).length >= 2) {
+                result = await resolveElo(sides[1], sides[2], req.params.id, matchRows[0].match_type);
+            }
+        }
+        else if (allDone && !matchRows[0].is_practice && allPlayers.length === 1) {
+            // Solo submission — find the best-ELO match from the pending pool
+            const myP = allPlayers[0];
+            const myHolesPlayed = holeScores.length;
+            // Direct-challenge grace: if THIS match was a challenge to a specific
+            // friend (a pending invite from the last 3 days) and the challenger
+            // finished first, do NOT auto-pair with a stranger. Hold it open so the
+            // challenged friend still has time to accept and play. After 3 days the
+            // invite lapses and the every-minute pairing pass matches it with the
+            // best available option.
+            const { rows: chalRows } = await client.query(`SELECT 1 FROM match_invites
+          WHERE match_id = $1 AND status = 'pending'
+            AND created_at > NOW() - INTERVAL '3 days' LIMIT 1`, [req.params.id]);
+            const holdForChallenge = chalRows.length > 0;
+            const pendingPoolQuery = (holesFilter) => client.query(`SELECT mp.match_id AS opp_match_id, mp.user_id, mp.strokes, mp.teebox_id,
+                u.username, u.elo, u.total_matches,
+                array_length(r.hole_scores, 1) AS holes_played
+         FROM match_players mp
+         JOIN users u ON u.user_id = mp.user_id
+         JOIN matches m ON m.match_id = mp.match_id
+         JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+         WHERE mp.user_id != $1
+           AND mp.completed = true
+           AND m.is_practice = false
+           AND m.completed = false
+           AND m.match_type = $2
+           AND array_length(r.hole_scores, 1) ${holesFilter === 'same' ? '=' : '!='} $4
+           AND NOT EXISTS (
+             SELECT 1 FROM match_players mp2
+             WHERE mp2.match_id = mp.match_id AND mp2.user_id != mp.user_id
+           )
+           -- Don't grab a candidate that is itself an active challenge match.
+           AND NOT EXISTS (
+             SELECT 1 FROM match_invites mi
+             WHERE mi.match_id = mp.match_id AND mi.status = 'pending'
+               AND mi.created_at > NOW() - INTERVAL '3 days'
+           )
+         ORDER BY ABS(u.elo - $3)
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED`, [myP.user_id, matchRows[0].match_type, myP.elo, myHolesPlayed]);
+            // Prefer same-format (9v9 or 18v18). Fall back to cross-format only if pool is empty.
+            // Skip entirely while holding for a challenged friend.
+            let candidates = [];
+            let isCrossFormat = false;
+            if (!holdForChallenge) {
+                ({ rows: candidates } = await pendingPoolQuery('same'));
+                if (!candidates.length) {
+                    ({ rows: candidates } = await pendingPoolQuery('different'));
+                    isCrossFormat = candidates.length > 0;
+                }
+            }
+            if (candidates.length > 0) {
+                const opp = candidates[0];
+                // Defensive: the pool query already filters `mp.user_id != $1` AND
+                // the match_players (match_id, user_id) PK would also reject this.
+                // But we double-check here so a future refactor of the pool query
+                // can't accidentally pair a user against themselves.
+                if (opp.user_id === myP.user_id) {
+                    console.warn('[match] skipped self-match candidate', { userId: myP.user_id, matchId: req.params.id });
+                    // Fall through as if no candidate found — match stays pending.
+                }
+                else {
+                    // Fetch teebox data for opponent separately (can't LEFT JOIN with FOR UPDATE)
+                    if (opp.teebox_id) {
+                        const { rows: tbRows } = await client.query(`SELECT course_rating, slope_rating, num_holes AS teebox_num_holes FROM teeboxes WHERE teebox_id = $1`, [opp.teebox_id]);
+                        if (tbRows.length) {
+                            opp.course_rating = tbRows[0].course_rating;
+                            opp.slope_rating = tbRows[0].slope_rating;
+                            opp.teebox_num_holes = tbRows[0].teebox_num_holes;
+                        }
+                    }
+                    // Add opponent into this match as side 2 (store the real strokes, not normalised)
+                    await client.query(`INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed)
+           VALUES ($1, $2, $3, 2, $4, true)`, [req.params.id, opp.user_id, opp.teebox_id, opp.strokes]);
+                    // Copy the opponent's round (from their original match) into THIS match
+                    // so the allPlayers query in resolveElo gets correct holes_played for them.
+                    // Without this, the LEFT JOIN to rounds returns null and COALESCE defaults
+                    // to 18 — wrong for 9-hole opponents.
+                    await client.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, total_score, round_type)
+           SELECT $1, user_id, course_id, teebox_id, hole_scores, total_score, round_type
+           FROM rounds WHERE match_id = $2 AND user_id = $3
+           ON CONFLICT (match_id, user_id) DO NOTHING`, [req.params.id, opp.opp_match_id, opp.user_id]);
+                    // No special-case normalization needed — diff18() inside resolveElo
+                    // already converts each player's score to an 18-hole equivalent so a
+                    // 9-hole player vs an 18-hole player compares fairly.
+                    const oppForElo = { ...opp, side: 2 };
+                    result = await resolveElo([myP], [oppForElo], req.params.id, matchRows[0].match_type);
+                    result.autoMatched = true;
+                    result.crossFormat = isCrossFormat;
+                    result.opponentUsername = opp.username;
+                    // Close opponent's pending match AND mark it superseded by the current
+                    // match. The matches-list endpoint filters out superseded rows so the
+                    // opponent's match list doesn't show a phantom TIE — they see this
+                    // match instead, where they're listed as side 2 with the real result.
+                    await client.query(`UPDATE matches SET completed = true, superseded_by_match_id = $2 WHERE match_id = $1`, [opp.opp_match_id, req.params.id]);
+                } // end !self-match guard
+            }
+            // No candidate → stay pending (match.completed stays false, scores are recorded)
+        }
+        else if (allDone) {
+            // Practice round — just complete it
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+        }
+        // Decorate the response with the submitter's signed ELO delta so the
+        // client doesn't have to figure out which side they were on.
+        if (result) {
+            const tied = result.tied || result.winnerSide === null;
+            const submitterIsSide1 = myeSide === 1;
+            const baseDelta = result.deltaElo ?? 0;
+            if (tied) {
+                const { rows: mrRows } = await client.query(`SELECT details FROM match_results WHERE match_id = $1`, [req.params.id]);
+                const details = mrRows[0]?.details;
+                const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+                result.myDeltaElo = details?.[key] ?? 0;
+            }
+            else {
+                const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
+                result.myDeltaElo = won ? baseDelta : -baseDelta;
+            }
+            // Override with per-player perk-adjusted delta if the submitter consumed a perk
+            const myPerk = (result.perks ?? []).find((pa) => pa.user_id === req.userId);
+            if (myPerk)
+                result.myDeltaElo = myPerk.adjusted;
+        }
+        // Surface whether THIS submission earned the user a fresh perk
+        if (perkAwarded) {
+            if (!result)
+                result = {};
+            result.perkAwarded = 'lucky_round';
+        }
+        await client.query('COMMIT');
+        // ── Push: notify EACH participant of the resolved result. We do this
+        // post-commit so a push failure can't roll back the round, and outside
+        // the transaction so the network call doesn't hold a DB connection.
+        // Each user gets their personal narrative (you won / lost / tied + Δ).
+        if (result && (result.winnerSide != null || result.tied)) {
+            try {
+                const { rows: pushRows } = await pool_1.default.query(`SELECT mp.user_id, mp.side, u.push_token, u.username,
+                  m.match_type, m.format
+           FROM match_players mp
+           JOIN users u ON u.user_id = mp.user_id
+           JOIN matches m ON m.match_id = mp.match_id
+           WHERE mp.match_id = $1 AND u.push_token IS NOT NULL`, [req.params.id]);
+                const detailsRow = await pool_1.default.query(`SELECT details FROM match_results WHERE match_id = $1`, [req.params.id]);
+                const detailsBlob = detailsRow.rows[0]?.details ?? {};
+                const winnerSide = result.winnerSide ?? null;
+                for (const row of pushRows) {
+                    const tied = winnerSide == null;
+                    const won = !tied && row.side === winnerSide;
+                    const key = row.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+                    let delta = detailsBlob[key] ?? 0;
+                    // Apply per-player perk override if any
+                    const perk = (detailsBlob.perks ?? []).find((p) => p.user_id === row.user_id);
+                    if (perk)
+                        delta = perk.adjusted;
+                    const sign = delta > 0 ? '+' : '';
+                    const title = tied ? 'Match drawn' : won ? 'You won!' : 'Match decided';
+                    const body = tied
+                        ? `Even round. ELO ${sign}${delta}.`
+                        : won
+                            ? `Nice round. ELO ${sign}${delta}.`
+                            : `Better luck next time. ELO ${sign}${delta}.`;
+                    // Fire-and-forget — sendPush already swallows network errors.
+                    (0, notify_1.sendPush)([row.push_token], title, body, { type: 'match_result', matchId: req.params.id, won, delta });
+                }
+            }
+            catch (e) {
+                console.error('match_result push failed:', e);
+            }
+        }
+        // Process @mentions in this match's round-caption posts. Round posts are
+        // created at resolution (above), so this only runs once the match is
+        // resolved. Best-effort + post-commit so it never blocks the score save.
+        if (result) {
+            try {
+                const { rows: rposts } = await pool_1.default.query(`SELECT p.post_id, p.user_id, p.body
+             FROM posts p
+            WHERE p.match_id = $1 AND p.kind = 'round' AND p.body IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM post_mentions pm WHERE pm.post_id = p.post_id)`, [req.params.id]);
+                for (const rp of rposts) {
+                    await (0, mentions_1.processMentions)(rp.post_id, rp.user_id, rp.body);
+                }
+            }
+            catch (e) {
+                console.error('round-caption mention processing failed:', e);
+            }
+        }
+        // ── Friend push: "<name> just finished a round" ─────────────────────
+        // Atomically flips match_players.finished_notified so each finisher's
+        // friends get exactly one push regardless of score edits / re-submits
+        // / scramble teammate auto-completions. Skipped for practice matches
+        // so range sessions don't spam the timeline. Best-effort post-commit
+        // so a push outage can't roll back the score save.
+        if (!matchRows[0].is_practice) {
+            try {
+                const { rows: flipped } = await pool_1.default.query(`UPDATE match_players
+              SET finished_notified = TRUE
+            WHERE match_id = $1 AND user_id = $2 AND finished_notified = FALSE
+            RETURNING match_id`, [req.params.id, req.userId]);
+                if (flipped.length > 0) {
+                    const { rows: meRows } = await pool_1.default.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
+                    const finisherName = meRows[0]?.username ?? 'A friend';
+                    const { rows: courseRows } = resolvedTeeboxId
+                        ? await pool_1.default.query(`SELECT c.course_name
+                   FROM teeboxes t
+                   JOIN courses c ON c.course_id = t.course_id
+                  WHERE t.teebox_id = $1`, [resolvedTeeboxId])
+                        : { rows: [] };
+                    const courseName = courseRows[0]?.course_name ?? 'a course';
+                    // Friends with push tokens — bidirectional (friends table stores
+                    // one directional row; the friend can be on either side).
+                    const { rows: friends } = await pool_1.default.query(`SELECT DISTINCT u.push_token
+               FROM friends f
+               JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+              WHERE (f.user_id = $1 OR f.friend_id = $1)
+                AND f.status = 'accepted'
+                AND u.push_token IS NOT NULL`, [req.userId]);
+                    const tokens = friends.map((f) => f.push_token).filter(Boolean);
+                    if (tokens.length) {
+                        const holesPlayed = holeScores.length;
+                        await (0, notify_1.sendPush)(tokens, `${finisherName} finished a round`, `Shot ${totalScore} on ${holesPlayed} holes at ${courseName}. Tap to see the scorecard.`, { type: 'round_finished', userId: req.userId, matchId: req.params.id });
+                    }
+                }
+            }
+            catch (e) {
+                console.error('round-finished friend notification failed:', e);
+            }
+        }
+        return res.json({ success: true, totalScore, result });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+    finally {
+        client.release();
+    }
+}));
+// Forfeit a match (counts as a loss with ELO penalty)
+router.post('/:id/forfeit', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        const { rows: playerRows } = await client.query(`SELECT mp.side, m.completed, m.is_practice, m.match_type
+       FROM match_players mp JOIN matches m ON m.match_id = mp.match_id
+       WHERE mp.match_id = $1 AND mp.user_id = $2 FOR UPDATE`, [req.params.id, req.userId]);
+        if (!playerRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Not in this match' });
+        }
+        if (playerRows[0].completed) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Match already completed' });
+        }
+        const mySide = playerRows[0].side;
+        const isPractice = playerRows[0].is_practice;
+        const { rows: allPlayers } = await client.query(`SELECT mp.user_id, mp.side, u.elo, u.total_matches
+       FROM match_players mp JOIN users u ON u.user_id = mp.user_id
+       WHERE mp.match_id = $1`, [req.params.id]);
+        const mySidePlayers = allPlayers.filter((p) => p.side === mySide);
+        const otherSidePlayers = allPlayers.filter((p) => p.side !== mySide);
+        if (otherSidePlayers.length === 0 || isPractice) {
+            // No real opponent — just abandon
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+            await client.query('COMMIT');
+            return res.json({ success: true, forfeited: false });
+        }
+        // ELO calculation — forfeit = full loss
+        const p1 = mySidePlayers[0];
+        const p2 = otherSidePlayers[0];
+        const expA = expectedScore(p1.elo, p2.elo);
+        const k = kFactor(p1.total_matches, p1.elo);
+        const deltaElo = Math.round(k * (0 - expA)); // negative for forfeiter
+        // Pull unused 'lucky_round' perks for everyone in this match (excluding any
+        // earned on this match — those are reserved for their next ranked match).
+        const allForfeitPlayerIds = [...mySidePlayers, ...otherSidePlayers].map((p) => p.user_id);
+        const { rows: forfeitPerkRows } = await client.query(`SELECT DISTINCT ON (user_id) user_id, perk_id
+       FROM user_perks
+       WHERE user_id = ANY($1)
+         AND consumed_at IS NULL
+         AND (earned_match_id IS NULL OR earned_match_id != $2)
+       ORDER BY user_id, earned_at ASC`, [allForfeitPlayerIds, req.params.id]);
+        const forfeitPerkByUser = new Map(forfeitPerkRows.map((r) => [r.user_id, r.perk_id]));
+        const forfeitPerkApplications = [];
+        for (const p of mySidePlayers) {
+            let change = deltaElo; // negative for forfeiter
+            const perkId = forfeitPerkByUser.get(p.user_id);
+            if (perkId && change < 0) {
+                await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, req.params.id]);
+                forfeitPerkApplications.push({ user_id: p.user_id, original: change, adjusted: 0, type: 'lucky_round' });
+                change = 0;
+            }
+            await client.query(`UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1 WHERE user_id = $2`, [change, p.user_id]);
+        }
+        for (const p of otherSidePlayers) {
+            let change = -deltaElo; // positive for opponents
+            const perkId = forfeitPerkByUser.get(p.user_id);
+            if (perkId && change > 0) {
+                await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, req.params.id]);
+                forfeitPerkApplications.push({ user_id: p.user_id, original: change, adjusted: change * 2, type: 'lucky_round' });
+                change = change * 2;
+            }
+            await client.query(`UPDATE users SET elo = GREATEST(100, elo + $1), total_matches = total_matches + 1, total_wins = total_wins + 1 WHERE user_id = $2`, [change, p.user_id]);
+        }
+        await client.query(`INSERT INTO match_results (match_id, match_type, winner_side, delta_elo, details)
+       VALUES ($1, $2, $3, $4, $5)`, [
+            req.params.id, playerRows[0].match_type,
+            mySide === 1 ? 2 : 1,
+            Math.abs(deltaElo),
+            JSON.stringify({
+                forfeit: true,
+                forfeitUserId: req.userId,
+                side1DeltaSignedElo: mySide === 1 ? deltaElo : -deltaElo,
+                side2DeltaSignedElo: mySide === 1 ? -deltaElo : deltaElo,
+                perks: forfeitPerkApplications,
+            }),
+        ]);
+        await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+        await client.query('COMMIT');
+        return res.json({ success: true, forfeited: true, deltaElo });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}));
+// Save in-progress hole scores so friends (not in this match) can watch live.
+// Stores partial scores on the rounds row without marking it complete.
+// Optionally accepts teeboxId/courseId so a player who just picked their teebox
+// in the scoring screen gets it persisted on match_players too (needed for
+// challenge matches where no teebox was set at match creation).
+router.post('/:id/progress', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { holeScores, holeStats, teeboxId } = req.body;
+    if (!Array.isArray(holeScores))
+        return res.status(400).json({ error: 'holeScores required' });
+    const cleanStats = cleanHoleStats(holeStats, holeScores.length);
+    // Don't accept progress for already-finished matches
+    const { rows: matchRows } = await pool_1.default.query(`SELECT completed FROM matches WHERE match_id = $1`, [req.params.id]);
+    if (!matchRows.length)
+        return res.status(404).json({ error: 'Match not found' });
+    if (matchRows[0]?.completed)
+        return res.json({ success: true, ignored: 'completed' });
+    // If client passed a teeboxId, persist it on match_players when not already set
+    if (teeboxId) {
+        await pool_1.default.query(`UPDATE match_players SET teebox_id = COALESCE(teebox_id, $1)
+       WHERE match_id = $2 AND user_id = $3`, [teeboxId, req.params.id, req.userId]);
+    }
+    // Resolve teebox + course from match_players (now that we may have just set it)
+    const { rows: pRows } = await pool_1.default.query(`SELECT mp.teebox_id, t.course_id FROM match_players mp
+     LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     WHERE mp.match_id = $1 AND mp.user_id = $2`, [req.params.id, req.userId]);
+    if (!pRows.length)
+        return res.status(404).json({ error: 'Not in this match' });
+    await pool_1.default.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (match_id, user_id)
+     DO UPDATE SET hole_scores = $5,
+                   hole_stats = $6,
+                   course_id = COALESCE(rounds.course_id, EXCLUDED.course_id),
+                   teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`, [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]);
+    // ── Celebration detection ──────────────────────────────────────────
+    // Scan the just-saved hole_scores for any birdie/eagle/HIO. The unique
+    // constraint on (match_id, user_id, hole_num) means a celebration fires
+    // exactly once per (player, hole) pair — re-saving the same score, or a
+    // duplicate progress call from a flaky retry, is a no-op via
+    // ON CONFLICT DO NOTHING.
+    //
+    // Hole-in-one wins over the par-3 eagle interpretation: a 1 on a par-3
+    // is an ACE, not just an eagle. The check kind order encodes that.
+    try {
+        const { rows: holeRows } = await pool_1.default.query(`SELECT hole_num, par FROM holes
+        WHERE teebox_id = $1
+        ORDER BY hole_num ASC`, [pRows[0].teebox_id]);
+        const pars = new Map(holeRows.map((h) => [Number(h.hole_num), Number(h.par)]));
+        // Build a flat insert payload for any qualifying holes we haven't
+        // already recorded. We batch into a single INSERT … VALUES (…), (…), (…)
+        // because most rounds will only have one new celebration per save
+        // anyway and the per-call overhead matters more than the query cost.
+        const events = [];
+        for (let i = 0; i < holeScores.length; i++) {
+            const score = Number(holeScores[i]);
+            if (!Number.isFinite(score) || score <= 0)
+                continue;
+            const par = pars.get(i + 1);
+            if (par == null)
+                continue;
+            const diff = score - par;
+            let kind = null;
+            if (score === 1)
+                kind = 'ace';
+            else if (diff === -2)
+                kind = 'eagle';
+            else if (diff <= -3)
+                kind = 'albatross';
+            else if (diff === -1)
+                kind = 'birdie';
+            if (kind)
+                events.push({ hole: i + 1, score, par, kind });
+        }
+        if (events.length) {
+            // Multi-row INSERT with conflict-do-nothing — safe to call repeatedly
+            // because the unique constraint on (match_id, user_id, hole_num)
+            // dedupes per hole regardless of how many times /progress fires.
+            const phs = [];
+            const vs = [];
+            events.forEach((e, idx) => {
+                const base = idx * 6;
+                phs.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+                vs.push(req.params.id, req.userId, e.hole, e.score, e.par, e.kind);
+            });
+            await pool_1.default.query(`INSERT INTO celebrations (match_id, user_id, hole_num, score, par, kind)
+         VALUES ${phs.join(', ')}
+         ON CONFLICT (match_id, user_id, hole_num) DO NOTHING`, vs);
+        }
+    }
+    catch (err) {
+        // Celebrations are best-effort eye candy. A failure here must never
+        // block the score save itself — the score is already persisted above.
+        console.error('celebration write failed', err);
+    }
+    return res.json({ success: true });
+}));
+/**
+ * Pull all celebrations for this match. Caller passes `since` (an ISO
+ * timestamp from the previous poll) and we return only events newer than
+ * that — keeps the response tiny in the steady state.
+ *
+ * NOTE: deliberately does NOT filter by expires_at. The async-match case
+ * (Player A finishes Monday, Player B plays the same match Saturday) needs
+ * a full retro of A's birdies/eagles/HIO when B opens the scoring screen,
+ * so the client can fire them as B reaches each corresponding hole. The
+ * client-side gate is "has the local player reached hole_num" — server is
+ * the firehose, client is the gate.
+ *
+ * Joins the celebrating user's theme info (personal theme for solos, clan
+ * theme for team matches) so the client doesn't need a second round-trip
+ * to figure out what music to play. We let the CLIENT decide which theme
+ * source to pick based on its own knowledge of the match type — both sets
+ * of fields come back and the client chooses.
+ *
+ * Authorization: any player IN the match can see the celebrations. A
+ * separate spectator endpoint exists for non-players (TODO if/when we
+ * expand spectator views to opponents' real-time scoring).
+ */
+router.get('/:id/celebrations', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { rows: pm } = await pool_1.default.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+    if (!pm.length)
+        return res.status(403).json({ error: 'Not in this match' });
+    // `since` is best-effort — accept anything Postgres can parse; otherwise
+    // fall through to "anything still un-expired."
+    const since = typeof req.query.since === 'string' ? req.query.since : null;
+    const { rows } = await pool_1.default.query(`SELECT
+        c.celebration_id, c.user_id, c.hole_num, c.score, c.par, c.kind,
+        c.created_at,
+        u.username,
+        u.avatar_url,
+        u.elo,
+        u.theme_track_title   AS user_theme_title,
+        u.theme_track_artist  AS user_theme_artist,
+        u.theme_track_artwork AS user_theme_artwork,
+        u.theme_track_preview AS user_theme_preview,
+        cl.clan_id,
+        cl.name               AS clan_name,
+        cl.theme_track_title  AS clan_theme_title,
+        cl.theme_track_artist AS clan_theme_artist,
+        cl.theme_track_artwork AS clan_theme_artwork,
+        cl.theme_track_preview AS clan_theme_preview
+       FROM celebrations c
+       JOIN users u ON u.user_id = c.user_id
+       LEFT JOIN LATERAL (
+         SELECT cl.clan_id, cl.name,
+                cl.theme_track_title, cl.theme_track_artist,
+                cl.theme_track_artwork, cl.theme_track_preview
+           FROM clan_members cm
+           JOIN clans cl ON cl.clan_id = cm.clan_id
+          WHERE cm.user_id = c.user_id
+          ORDER BY cm.joined_at DESC
+          LIMIT 1
+       ) cl ON true
+      WHERE c.match_id = $1
+        ${since ? 'AND c.created_at > $2' : ''}
+      ORDER BY c.created_at ASC`, since ? [req.params.id, since] : [req.params.id]);
+    return res.json(rows);
+}));
+/**
+ * Mark the match-found intro as having been shown to the requesting user.
+ * Called by the mobile MatchFoundWatcher the moment it triggers the VS
+ * animation. Idempotent — uses COALESCE so the FIRST trigger wins and
+ * subsequent calls are no-ops, which keeps the "first time" timestamp
+ * accurate even if the watcher fires twice during a race.
+ *
+ * The list endpoint exposes mp_me.intro_shown_at so the watcher can avoid
+ * even fetching the full match detail on subsequent polls.
+ */
+router.post('/:id/mark-intro-shown', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { rowCount } = await pool_1.default.query(`UPDATE match_players
+        SET intro_shown_at = COALESCE(intro_shown_at, NOW())
+      WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+    if (!rowCount)
+        return res.status(404).json({ error: 'Not in match' });
+    return res.json({ success: true });
+}));
+// Notify friends that the user has started a round. Idempotent — only fires once per match.
+router.post('/:id/started', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    // Verify caller is in the match BEFORE we flip the bit, otherwise a
+    // non-member could grief the notification by calling this first.
+    const { rows: playerRows } = await pool_1.default.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+    if (!playerRows.length)
+        return res.json({ success: true, sent: false });
+    // Atomic flip: only the first caller for this match gets a row back
+    const { rows: flipped } = await pool_1.default.query(`UPDATE matches SET started_notified = true
+     WHERE match_id = $1 AND started_notified = false AND completed = false AND is_practice = false
+     RETURNING match_id`, [req.params.id]);
+    if (!flipped.length)
+        return res.json({ success: true, sent: false });
+    // Course name (from any player's teebox), starter username
+    const { rows: meRows } = await pool_1.default.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
+    const starterName = meRows[0]?.username ?? 'A friend';
+    const { rows: courseRows } = await pool_1.default.query(`SELECT c.course_name FROM match_players mp
+     JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+     JOIN courses c ON c.course_id = t.course_id
+     WHERE mp.match_id = $1 LIMIT 1`, [req.params.id]);
+    const courseName = courseRows[0]?.course_name ?? 'a course';
+    // Friends with push tokens — bidirectional (the friends table stores one
+    // row per friendship; the friend can be on either side of user_id/friend_id).
+    const { rows: friends } = await pool_1.default.query(`SELECT DISTINCT u.push_token FROM friends f
+     JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+     WHERE (f.user_id = $1 OR f.friend_id = $1)
+       AND f.status = 'accepted'
+       AND u.push_token IS NOT NULL`, [req.userId]);
+    const tokens = friends.map((f) => f.push_token).filter(Boolean);
+    if (tokens.length) {
+        await (0, notify_1.sendPush)(tokens, `${starterName} started a round`, `Tap to watch their scorecard live at ${courseName}`, { type: 'round_started', userId: req.userId, matchId: req.params.id });
+    }
+    return res.json({ success: true, sent: true, recipientCount: tokens.length });
+}));
+// POST a pin location for a hole during a round.
+//   body: { holeId: UUID, lat: number, lng: number }
+// Updates the hole's pin coords iff they're not already set (first contributor wins).
+// Records a contribution credit so we can reward the user for pinning ≥50% of holes.
+router.post('/:id/pin', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { holeId, lat, lng, elevationM } = req.body ?? {};
+    if (typeof holeId !== 'string' || typeof lat !== 'number' || typeof lng !== 'number') {
+        return res.status(400).json({ error: 'holeId, lat, lng required' });
+    }
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+        return res.status(400).json({ error: 'invalid coords' });
+    }
+    // Sanity check elevation: -500m (Dead Sea) to +9000m (Everest)
+    const elev = (typeof elevationM === 'number' && elevationM > -500 && elevationM < 9000)
+        ? elevationM : null;
+    // Verify the user is in this match AND the hole belongs to their teebox.
+    const { rows: pRows } = await pool_1.default.query(`SELECT 1 FROM match_players mp
+     JOIN holes h ON h.teebox_id = mp.teebox_id
+     WHERE mp.match_id = $1 AND mp.user_id = $2 AND h.hole_id = $3`, [req.params.id, req.userId, holeId]);
+    if (!pRows.length) {
+        return res.status(404).json({ error: 'Not in match or hole not on your teebox' });
+    }
+    // Upsert this user's contribution for this match+hole. Re-marking by the
+    // same user during the same match overwrites their previous reading
+    // (helpful: their GPS may have improved since the first attempt).
+    await pool_1.default.query(`INSERT INTO pin_contributions (user_id, match_id, hole_id, lat, lng, elevation_m)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, match_id, hole_id) DO UPDATE
+       SET lat = EXCLUDED.lat,
+           lng = EXCLUDED.lng,
+           elevation_m = COALESCE(EXCLUDED.elevation_m, pin_contributions.elevation_m),
+           created_at = NOW()`, [req.userId, req.params.id, holeId, lat, lng, elev]);
+    // Recompute the canonical pin position from ALL contributors (across every
+    // match) using a median to stay robust against an outlier from someone who
+    // marked while walking past the green. PostgreSQL's percentile_cont(0.5)
+    // gives us a continuous median which is fine for lat/lng.
+    const { rows: medRows } = await pool_1.default.query(`SELECT
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lat) AS med_lat,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY lng) AS med_lng,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY elevation_m)
+         FILTER (WHERE elevation_m IS NOT NULL)              AS med_elev,
+       COUNT(*)::int                                          AS samples
+     FROM pin_contributions
+     WHERE hole_id = $1 AND lat IS NOT NULL AND lng IS NOT NULL`, [holeId]);
+    const med = medRows[0];
+    if (med?.med_lat != null && med.med_lng != null) {
+        // Try to upgrade pin elevation to a DEM (digital elevation model) value
+        // from Open-Meteo's terrain API, which is far more accurate than median
+        // GPS altitude (~1m DEM error vs ±15m GPS error). We fall back to the
+        // median GPS reading if DEM lookup fails so slope still works.
+        let elevToStore = med.med_elev ?? null;
+        try {
+            const dResp = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${med.med_lat}&longitude=${med.med_lng}`);
+            if (dResp.ok) {
+                const dData = await dResp.json();
+                const demM = dData?.elevation?.[0];
+                if (typeof demM === 'number')
+                    elevToStore = demM;
+            }
+        }
+        catch { /* DEM is best-effort — fall through to GPS median */ }
+        await pool_1.default.query(`UPDATE holes
+         SET pin_lat = $2,
+             pin_lng = $3,
+             pin_elevation_m = COALESCE($4, pin_elevation_m),
+             pin_set_at = NOW(),
+             pin_set_by = COALESCE(pin_set_by, $5)
+       WHERE hole_id = $1`, [holeId, med.med_lat, med.med_lng, elevToStore, req.userId]);
+    }
+    return res.json({ success: true, samples: med?.samples ?? 1 });
+}));
+// PUT a player's shot track for a single hole. Replaces the full array.
+//   body: { shots: Array<{ lat: number, lng: number }> }
+router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const holeNum = parseInt(req.params.holeNum, 10);
+    if (isNaN(holeNum) || holeNum < 1 || holeNum > 36) {
+        return res.status(400).json({ error: 'invalid holeNum' });
+    }
+    const shots = req.body?.shots;
+    if (!Array.isArray(shots))
+        return res.status(400).json({ error: 'shots array required' });
+    // Allowed clubs and lies — keep these short, lower-cased identifiers.
+    // Front-end labels can be richer; here we just whitelist values to avoid
+    // free-text growing organically.
+    //
+    // 'chip' is a SPECIAL non-attributing club: the player wants to track
+    // the shot on the map but NOT have it counted toward any specific
+    // club's per-club stats (since "chip" isn't a single physical club —
+    // could be a 56°, 60°, or even a hybrid bump). The /club-stats query
+    // explicitly skips it. Kept in the allowed-set here so the shot save
+    // still records the chip tag rather than coercing it to "unknown".
+    const ALLOWED_CLUBS = new Set([
+        'driver', '3w', '5w', '7w', 'hybrid',
+        '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
+        'pw', 'gw', 'sw', 'lw', 'putter',
+        'chip',
+    ]);
+    const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
+    // Validate one Pt (used for start/end of segments AND for legacy points).
+    const cleanPt = (p) => {
+        if (typeof p?.lat !== 'number' || typeof p?.lng !== 'number')
+            return null;
+        if (Math.abs(p.lat) > 90 || Math.abs(p.lng) > 180)
+            return null;
+        const out = { lat: p.lat, lng: p.lng };
+        if (typeof p.elevation_m === 'number' && p.elevation_m > -500 && p.elevation_m < 9000) {
+            out.elevation_m = p.elevation_m;
+        }
+        return out;
+    };
+    // Accept BOTH formats:
+    //   • New (segments): { club, lie?, start: Pt, end: Pt, recorded_at? }
+    //   • Legacy (points): { lat, lng, elevation_m?, club?, lie? }
+    // Old clients that send legacy data still work; new clients send segments.
+    const clean = shots.slice(0, 30).map((s) => {
+        if (s?.start && s?.end) {
+            const start = cleanPt(s.start);
+            const end = cleanPt(s.end);
+            if (!start || !end)
+                return null;
+            const out = { start, end };
+            if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+                out.club = s.club.toLowerCase();
+            }
+            else if (typeof s.club === 'string') {
+                out.club = 'unknown';
+            }
+            if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
+                out.lie = s.lie.toLowerCase();
+            }
+            if (typeof s.recorded_at === 'string')
+                out.recorded_at = s.recorded_at;
+            // Plays-like yardage: client-computed at finalize time using the
+            // current weather snapshot + slope. Optional — older clients omit it.
+            if (typeof s.plays_like_yds === 'number'
+                && s.plays_like_yds >= 0
+                && s.plays_like_yds < 1000) {
+                out.plays_like_yds = s.plays_like_yds;
+            }
+            // Aim point: where the player aimed at the moment they finalised the
+            // shot, captured from the draggable on-map heatmap target. Stored so
+            // downstream lateral-accuracy stats can compare against the start→aim
+            // line instead of the default start→pin centerline. Validated as a
+            // sane lat/lng pair; ignored otherwise.
+            if (s.aim && typeof s.aim.lat === 'number' && typeof s.aim.lng === 'number'
+                && Math.abs(s.aim.lat) <= 90 && Math.abs(s.aim.lng) <= 180) {
+                out.aim = { lat: s.aim.lat, lng: s.aim.lng };
+            }
+            // Frozen-at-finalize geometry. Sanity-clamped so a buggy client
+            // can't poison the column with nonsense — anything beyond a long
+            // par-5's worth of yards is rejected.
+            if (typeof s.total_yds === 'number' && s.total_yds >= 0 && s.total_yds < 1000) {
+                out.total_yds = Math.round(s.total_yds);
+            }
+            if (typeof s.lateral_yds === 'number' && s.lateral_yds > -500 && s.lateral_yds < 500) {
+                out.lateral_yds = Math.round(s.lateral_yds);
+            }
+            if (s.lateral_ref === 'aim' || s.lateral_ref === 'pin') {
+                out.lateral_ref = s.lateral_ref;
+            }
+            return out;
+        }
+        // Legacy point format
+        const pt = cleanPt(s);
+        if (!pt)
+            return null;
+        const out = { ...pt };
+        if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+            out.club = s.club.toLowerCase();
+        }
+        if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
+            out.lie = s.lie.toLowerCase();
+        }
+        return out;
+    }).filter((s) => s !== null);
+    // Verify membership
+    const { rows: members } = await pool_1.default.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+    if (!members.length)
+        return res.status(404).json({ error: 'Not in match' });
+    // Atomic replace: delete this user's shots for this hole, then insert the
+    // new set. Same effective semantics as the old UPSERT-on-JSONB approach
+    // but each shot is its own durable row in the new `shots` table.
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query(`DELETE FROM shots WHERE match_id = $1 AND user_id = $2 AND hole_num = $3`, [req.params.id, req.userId, holeNum]);
+        for (let i = 0; i < clean.length; i++) {
+            const s = clean[i];
+            const start = s.start ?? { lat: s.lat, lng: s.lng, elevation_m: s.elevation_m };
+            // Legacy single-point format gets stored as a degenerate segment
+            // (start == end). Backward-compat for any client that hasn't
+            // upgraded to segment shape.
+            const end = s.end ?? start;
+            await client.query(`INSERT INTO shots (
+           user_id, match_id, hole_num, shot_index,
+           club, lie,
+           start_lat, start_lng, start_elevation_m,
+           end_lat,   end_lng,   end_elevation_m,
+           recorded_at, source, plays_like_yds,
+           aim_lat, aim_lng,
+           total_yds, lateral_yds, lateral_ref
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19)`, [
+                req.userId, req.params.id, holeNum, i,
+                s.club ?? 'unknown', s.lie ?? null,
+                start.lat, start.lng, start.elevation_m ?? null,
+                end.lat, end.lng, end.elevation_m ?? null,
+                s.recorded_at ?? new Date().toISOString(),
+                s.plays_like_yds ?? null,
+                s.aim?.lat ?? null, s.aim?.lng ?? null,
+                s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null,
+            ]);
+        }
+        await client.query('COMMIT');
+        return res.json({ success: true, count: clean.length });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}));
+// GET shot tracks for a match — optionally filter by user.
+// Returns the shape the old shot_tracks endpoint did so mobile clients
+// don't need to change: [{ user_id, hole_num, shots: [{start, end, club, lie}, ...] }]
+router.get('/:id/shots', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const userFilter = req.query.user;
+    const params = [req.params.id];
+    let where = `WHERE match_id = $1`;
+    if (userFilter) {
+        params.push(userFilter);
+        where += ` AND user_id = $2`;
+    }
+    const { rows } = await pool_1.default.query(`SELECT user_id, hole_num,
+            json_agg(
+              json_build_object(
+                'club',  club,
+                'lie',   lie,
+                'start', json_build_object(
+                  'lat', start_lat, 'lng', start_lng, 'elevation_m', start_elevation_m
+                ),
+                'end',   json_build_object(
+                  'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
+                ),
+                'recorded_at', recorded_at,
+                'plays_like_yds', plays_like_yds,
+                'total_yds', total_yds,
+                'lateral_yds', lateral_yds,
+                'lateral_ref', lateral_ref,
+                'aim', CASE WHEN aim_lat IS NOT NULL AND aim_lng IS NOT NULL
+                            THEN json_build_object('lat', aim_lat, 'lng', aim_lng)
+                            ELSE NULL END
+              )
+              ORDER BY shot_index
+            ) AS shots
+     FROM shots
+     ${where}
+     GROUP BY user_id, hole_num
+     ORDER BY user_id, hole_num`, params);
+    return res.json(rows);
+}));
+// Group-scoring endpoint: replace the match's guest_players list with whatever
+// the host sends. Guests are non-account players whose scorecards are tracked
+// alongside the real players' but never affect ELO or matchmaking — pure
+// "one phone, four people" use case.
+//
+// Only a participant in the match can edit the guest list (so randos can't
+// add ghost players). On every save we OVERWRITE the array so the client can
+// just send the current state without diffing.
+//
+// Body shape:
+//   { guests: [
+//       { name: string, scores: number[], teebox_id?: string | null }
+//     ]
+//   }
+//
+// Each entry's `scores` array is parallel to the host's hole_scores — index 0
+// is the first hole played (front-9 vs back-9 already factored in by the
+// match's holes_subset).
+router.put('/:id/guests', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { guests } = req.body ?? {};
+    if (!Array.isArray(guests))
+        return res.status(400).json({ error: 'guests array required' });
+    // Permission: must be a player in the match.
+    const { rows: meRows } = await pool_1.default.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId]);
+    if (!meRows.length)
+        return res.status(403).json({ error: 'Not in this match' });
+    // Lightly validate each guest. We accept up to 7 guests (round of 8 max
+    // including the host); names get trimmed + truncated to 30 chars; scores
+    // are clamped to a sane stroke range so a typo doesn't break the UI.
+    const cleaned = guests.slice(0, 7).map((g) => ({
+        name: typeof g?.name === 'string' ? g.name.trim().slice(0, 30) : 'Guest',
+        scores: Array.isArray(g?.scores)
+            ? g.scores.map((s) => {
+                const n = Number(s);
+                return Number.isFinite(n) && n > 0 && n < 30 ? Math.round(n) : 0;
+            })
+            : [],
+        teebox_id: typeof g?.teebox_id === 'string' ? g.teebox_id : null,
+    })).filter((g) => g.name);
+    await pool_1.default.query(`UPDATE matches SET guest_players = $1::jsonb WHERE match_id = $2`, [JSON.stringify(cleaned), req.params.id]);
+    return res.json({ success: true, count: cleaned.length });
+}));
+// Cancel / delete a match — only allowed if no player has submitted scores yet (no ELO penalty)
+router.delete('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        // Must be a participant
+        const { rows: playerRows } = await client.query(`SELECT mp.user_id FROM match_players mp
+       WHERE mp.match_id = $1 AND mp.user_id = $2`, [req.params.id, req.userId]);
+        if (!playerRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Not in this match' });
+        }
+        // Reject if anyone has already submitted scores
+        const { rows: scoredRows } = await client.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND completed = true LIMIT 1`, [req.params.id]);
+        if (scoredRows.length) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: 'Scores have already been submitted — use Forfeit instead.' });
+        }
+        // DELETE cascades to match_players, rounds, match_invites, match_results, messages
+        await client.query(`DELETE FROM matches WHERE match_id = $1`, [req.params.id]);
+        await client.query('COMMIT');
+        return res.json({ success: true });
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}));
+exports.default = router;

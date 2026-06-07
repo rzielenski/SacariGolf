@@ -1,0 +1,118 @@
+"use strict";
+/**
+ * Advanced strokes-gained engine.
+ *
+ * Implements the Mark Broadie / PGA-Tour-style model: each shot's SG is the
+ * change in expected strokes-to-hole-out, minus the stroke just played.
+ *
+ *     SG_shot = ES(start_lie, start_dist) - ES(end_lie, end_dist) - 1
+ *
+ * Categorisation:
+ *   • Off-the-Tee   — shots from the tee on par 4/5 holes
+ *   • Approach      — shots from tee on par 3, OR fairway/rough/sand outside
+ *                     30 yards on par 4/5
+ *   • Around-Green  — shots from off the green within 30 yards
+ *   • Putting       — shots from the green
+ *
+ * Baseline tables come from publicly published PGA-Tour-average expected-strokes
+ * data. They're approximations — close enough for category-level comparisons,
+ * but not absolute fidelity. Easy to swap for a more precise table later.
+ *
+ * See https://shotscope.com/blog/practice-green/stats-and-data/understanding-strokes-gained/
+ * for a friendly explainer of the same model.
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.expectedStrokes = expectedStrokes;
+exports.sgForShot = sgForShot;
+exports.categorize = categorize;
+exports.aggregateSG = aggregateSG;
+/** PGA-Tour average expected strokes from each lie at given distance.
+ * Distances in yards (or feet for putts). Linear interpolation between rows.
+ * Sources: Broadie's published tables, Shotscope baselines.  */
+const ES_TEE = [
+    [100, 2.92], [150, 2.97], [200, 3.05], [250, 3.27], [300, 3.65], [400, 4.30], [500, 4.85], [600, 5.30],
+];
+const ES_FAIRWAY = [
+    [10, 2.18], [20, 2.40], [30, 2.52], [40, 2.60], [60, 2.70], [80, 2.80],
+    [100, 2.85], [120, 2.91], [140, 2.96], [160, 3.02], [180, 3.10], [200, 3.20],
+    [220, 3.30], [240, 3.40], [260, 3.50],
+];
+const ES_ROUGH = [
+    [10, 2.45], [20, 2.65], [30, 2.78], [40, 2.85], [60, 2.95], [80, 3.05],
+    [100, 3.15], [120, 3.20], [140, 3.27], [160, 3.35], [180, 3.45], [200, 3.55],
+    [220, 3.65], [240, 3.75], [260, 3.85],
+];
+const ES_BUNKER = [
+    [10, 2.60], [20, 2.85], [30, 2.92], [40, 3.00], [60, 3.15], [80, 3.25],
+    [100, 3.30], [150, 3.50], [200, 3.75],
+];
+const ES_RECOVERY = [
+    [50, 3.80], [100, 3.85], [150, 3.95], [200, 4.05], [250, 4.20],
+];
+/** Putting expected-strokes by distance in FEET (not yards). */
+const ES_GREEN_FT = [
+    [1, 1.001], [2, 1.009], [3, 1.053], [4, 1.147], [5, 1.265], [6, 1.385],
+    [7, 1.493], [8, 1.589], [10, 1.751], [15, 1.989], [20, 2.094],
+    [30, 2.273], [40, 2.392], [50, 2.476], [60, 2.546], [90, 2.788],
+];
+function lerp(table, x) {
+    if (x <= table[0][0])
+        return table[0][1];
+    if (x >= table[table.length - 1][0])
+        return table[table.length - 1][1];
+    for (let i = 0; i < table.length - 1; i++) {
+        const [x0, y0] = table[i];
+        const [x1, y1] = table[i + 1];
+        if (x >= x0 && x <= x1) {
+            const t = (x - x0) / (x1 - x0);
+            return y0 + t * (y1 - y0);
+        }
+    }
+    return table[table.length - 1][1];
+}
+/** Expected strokes from a given lie at a given distance to the hole. */
+function expectedStrokes(lie, distYds) {
+    if (distYds <= 0)
+        return 0; // holed out
+    switch (lie) {
+        case 'tee': return lerp(ES_TEE, distYds);
+        case 'fairway': return lerp(ES_FAIRWAY, distYds);
+        case 'fringe': return lerp(ES_FAIRWAY, distYds); // treat fringe as fairway
+        case 'rough': return lerp(ES_ROUGH, distYds);
+        case 'bunker': return lerp(ES_BUNKER, distYds);
+        case 'recovery': return lerp(ES_RECOVERY, distYds);
+        case 'green': return lerp(ES_GREEN_FT, distYds * 3); // yards → feet
+    }
+}
+/** Strokes-gained for a single shot. */
+function sgForShot(shot) {
+    const before = expectedStrokes(shot.start_lie, shot.start_dist_yds);
+    const after = shot.end_dist_yds <= 0 ? 0 : expectedStrokes(shot.end_lie, shot.end_dist_yds);
+    return before - after - 1;
+}
+/** Categorise a shot into the four standard SG buckets. */
+function categorize(shot) {
+    if (shot.start_lie === 'green')
+        return 'putting';
+    if (shot.is_tee_shot && shot.par >= 4)
+        return 'off_tee';
+    if (shot.start_dist_yds <= 30 && shot.start_lie !== 'tee')
+        return 'around_green';
+    return 'approach';
+}
+/** Sum SG by category over a list of shots. */
+function aggregateSG(shots) {
+    const out = {
+        off_tee: 0, approach: 0, around_green: 0, putting: 0, total: 0, shots_used: 0,
+    };
+    for (const s of shots) {
+        const sg = sgForShot(s);
+        if (!Number.isFinite(sg))
+            continue;
+        const cat = categorize(s);
+        out[cat] += sg;
+        out.total += sg;
+        out.shots_used += 1;
+    }
+    return out;
+}

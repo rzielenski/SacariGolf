@@ -7,6 +7,7 @@ import { sendEmail } from '../utils/email';
 import {
   estimateRatingSlope, looksPlausibleRating, validateTeebox, HoleInput,
 } from '../utils/courseEstimate';
+import { scanScorecard, ScorecardScanError } from '../utils/scorecardScan';
 
 const router = Router();
 
@@ -247,6 +248,75 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     estimated_teebox_ids: estimatedTeeboxIds,
     warnings: allWarnings,
   });
+}));
+
+/**
+ * Scorecard OCR. The in-app course builder posts a photo of a paper
+ * scorecard here; we relay it to Claude's vision API and return structured
+ * tee/hole data the builder drops straight into its form, so a player can add
+ * a course by snapping one photo instead of typing ~90 numbers.
+ *
+ * The image is NOT persisted — it's relayed to Anthropic and discarded; only
+ * the parsed numbers come back.
+ *
+ *   POST /courses/scan-scorecard
+ *     body: { imageBase64: string, mimeType: 'image/jpeg' | 'image/png' }
+ *   response: { courseName?, city?, state?, numHoles, teeboxes[], warnings[] }
+ */
+router.post('/scan-scorecard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { imageBase64, mimeType } = req.body ?? {};
+  if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+    return res.status(400).json({ error: 'imageBase64 required' });
+  }
+  const mediaType = mimeType === 'image/png' ? 'image/png'
+    : mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'image/jpeg'
+    : null;
+  if (!mediaType) return res.status(400).json({ error: 'Only PNG and JPEG images are allowed' });
+
+  // Size cap (5 MB decoded). express.json is capped at 8mb, so a base64
+  // payload above ~5 MB binary risks bouncing off the body-parser limit
+  // before it even reaches here.
+  const approxBytes = Math.floor((imageBase64.length * 3) / 4);
+  if (approxBytes > 5 * 1024 * 1024) {
+    return res.status(413).json({ error: 'Image must be 5 MB or smaller' });
+  }
+
+  // Per-user daily cap. Every scan that reaches the vision API costs money, so
+  // we gate on billed attempts in the trailing 24h (counted from the
+  // scorecard_scans log below), NOT on courses actually added. This is the
+  // hard stop against a bored or malicious user spamming the endpoint to run
+  // up the API bill. The Anthropic Console spend limit is the global backstop.
+  const SCAN_DAILY_CAP = 20;
+  const { rows: capRows } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM scorecard_scans
+      WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
+    [req.userId],
+  );
+  if ((capRows[0]?.n ?? 0) >= SCAN_DAILY_CAP) {
+    return res.status(429).json({
+      error: `You've reached the daily limit of ${SCAN_DAILY_CAP} scorecard scans. Try again tomorrow, or enter the course manually.`,
+    });
+  }
+
+  // Log a billed attempt so it counts against the cap. We only count outcomes
+  // where Anthropic actually returned a 200 and generated tokens (success, or
+  // a 422 "couldn't read / refused" — both are billed). Pre-flight failures
+  // (no key → 503) and transport/API errors (→ 502, not billed by Anthropic)
+  // don't consume the user's quota.
+  const logScan = () =>
+    pool.query(`INSERT INTO scorecard_scans (user_id) VALUES ($1)`, [req.userId]).catch(() => {});
+
+  try {
+    const result = await scanScorecard(imageBase64, mediaType);
+    await logScan();
+    return res.json(result);
+  } catch (e) {
+    if (e instanceof ScorecardScanError) {
+      if (e.status === 422) await logScan();
+      return res.status(e.status).json({ error: e.message });
+    }
+    throw e;
+  }
 }));
 
 router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {
