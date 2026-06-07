@@ -108,22 +108,32 @@ export function fmtHandicap(
  * 18-hole teebox should compare against ~36, not 72, otherwise a 41
  * (over par for 9) reads as "−31" for the day.
  *
- *   parForHolesPlayed(72,  9) → 36
- *   parForHolesPlayed(72, 18) → 72
- *   parForHolesPlayed(70,  9) → 35   (rounded; assumes even nines)
+ *   parForHolesPlayed(72,  9, 18) → 36
+ *   parForHolesPlayed(72, 18, 18) → 72
+ *   parForHolesPlayed(70,  9, 18) → 35   (rounded; assumes even nines)
+ *   parForHolesPlayed(36,  9,  9) → 36   (9-hole teebox played to completion)
+ *
+ * `teeboxNumHoles` is REQUIRED. Earlier revisions defaulted it to 18,
+ * which produced wildly wrong totals on 9-hole teeboxes (par 36, num_holes
+ * 9): the helper computed 36 × 9 / 18 = 18 and a 39 read as +21. Forcing
+ * callers to pass the teebox's actual `num_holes` (from the API response)
+ * stops that class of bug at compile time. Pass `null`/`undefined` only
+ * when the field genuinely isn't available; the helper then returns the
+ * raw teeboxPar (no pro-rate possible).
  *
  * Returns null when teeboxPar is null. Falls back to teeboxPar when
- * holesPlayed is null/unknown so legacy callsites keep their old behaviour
- * (and 18-hole rounds, the common case, are unaffected).
+ * holesPlayed or teeboxNumHoles is missing so the meta line still has a
+ * sensible number to render.
  */
 export function parForHolesPlayed(
   teeboxPar: number | null | undefined,
   holesPlayed: number | null | undefined,
-  teeboxNumHoles: number = 18,
+  teeboxNumHoles: number | null | undefined,
 ): number | null {
   if (teeboxPar == null) return null;
-  if (holesPlayed == null || holesPlayed <= 0) return teeboxPar;
-  if (holesPlayed >= teeboxNumHoles)           return teeboxPar;
+  if (holesPlayed == null || holesPlayed <= 0)         return teeboxPar;
+  if (teeboxNumHoles == null || teeboxNumHoles <= 0)   return teeboxPar;
+  if (holesPlayed >= teeboxNumHoles)                   return teeboxPar;
   return Math.round(teeboxPar * (holesPlayed / teeboxNumHoles));
 }
 
@@ -131,13 +141,16 @@ export function parForHolesPlayed(
  * Total score relative to the par of the holes actually played. Negative
  * = under par, 0 = even, positive = over. Use this everywhere a round's
  * "to par" is displayed; never compute `total_score - teebox_par` raw,
- * because that breaks every 9-hole round of an 18-hole teebox.
+ * because that breaks every 9-hole round of an 18-hole teebox AND every
+ * 18-hole-style round on a 9-hole teebox (see parForHolesPlayed docstring).
+ *
+ * `teeboxNumHoles` is REQUIRED for the same reason as parForHolesPlayed.
  */
 export function toParForHolesPlayed(
   totalScore: number | null | undefined,
   teeboxPar: number | null | undefined,
   holesPlayed: number | null | undefined,
-  teeboxNumHoles: number = 18,
+  teeboxNumHoles: number | null | undefined,
 ): number | null {
   if (totalScore == null) return null;
   const par = parForHolesPlayed(teeboxPar, holesPlayed, teeboxNumHoles);

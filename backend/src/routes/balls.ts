@@ -45,28 +45,79 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 
 router.post('/log', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const kind = (req.body ?? {}).kind;
+  const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+    ? req.body.clientId.slice(0, 64) : null;
   if (kind !== 'found' && kind !== 'lost') {
     return res.status(400).json({ error: "kind must be 'found' or 'lost'" });
   }
-  await pool.query(
-    `INSERT INTO ball_log (user_id, kind) VALUES ($1, $2)`,
-    [req.userId, kind]
-  );
+  // ── Idempotent path: client-supplied id collapses retries to a single row.
+  // Partial unique index covers only rows with a non-null client_id, so the
+  // ON CONFLICT specifies the same WHERE predicate. Legacy callers (no
+  // clientId) keep the original "insert a new row" behaviour.
+  if (clientId) {
+    await pool.query(
+      `INSERT INTO ball_log (user_id, kind, client_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING`,
+      [req.userId, kind, clientId]
+    );
+  } else {
+    await pool.query(
+      `INSERT INTO ball_log (user_id, kind) VALUES ($1, $2)`,
+      [req.userId, kind]
+    );
+  }
   return res.json(await totalsFor(req.userId!));
 }));
 
 router.post('/undo', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  // Remove the single most recent entry — the natural "oops, mis-tapped" undo.
-  await pool.query(
-    `DELETE FROM ball_log
-      WHERE log_id = (
-        SELECT log_id FROM ball_log
-         WHERE user_id = $1
-         ORDER BY created_at DESC
-         LIMIT 1
-      )`,
-    [req.userId]
-  );
+  const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+    ? req.body.clientId.slice(0, 64) : null;
+
+  // ── Idempotent retries: if this clientId has already been processed,
+  // short-circuit and just return the current totals. Without this, a
+  // retried undo deletes a *different* row each time it lands.
+  if (clientId) {
+    const { rows: prev } = await pool.query(
+      `SELECT 1 FROM ball_log_undo WHERE user_id = $1 AND client_id = $2`,
+      [req.userId, clientId]
+    );
+    if (prev.length > 0) {
+      return res.json(await totalsFor(req.userId!));
+    }
+  }
+
+  // Delete most recent entry + record the undo, transactional so they
+  // can't drift apart.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: deleted } = await client.query(
+      `DELETE FROM ball_log
+        WHERE log_id = (
+          SELECT log_id FROM ball_log
+           WHERE user_id = $1
+           ORDER BY created_at DESC
+           LIMIT 1
+        )
+       RETURNING log_id`,
+      [req.userId]
+    );
+    if (clientId) {
+      await client.query(
+        `INSERT INTO ball_log_undo (user_id, client_id, deleted_log_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, client_id) DO NOTHING`,
+        [req.userId, clientId, deleted[0]?.log_id ?? null]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
   return res.json(await totalsFor(req.userId!));
 }));
 

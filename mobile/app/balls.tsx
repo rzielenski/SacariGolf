@@ -1,9 +1,32 @@
-import React, { useCallback, useEffect, useState } from 'react';
+/**
+ * Lost / found ball counter — optimistic UI with a persistent retry queue.
+ *
+ * Old version waited for every /balls/log round-trip before updating the
+ * UI, so a flaky network made the counter feel sticky or just silently
+ * dropped taps when offline. The fix is the standard optimistic pattern:
+ *
+ *   1. Tap updates the displayed totals INSTANTLY via a queued action.
+ *   2. The action is persisted to AsyncStorage so it survives a kill or a
+ *      no-service stretch.
+ *   3. A background drainer flushes the queue serially, retrying on
+ *      failure. Each action carries a clientId; the server dedupes via
+ *      the partial-unique index on ball_log + the ball_log_undo ledger
+ *      (see backend/src/routes/balls.ts) so a retry can't double-count.
+ *   4. When the queue drains, we reconcile by re-reading server totals;
+ *      the server wins any disagreement (e.g. logs from another device).
+ *
+ * Displayed totals = serverTotals + queue effects. Undo "pops" the most
+ * recent kind off a virtual stack seeded by serverRecent so a fresh
+ * Undo (no queued logs yet) still removes the right counter.
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
@@ -12,49 +35,176 @@ import { useCensor } from '../lib/censor';
 
 type Totals = { found: number; lost: number; net: number };
 type LeaderRow = Awaited<ReturnType<typeof api.balls.leaderboard>>[number];
+type RecentEntry = { kind: 'found' | 'lost' };
+type Queued = { id: string; op: 'log' | 'undo'; kind?: 'found' | 'lost' };
+
+const QUEUE_KEY = 'sacari.balls.queue.v1';
+const DRAIN_INTERVAL_MS = 15_000;     // periodic retry when items remain queued
+const FLUSH_DEBOUNCE_MS = 200;        // batch fast taps into one drain pass
+
+function genClientId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Project the queue onto the server's current state. We seed a "recent
+ * kinds" stack from the server's recent log so an Undo issued before any
+ * local Log still knows what to subtract. Each queue item then either
+ * pushes (log) or pops (undo) the stack. Output is what the hero card
+ * should display.
+ */
+function applyQueue(server: Totals, serverRecent: RecentEntry[], queue: Queued[]): Totals {
+  let found = server.found;
+  let lost  = server.lost;
+  // serverRecent is newest-first per the API; reverse so push/pop walk
+  // the natural chronological order.
+  const stack: Array<'found' | 'lost'> = [...serverRecent].reverse().map((r) => r.kind);
+  for (const a of queue) {
+    if (a.op === 'log' && (a.kind === 'found' || a.kind === 'lost')) {
+      stack.push(a.kind);
+      if (a.kind === 'found') found++;
+      else lost++;
+    } else if (a.op === 'undo') {
+      const k = stack.pop();
+      if (k === 'found') found = Math.max(0, found - 1);
+      else if (k === 'lost') lost = Math.max(0, lost - 1);
+      // Empty stack: server reconcile on drain will settle the truth.
+    }
+  }
+  return { found, lost, net: found - lost };
+}
+
+async function readQueue(): Promise<Queued[]> {
+  try {
+    const raw = await AsyncStorage.getItem(QUEUE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+async function writeQueue(q: Queued[]) {
+  try { await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch { /* non-fatal */ }
+}
 
 export default function BallsScreen() {
   const { user } = useAuth();
   const censor = useCensor();
-  const [totals, setTotals] = useState<Totals>({ found: 0, lost: 0, net: 0 });
+  const [server, setServer] = useState<Totals>({ found: 0, lost: 0, net: 0 });
+  const [serverRecent, setServerRecent] = useState<RecentEntry[]>([]);
+  const [queue, setQueue] = useState<Queued[]>([]);
   const [board, setBoard] = useState<LeaderRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [scope, setScope] = useState<'global' | 'friends'>('global');
 
+  // Refs so the drainer (running outside React's render cycle) reads the
+  // latest queue without relying on re-renders happening in between awaits.
+  const queueRef = useRef<Queued[]>([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  const draining = useRef(false);
+  const drainDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const totals = applyQueue(server, serverRecent, queue);
+
+  // ── Server loaders ────────────────────────────────────────────────────
   const loadBoard = useCallback(async () => {
-    try {
-      setBoard(await api.balls.leaderboard(scope === 'friends'));
-    } catch { /* silent */ }
+    try { setBoard(await api.balls.leaderboard(scope === 'friends')); } catch { /* silent */ }
   }, [scope]);
-
-  const load = useCallback(async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
+  const loadServer = useCallback(async () => {
     try {
-      const [me] = await Promise.all([api.balls.me(), loadBoard()]);
-      setTotals({ found: me.found, lost: me.lost, net: me.net });
-    } catch { /* silent */ } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [loadBoard]);
+      const me = await api.balls.me();
+      setServer({ found: me.found, lost: me.lost, net: me.net });
+      setServerRecent((me.recent ?? []).map((r) => ({ kind: r.kind })));
+    } catch { /* silent — keep last known */ }
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // ── Queue persistence + drainer ───────────────────────────────────────
+  const persist = useCallback((q: Queued[]) => { writeQueue(q); }, []);
 
-  // Log / undo: update the hero totals from the server response immediately,
-  // then refresh the leaderboard in the background so the rank reflects it.
-  const act = useCallback(async (fn: () => Promise<Totals>) => {
-    if (busy) return;
-    setBusy(true);
+  const drainQueue = useCallback(async () => {
+    if (draining.current) return;
+    draining.current = true;
     try {
-      const next = await fn();
-      setTotals(next);
+      while (queueRef.current.length > 0) {
+        const head = queueRef.current[0];
+        try {
+          if (head.op === 'log' && head.kind) {
+            await api.balls.log(head.kind, head.id);
+          } else if (head.op === 'undo') {
+            await api.balls.undo(head.id);
+          }
+          // Dequeue by id so we don't trip over concurrently-enqueued items.
+          const next = queueRef.current.filter((q) => q.id !== head.id);
+          queueRef.current = next;
+          setQueue(next);
+          persist(next);
+        } catch {
+          // Network / 5xx — keep the item in the queue and bail; the next
+          // tap or the periodic timer will retry.
+          return;
+        }
+      }
+      // Queue empty: server is now the source of truth.
+      await loadServer();
       loadBoard();
-    } catch { /* silent */ } finally {
-      setBusy(false);
+    } finally {
+      draining.current = false;
     }
-  }, [busy, loadBoard]);
+  }, [loadServer, loadBoard, persist]);
+
+  // Coalesce fast taps so a flurry of +/- in 200ms triggers ONE drain pass.
+  const scheduleDrain = useCallback(() => {
+    if (drainDebounceTimer.current) clearTimeout(drainDebounceTimer.current);
+    drainDebounceTimer.current = setTimeout(() => { drainQueue(); }, FLUSH_DEBOUNCE_MS);
+  }, [drainQueue]);
+
+  // Initial mount: restore queue from AsyncStorage, load server, kick drainer.
+  useEffect(() => {
+    (async () => {
+      const restored = await readQueue();
+      if (restored.length > 0) {
+        setQueue(restored);
+        queueRef.current = restored;
+      }
+      await Promise.all([loadServer(), loadBoard()]);
+      setLoading(false);
+      // If we restored anything, flush it now.
+      if (restored.length > 0) drainQueue();
+    })();
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Periodic retry: if anything is stuck in the queue, try again every 15s.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (queueRef.current.length > 0) drainQueue();
+    }, DRAIN_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [drainQueue]);
+
+  // ── Tap handlers ──────────────────────────────────────────────────────
+  const enqueue = useCallback((op: 'log' | 'undo', kind?: 'found' | 'lost') => {
+    const item: Queued = { id: genClientId(), op, ...(kind ? { kind } : {}) };
+    setQueue((prev) => {
+      const next = [...prev, item];
+      queueRef.current = next;
+      persist(next);
+      return next;
+    });
+    scheduleDrain();
+  }, [persist, scheduleDrain]);
+
+  const onLog  = (kind: 'found' | 'lost') => enqueue('log', kind);
+  const onUndo = () => enqueue('undo');
+
+  // Pull-to-refresh: re-read server + leaderboard. Doesn't touch the queue.
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([loadServer(), loadBoard()]);
+    setRefreshing(false);
+  }, [loadServer, loadBoard]);
+
+  // When the leaderboard scope flips, just refetch the board.
+  useEffect(() => { loadBoard(); }, [scope, loadBoard]);
+
+  const queuedCount = queue.length;
 
   return (
     <View style={styles.container}>
@@ -76,10 +226,10 @@ export default function BallsScreen() {
           data={board}
           keyExtractor={(r) => r.user_id}
           contentContainerStyle={styles.listContent}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.gold} />}
           ListHeaderComponent={
             <View>
-              {/* Counter hero */}
+              {/* Counter hero. Buttons are NEVER disabled — they just enqueue. */}
               <View style={styles.hero}>
                 <Text style={styles.heroLabel}>YOUR BALL COUNT</Text>
                 <Text style={styles.heroNet}>{totals.net > 0 ? `+${totals.net}` : totals.net}</Text>
@@ -98,34 +248,39 @@ export default function BallsScreen() {
                 <View style={styles.logRow}>
                   <TouchableOpacity
                     style={[styles.logBtn, { borderColor: C.green, backgroundColor: C.green + '1f' }]}
-                    onPress={() => act(() => api.balls.log('found'))}
-                    disabled={busy}
+                    onPress={() => onLog('found')}
                     activeOpacity={0.7}
                   >
                     <Text style={[styles.logBtnText, { color: C.green }]}>＋ Found a ball</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.logBtn, { borderColor: C.red, backgroundColor: C.red + '1f' }]}
-                    onPress={() => act(() => api.balls.log('lost'))}
-                    disabled={busy}
+                    onPress={() => onLog('lost')}
                     activeOpacity={0.7}
                   >
                     <Text style={[styles.logBtnText, { color: C.red }]}>－ Lost a ball</Text>
                   </TouchableOpacity>
                 </View>
 
-                <TouchableOpacity onPress={() => act(() => api.balls.undo())} disabled={busy} hitSlop={8}>
+                <TouchableOpacity onPress={onUndo} hitSlop={8}>
                   <Text style={styles.undoText}>Undo last</Text>
                 </TouchableOpacity>
+
+                {/* Subtle "n queued / not yet saved" indicator. Reassures
+                    the user the tap landed even when offline. */}
+                {queuedCount > 0 && (
+                  <Text style={styles.queuedText}>
+                    Syncing… {queuedCount} pending
+                  </Text>
+                )}
               </View>
 
-              {/* Scope toggle */}
               <View style={styles.scopeRow}>
                 {(['global', 'friends'] as const).map((s) => (
                   <TouchableOpacity
                     key={s}
                     style={[styles.scopeBtn, scope === s && styles.scopeBtnActive]}
-                    onPress={() => { setScope(s); setLoading(true); }}
+                    onPress={() => setScope(s)}
                   >
                     <Text style={[styles.scopeBtnText, scope === s && styles.scopeBtnTextActive]}>
                       {s === 'global' ? 'Global' : 'Friends'}
@@ -217,6 +372,7 @@ const styles = StyleSheet.create({
   },
   logBtnText: { fontWeight: '900', fontSize: 14 },
   undoText: { color: C.textMuted, fontSize: 12, fontWeight: '700', marginTop: 12, textDecorationLine: 'underline' },
+  queuedText: { color: C.gold, fontSize: 11, fontWeight: '700', marginTop: 8, letterSpacing: 0.5 },
 
   scopeRow: { flexDirection: 'row', gap: 8, paddingBottom: 10 },
   scopeBtn: {

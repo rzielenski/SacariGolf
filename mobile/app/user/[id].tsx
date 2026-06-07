@@ -427,8 +427,11 @@ export default function UserProfileScreen() {
       {profile.best_round && (() => {
         const br = profile.best_round;
         const played = br.hole_scores?.length ?? br.num_holes ?? null;
-        const effPar = parForHolesPlayed(br.teebox_par, played);
-        const toPar  = toParForHolesPlayed(br.total_score, br.teebox_par, played);
+        // `br.num_holes` is the teebox's num_holes from the SQL (t.num_holes),
+        // not the match's. Passing it explicitly is required since the helper
+        // no longer defaults to 18 — see lib/golfMath.ts for why.
+        const effPar = parForHolesPlayed(br.teebox_par, played, br.num_holes);
+        const toPar  = toParForHolesPlayed(br.total_score, br.teebox_par, played, br.num_holes);
         return (
           <>
             <OrnamentTitle title="Best Round" />
@@ -465,9 +468,11 @@ export default function UserProfileScreen() {
       ) : (
         profile.recent_rounds?.map((r: any) => {
           // Pro-rate par to the holes actually played (front 9 of an 18-hole
-          // teebox compares against ~36, not the full 72).
+          // teebox compares against ~36, not the full 72). `r.num_holes`
+          // is the teebox's full num_holes (from t.num_holes in the SQL),
+          // required so 9-hole teeboxes don't get judged against 18.
           const played = r.hole_scores?.length ?? r.num_holes ?? null;
-          const toPar  = toParForHolesPlayed(r.total_score, r.teebox_par, played);
+          const toPar  = toParForHolesPlayed(r.total_score, r.teebox_par, played, r.num_holes);
           return (
             <TouchableOpacity
               key={r.round_id}

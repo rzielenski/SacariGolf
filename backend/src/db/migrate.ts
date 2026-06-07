@@ -1191,6 +1191,37 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON courses(created_by_user_id) WHERE created_by_user_id IS NOT NULL;
     `,
   },
+  {
+    // Idempotency for ball_log + ball_log undo. The mobile ball counter
+    // moved to an optimistic UI: taps update the local state instantly and
+    // the API call rides a persistent retry queue, which means the same
+    // request can fire twice over a flaky network. Without these, a retry
+    // would double-log a found ball or double-delete via undo.
+    //
+    //   ball_log.client_id (nullable)
+    //     • Partial unique index so legacy NULL rows coexist.
+    //     • POST /balls/log uses ON CONFLICT (user_id, client_id) DO NOTHING
+    //       on rows that carry a clientId.
+    //
+    //   ball_log_undo (new table)
+    //     • Stores (user_id, client_id, deleted_log_id). POST /balls/undo
+    //       checks the table first and short-circuits on a repeat clientId,
+    //       returning the cached totals instead of deleting again.
+    name: 'ball_log.client_id_idempotency',
+    sql: `
+      ALTER TABLE ball_log
+        ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS ball_log_user_client_uniq
+        ON ball_log(user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS ball_log_undo (
+        user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        client_id      TEXT NOT NULL,
+        deleted_log_id UUID,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, client_id)
+      );
+    `,
+  },
 ];
 
 export async function runMigrations() {

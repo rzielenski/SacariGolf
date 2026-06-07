@@ -750,10 +750,12 @@ export default function ProfileScreen() {
 
           {(() => {
             // Pro-rate par + to-par to the holes actually played (a 9-hole
-            // round of an 18-hole teebox compares against ~36, not 72).
+            // round of an 18-hole teebox compares against ~36, not 72). The
+            // 3rd arg is the teebox's num_holes from the API (t.num_holes);
+            // omitting it used to default to 18 and broke 9-hole teeboxes.
             const played = bestRound.hole_scores?.length ?? bestRound.num_holes ?? null;
-            const effPar = parForHolesPlayed(bestRound.teebox_par, played);
-            const toPar  = toParForHolesPlayed(bestRound.total_score, bestRound.teebox_par, played);
+            const effPar = parForHolesPlayed(bestRound.teebox_par, played, bestRound.num_holes);
+            const toPar  = toParForHolesPlayed(bestRound.total_score, bestRound.teebox_par, played, bestRound.num_holes);
             return (
               <TouchableOpacity
                 style={[styles.roundCard, { borderColor: C.gold }]}
@@ -789,9 +791,11 @@ export default function ProfileScreen() {
 
           {recentRounds.map((r: any) => {
             // Pro-rate par to the holes actually played; never compare a 9-hole
-            // round's total directly to the 18-hole teebox par.
+            // round's total directly to the 18-hole teebox par. `r.num_holes`
+            // is the teebox's num_holes (t.num_holes) and is required since
+            // the helper no longer defaults to 18.
             const played = r.hole_scores?.length ?? r.num_holes ?? null;
-            const toPar  = toParForHolesPlayed(r.total_score, r.teebox_par, played);
+            const toPar  = toParForHolesPlayed(r.total_score, r.teebox_par, played, r.num_holes);
             return (
               <TouchableOpacity
                 key={r.round_id}

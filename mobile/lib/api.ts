@@ -476,12 +476,16 @@ export const api = {
       found: number; lost: number; net: number;
       recent: { log_id: string; kind: 'found' | 'lost'; created_at: string }[];
     }>('GET', '/balls/me'),
-    /** Log one found or lost ball. Returns the updated totals. */
-    log: (kind: 'found' | 'lost') =>
-      request<{ found: number; lost: number; net: number }>('POST', '/balls/log', { kind }),
-    /** Undo the most recent log entry. Returns the updated totals. */
-    undo: () =>
-      request<{ found: number; lost: number; net: number }>('POST', '/balls/undo'),
+    /** Log one found or lost ball. `clientId` makes the call idempotent so
+     *  the optimistic-UI retry queue can safely re-fire on flaky networks
+     *  without double-counting. Returns the updated totals. */
+    log: (kind: 'found' | 'lost', clientId?: string) =>
+      request<{ found: number; lost: number; net: number }>('POST', '/balls/log', { kind, clientId }),
+    /** Undo the most recent log entry. `clientId` makes the call idempotent
+     *  via a server-side undo-ledger (otherwise a retried undo deletes a
+     *  *different* row each time it lands). Returns the updated totals. */
+    undo: (clientId?: string) =>
+      request<{ found: number; lost: number; net: number }>('POST', '/balls/undo', { clientId }),
     /** Ball-count leaderboard, ranked by net (found − lost). `friendsOnly`
      *  scopes to self + accepted friends. */
     leaderboard: (friendsOnly = false) =>
