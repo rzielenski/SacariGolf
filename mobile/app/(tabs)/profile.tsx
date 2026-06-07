@@ -655,6 +655,18 @@ export default function ProfileScreen() {
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
+      {/* Invite Friends — shares a referral link. Each signup that uses
+          the code grants this user a Lucky Round perk. Stats + share UI
+          live on the /invite screen. */}
+      <TouchableOpacity
+        style={styles.inviteBtn}
+        onPress={() => router.push('/invite' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.inviteBtnLabel}>✦ INVITE FRIENDS · EARN PERKS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
       {/* Personal theme song — plays during the match-found VS animation
           when no team theme is set. Solo players use this. */}
       <TouchableOpacity
@@ -1333,6 +1345,14 @@ const styles = StyleSheet.create({
     marginTop: 0, marginBottom: 16,
   },
   premiumBtnLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 0.8 },
+
+  inviteBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.gold + '88',
+    paddingHorizontal: 14, paddingVertical: 12, borderRadius: 6,
+    marginBottom: 16,
+  },
+  inviteBtnLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 0.8 },
 
   themeBtn: {
     flexDirection: 'row', alignItems: 'center',

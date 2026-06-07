@@ -358,6 +358,43 @@ const SUPPORT_HTML = `
 <h2>Report a problem</h2>
 <p>Use the report option in the app on any post, message, or profile, or email us directly.</p>`;
 
+/**
+ * Public referral landing. Tapping a /invite/<code> link from a current
+ * user lands here. We resolve the code → inviter username, render the
+ * code + an App Store button, and link-preview OG tags carry the
+ * inviter's name so iMessage / SMS / Slack show "Richard invited you
+ * to Sacari Golf" instead of a generic page title.
+ *
+ * Unknown / malformed codes get a 404 so a typo doesn't render a
+ * misleading "A friend invited you" landing.
+ */
+app.get('/invite/:code', async (req, res) => {
+  const code = String(req.params.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
+  if (!code) {
+    res.status(404);
+    return res.send(R.renderNotFound('invite link'));
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT username FROM users WHERE referral_code = $1 LIMIT 1`,
+      [code]
+    );
+    if (!rows.length) {
+      res.status(404);
+      return res.send(R.renderNotFound('invite link'));
+    }
+    res.send(R.renderInvite({
+      inviter: rows[0].username,
+      code,
+      appStoreUrl: APP_STORE_URL,
+      siteUrl: SITE_URL,
+    }));
+  } catch (e) {
+    res.status(500);
+    return res.send(R.renderNotFound('invite link'));
+  }
+});
+
 app.get('/privacy', (_req, res) => res.send(R.renderStatic({
   title: 'Privacy Policy', heading: 'Privacy Policy',
   description: 'How Sacari Golf collects and uses your data.', html: PRIVACY_HTML,

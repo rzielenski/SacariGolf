@@ -617,8 +617,98 @@ function renderCoursePins({ course, holes }) {
   return page({ title: `Place pins · ${course.course_name}. Sacari Golf`, description: 'Add crowd-sourced pin locations on Sacari Golf.', active: 'courses', authed: true, body });
 }
 
+// ----- Invite landing -------------------------------------------------------
+/**
+ * Public referral landing. Tapping a /invite/<code> link sent by an existing
+ * user lands here. We render the inviter's name + the code prominently with
+ * tap-to-copy + an App Store button, so the recipient can install the app,
+ * sign up, and paste the code in the "Referral code (optional)" field.
+ *
+ * OG tags carry the inviter's name so the link preview in iMessage / SMS /
+ * Slack reads "Richard invited you to Sacari Golf" instead of a generic title.
+ */
+function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
+  const safeCode = esc(code);
+  const safeName = esc(inviter || 'A friend');
+  const shareUrl = siteUrl ? `${siteUrl}/invite/${safeCode}` : '';
+  const body = `<style>
+    .invite-card { text-align: center; max-width: 540px; margin: 32px auto; }
+    .invite-code-box {
+      background: rgba(212, 169, 63, 0.07);
+      border: 2px solid var(--gold, #d4a93f);
+      border-radius: 12px;
+      padding: 26px 16px 22px;
+      margin: 28px auto 22px;
+      max-width: 360px;
+    }
+    .invite-code-label { color: var(--text-muted, #999); font-size: 11px; font-weight: 800; letter-spacing: 2px; }
+    .invite-code {
+      font-family: serif;
+      color: var(--gold, #d4a93f);
+      font-size: 42px;
+      font-weight: 900;
+      letter-spacing: 6px;
+      margin-top: 6px;
+    }
+    .invite-copy-btn {
+      margin-top: 14px;
+      background: var(--gold, #d4a93f);
+      color: var(--bg, #0a0a0a);
+      border: none;
+      border-radius: 8px;
+      padding: 10px 22px;
+      font-weight: 900;
+      font-size: 13px;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+    }
+    .invite-fineprint { font-size: 13px; color: var(--text-muted, #999); margin-top: 18px; }
+  </style>
+  <section class="card landing invite-card">
+    <h1 class="hero-small">${safeName} invited you to Sacari Golf</h1>
+    <p class="lead">Ranked rounds, ELO ladder, satellite shot-tracking. Tap below to install, then enter the code on the sign-up screen.</p>
+
+    <div class="invite-code-box" data-code="${safeCode}">
+      <div class="invite-code-label">YOUR INVITE CODE</div>
+      <div class="invite-code">${safeCode}</div>
+      <button type="button" class="invite-copy-btn" id="invite-copy">Tap to copy</button>
+    </div>
+
+    ${appStoreUrl ? `<a class="cta" href="${esc(appStoreUrl)}">Download on the App Store</a>` : ''}
+    <p class="lead invite-fineprint">No account yet? Install Sacari, open Sign Up, paste the code in the "Referral code (optional)" field. ${safeName} earns a Lucky Round perk in their next ranked match.</p>
+  </section>
+  <script>
+    (function(){
+      var btn = document.getElementById('invite-copy');
+      var box = btn && btn.closest('.invite-code-box');
+      if (!btn || !box) return;
+      btn.addEventListener('click', function(){
+        var code = box.getAttribute('data-code') || '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(code).then(function(){
+            btn.textContent = 'Copied · ' + code;
+            setTimeout(function(){ btn.textContent = 'Tap to copy'; }, 2200);
+          }).catch(function(){
+            btn.textContent = code;
+          });
+        } else {
+          btn.textContent = code;
+        }
+      });
+    })();
+  </script>`;
+  return page({
+    title: `${safeName} invited you. Sacari Golf`,
+    description: `Join Sacari Golf with invite code ${safeCode}. ${safeName} earns a Lucky Round perk when you sign up.`,
+    ogUrl: shareUrl,
+    active: '',
+    body,
+  });
+}
+
 module.exports = {
   renderHome, renderLeaderboard, renderCoursesIndex, renderCourse,
   renderProfile, renderStatic, renderNotFound, esc,
   renderLogin, renderDashboard, renderClubs, renderCoursePins,
+  renderInvite,
 };

@@ -1414,6 +1414,60 @@ router.get('/me/perks', requireAuth, wrap(async (req: AuthRequest, res: Response
   return res.json(rows);
 }));
 
+/**
+ * Referral dashboard: the caller's share code, the share URL the Invite
+ * screen displays / copies, and the running tally of who they've referred
+ * and how many Lucky Rounds they've earned for it.
+ *
+ *   GET /users/me/referral
+ *   → { code, share_url, referred_count, perks_earned }
+ *
+ * `referral_code` is populated on every row (signup-time generator for
+ * new accounts, migration backfill for old ones), so this endpoint never
+ * returns a missing code. The share URL points at the web landing page —
+ * see web/server.js for /invite/<code>.
+ */
+router.get('/me/referral', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: codeRows } = await pool.query(
+    `SELECT referral_code FROM users WHERE user_id = $1`,
+    [req.userId]
+  );
+  const code = codeRows[0]?.referral_code as string | null | undefined;
+  if (!code) {
+    // Backfill missed this row somehow — generate one now so the screen
+    // still works. Idempotent: UPDATE only if still null.
+    const { rows: gen } = await pool.query(
+      `UPDATE users
+          SET referral_code = upper(substring(
+                translate(encode(gen_random_bytes(8), 'base64'),
+                          '+/=abcdefghijklmnopqrstuvwxyz', ''),
+                1, 7))
+        WHERE user_id = $1 AND referral_code IS NULL
+       RETURNING referral_code`,
+      [req.userId]
+    );
+    if (gen[0]?.referral_code) (codeRows[0] ??= {}).referral_code = gen[0].referral_code;
+  }
+  const finalCode = codeRows[0]?.referral_code as string;
+
+  const { rows: stats } = await pool.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM users
+         WHERE referred_by_user_id = $1) AS referred_count,
+       (SELECT COUNT(*)::int FROM user_perks
+         WHERE user_id = $1 AND earned_reason = 'referral') AS perks_earned`,
+    [req.userId]
+  );
+
+  const siteUrl = process.env.SITE_URL || 'https://sacarigolf.com';
+  return res.json({
+    code: finalCode,
+    share_url: `${siteUrl}/invite/${finalCode}`,
+    referred_count: stats[0]?.referred_count ?? 0,
+    perks_earned:   stats[0]?.perks_earned   ?? 0,
+  });
+}));
+
 router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const friendsOnly = req.query.friends === '1' || req.query.friends === 'true';
   // mode: 'all' (overall ELO, default) or a match type (solo|duo|squad|ffa).

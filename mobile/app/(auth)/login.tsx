@@ -16,11 +16,17 @@ export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  // Optional invite code — pre-populated by tapping a /invite/<code> link
+  // on the website would be ideal, but for the MVP the user types it in
+  // by hand. Stored uppercased and stripped to [A-Z0-9] so paste-from-
+  // marketing-copy ("Code: abc-123") still resolves.
+  const [referral, setReferral] = useState('');
   const [step, setStep] = useState<'email' | 'password' | 'newuser'>('email');
   const [loading, setLoading] = useState(false);
   const fadeAnim = useRef(new Animated.Value(1)).current;
   const passwordRef = useRef<TextInput>(null);
   const nameRef = useRef<TextInput>(null);
+  const referralRef = useRef<TextInput>(null);
 
   const fade = (cb: () => void) => {
     Keyboard.dismiss();
@@ -83,7 +89,12 @@ export default function LoginScreen() {
           setLoading(false);
           return;
         }
-        await register(username, email.trim().toLowerCase(), password);
+        await register(
+          username,
+          email.trim().toLowerCase(),
+          password,
+          referral.trim().toUpperCase() || undefined,
+        );
         router.replace('/(tabs)/');
       } catch (err: any) {
         Alert.alert('Error', err.message);
@@ -169,9 +180,28 @@ export default function LoginScreen() {
               placeholder="Choose a username (e.g. SwingKing99)"
               placeholderTextColor={C.textMuted}
               autoCapitalize="none"
+              returnKeyType="next"
+              onSubmitEditing={() => referralRef.current?.focus()}
+              maxLength={20}
+            />
+          )}
+
+          {/* Referral code — optional, new users only. Lands the inviter
+              a Lucky Round perk. Stripped + uppercased on submit so a
+              link-pasted "Code: abc-123" still resolves. */}
+          {step === 'newuser' && (
+            <TextInput
+              ref={referralRef}
+              style={[styles.input, { letterSpacing: 2 }]}
+              value={referral}
+              onChangeText={(v) => setReferral(v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16))}
+              placeholder="Referral code (optional)"
+              placeholderTextColor={C.textMuted}
+              autoCapitalize="characters"
+              autoCorrect={false}
               returnKeyType="done"
               onSubmitEditing={handleContinue}
-              maxLength={20}
+              maxLength={16}
             />
           )}
 
@@ -196,7 +226,7 @@ export default function LoginScreen() {
 
           {step !== 'email' && (
             <TouchableOpacity
-              onPress={() => { fade(() => { setStep('email'); setPassword(''); setName(''); }); }}
+              onPress={() => { fade(() => { setStep('email'); setPassword(''); setName(''); setReferral(''); }); }}
               style={styles.backBtn}
             >
               <Text style={styles.backText}>← Use a different email</Text>

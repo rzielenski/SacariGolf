@@ -1235,6 +1235,57 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS finished_notified BOOLEAN NOT NULL DEFAULT FALSE;
     `,
   },
+  {
+    // Referral system:
+    //   • users.referral_code        — the inviter's share code (in their
+    //                                  /invite/<code> link). 7 chars,
+    //                                  uppercase alphanumeric, unique. We
+    //                                  generate on signup going forward and
+    //                                  backfill existing rows below.
+    //   • users.referred_by_user_id  — who invited this account. Nullable
+    //                                  because (a) existing users weren't
+    //                                  referred and (b) future signups can
+    //                                  skip the code field.
+    //
+    // The reward today is a `lucky_round` perk (matches the open-beta posture
+    // where premium is on the house). When pricing kicks in this should
+    // switch to a 7-day premium grant; see backend/src/routes/auth.ts.
+    //
+    // The backfill is idempotent: it only generates codes for rows that
+    // don't have one yet, and the loop retries on the unique-violation
+    // edge case (vanishingly rare for 7×36 chars but possible).
+    name: 'users.referral_columns',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS referral_code        TEXT,
+        ADD COLUMN IF NOT EXISTS referred_by_user_id  UUID REFERENCES users(user_id) ON DELETE SET NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS users_referral_code_uniq
+        ON users(referral_code) WHERE referral_code IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS users_referred_by_idx
+        ON users(referred_by_user_id) WHERE referred_by_user_id IS NOT NULL;
+
+      DO $$
+      DECLARE
+        u RECORD;
+        code TEXT;
+      BEGIN
+        FOR u IN SELECT user_id FROM users WHERE referral_code IS NULL LOOP
+          LOOP
+            -- 7 uppercase alphanumeric chars. encode(gen_random_bytes()) ->
+            -- base64 then strip the chars that aren't in [A-Z0-9] and slice.
+            -- Re-rolls if we land short.
+            SELECT upper(substring(translate(encode(gen_random_bytes(8), 'base64'),
+                                              '+/=abcdefghijklmnopqrstuvwxyz', ''),
+                                    1, 7))
+              INTO code;
+            EXIT WHEN length(code) = 7
+                 AND NOT EXISTS (SELECT 1 FROM users WHERE referral_code = code);
+          END LOOP;
+          UPDATE users SET referral_code = code WHERE user_id = u.user_id;
+        END LOOP;
+      END $$;
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import pool from '../db/pool';
 import { sendEmail } from '../utils/email';
+import { sendPush } from '../utils/notify';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -55,10 +56,17 @@ router.post('/register', async (req: Request, res: Response) => {
   if (!rateLimit(`reg:${ip}`, 10, 60 * 60 * 1000)) {
     return res.status(429).json({ error: 'Too many registration attempts. Try again later.' });
   }
-  const { username, email, password } = req.body ?? {};
+  const { username, email, password, referralCode } = req.body ?? {};
   if (!username || !email || !password) {
     return res.status(400).json({ error: 'username, email, and password required' });
   }
+  // Referral code: optional. Tolerate any caller-supplied formatting and
+  // normalize to upper-case alphanumeric. We resolve it to an inviter
+  // BEFORE creating the account so we can stamp `referred_by_user_id` on
+  // the row in one go. An unknown / blank code is not an error — the
+  // signup proceeds without a referrer.
+  const rcRaw = typeof referralCode === 'string' ? referralCode : '';
+  const rc = rcRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
   // Validate username: 3–20 chars, alphanumeric + underscore (matches the
   // PATCH /me/username rules so the registered name can later be edited).
   const u = String(username).trim();
@@ -80,12 +88,35 @@ router.post('/register', async (req: Request, res: Response) => {
     // Generate a verification code at registration time and store its hash.
     const verifyCode = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
     const verifyHash = crypto.createHash('sha256').update(verifyCode).digest('hex');
+
+    // Resolve the referral code (if any) to an inviter user_id BEFORE we
+    // insert, so the new row's referred_by_user_id is set in one statement.
+    // An unknown code silently falls through to a no-credit signup —
+    // never block account creation on a bad code, just don't pay out.
+    let inviterId: string | null = null;
+    if (rc) {
+      const { rows: invRows } = await pool.query(
+        `SELECT user_id FROM users WHERE referral_code = $1 LIMIT 1`,
+        [rc]
+      );
+      inviterId = invRows[0]?.user_id ?? null;
+    }
+
+    // Generate a referral_code for the new account inline (same expression
+    // the backfill migration uses — encode 8 bytes, strip non-[A-Z0-9],
+    // take 7 chars). 32^7 ≈ 34B permutations so collisions on a single
+    // insert are negligible; the unique index would 23505 if we ever hit one.
     const { rows } = await pool.query(
       `INSERT INTO users (username, email, password_hash,
-                          email_verify_code_hash, email_verify_expires_at)
-       VALUES ($1, $2, $3, $4, NOW() + INTERVAL '24 hours')
-       RETURNING user_id, username, email, elo, total_matches, total_wins, created_at, email_verified`,
-      [u, e, hash, verifyHash]
+                          email_verify_code_hash, email_verify_expires_at,
+                          referral_code, referred_by_user_id)
+       VALUES ($1, $2, $3, $4, NOW() + INTERVAL '24 hours',
+               upper(substring(translate(encode(gen_random_bytes(8), 'base64'),
+                                         '+/=abcdefghijklmnopqrstuvwxyz', ''),
+                               1, 7)),
+               $5)
+       RETURNING user_id, username, email, elo, total_matches, total_wins, created_at, email_verified, referral_code`,
+      [u, e, hash, verifyHash, inviterId]
     );
     // Await the send so any failure shows up in Railway logs and the response
     // doesn't return before the email is actually queued. Capped at 8s so a
@@ -115,6 +146,45 @@ router.post('/register', async (req: Request, res: Response) => {
       // eslint-disable-next-line no-console
       console.error('[register] verification email send failed:', emailResult.error);
     }
+
+    // ── Referral payout ───────────────────────────────────────────────
+    // The inviter gets one 'lucky_round' perk per new signup that used
+    // their code, tagged with earned_reason='referral' so it's
+    // distinguishable from the in-match pin/shot-contribution path. The
+    // perk model already handles consumption + the win-double / loss-
+    // protection mechanic, so no new gameplay code is needed — only the
+    // grant + a push so the inviter actually sees the reward landed.
+    //
+    // FUTURE: once premium becomes paid, switch this to a 7-day premium
+    // grant (bump premium_until on the inviter) instead. Today's open-beta
+    // posture makes premium days meaningless, so a Lucky Round is the
+    // reward that actually changes something for the inviter right now.
+    if (inviterId) {
+      try {
+        await pool.query(
+          `INSERT INTO user_perks (user_id, perk_type, earned_reason)
+           VALUES ($1, 'lucky_round', 'referral')`,
+          [inviterId]
+        );
+        const { rows: tokRows } = await pool.query(
+          `SELECT push_token FROM users WHERE user_id = $1`,
+          [inviterId]
+        );
+        const token = tokRows[0]?.push_token;
+        if (token) {
+          await sendPush(
+            [token],
+            'New referral!',
+            `${u} signed up with your code. Lucky Round added to your perks.`,
+            { type: 'referral', referredUserId: rows[0].user_id }
+          );
+        }
+      } catch (referralErr) {
+        // eslint-disable-next-line no-console
+        console.error('[register] referral credit failed:', referralErr);
+      }
+    }
+
     return res.status(201).json({ token: makeToken(rows[0].user_id), user: rows[0] });
   } catch (err: any) {
     if (err.code === '23505') return res.status(409).json({ error: 'Username or email already taken' });

@@ -9,7 +9,7 @@ interface AuthContextType {
   token: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (username: string, email: string, password: string) => Promise<void>;
+  register: (username: string, email: string, password: string, referralCode?: string) => Promise<void>;
   logout: () => Promise<void>;
   deleteAccount: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -72,8 +72,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(u);
   };
 
-  const register = async (username: string, email: string, password: string) => {
-    const { token: t, user: u } = await api.auth.register(username, email, password);
+  const register = async (username: string, email: string, password: string, referralCode?: string) => {
+    const { token: t, user: u } = await api.auth.register(username, email, password, referralCode);
     await AsyncStorage.setItem('coc_token', t);
     setToken(t);
     setUser(u);

@@ -228,8 +228,9 @@ export const api = {
   delete: <T>(path: string) => request<T>('DELETE', path),
 
   auth: {
-    register: (username: string, email: string, password: string) =>
-      request<{ token: string; user: any }>('POST', '/auth/register', { username, email, password }, false),
+    register: (username: string, email: string, password: string, referralCode?: string) =>
+      request<{ token: string; user: any }>('POST', '/auth/register',
+        { username, email, password, referralCode: referralCode || undefined }, false),
     login: (email: string, password: string) =>
       request<{ token: string; user: any }>('POST', '/auth/login', { email, password }, false),
     forgotPassword: (email: string) =>
@@ -271,6 +272,14 @@ export const api = {
       chat_unread_count?: number;
     }>('GET', '/users/me/notifications'),
     perks: () => request<{ perk_id: string; perk_type: string; earned_at: string }[]>('GET', '/users/me/perks'),
+    /** Caller's referral code + shareable URL + running tally of signups
+     *  that used the code and Lucky Round perks earned from them. */
+    referral: () => request<{
+      code: string;
+      share_url: string;
+      referred_count: number;
+      perks_earned: number;
+    }>('GET', '/users/me/referral'),
     courseRecords: (id: string) => request<{ course_id: string; course_name: string; teebox_name: string; total_score: number; created_at: string }[]>('GET', `/users/${id}/course-records`),
     markNotificationsSeen: () => request<any>('POST', '/users/me/notifications/seen', {}),
     search: (q: string) => request<any[]>('GET', `/users/search?q=${encodeURIComponent(q)}`),
