@@ -318,9 +318,11 @@ export default function CourseBuilderScreen() {
           + 'Please check every value, then tap Next.',
       );
     } catch (e: any) {
+      // Neutral title: the message could be a photo problem, the daily limit,
+      // or "feature not available at this time" (e.g. API credits exhausted).
       Alert.alert(
-        'Couldn’t read that photo',
-        e?.message ?? 'Try a clearer, well-lit photo, or enter the course manually.',
+        'Scorecard scan',
+        e?.message ?? 'Something went wrong. Try again, or enter the course manually.',
       );
     } finally {
       setScanning(false);

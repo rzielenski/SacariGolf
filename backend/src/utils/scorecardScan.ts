@@ -140,11 +140,8 @@ export async function scanScorecard(
 ): Promise<ScannedScorecard> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    // No key configured (e.g. local dev). Fail clearly rather than pretending.
-    throw new ScorecardScanError(
-      'Scorecard scanning is not configured on this server.',
-      503,
-    );
+    // No key configured. To the user this is just "feature unavailable".
+    throw new ScorecardScanError('This feature is not available at this time.', 503);
   }
   const model = process.env.SCORECARD_MODEL || DEFAULT_MODEL;
 
@@ -190,9 +187,16 @@ export async function scanScorecard(
     const errText = await res.text().catch(() => '');
     // eslint-disable-next-line no-console
     console.error('[scorecard] Anthropic error', res.status, errText.slice(0, 500));
-    // Surface auth/quota issues as 503 (server-side problem), everything else as 502.
-    const status = res.status === 401 || res.status === 429 ? 503 : 502;
-    throw new ScorecardScanError('The scanning service is unavailable right now. Try again later.', status);
+    // Out of credits, billing problem, bad/revoked key, or quota exhausted:
+    // the feature genuinely can't run until the account owner fixes billing,
+    // so report it as unavailable (not "try again"). A 400 here is almost
+    // always the "credit balance too low" error, since we control the request
+    // shape; 401 = bad key, 403 = billing/permission, 429 = quota.
+    if (res.status === 400 || res.status === 401 || res.status === 403 || res.status === 429) {
+      throw new ScorecardScanError('This feature is not available at this time.', 503);
+    }
+    // Transient upstream error (5xx) — genuinely worth retrying later.
+    throw new ScorecardScanError('Scorecard scanning is temporarily unavailable. Please try again.', 502);
   }
 
   const data: any = await res.json().catch(() => null);
