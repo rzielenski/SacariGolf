@@ -110,14 +110,23 @@ function AuthGuard() {
   }, [user?.user_id]);
 
   // Route notification taps. The backend tags every push with a `data.type`
-  // and we route to where the user can act on / view it:
-  //   • invite       → social tab (invite accept/decline list)
-  //   • matchFound   → match lobby
-  //   • round_started→ the friend's profile, which renders their LIVE
-  //                    in-progress round card + tap-to-spectate
-  //   • dm           → that 1:1 chat thread
-  //   • chat         → that match's chat room
-  //   • clan_chat    → that team's chat room
+  // and we route straight to where the user can act on / view it.
+  // (See every `sendPush(..., { type: ... })` callsite in backend/src/routes/
+  // for the full taxonomy — every type that ships must have a case here.)
+  //
+  //   • invite         → social tab (invite accept/decline list)
+  //   • matchFound     → match lobby
+  //   • round_started  → the live match scorecard (the "live round" page).
+  //                      Goes to /match/<matchId> so the recipient lands
+  //                      directly on the spectatable scorecard rather than
+  //                      having to tap through the friend's profile.
+  //   • round_finished → same match page; now shows the completed scorecard.
+  //   • match_result   → match recap with ELO delta + win/loss banner.
+  //   • round_reaction → home feed (the round post carries the reactions).
+  //   • round_comment  → home feed (the comment thread lives on the post).
+  //   • dm             → that 1:1 chat thread
+  //   • chat           → that match's chat room
+  //   • clan_chat      → that team's chat room
   //
   // CRITICAL: this listener also handles the case where the app was
   // COLD-LAUNCHED by tapping a notification (not just tapped while
@@ -136,10 +145,28 @@ function AuthGuard() {
           if (typeof data.matchId === 'string') router.push(`/match/${data.matchId}` as any);
           break;
         case 'round_started':
-          // Friend started a round → their profile shows the live
-          // in-progress round card with the spectate button (the "live
-          // round" surface).
-          if (typeof data.userId === 'string') router.push(`/user/${data.userId}` as any);
+        case 'round_finished':
+          // Friend started or finished a round → the match scorecard,
+          // which is the "live round" for an in-progress match and the
+          // recap for a completed one. Both pushes ship with matchId; if
+          // it's somehow missing on a legacy payload, fall back to the
+          // friend's profile (which renders the live round card too).
+          if (typeof data.matchId === 'string') {
+            router.push(`/match/${data.matchId}` as any);
+          } else if (typeof data.userId === 'string') {
+            router.push(`/user/${data.userId}` as any);
+          }
+          break;
+        case 'match_result':
+          // Resolved match → recap with ELO delta + win/loss banner.
+          if (typeof data.matchId === 'string') router.push(`/match/${data.matchId}` as any);
+          break;
+        case 'round_reaction':
+        case 'round_comment':
+          // Reaction or comment on your round → the home feed, where the
+          // round post carries the inline thread. There's no per-round
+          // standalone route to deep-link to (the scorecard is a modal).
+          router.push('/(tabs)/' as any);
           break;
         case 'dm':
           // Open the 1:1 thread. fromName (when present) gives the chat

@@ -1222,6 +1222,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       );
     `,
   },
+  {
+    // Per-player "round-finished friend push fired" guard. Lives on
+    // match_players so each finisher's friends get exactly one push per
+    // round even if the player re-submits scores or edits an existing
+    // round. Mirrors the matches.started_notified pattern at the player
+    // level instead of the match level — async multiplayer matches
+    // finish one player at a time, so per-player granularity is right.
+    name: 'match_players.finished_notified',
+    sql: `
+      ALTER TABLE match_players
+        ADD COLUMN IF NOT EXISTS finished_notified BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
 ];
 
 export async function runMigrations() {

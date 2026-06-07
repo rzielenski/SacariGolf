@@ -1,23 +1,36 @@
 /**
- * Lost / found ball counter — optimistic UI with a persistent retry queue.
+ * Lost / found ball counter — pure-local state with a fire-and-forget
+ * background sync.
  *
- * Old version waited for every /balls/log round-trip before updating the
- * UI, so a flaky network made the counter feel sticky or just silently
- * dropped taps when offline. The fix is the standard optimistic pattern:
+ * Previous design held a `server` snapshot and recomputed the displayed
+ * total on every render via `applyQueue(server, recent, queue)`. The
+ * trouble was the order of state updates around drain: the queue
+ * dequeued first, the server snapshot updated a moment later, and in
+ * the gap the projection briefly showed the stale server number. That's
+ * the "bounces back and forth before settling" the user saw.
  *
- *   1. Tap updates the displayed totals INSTANTLY via a queued action.
- *   2. The action is persisted to AsyncStorage so it survives a kill or a
- *      no-service stretch.
- *   3. A background drainer flushes the queue serially, retrying on
- *      failure. Each action carries a clientId; the server dedupes via
- *      the partial-unique index on ball_log + the ball_log_undo ledger
- *      (see backend/src/routes/balls.ts) so a retry can't double-count.
- *   4. When the queue drains, we reconcile by re-reading server totals;
- *      the server wins any disagreement (e.g. logs from another device).
+ * New shape:
  *
- * Displayed totals = serverTotals + queue effects. Undo "pops" the most
- * recent kind off a virtual stack seeded by serverRecent so a fresh
- * Undo (no queued logs yet) still removes the right counter.
+ *   1. The displayed `totals` is local state, period. Taps mutate it
+ *      directly. There is no recompute-from-server projection.
+ *   2. Totals + the pending queue are persisted to AsyncStorage on every
+ *      change so we survive kill / no-service.
+ *   3. Each tap fires its API call in the background (idempotent via a
+ *      clientId, so a retry can't double-count). On failure the action
+ *      stays queued; the next tap or a focus-event triggers a drain.
+ *   4. We RECONCILE WITH THE SERVER only on:
+ *         • initial mount
+ *         • tab focus
+ *         • pull-to-refresh
+ *      And only when the queue is empty (otherwise the server is missing
+ *      our pending writes — overriding would clobber them). When we do
+ *      reconcile, we adopt the server number directly. One paint, no
+ *      flicker.
+ *
+ * Undo: maintained as a local "recent stack" of kinds. Pop subtracts the
+ * right counter. If the stack is empty (no local context — e.g. straight
+ * after opening the app), we fall back to subtracting from net + treating
+ * it as 'found' optimistically; the next reconcile corrects it.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -25,7 +38,7 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   ActivityIndicator, RefreshControl,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -35,90 +48,69 @@ import { useCensor } from '../lib/censor';
 
 type Totals = { found: number; lost: number; net: number };
 type LeaderRow = Awaited<ReturnType<typeof api.balls.leaderboard>>[number];
-type RecentEntry = { kind: 'found' | 'lost' };
 type Queued = { id: string; op: 'log' | 'undo'; kind?: 'found' | 'lost' };
 
-const QUEUE_KEY = 'sacari.balls.queue.v1';
-const DRAIN_INTERVAL_MS = 15_000;     // periodic retry when items remain queued
-const FLUSH_DEBOUNCE_MS = 200;        // batch fast taps into one drain pass
+const TOTALS_KEY  = 'sacari.balls.totals.v1';
+const QUEUE_KEY   = 'sacari.balls.queue.v1';
+const RECENT_KEY  = 'sacari.balls.recent.v1';
 
 function genClientId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
-/**
- * Project the queue onto the server's current state. We seed a "recent
- * kinds" stack from the server's recent log so an Undo issued before any
- * local Log still knows what to subtract. Each queue item then either
- * pushes (log) or pops (undo) the stack. Output is what the hero card
- * should display.
- */
-function applyQueue(server: Totals, serverRecent: RecentEntry[], queue: Queued[]): Totals {
-  let found = server.found;
-  let lost  = server.lost;
-  // serverRecent is newest-first per the API; reverse so push/pop walk
-  // the natural chronological order.
-  const stack: Array<'found' | 'lost'> = [...serverRecent].reverse().map((r) => r.kind);
-  for (const a of queue) {
-    if (a.op === 'log' && (a.kind === 'found' || a.kind === 'lost')) {
-      stack.push(a.kind);
-      if (a.kind === 'found') found++;
-      else lost++;
-    } else if (a.op === 'undo') {
-      const k = stack.pop();
-      if (k === 'found') found = Math.max(0, found - 1);
-      else if (k === 'lost') lost = Math.max(0, lost - 1);
-      // Empty stack: server reconcile on drain will settle the truth.
-    }
-  }
-  return { found, lost, net: found - lost };
-}
-
-async function readQueue(): Promise<Queued[]> {
-  try {
-    const raw = await AsyncStorage.getItem(QUEUE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-async function writeQueue(q: Queued[]) {
-  try { await AsyncStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch { /* non-fatal */ }
-}
-
 export default function BallsScreen() {
   const { user } = useAuth();
   const censor = useCensor();
-  const [server, setServer] = useState<Totals>({ found: 0, lost: 0, net: 0 });
-  const [serverRecent, setServerRecent] = useState<RecentEntry[]>([]);
+  const [totals, setTotals] = useState<Totals>({ found: 0, lost: 0, net: 0 });
+  const [recent, setRecent] = useState<Array<'found' | 'lost'>>([]);
   const [queue, setQueue] = useState<Queued[]>([]);
   const [board, setBoard] = useState<LeaderRow[]>([]);
+  const [scope, setScope] = useState<'global' | 'friends'>('global');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [scope, setScope] = useState<'global' | 'friends'>('global');
 
-  // Refs so the drainer (running outside React's render cycle) reads the
-  // latest queue without relying on re-renders happening in between awaits.
+  // Refs let the background drainer / focus listener read the latest
+  // queue + totals without depending on React's render-cycle.
   const queueRef = useRef<Queued[]>([]);
-  useEffect(() => { queueRef.current = queue; }, [queue]);
+  const totalsRef = useRef<Totals>({ found: 0, lost: 0, net: 0 });
   const draining = useRef(false);
-  const drainDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const totals = applyQueue(server, serverRecent, queue);
+  // ── Persistence ──────────────────────────────────────────────────────
+  useEffect(() => { totalsRef.current = totals;
+    AsyncStorage.setItem(TOTALS_KEY, JSON.stringify(totals)).catch(() => {});
+  }, [totals]);
+  useEffect(() => { queueRef.current = queue;
+    AsyncStorage.setItem(QUEUE_KEY,  JSON.stringify(queue)).catch(() => {});
+  }, [queue]);
+  useEffect(() => {
+    AsyncStorage.setItem(RECENT_KEY, JSON.stringify(recent)).catch(() => {});
+  }, [recent]);
 
-  // ── Server loaders ────────────────────────────────────────────────────
+  // ── Server I/O ───────────────────────────────────────────────────────
   const loadBoard = useCallback(async () => {
     try { setBoard(await api.balls.leaderboard(scope === 'friends')); } catch { /* silent */ }
   }, [scope]);
-  const loadServer = useCallback(async () => {
+
+  /** Replace local totals with server's, but ONLY if our queue is empty.
+   *  With pending writes still in flight, the server hasn't seen them yet
+   *  and overriding would erase the user's optimistic increments. */
+  const reconcileWithServer = useCallback(async () => {
     try {
       const me = await api.balls.me();
-      setServer({ found: me.found, lost: me.lost, net: me.net });
-      setServerRecent((me.recent ?? []).map((r) => ({ kind: r.kind })));
-    } catch { /* silent — keep last known */ }
-  }, []);
+      if (queueRef.current.length === 0) {
+        const next: Totals = { found: me.found, lost: me.lost, net: me.net };
+        setTotals(next);
+        totalsRef.current = next;
+        // Re-seed the local recent stack from the server so an Undo after
+        // opening the app still knows what to subtract.
+        const fromServer = (me.recent ?? []).slice().reverse().map((r) => r.kind);
+        setRecent(fromServer);
+      }
+      loadBoard();
+    } catch { /* offline — keep local */ }
+  }, [loadBoard]);
 
-  // ── Queue persistence + drainer ───────────────────────────────────────
-  const persist = useCallback((q: Queued[]) => { writeQueue(q); }, []);
-
+  // ── Background drainer ──────────────────────────────────────────────
   const drainQueue = useCallback(async () => {
     if (draining.current) return;
     draining.current = true;
@@ -131,80 +123,115 @@ export default function BallsScreen() {
           } else if (head.op === 'undo') {
             await api.balls.undo(head.id);
           }
-          // Dequeue by id so we don't trip over concurrently-enqueued items.
+          // Dequeue ONLY. The displayed totals were already updated
+          // optimistically on tap — do NOT re-set them from the response,
+          // that's what caused the flicker.
           const next = queueRef.current.filter((q) => q.id !== head.id);
           queueRef.current = next;
           setQueue(next);
-          persist(next);
         } catch {
-          // Network / 5xx — keep the item in the queue and bail; the next
-          // tap or the periodic timer will retry.
+          // Network / 5xx — keep queued, bail. Next focus / tap retries.
           return;
         }
       }
-      // Queue empty: server is now the source of truth.
-      await loadServer();
+      // Drain complete. Refresh the leaderboard so rank updates.
+      // We DO NOT refetch /balls/me here on purpose: the local total is
+      // already the truth (we just confirmed all the writes), and a
+      // refetch could race the next tap and cause flicker.
       loadBoard();
     } finally {
       draining.current = false;
     }
-  }, [loadServer, loadBoard, persist]);
+  }, [loadBoard]);
 
-  // Coalesce fast taps so a flurry of +/- in 200ms triggers ONE drain pass.
-  const scheduleDrain = useCallback(() => {
-    if (drainDebounceTimer.current) clearTimeout(drainDebounceTimer.current);
-    drainDebounceTimer.current = setTimeout(() => { drainQueue(); }, FLUSH_DEBOUNCE_MS);
-  }, [drainQueue]);
-
-  // Initial mount: restore queue from AsyncStorage, load server, kick drainer.
+  // ── Mount: restore local state, then reconcile ──────────────────────
   useEffect(() => {
     (async () => {
-      const restored = await readQueue();
-      if (restored.length > 0) {
-        setQueue(restored);
-        queueRef.current = restored;
-      }
-      await Promise.all([loadServer(), loadBoard()]);
+      try {
+        const [tRaw, qRaw, rRaw] = await Promise.all([
+          AsyncStorage.getItem(TOTALS_KEY),
+          AsyncStorage.getItem(QUEUE_KEY),
+          AsyncStorage.getItem(RECENT_KEY),
+        ]);
+        if (tRaw) {
+          const t = JSON.parse(tRaw);
+          setTotals(t);
+          totalsRef.current = t;
+        }
+        if (qRaw) {
+          const q = JSON.parse(qRaw);
+          setQueue(q);
+          queueRef.current = q;
+        }
+        if (rRaw) setRecent(JSON.parse(rRaw));
+      } catch { /* corrupt storage — start clean */ }
+      await reconcileWithServer();
       setLoading(false);
-      // If we restored anything, flush it now.
-      if (restored.length > 0) drainQueue();
+      if (queueRef.current.length > 0) drainQueue();
     })();
   }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Periodic retry: if anything is stuck in the queue, try again every 15s.
-  useEffect(() => {
-    const t = setInterval(() => {
+  // ── Focus: reconcile + flush queue if anything's stuck ──────────────
+  useFocusEffect(
+    useCallback(() => {
+      reconcileWithServer();
       if (queueRef.current.length > 0) drainQueue();
-    }, DRAIN_INTERVAL_MS);
-    return () => clearInterval(t);
-  }, [drainQueue]);
+    }, [reconcileWithServer, drainQueue])
+  );
 
-  // ── Tap handlers ──────────────────────────────────────────────────────
-  const enqueue = useCallback((op: 'log' | 'undo', kind?: 'found' | 'lost') => {
-    const item: Queued = { id: genClientId(), op, ...(kind ? { kind } : {}) };
-    setQueue((prev) => {
-      const next = [...prev, item];
-      queueRef.current = next;
-      persist(next);
-      return next;
-    });
-    scheduleDrain();
-  }, [persist, scheduleDrain]);
-
-  const onLog  = (kind: 'found' | 'lost') => enqueue('log', kind);
-  const onUndo = () => enqueue('undo');
-
-  // Pull-to-refresh: re-read server + leaderboard. Doesn't touch the queue.
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await Promise.all([loadServer(), loadBoard()]);
-    setRefreshing(false);
-  }, [loadServer, loadBoard]);
-
-  // When the leaderboard scope flips, just refetch the board.
+  // Re-fetch the leaderboard when the scope flips.
   useEffect(() => { loadBoard(); }, [scope, loadBoard]);
 
-  const queuedCount = queue.length;
+  // ── Tap handlers ────────────────────────────────────────────────────
+  const onLog = (kind: 'found' | 'lost') => {
+    // 1. Optimistic update — instant.
+    setTotals((t) => ({
+      found: t.found + (kind === 'found' ? 1 : 0),
+      lost:  t.lost  + (kind === 'lost'  ? 1 : 0),
+      net:   t.net   + (kind === 'found' ? 1 : -1),
+    }));
+    setRecent((r) => [...r, kind]);
+    // 2. Enqueue + kick the drainer.
+    const item: Queued = { id: genClientId(), op: 'log', kind };
+    setQueue((q) => {
+      const next = [...q, item];
+      queueRef.current = next;
+      return next;
+    });
+    drainQueue();
+  };
+
+  const onUndo = () => {
+    // Decrement the right counter using the local recent stack. If empty
+    // (fresh tab open with no local context), we still optimistically
+    // drop net by 1 and let the next reconcile correct found/lost.
+    const last = recent[recent.length - 1];
+    setTotals((t) => {
+      if (last === 'found') return { found: Math.max(0, t.found - 1), lost: t.lost,                   net: t.net - 1 };
+      if (last === 'lost')  return { found: t.found,                   lost: Math.max(0, t.lost - 1), net: t.net + 1 };
+      // Empty stack: best-effort net drop; reconcile resolves found/lost.
+      return { found: t.found, lost: t.lost, net: t.net - 1 };
+    });
+    if (last) setRecent((r) => r.slice(0, -1));
+    const item: Queued = { id: genClientId(), op: 'undo' };
+    setQueue((q) => {
+      const next = [...q, item];
+      queueRef.current = next;
+      return next;
+    });
+    drainQueue();
+  };
+
+  const onPullRefresh = useCallback(async () => {
+    setRefreshing(true);
+    // First drain any pending writes so the server has them before we
+    // overwrite our local total with its number.
+    if (queueRef.current.length > 0) await drainQueue();
+    await reconcileWithServer();
+    setRefreshing(false);
+  }, [drainQueue, reconcileWithServer]);
+
+  const pending = queue.length;
 
   return (
     <View style={styles.container}>
@@ -226,10 +253,9 @@ export default function BallsScreen() {
           data={board}
           keyExtractor={(r) => r.user_id}
           contentContainerStyle={styles.listContent}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.gold} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onPullRefresh} tintColor={C.gold} />}
           ListHeaderComponent={
             <View>
-              {/* Counter hero. Buttons are NEVER disabled — they just enqueue. */}
               <View style={styles.hero}>
                 <Text style={styles.heroLabel}>YOUR BALL COUNT</Text>
                 <Text style={styles.heroNet}>{totals.net > 0 ? `+${totals.net}` : totals.net}</Text>
@@ -266,12 +292,8 @@ export default function BallsScreen() {
                   <Text style={styles.undoText}>Undo last</Text>
                 </TouchableOpacity>
 
-                {/* Subtle "n queued / not yet saved" indicator. Reassures
-                    the user the tap landed even when offline. */}
-                {queuedCount > 0 && (
-                  <Text style={styles.queuedText}>
-                    Syncing… {queuedCount} pending
-                  </Text>
+                {pending > 0 && (
+                  <Text style={styles.queuedText}>Syncing… {pending} pending</Text>
                 )}
               </View>
 

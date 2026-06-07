@@ -1505,6 +1505,64 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       }
     }
 
+    // ── Friend push: "<name> just finished a round" ─────────────────────
+    // Atomically flips match_players.finished_notified so each finisher's
+    // friends get exactly one push regardless of score edits / re-submits
+    // / scramble teammate auto-completions. Skipped for practice matches
+    // so range sessions don't spam the timeline. Best-effort post-commit
+    // so a push outage can't roll back the score save.
+    if (!matchRows[0].is_practice) {
+      try {
+        const { rows: flipped } = await pool.query(
+          `UPDATE match_players
+              SET finished_notified = TRUE
+            WHERE match_id = $1 AND user_id = $2 AND finished_notified = FALSE
+            RETURNING match_id`,
+          [req.params.id, req.userId]
+        );
+        if (flipped.length > 0) {
+          const { rows: meRows } = await pool.query(
+            `SELECT username FROM users WHERE user_id = $1`, [req.userId]
+          );
+          const finisherName = meRows[0]?.username ?? 'A friend';
+          const { rows: courseRows } = resolvedTeeboxId
+            ? await pool.query(
+                `SELECT c.course_name
+                   FROM teeboxes t
+                   JOIN courses c ON c.course_id = t.course_id
+                  WHERE t.teebox_id = $1`,
+                [resolvedTeeboxId]
+              )
+            : { rows: [] as any[] };
+          const courseName = courseRows[0]?.course_name ?? 'a course';
+
+          // Friends with push tokens — bidirectional (friends table stores
+          // one directional row; the friend can be on either side).
+          const { rows: friends } = await pool.query(
+            `SELECT DISTINCT u.push_token
+               FROM friends f
+               JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+              WHERE (f.user_id = $1 OR f.friend_id = $1)
+                AND f.status = 'accepted'
+                AND u.push_token IS NOT NULL`,
+            [req.userId]
+          );
+          const tokens = friends.map((f: any) => f.push_token).filter(Boolean);
+          if (tokens.length) {
+            const holesPlayed = holeScores.length;
+            await sendPush(
+              tokens,
+              `${finisherName} finished a round`,
+              `Shot ${totalScore} on ${holesPlayed} holes at ${courseName}. Tap to see the scorecard.`,
+              { type: 'round_finished', userId: req.userId, matchId: req.params.id }
+            );
+          }
+        }
+      } catch (e) {
+        console.error('round-finished friend notification failed:', e);
+      }
+    }
+
     return res.json({ success: true, totalScore, result });
   } catch (err) {
     await client.query('ROLLBACK');
