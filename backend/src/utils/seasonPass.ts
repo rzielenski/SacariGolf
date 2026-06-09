@@ -88,18 +88,29 @@ export async function ensureCurrentSeason(): Promise<void> {
 
 /** Grant +1 XP to a user for the current season. Creates the
  *  progress row on first call. Safe to call multiple times per round
- *  (the matches.ts caller only fires once per submit anyway). */
+ *  (the matches.ts caller only fires once per submit anyway).
+ *
+ *  NOTE: don't write this as `INSERT … SELECT … LIMIT 1 ON CONFLICT`.
+ *  Postgres rejects `LIMIT` between the SELECT and the ON CONFLICT
+ *  clause with a "syntax error at or near 'LIMIT'". A two-step lookup
+ *  (find the season id, then upsert) is clearer anyway, and the unique
+ *  index on seasons.starts_at means the SELECT can return at most one
+ *  row, so the limit was redundant. */
 export async function awardRoundXp(userId: string): Promise<void> {
   await ensureCurrentSeason();
+  const { rows } = await pool.query(
+    `SELECT season_id FROM seasons
+      WHERE NOW() >= starts_at AND NOW() < ends_at
+      LIMIT 1`,
+  );
+  const seasonId = rows[0]?.season_id;
+  if (!seasonId) return;
   await pool.query(
     `INSERT INTO season_pass_progress (user_id, season_id, xp, updated_at)
-     SELECT $1, s.season_id, 1, NOW()
-       FROM seasons s
-      WHERE NOW() >= s.starts_at AND NOW() < s.ends_at
-      LIMIT 1
+     VALUES ($1, $2, 1, NOW())
      ON CONFLICT (user_id, season_id)
      DO UPDATE SET xp         = season_pass_progress.xp + 1,
                    updated_at = NOW()`,
-    [userId],
+    [userId, seasonId],
   );
 }
