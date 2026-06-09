@@ -1682,6 +1682,124 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON season_pass_progress(season_id, xp DESC);
     `,
   },
+  {
+    // Catalog v3: refines visual_data on items the v2 seed used a
+    // placeholder style for (e.g. trail_fire was 'gradient', now 'fire'
+    // so the renderer paints rising embers; bg_volcanic was a static
+    // gradient, now uses the 'flame' renderer with wisps) AND adds 18
+    // new cosmetics across every kind so the renderer's full set of
+    // styles has paying inventory behind it.
+    //
+    // Idempotent — UPSERT on cosmetic_id means re-running the migration
+    // just refreshes visual_data. New rank-locked items are NOT
+    // back-granted to qualifying users here; rank promotion writes the
+    // grant rows so this migration stays predictable. Premium items
+    // catch up via the same pattern v2 used.
+    name: 'cosmetics.catalog_v3',
+    sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── REFRESH: existing items get the right renderer style ─────
+        ('bg_volcanic',       'background', 'Volcanic',         'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"flame","from":"#1a0807","to":"#5e1a14","accent":"#ffb14a","animated":true}'::jsonb),
+        ('trail_fire',        'ball_trail', 'Wildfire',         'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"fire","color":"#ffb14a","accent":"#d83a5e","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_galaxy',      'ball_trail', 'Galaxy',           'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"galaxy","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('uname_holographic', 'username',   'Holographic Text', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"holographic","gradient":["#ff6b9d","#74e0ff","#a89cf0","#ffe28a","#ff6b9d"],"animated":true}'::jsonb),
+        ('uname_fire',        'username',   'Wildfire Text',    'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffe28a","#ffb14a","#d83a5e"],"animated":true}'::jsonb),
+
+        -- ── NEW BACKGROUNDS (6) ──────────────────────────────────────
+        ('bg_cyber_grid',     'background', 'Cyber Grid',       'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"cyber","from":"#02060e","to":"#0a1e2e","accent":"#00ffd5","animated":true}'::jsonb),
+        ('bg_solar_flare',    'background', 'Solar Flare',      'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"solar","from":"#2a0d05","to":"#0a0204","accent":"#ffb14a","core":"#fff3a8","animated":true}'::jsonb),
+        ('bg_deep_ocean',     'background', 'Deep Ocean',       'epic',      'premium',
+          NULL,
+          '{"style":"ocean","from":"#0a1e3a","to":"#072a48","accent":"#5aacd9","animated":true}'::jsonb),
+        ('bg_sakura_fall',    'background', 'Sakura Fall',      'epic',      'premium',
+          NULL,
+          '{"style":"sakura","from":"#3a1a2a","to":"#7a3a55","animated":true}'::jsonb),
+        ('bg_liquid_gold',    'background', 'Liquid Gold',      'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"liquid","animated":true}'::jsonb),
+        ('bg_phoenix_rise',   'background', 'Phoenix Rise',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"flame","from":"#1a0207","to":"#5e0a14","accent":"#ff8a3a","animated":true}'::jsonb),
+
+        -- ── NEW BORDERS (4) ──────────────────────────────────────────
+        ('border_comet',      'border',     'Comet Trail',      'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"traveling","color":"#ffe28a","width":3,"animated":true}'::jsonb),
+        ('border_plasma',     'border',     'Plasma Coil',      'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"plasma","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true}'::jsonb),
+        ('border_frost',      'border',     'Frost Crown',      'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"frost","color":"#74e0ff","accent":"#cad9ff","width":3,"animated":true}'::jsonb),
+        ('border_inferno',    'border',     'Inferno Ring',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"flame","width":3,"animated":true}'::jsonb),
+
+        -- ── NEW BALL TRAILS (2) ──────────────────────────────────────
+        ('trail_phoenix',     'ball_trail', 'Phoenix Wing',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"fire","color":"#ff8a3a","accent":"#bf1a3a","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_comet',       'ball_trail', 'Comet',            'rare',      'premium',
+          NULL,
+          '{"style":"traveling","color":"#ffe28a","width":3,"animated":true,"glow":true}'::jsonb),
+
+        -- ── NEW USERNAMES (3) ────────────────────────────────────────
+        ('uname_sunset',      'username',   'Sunset',           'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffe28a","#ff6b9d","#a36bff"],"animated":true}'::jsonb),
+        ('uname_ocean',       'username',   'Ocean',            'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"gradient","gradient":["#74e0ff","#3d8bbf","#0a1e3a"],"animated":true}'::jsonb),
+        ('uname_shimmer',     'username',   'Gold Shimmer',     'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"shimmer","color":"#d4a93f","animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      -- Catch-up grants for non-rank items: same pattern as v2. Rank-
+      -- locked items wait for the rank-promotion code path so this
+      -- migration doesn't accidentally hand out rewards to people who
+      -- haven't earned them — except for the testing account.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium' AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Test account gets everything so Richard can preview before
+      -- shipping. Safe to leave in — the username is unique.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'admin_grant'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE LOWER(u.username) = 'rickybobbyfairways'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+  },
 ];
 
 export async function runMigrations() {

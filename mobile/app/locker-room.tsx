@@ -14,13 +14,16 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, Image,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, Alert,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
+import {
+  CosmeticBackground, CosmeticBorder, CosmeticUsername, CosmeticTrailPreview,
+} from '../components/Cosmetics';
 
 type CatalogItem = {
   cosmetic_id: string;
@@ -172,43 +175,48 @@ export default function LockerRoomScreen() {
   );
 }
 
-/** Minimal preview swatch — just enough to feel different per item. The
- *  actual rendering in the profile screen reads visual_data itself. */
+/** Real preview — uses the same components that render the cosmetic
+ *  on the profile screen / shot map. Animations run inside each tile,
+ *  capped to roughly 30 visible cosmetics → ~60 simultaneous animation
+ *  drivers, which sits well inside the ~500-on-iOS / ~100-on-Android
+ *  budget for animated views before commit phase backs up. */
 function CosmeticPreview({ item }: { item: CatalogItem }) {
   const v = item.visual_data ?? {};
+
   if (item.kind === 'background') {
     return (
-      <View style={[s.preview, {
-        backgroundColor: v.to ?? '#444',
-        borderTopWidth: 8, borderTopColor: v.from ?? '#222',
-      }]} />
+      <View style={s.preview}>
+        <CosmeticBackground visual={v} style={StyleSheet.absoluteFill} />
+      </View>
     );
   }
   if (item.kind === 'username') {
     return (
       <View style={s.preview}>
-        <Text style={{ color: v.color ?? '#fff', fontWeight: '900', fontSize: 18, fontFamily: F.serif }}>
+        <CosmeticUsername visual={v} style={{ fontSize: 20, fontWeight: '900', fontFamily: F.serif }}>
           Aa
-        </Text>
+        </CosmeticUsername>
       </View>
     );
   }
   if (item.kind === 'border') {
     return (
-      <View style={[s.preview, {
-        borderWidth: v.width ?? 2,
-        borderColor: v.color ?? '#aaa',
-        backgroundColor: C.card,
-      }]} />
+      <View style={[s.preview, { backgroundColor: 'transparent' }]}>
+        <CosmeticBorder visual={v} size={32}>
+          <View style={{
+            width: 32, height: 32, borderRadius: 16, backgroundColor: C.cardAlt,
+            alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Text style={{ color: C.textMuted, fontSize: 12, fontWeight: '700' }}>·</Text>
+          </View>
+        </CosmeticBorder>
+      </View>
     );
   }
   if (item.kind === 'ball_trail') {
     return (
-      <View style={s.preview}>
-        <View style={{
-          width: '60%', height: v.width ?? 2, backgroundColor: v.color ?? '#fff',
-          borderRadius: 2,
-        }} />
+      <View style={[s.preview, { padding: 6 }]}>
+        <CosmeticTrailPreview visual={v} />
       </View>
     );
   }
