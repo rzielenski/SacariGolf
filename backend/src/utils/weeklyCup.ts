@@ -101,24 +101,34 @@ async function resolveOne(cupId: string, weekStartsAt: Date): Promise<boolean> {
   // No entries: still resolved (status flipped above), no payouts.
   if (!top.length) return true;
 
-  // ── Award cup-winner cosmetics ─────────────────────────────────────
-  // Every cup_winner cosmetic with matching place gets granted to the
-  // matching finisher. Idempotent via PK on user_cosmetics.
-  for (let i = 0; i < top.length; i++) {
-    const place = i + 1;
-    const winner = top[i];
-    await pool.query(
-      `INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
-         SELECT $1, c.cosmetic_id, $3
-           FROM cosmetics c
-          WHERE c.unlock_kind = 'cup_winner'
-            AND (c.unlock_data ->> 'place')::int = $2
-       ON CONFLICT (user_id, cosmetic_id) DO NOTHING`,
-      [winner.user_id, place, `cup_${cupId}_place_${place}`],
-    );
-  }
+  // ── Pin the winner so the home banner + profile trophy row can
+  // count cups won later. ────────────────────────────────────────────
+  const champion = top[0];
+  await pool.query(
+    `INSERT INTO weekly_cup_winners (cup_id, user_id, best_to_par)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (cup_id) DO NOTHING`,
+    [cupId, champion.user_id, champion.best_to_par],
+  );
 
-  // ── Push notify all finishers ──────────────────────────────────────
+  // ── Award cup-winner cosmetics ─────────────────────────────────────
+  // Only the #1 finisher gets a cosmetic (the Champion Wreath border).
+  // Per user request: dropped the gold-frame + gold-text payouts —
+  // the trophy itself (tracked above) is the prestige. Idempotent via
+  // PK on user_cosmetics.
+  await pool.query(
+    `INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+       SELECT $1, c.cosmetic_id, $2
+         FROM cosmetics c
+        WHERE c.unlock_kind = 'cup_winner'
+          AND (c.unlock_data ->> 'place')::int = 1
+     ON CONFLICT (user_id, cosmetic_id) DO NOTHING`,
+    [champion.user_id, `cup_${cupId}_winner`],
+  );
+
+  // ── Push notify finishers ──────────────────────────────────────────
+  // Only the champion gets a cosmetic + trophy, but 2nd/3rd still get a
+  // congratulatory ping so they know they were on the podium.
   const tokens = top
     .map((w: any, i: number) => ({ token: w.push_token, place: i + 1, name: w.username }))
     .filter((w) => !!w.token);
@@ -128,24 +138,21 @@ async function resolveOne(cupId: string, weekStartsAt: Date): Promise<boolean> {
       [w.token],
       `${medal} Sacari Cup result`,
       w.place === 1
-        ? `You won this week's Sacari Cup! Check the Locker Room for your champion cosmetics.`
-        : `You finished #${w.place} in this week's Sacari Cup. Cosmetics unlocked in the Locker Room.`,
+        ? `You won this week's Sacari Cup! 🏆 Champion Wreath border + trophy added to your profile.`
+        : `You finished #${w.place} in this week's Sacari Cup. So close — try again this week.`,
       { type: 'cup_result', cupId, place: w.place },
     );
   }
 
-  // ── Feed post — one card per cup, summarising the podium ───────────
-  // Hosted under the champion's user_id so the post sticks even if the
-  // 2nd/3rd-place players delete their accounts.
+  // ── Feed post — single card under the champion summarising podium ─
   try {
-    const champion = top[0];
     const podium = top.map((w: any, i: number) => `${i + 1}. ${w.username}`).join('  ·  ');
     await pool.query(
       `INSERT INTO posts (user_id, kind, body)
        VALUES ($1, 'text', $2)`,
       [
         champion.user_id,
-        `Sacari Cup — Week of ${weekStartsAt.toISOString().slice(0, 10)}\n${podium}`,
+        `🏆 Sacari Cup Champion — Week of ${weekStartsAt.toISOString().slice(0, 10)}\n${podium}`,
       ],
     );
   } catch (e) {

@@ -51,6 +51,12 @@ export default function HomeScreen() {
   // but never opened, or accepted on another device, is still resumable.
   const [resumeCount, setResumeCount] = useState(0);
   const [singleResumeId, setSingleResumeId] = useState<string | null>(null);
+  // Most recent Sacari Cup champion — drives the banner near the top
+  // of the home tab. Refetched alongside the rest of the home data so a
+  // pull-to-refresh on Monday morning picks up the new champion crisply.
+  const [lastChampion, setLastChampion] = useState<
+    { username: string; avatar_url: string | null; best_to_par: number; week_starts_at: string } | null
+  >(null);
 
   const loadHomeData = useCallback(async () => {
     try {
@@ -66,6 +72,10 @@ export default function HomeScreen() {
     try {
       const rows = await api.users.perks();
       setPerkCount(Array.isArray(rows) ? rows.length : 0);
+    } catch { /* silent */ }
+    try {
+      const ch = await api.weeklyCup.lastChampion();
+      setLastChampion(ch.champion ?? null);
     } catch { /* silent */ }
   }, [refreshUser, user?.user_id]);
 
@@ -98,6 +108,29 @@ export default function HomeScreen() {
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
         </View>
       </View>
+
+      {/* Last week's Sacari Cup champion — gold trophy banner. Hidden
+          until a cup actually resolves (fresh DB / first-ever week). */}
+      {lastChampion && (
+        <TouchableOpacity
+          style={styles.champBanner}
+          onPress={() => router.push('/sacari-cup' as any)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.champTrophy}>🏆</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.champLabel}>LAST WEEK'S CHAMPION</Text>
+            <Text style={styles.champName}>{censor(lastChampion.username)}</Text>
+            <Text style={styles.champMeta}>
+              {lastChampion.best_to_par > 0
+                ? `+${lastChampion.best_to_par}`
+                : lastChampion.best_to_par === 0 ? 'E' : lastChampion.best_to_par}
+              {' '}· week of {new Date(lastChampion.week_starts_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+            </Text>
+          </View>
+          <Text style={styles.champChev}>›</Text>
+        </TouchableOpacity>
+      )}
 
       {/* ELO card — tap ELO number 5× to open Find Ranker (existing easter egg) */}
       <View style={styles.eloCard}>
@@ -322,6 +355,17 @@ const styles = StyleSheet.create({
   },
   openBetaLabel: { color: C.gold, fontWeight: '900', fontSize: 13, letterSpacing: 1.5, textAlign: 'center' },
   openBetaMsg: { color: C.text, fontSize: 12, marginTop: 6, lineHeight: 17, textAlign: 'center' },
+
+  champBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.gold + '18', borderRadius: 12, padding: 14, marginBottom: 14,
+    borderWidth: 2, borderColor: C.gold,
+  },
+  champTrophy: { fontSize: 34 },
+  champLabel: { color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.5 },
+  champName: { color: C.gold, fontFamily: F.serif, fontSize: 18, fontWeight: '900', marginTop: 2 },
+  champMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
+  champChev: { color: C.gold, fontSize: 22, fontWeight: '700' },
 
   // 2-wide nav grid (replaces the stacked Leaderboard / Tournaments buttons).
   // Each tile uses PressableScale for tactile press feedback. Slight

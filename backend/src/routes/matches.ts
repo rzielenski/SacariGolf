@@ -1525,6 +1525,20 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       }
     }
 
+    // ── Season Pass XP ─────────────────────────────────────────────────
+    // +1 XP per completed non-practice round. The full pass is 10 XP =
+    // 10 rounds. Best-effort post-commit: a failure to grant XP doesn't
+    // roll back the score save, and the next round resync (or the
+    // boot-time ensureCurrentSeason) keeps the ladder healthy.
+    if (!matchRows[0].is_practice) {
+      try {
+        const { awardRoundXp } = await import('../utils/seasonPass');
+        await awardRoundXp(req.userId!);
+      } catch (e) {
+        console.error('[season-pass] xp grant failed:', e);
+      }
+    }
+
     // ── Friend push: "<name> just finished a round" ─────────────────────
     // Atomically flips match_players.finished_notified so each finisher's
     // friends get exactly one push regardless of score edits / re-submits

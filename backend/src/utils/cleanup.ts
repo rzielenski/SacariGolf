@@ -322,6 +322,14 @@ async function weeklyCupTick(): Promise<void> {
   } catch (err) {
     console.error('[weekly-cup] tick failed:', err);
   }
+  // Same cadence as the cup tick — also ensures the current calendar
+  // month's season exists + the tier ladder is seeded.
+  try {
+    const { ensureCurrentSeason } = await import('./seasonPass');
+    await ensureCurrentSeason();
+  } catch (err) {
+    console.error('[season-pass] tick failed:', err);
+  }
 }
 
 /** Stop all background tasks. Idempotent; safe to call multiple times. */

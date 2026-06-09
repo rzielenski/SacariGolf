@@ -220,4 +220,136 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
   });
 }));
 
+/**
+ * Last resolved Sacari Cup champion. Drives the home-tab banner. Returns
+ * the user + the week + their winning score, or null if no cup has ever
+ * resolved (fresh database).
+ */
+router.get('/weekly-cup/last-champion', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT w.cup_id, w.user_id, w.best_to_par, w.decided_at,
+            wc.week_starts_at,
+            u.username, u.avatar_url, u.elo
+       FROM weekly_cup_winners w
+       JOIN weekly_cups wc ON wc.cup_id = w.cup_id
+       JOIN users u        ON u.user_id = w.user_id
+      ORDER BY w.decided_at DESC
+      LIMIT 1`,
+  );
+  return res.json({ champion: rows[0] ?? null });
+}));
+
+/**
+ * Season Pass — current month's progression for the caller. Includes
+ * total XP, days remaining, the full tier ladder with each tier's
+ * cosmetic (visual_data resolved) + locked/claimable/claimed state.
+ *
+ *   GET  /season-pass         → my progression + tier ladder
+ *   POST /season-pass/claim   { tier }  → claim a reached tier
+ */
+router.get('/season-pass', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: seasonRows } = await pool.query(
+    `SELECT season_id, name, starts_at, ends_at
+       FROM seasons
+      WHERE NOW() >= starts_at AND NOW() < ends_at
+      LIMIT 1`,
+  );
+  if (!seasonRows.length) return res.json({ season: null, tiers: [], xp: 0, claimed: [] });
+  const season = seasonRows[0];
+
+  const [{ rows: progressRows }, { rows: tierRows }] = await Promise.all([
+    pool.query(
+      `SELECT xp, claimed_tiers
+         FROM season_pass_progress
+        WHERE user_id = $1 AND season_id = $2`,
+      [req.userId, season.season_id],
+    ),
+    pool.query(
+      `SELECT sp.tier, sp.xp_required,
+              sp.cosmetic_id,
+              c.name AS cosmetic_name, c.kind, c.rarity, c.visual_data
+         FROM season_pass_tiers sp
+         LEFT JOIN cosmetics c ON c.cosmetic_id = sp.cosmetic_id
+        WHERE sp.season_id = $1
+        ORDER BY sp.tier ASC`,
+      [season.season_id],
+    ),
+  ]);
+
+  const xp = progressRows[0]?.xp ?? 0;
+  const claimed: number[] = progressRows[0]?.claimed_tiers ?? [];
+  return res.json({
+    season,
+    xp,
+    claimed,
+    tiers: tierRows.map((t: any) => ({
+      ...t,
+      reached: xp >= t.xp_required,
+      claimed: claimed.includes(t.tier),
+    })),
+  });
+}));
+
+router.post('/season-pass/claim', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const tier = Number(req.body?.tier);
+  if (!Number.isInteger(tier) || tier < 1 || tier > 50) {
+    return res.status(400).json({ error: 'tier must be 1..50' });
+  }
+  const { rows: seasonRows } = await pool.query(
+    `SELECT season_id FROM seasons
+      WHERE NOW() >= starts_at AND NOW() < ends_at
+      LIMIT 1`,
+  );
+  if (!seasonRows.length) return res.status(404).json({ error: 'No active season' });
+  const seasonId = seasonRows[0].season_id;
+
+  // Verify the tier exists for this season and the user has reached it.
+  const { rows: tierRows } = await pool.query(
+    `SELECT spt.xp_required, spt.cosmetic_id,
+            COALESCE(spp.xp, 0) AS xp,
+            COALESCE(spp.claimed_tiers, '{}') AS claimed
+       FROM season_pass_tiers spt
+       LEFT JOIN season_pass_progress spp
+              ON spp.season_id = spt.season_id AND spp.user_id = $2
+      WHERE spt.season_id = $1 AND spt.tier = $3`,
+    [seasonId, req.userId, tier],
+  );
+  if (!tierRows.length) return res.status(404).json({ error: 'Tier not found' });
+  const row = tierRows[0];
+  if (row.xp < row.xp_required) return res.status(403).json({ error: 'Tier not yet reached' });
+  if ((row.claimed as number[]).includes(tier)) return res.json({ success: true, alreadyClaimed: true });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Append the tier to claimed_tiers + grant the cosmetic.
+    await client.query(
+      `INSERT INTO season_pass_progress (user_id, season_id, xp, claimed_tiers, updated_at)
+       VALUES ($1, $2, 0, ARRAY[$3]::int[], NOW())
+       ON CONFLICT (user_id, season_id)
+       DO UPDATE SET claimed_tiers =
+         (SELECT array_agg(DISTINCT x ORDER BY x)
+            FROM unnest(season_pass_progress.claimed_tiers || EXCLUDED.claimed_tiers) x),
+                     updated_at = NOW()`,
+      [req.userId, seasonId, tier],
+    );
+    if (row.cosmetic_id) {
+      await client.query(
+        `INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, cosmetic_id) DO NOTHING`,
+        [req.userId, row.cosmetic_id, `season_pass_${seasonId}_tier_${tier}`],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  return res.json({ success: true, tier, cosmetic_id: row.cosmetic_id });
+}));
+
 export default router;

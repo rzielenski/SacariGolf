@@ -535,6 +535,33 @@ export const api = {
       }>;
       prizes: { first: string; second: string; third: string };
     }>('GET', '/weekly-cup/current'),
+    /** Most recently resolved Sacari Cup winner — drives the home banner. */
+    lastChampion: () => request<{
+      champion: {
+        cup_id: string; user_id: string; username: string; avatar_url: string | null;
+        elo: number; best_to_par: number; week_starts_at: string;
+      } | null;
+    }>('GET', '/weekly-cup/last-champion'),
+  },
+
+  seasonPass: {
+    /** Current calendar-month season + my XP + tier ladder. */
+    current: () => request<{
+      season: { season_id: string; name: string; starts_at: string; ends_at: string } | null;
+      xp: number;
+      claimed: number[];
+      tiers: Array<{
+        tier: number; xp_required: number;
+        cosmetic_id: string | null; cosmetic_name: string | null;
+        kind: string | null; rarity: string | null; visual_data: any;
+        reached: boolean; claimed: boolean;
+      }>;
+    }>('GET', '/season-pass'),
+    /** Claim a tier I've reached. Server validates. */
+    claim: (tier: number) =>
+      request<{ success: true; tier?: number; cosmetic_id?: string | null; alreadyClaimed?: boolean }>(
+        'POST', '/season-pass/claim', { tier },
+      ),
   },
 
   balls: {

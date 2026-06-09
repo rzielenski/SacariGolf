@@ -1509,6 +1509,179 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON weekly_cups(status, week_starts_at DESC);
     `,
   },
+  {
+    // Pin which user_id won which cup. Used for the home-page banner,
+    // the per-profile trophy row, and stats. The resolver writes here
+    // alongside the user_cosmetics grant.
+    name: 'weekly_cup_winners.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS weekly_cup_winners (
+        cup_id        UUID PRIMARY KEY REFERENCES weekly_cups(cup_id) ON DELETE CASCADE,
+        user_id       UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        best_to_par   INTEGER NOT NULL,
+        decided_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS weekly_cup_winners_user_idx
+        ON weekly_cup_winners(user_id);
+    `,
+  },
+  {
+    // Cosmetics v2 — rewrite the catalog around a richer visual_data
+    // schema and ditch the placeholder gold-frame/gold-text items. New
+    // items are designed as season-pass tier rewards or premium perks,
+    // not cup payouts; cup payouts collapse to just the Champion Wreath
+    // border (+ a trophy count tracked separately via
+    // weekly_cup_winners). Idempotent — only DELETEs items the seed
+    // explicitly replaced, never touches user_cosmetics rows for
+    // surviving items.
+    name: 'cosmetics.catalog_v2',
+    sql: `
+      -- Drop the items the v2 seed is replacing. CASCADE clears any
+      -- user_cosmetics rows pointing at them so nobody's stuck with a
+      -- now-deleted reference.
+      DELETE FROM user_cosmetics WHERE cosmetic_id IN (
+        'border_gold', 'border_obsidian',
+        'bg_fairway', 'bg_royal', 'bg_gold_dust',
+        'uname_gold', 'uname_champion',
+        'trail_lightning', 'trail_gold'
+      );
+      DELETE FROM cosmetics WHERE cosmetic_id IN (
+        'border_gold', 'border_obsidian',
+        'bg_fairway', 'bg_royal', 'bg_gold_dust',
+        'uname_gold', 'uname_champion',
+        'trail_lightning', 'trail_gold'
+      );
+
+      -- Clear equipped pointers that referenced now-deleted items so
+      -- the FK doesn't dangle. Replacement defaults are reinstated below.
+      UPDATE users SET
+        equipped_border     = CASE WHEN equipped_border     IN ('border_gold','border_obsidian') THEN 'border_classic' ELSE equipped_border END,
+        equipped_background = CASE WHEN equipped_background IN ('bg_fairway','bg_royal','bg_gold_dust') THEN 'bg_default' ELSE equipped_background END,
+        equipped_username   = CASE WHEN equipped_username   IN ('uname_gold','uname_champion') THEN 'uname_default' ELSE equipped_username END,
+        equipped_ball_trail = CASE WHEN equipped_ball_trail IN ('trail_lightning','trail_gold') THEN 'trail_default' ELSE equipped_ball_trail END;
+
+      -- Seed v2. Each visual_data carries a 'style' discriminator the
+      -- mobile renderer branches on; the rest of the fields describe
+      -- the look. Tier rewards are season-pass-only — players can't
+      -- find them anywhere else.
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── Borders ────────────────────────────────────────────────
+        ('border_champion',  'border', 'Champion Wreath', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"glow","color":"#d4a93f","accent":"#ffe28a","width":4,"animated":true}'::jsonb),
+        ('border_holographic','border','Holographic',    'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"holographic","colors":["#ff6b9d","#74e0ff","#a89cf0","#ffe28a"],"width":3,"animated":true}'::jsonb),
+        ('border_storm',     'border', 'Storm Edge',     'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"pulse","color":"#5a76b0","accent":"#cad9ff","width":3,"animated":true}'::jsonb),
+
+        -- ── Backgrounds ────────────────────────────────────────────
+        ('bg_america',       'background', 'Stars & Stripes', 'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"flag","stripes":["#bf0a30","#ffffff"],"canton":"#002868","stars":50,"animated":false}'::jsonb),
+        ('bg_storm',         'background', 'Thunderstorm',    'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"pulse","from":"#0a0f1c","to":"#3a4060","flash":"#cad9ff","animated":true}'::jsonb),
+        ('bg_aurora',        'background', 'Aurora',          'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"aurora","layers":["#00ff9d","#7fa2ff","#c779ff"],"from":"#04161e","animated":true}'::jsonb),
+        ('bg_cosmic',        'background', 'Cosmic Drift',    'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"stars","from":"#040515","to":"#1a0a3a","stars":80,"animated":false}'::jsonb),
+        ('bg_volcanic',      'background', 'Volcanic',        'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","from":"#1a0807","to":"#e8623a","accent":"#ffd700"}'::jsonb),
+
+        -- ── Ball trails (shot map polyline) ────────────────────────
+        ('trail_lightning',  'ball_trail', 'Lightning Crackle','legendary','rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"crackle","color":"#74e0ff","accent":"#ffffff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_fire',       'ball_trail', 'Wildfire',        'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","color":"#ffb14a","accent":"#d83a5e","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_galaxy',     'ball_trail', 'Galaxy',          'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"gradient","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_neon',       'ball_trail', 'Neon Pulse',      'rare',     'premium',
+          NULL,
+          '{"style":"pulse","color":"#39ff14","width":3,"animated":true,"glow":true}'::jsonb),
+
+        -- ── Username flair ────────────────────────────────────────
+        ('uname_holographic','username', 'Holographic Text',  'legendary','rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"gradient","gradient":["#ff6b9d","#74e0ff","#a89cf0"],"animated":true}'::jsonb),
+        ('uname_fire',       'username', 'Wildfire Text',     'epic',     'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffb14a","#d83a5e"],"animated":true}'::jsonb),
+        ('uname_ice',        'username', 'Ice Crystal',       'rare',     'premium',
+          NULL,
+          '{"style":"solid","color":"#74e0ff","glow":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      -- Catch-up: grant premium items to current premium members + grant
+      -- free items to everyone, same as v1. Rank-locked items are NOT
+      -- granted here — they're awarded via the season-pass and
+      -- rank-promotion code paths.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium'
+           AND u.is_premium  = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+  },
+  {
+    // Season pass. One season per calendar month, auto-created by
+    // utils/seasonPass.ts on boot. XP is earned 1 per completed ranked
+    // round (~10 rounds = full pass). The reward ladder is data-driven:
+    // season_pass_tiers rows define which cosmetic the player gets at
+    // each XP threshold. claimed_tiers JSONB on the progress row
+    // tracks what the user has already pulled.
+    name: 'season_pass.create_tables',
+    sql: `
+      CREATE TABLE IF NOT EXISTS seasons (
+        season_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        starts_at      TIMESTAMPTZ NOT NULL UNIQUE,
+        ends_at        TIMESTAMPTZ NOT NULL,
+        name           TEXT NOT NULL,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS seasons_window_idx
+        ON seasons(starts_at, ends_at);
+
+      CREATE TABLE IF NOT EXISTS season_pass_tiers (
+        season_id      UUID NOT NULL REFERENCES seasons(season_id) ON DELETE CASCADE,
+        tier           INT  NOT NULL,
+        xp_required    INT  NOT NULL,
+        cosmetic_id    TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        PRIMARY KEY (season_id, tier)
+      );
+
+      CREATE TABLE IF NOT EXISTS season_pass_progress (
+        user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        season_id       UUID NOT NULL REFERENCES seasons(season_id) ON DELETE CASCADE,
+        xp              INT  NOT NULL DEFAULT 0,
+        claimed_tiers   INT[] NOT NULL DEFAULT '{}',
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, season_id)
+      );
+      CREATE INDEX IF NOT EXISTS season_pass_progress_season_idx
+        ON season_pass_progress(season_id, xp DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {
