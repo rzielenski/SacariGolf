@@ -115,7 +115,14 @@ export default function ChatScreen() {
         prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
       ));
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
-    } catch { setText(trimmed); } finally { setSending(false); }
+    } catch (e: any) {
+      // Restore the text so the user can retry or edit, AND show why it
+      // failed. The silent catch here used to swallow 403 "you can only
+      // DM friends" responses, leaving the user staring at a tap that
+      // appeared to do nothing.
+      setText(trimmed);
+      Alert.alert('Could not send', e?.message ?? 'Try again.');
+    } finally { setSending(false); }
   };
 
   /** Pick a photo from the library and send it as a chat message. Mirrors

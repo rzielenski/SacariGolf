@@ -370,17 +370,23 @@ export default function ProfileScreen() {
   const usernameVisual = equipped.username ?? null;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, bgVisual && { backgroundColor: 'transparent' }]}>
       {/* Animated/styled background lives BEHIND the scroll content so
           the stars / aurora / flag patterns can paint full-bleed without
-          interfering with scroll. */}
+          interfering with scroll. Both the outer View AND the ScrollView
+          have to be transparent when a cosmetic background is equipped —
+          otherwise styles.container's backgroundColor: C.bg paints over
+          the cosmetic and the player sees no change. */}
       {bgVisual && (
         <CosmeticBackground
           visual={bgVisual}
           style={StyleSheet.absoluteFillObject}
         />
       )}
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={[styles.container, bgVisual && { backgroundColor: 'transparent' }]}
+      contentContainerStyle={styles.content}
+    >
       {/* Bell — old gothic, cracked */}
       <TouchableOpacity style={styles.bellBtn} onPress={openNotifications} activeOpacity={0.7}>
         <View style={styles.bellWrap}>
