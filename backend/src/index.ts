@@ -19,6 +19,7 @@ import tournamentsRouter from './routes/tournaments';
 import postsRouter from './routes/posts';
 import seasonsRouter from './routes/seasons';
 import ballsRouter from './routes/balls';
+import cosmeticsRouter from './routes/cosmetics';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
 import { startTwitterDigestSchedule } from './utils/twitterDigest';
@@ -49,6 +50,9 @@ app.use('/tournaments', tournamentsRouter);
 app.use('/posts', postsRouter);
 app.use('/seasons', seasonsRouter);
 app.use('/balls', ballsRouter);
+// Cosmetics router declares its own multi-prefix routes (/cosmetics/...,
+// /users/me/cosmetics/..., /weekly-cup/...) so it mounts at the root.
+app.use('/', cosmeticsRouter);
 
 // Catch unhandled errors so the server doesn't crash
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
 import { api, setSessionInvalidHandler } from './api';
 import { User } from '../types';
+import * as themePlayer from './themePlayer';
 
 interface AuthContextType {
   user: User | null;
@@ -64,6 +65,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
     return () => setSessionInvalidHandler(null);
   }, []);
+
+  // Push the saved theme-song max-volume preference into the singleton
+  // player whenever the user state changes (initial load, login, settings
+  // toggle, refresh). The player otherwise wouldn't know about the flag
+  // until the user navigates into Settings.
+  useEffect(() => {
+    themePlayer.setThemeMaxVolume(!!(user as any)?.theme_song_max_volume);
+  }, [user]);
 
   const login = async (email: string, password: string) => {
     const { token: t, user: u } = await api.auth.login(email, password);

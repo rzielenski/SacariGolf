@@ -5,6 +5,8 @@ import {
 } from 'react-native';
 import { Audio } from 'expo-av';
 import { C, F } from '../lib/colors';
+import { useVoiceRecorder } from '../app/chat/hooks/useVoiceRecorder';
+import { api } from '../lib/api';
 
 /**
  * Searches Apple's iTunes catalog (no auth required) and lets the user pick
@@ -33,16 +35,29 @@ export function ThemeSongPicker({
   visible,
   onClose,
   onPick,
+  onPickVoice,
 }: {
   visible: boolean;
   onClose: () => void;
   onPick: (track: ThemeTrack) => void;
+  /** Fires after a voice memo upload succeeds. The server has already
+   *  stamped theme_track_* onto the user's row at this point — the parent
+   *  just needs to refresh its `user` to pick up the new previewUrl. */
+  onPickVoice?: () => void;
 }) {
+  const [mode, setMode] = useState<'search' | 'voice'>('search');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ITunesResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [playingId, setPlayingId] = useState<number | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
+
+  // Voice recording state
+  const recorder = useVoiceRecorder(30_000); // 30s cap matches iTunes preview
+  const [voiceClip, setVoiceClip] = useState<{ base64: string; mime: string; durationMs: number } | null>(null);
+  const [voicePlaying, setVoicePlaying] = useState(false);
+  const [voiceUploading, setVoiceUploading] = useState(false);
+  const voiceSoundRef = useRef<Audio.Sound | null>(null);
 
   // Debounced search — wait 350ms after typing stops before hitting iTunes.
   useEffect(() => {
@@ -67,14 +82,18 @@ export function ThemeSongPicker({
     return () => clearTimeout(handle);
   }, [query, visible]);
 
-  // Tear down audio whenever the modal closes.
+  // Tear down audio + reset state whenever the modal closes.
   useEffect(() => {
     if (!visible) {
       stopPreview();
+      stopVoicePlayback();
+      recorder.cancel();
       setQuery('');
       setResults([]);
+      setMode('search');
+      setVoiceClip(null);
     }
-  }, [visible]);
+  }, [visible]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Configure the iOS audio session to play through the speaker even when
   // the device is on silent (otherwise no sound at all on a muted phone).
@@ -115,6 +134,64 @@ export function ThemeSongPicker({
     }
   };
 
+  // ── Voice mode ──────────────────────────────────────────────────────
+  const stopVoicePlayback = async () => {
+    if (voiceSoundRef.current) {
+      try { await voiceSoundRef.current.stopAsync(); } catch { /* */ }
+      try { await voiceSoundRef.current.unloadAsync(); } catch { /* */ }
+      voiceSoundRef.current = null;
+    }
+    setVoicePlaying(false);
+  };
+
+  const beginRecord = async () => {
+    await stopPreview();
+    await stopVoicePlayback();
+    setVoiceClip(null);
+    const ok = await recorder.start();
+    if (!ok) Alert.alert('Microphone needed', 'Enable mic access in Settings to record a voice theme.');
+  };
+
+  const endRecord = async () => {
+    const clip = await recorder.stopAndGet();
+    if (clip) setVoiceClip(clip);
+  };
+
+  const playBackVoice = async () => {
+    if (!voiceClip) return;
+    if (voicePlaying) { await stopVoicePlayback(); return; }
+    try {
+      // Load from the data URI — voice clips live in memory until upload, so
+      // there's no file URI yet to point Sound at.
+      const dataUri = `data:${voiceClip.mime};base64,${voiceClip.base64}`;
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: dataUri },
+        { shouldPlay: true, volume: 1.0 },
+      );
+      voiceSoundRef.current = sound;
+      setVoicePlaying(true);
+      sound.setOnPlaybackStatusUpdate((st: any) => {
+        if (st?.didJustFinish) stopVoicePlayback();
+      });
+    } catch (e: any) {
+      Alert.alert('Playback error', e?.message ?? 'Could not play voice memo.');
+    }
+  };
+
+  const saveVoice = async () => {
+    if (!voiceClip) return;
+    setVoiceUploading(true);
+    try {
+      await api.users.uploadThemeVoice(voiceClip.base64, voiceClip.mime, voiceClip.durationMs);
+      onPickVoice?.();
+      onClose();
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message ?? 'Try again.');
+    } finally {
+      setVoiceUploading(false);
+    }
+  };
+
   const pick = async (track: ITunesResult) => {
     if (!track.previewUrl) return;
     await stopPreview();
@@ -138,6 +215,77 @@ export function ThemeSongPicker({
           </TouchableOpacity>
         </View>
 
+        {/* Mode switch — Search iTunes vs Record voice memo */}
+        <View style={s.modeRow}>
+          <TouchableOpacity
+            style={[s.modeBtn, mode === 'search' && s.modeBtnActive]}
+            onPress={() => { stopVoicePlayback(); setMode('search'); }}
+          >
+            <Text style={[s.modeBtnText, mode === 'search' && s.modeBtnTextActive]}>SEARCH SONG</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[s.modeBtn, mode === 'voice' && s.modeBtnActive]}
+            onPress={() => { stopPreview(); setMode('voice'); }}
+          >
+            <Text style={[s.modeBtnText, mode === 'voice' && s.modeBtnTextActive]}>🎤  RECORD VOICE</Text>
+          </TouchableOpacity>
+        </View>
+
+        {mode === 'voice' ? (
+          <View style={s.voiceWrap}>
+            <Text style={s.voiceHint}>
+              Record up to 30 seconds. Plays whenever your match-found intro
+              fires — same as a song.
+            </Text>
+
+            {!voiceClip ? (
+              <>
+                <TouchableOpacity
+                  style={[s.recordBtn, recorder.recording && s.recordBtnActive]}
+                  onPress={recorder.recording ? endRecord : beginRecord}
+                  activeOpacity={0.85}
+                >
+                  <Text style={s.recordBtnText}>
+                    {recorder.recording ? '■  STOP' : '●  RECORD'}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={s.recordElapsed}>
+                  {recorder.recording
+                    ? `${(recorder.elapsedMs / 1000).toFixed(1)}s / 30s`
+                    : 'Tap to start. Tap again to stop.'}
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text style={s.voiceClipMeta}>
+                  Recorded {(voiceClip.durationMs / 1000).toFixed(1)}s
+                </Text>
+                <View style={s.voiceActions}>
+                  <TouchableOpacity style={s.voiceBtnSecondary} onPress={playBackVoice}>
+                    <Text style={s.voiceBtnSecondaryText}>{voicePlaying ? '■ Stop' : '▶ Preview'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={s.voiceBtnSecondary}
+                    onPress={() => { stopVoicePlayback(); setVoiceClip(null); }}
+                  >
+                    <Text style={s.voiceBtnSecondaryText}>↻ Redo</Text>
+                  </TouchableOpacity>
+                </View>
+                <TouchableOpacity
+                  style={[s.voiceSaveBtn, voiceUploading && { opacity: 0.5 }]}
+                  onPress={saveVoice}
+                  disabled={voiceUploading}
+                >
+                  {voiceUploading
+                    ? <ActivityIndicator color={C.bg} />
+                    : <Text style={s.voiceSaveBtnText}>SET AS THEME</Text>}
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        ) : (
+        <>
+
         <TextInput
           style={s.input}
           value={query}
@@ -146,7 +294,6 @@ export function ThemeSongPicker({
           placeholderTextColor={C.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
-          autoFocus
         />
 
         {loading && (
@@ -189,6 +336,8 @@ export function ThemeSongPicker({
           }
           contentContainerStyle={{ paddingBottom: 40 }}
         />
+        </>
+        )}
       </View>
     </Modal>
   );
@@ -226,4 +375,36 @@ const s = StyleSheet.create({
     marginLeft: 8,
   },
   pickBtnText: { color: C.bg, fontWeight: '900', fontSize: 11, letterSpacing: 0.6 },
+
+  modeRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  modeBtn: {
+    flex: 1, paddingVertical: 9, borderRadius: 6, alignItems: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  modeBtnActive: { backgroundColor: C.gold + '22', borderColor: C.gold },
+  modeBtnText: { color: C.textMuted, fontWeight: '900', fontSize: 11, letterSpacing: 1 },
+  modeBtnTextActive: { color: C.gold },
+
+  voiceWrap: { flex: 1, alignItems: 'center', paddingTop: 30, paddingHorizontal: 8 },
+  voiceHint: { color: C.textMuted, fontSize: 13, lineHeight: 19, textAlign: 'center', marginBottom: 32 },
+  recordBtn: {
+    width: 160, height: 160, borderRadius: 80,
+    backgroundColor: C.gold + '22', borderWidth: 3, borderColor: C.gold,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  recordBtnActive: { backgroundColor: C.red + '33', borderColor: C.red },
+  recordBtnText: { color: C.gold, fontWeight: '900', fontSize: 18, letterSpacing: 2 },
+  recordElapsed: { color: C.textMuted, fontSize: 13, marginTop: 20 },
+  voiceClipMeta: { color: C.gold, fontSize: 16, fontWeight: '900', marginBottom: 18 },
+  voiceActions: { flexDirection: 'row', gap: 12 },
+  voiceBtnSecondary: {
+    paddingVertical: 12, paddingHorizontal: 22, borderRadius: 8,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  voiceBtnSecondaryText: { color: C.gold, fontWeight: '700', fontSize: 13 },
+  voiceSaveBtn: {
+    marginTop: 26, backgroundColor: C.gold, borderRadius: 8,
+    paddingVertical: 14, paddingHorizontal: 36, alignItems: 'center',
+  },
+  voiceSaveBtnText: { color: C.bg, fontWeight: '900', letterSpacing: 1 },
 });

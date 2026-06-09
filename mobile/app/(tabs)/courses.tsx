@@ -15,12 +15,32 @@ import { Divider } from '../../components/Flourish';
 // request any course that's missing from the still-growing catalog.
 const COURSE_TIP_KEY = 'courses_request_tip_seen_v1';
 
+// Great-circle distance in miles between two lat/lng points. Used to show how
+// far each course is from the player and to sort results nearest-first.
+function distanceMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 3958.8; // Earth radius in miles
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatMiles(d: number): string {
+  if (d < 0.1) return '< 0.1 mi';
+  if (d < 10) return `${d.toFixed(1)} mi`;
+  return `${Math.round(d)} mi`;
+}
+
 export default function CoursesScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Course[]>([]);
   const [searching, setSearching] = useState(false);
   const [nearby, setNearby] = useState<Course[]>([]);
   const [loadingNearby, setLoadingNearby] = useState(false);
+  // The player's current location, captured once we have permission. Drives
+  // the per-row distance badge and the nearest-first sort.
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   // First-visit tip: point users at the +Request flow for missing courses.
   useEffect(() => {
@@ -48,6 +68,7 @@ export default function CoursesScreen() {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') return;
         const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
         const courses = await api.courses.nearby(pos.coords.latitude, pos.coords.longitude);
         setNearby(courses);
       } catch { /* silent */ } finally {
@@ -67,6 +88,18 @@ export default function CoursesScreen() {
   }, []);
 
   const open = (c: Course) => router.push(`/course/${c.course_id}` as any);
+
+  // Sort a list nearest-first when we know where the player is; courses with no
+  // coordinates sink to the bottom. Applied to both search results and the
+  // Nearby list so distance is the primary ordering everywhere.
+  const sortByDistance = useCallback((list: Course[]): Course[] => {
+    if (!userCoords) return list;
+    const d = (c: Course) =>
+      c.latitude != null && c.longitude != null
+        ? distanceMiles(userCoords.lat, userCoords.lng, c.latitude, c.longitude)
+        : Infinity;
+    return [...list].sort((a, b) => d(a) - d(b));
+  }, [userCoords]);
 
   const showResults = query.length >= 2;
 
@@ -107,16 +140,20 @@ export default function CoursesScreen() {
             {!searching && results.length === 0 && (
               <Text style={styles.empty}>No courses match "{query}"</Text>
             )}
-            {results.map((c) => <CourseRow key={c.course_id} course={c} onPress={() => open(c)} />)}
+            {sortByDistance(results).map((c) => (
+              <CourseRow key={c.course_id} course={c} userCoords={userCoords} onPress={() => open(c)} />
+            ))}
           </>
         ) : (
           <>
-            <Text style={styles.sectionLabel}>Nearby</Text>
+            <Text style={styles.sectionLabel}>{userCoords ? 'Nearest to you' : 'Nearby'}</Text>
             {loadingNearby
               ? <ActivityIndicator color={C.gold} style={{ marginTop: 16 }} />
               : nearby.length === 0
                 ? <Text style={styles.empty}>No nearby courses found. Try searching above.</Text>
-                : nearby.map((c) => <CourseRow key={c.course_id} course={c} onPress={() => open(c)} />)
+                : sortByDistance(nearby).map((c) => (
+                    <CourseRow key={c.course_id} course={c} userCoords={userCoords} onPress={() => open(c)} />
+                  ))
             }
           </>
         )}
@@ -125,7 +162,16 @@ export default function CoursesScreen() {
   );
 }
 
-function CourseRow({ course, onPress }: { course: Course; onPress: () => void }) {
+function CourseRow({
+  course, userCoords, onPress,
+}: {
+  course: Course;
+  userCoords: { lat: number; lng: number } | null;
+  onPress: () => void;
+}) {
+  const dist = userCoords && course.latitude != null && course.longitude != null
+    ? distanceMiles(userCoords.lat, userCoords.lng, course.latitude, course.longitude)
+    : null;
   return (
     <TouchableOpacity style={styles.courseCard} onPress={onPress} activeOpacity={0.7}>
       <View style={{ flex: 1 }}>
@@ -137,7 +183,14 @@ function CourseRow({ course, onPress }: { course: Course; onPress: () => void })
           {[course.city, course.state, course.country].filter(Boolean).join(', ')}
         </Text>
       </View>
-      <Text style={styles.chev}>›</Text>
+      {dist != null ? (
+        <View style={styles.distBadge}>
+          <Text style={styles.distValue}>{formatMiles(dist)}</Text>
+          <Text style={styles.distLabel}>away</Text>
+        </View>
+      ) : (
+        <Text style={styles.chev}>›</Text>
+      )}
     </TouchableOpacity>
   );
 }
@@ -173,7 +226,16 @@ const styles = StyleSheet.create({
   },
   courseName: { color: C.text, fontWeight: '700', fontSize: 15 },
   clubName: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  location: { color: C.gold, fontSize: 12, marginTop: 4 },
+  location: { color: C.textMuted, fontSize: 12, marginTop: 4 },
   chev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
+  // Prominent distance badge on the right of each row — the headline number
+  // so "how far is this course" reads at a glance.
+  distBadge: {
+    alignItems: 'center', justifyContent: 'center', marginLeft: 10,
+    minWidth: 58, paddingHorizontal: 8, paddingVertical: 6,
+    backgroundColor: C.gold + '1a', borderRadius: 8, borderWidth: 1, borderColor: C.gold + '55',
+  },
+  distValue: { color: C.gold, fontSize: 14, fontWeight: '900' },
+  distLabel: { color: C.textMuted, fontSize: 9, fontWeight: '700', letterSpacing: 0.5, marginTop: 1 },
   empty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 24 },
 });

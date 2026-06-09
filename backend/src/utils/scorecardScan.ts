@@ -140,10 +140,19 @@ export async function scanScorecard(
 ): Promise<ScannedScorecard> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    // No key configured. To the user this is just "feature unavailable".
+    // No key reaching the running process — env var missing, misnamed, or set
+    // on the wrong service / not redeployed. Logged so it's diagnosable from
+    // the Railway logs; to the user it's just "feature unavailable".
+    // eslint-disable-next-line no-console
+    console.error('[scorecard] ANTHROPIC_API_KEY is not set in this process — cannot scan.');
     throw new ScorecardScanError('This feature is not available at this time.', 503);
   }
   const model = process.env.SCORECARD_MODEL || DEFAULT_MODEL;
+  // Presence-only diagnostic (never logs the key itself): confirms the env var
+  // is wired and which model we're calling, so a failure downstream is clearly
+  // an Anthropic-side rejection rather than a missing key.
+  // eslint-disable-next-line no-console
+  console.log(`[scorecard] calling Anthropic (model=${model}, key set, length=${apiKey.length})`);
 
   let res: Response;
   try {

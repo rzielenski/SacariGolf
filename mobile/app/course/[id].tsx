@@ -18,6 +18,8 @@ export default function CourseInfoScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [lbTab, setLbTab] = useState<'stroke' | 'scramble'>('stroke');
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
+  // The teebox whose generic (par/yardage/HCP) scorecard is open, if any.
+  const [teeScorecard, setTeeScorecard] = useState<any | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportField, setReportField] = useState('course_rating');
   const [reportSuggested, setReportSuggested] = useState('');
@@ -115,10 +117,15 @@ export default function CourseInfoScreen() {
         </View>
       )}
 
-      {/* Tee boxes */}
+      {/* Tee boxes — tap any to see its full hole-by-hole scorecard */}
       <Text style={styles.sectionHeader}>TEE BOXES</Text>
       {(course.teeboxes ?? []).map((t: any) => (
-        <View key={t.teebox_id} style={styles.teeCard}>
+        <TouchableOpacity
+          key={t.teebox_id}
+          style={styles.teeCard}
+          activeOpacity={0.7}
+          onPress={() => setTeeScorecard(t)}
+        >
           <View style={styles.teeLeft}>
             <Text style={styles.teeName}>{t.name}</Text>
             <Text style={styles.teeMeta}>
@@ -126,12 +133,15 @@ export default function CourseInfoScreen() {
             </Text>
           </View>
           <View style={styles.teeRight}>
-            {t.course_rating && <Text style={styles.teeRating}>Rating {t.course_rating}</Text>}
-            {t.slope_rating && <Text style={styles.teeSlope}>Slope {t.slope_rating}</Text>}
+            {t.course_rating ? <Text style={styles.teeRating}>Rating {t.course_rating}</Text> : null}
+            {t.slope_rating ? <Text style={styles.teeSlope}>Slope {t.slope_rating}</Text> : null}
           </View>
-        </View>
+          <Text style={styles.teeChev}>›</Text>
+        </TouchableOpacity>
       ))}
-      {!course.teeboxes?.length && (
+      {course.teeboxes?.length ? (
+        <Text style={styles.tapHint}>Tap a tee to view its scorecard</Text>
+      ) : (
         <Text style={styles.empty}>No tee box data available.</Text>
       )}
 
@@ -228,6 +238,12 @@ export default function CourseInfoScreen() {
         }}
       />
 
+      <TeeScorecardModal
+        teebox={teeScorecard}
+        courseName={course.course_name}
+        onClose={() => setTeeScorecard(null)}
+      />
+
       <Modal
         visible={reportOpen}
         animationType="slide"
@@ -318,6 +334,122 @@ function StatChip({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+/**
+ * Generic (blank) scorecard for one tee set — the course's own par / yardage /
+ * handicap per hole, with no player scores. Reads straight from the holes the
+ * /courses/:id endpoint already returns on each teebox, so no extra fetch.
+ */
+function TeeScorecardModal({ teebox, courseName, onClose }: {
+  teebox: any | null;
+  courseName: string;
+  onClose: () => void;
+}) {
+  return (
+    <Modal
+      visible={!!teebox}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
+      {teebox && <TeeScorecardContents teebox={teebox} courseName={courseName} onClose={onClose} />}
+    </Modal>
+  );
+}
+
+function TeeScorecardContents({ teebox, courseName, onClose }: {
+  teebox: any;
+  courseName: string;
+  onClose: () => void;
+}) {
+  const holes = [...(teebox.holes ?? [])].sort((a: any, b: any) => a.hole_num - b.hole_num);
+  const front = holes.filter((h: any) => h.hole_num <= 9);
+  const back = holes.filter((h: any) => h.hole_num > 9);
+  const totalPar = holes.reduce((a: number, h: any) => a + (h.par || 0), 0);
+  const totalYards = holes.reduce((a: number, h: any) => a + (h.yardage || 0), 0);
+
+  return (
+    <View style={styles.modalContainer}>
+      <View style={styles.modalHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.modalTitle}>{teebox.name} Tees</Text>
+          <Text style={styles.modalSub}>
+            {[
+              courseName,
+              `Par ${totalPar}`,
+              teebox.course_rating ? `Rating ${teebox.course_rating}` : null,
+              teebox.slope_rating ? `Slope ${teebox.slope_rating}` : null,
+            ].filter(Boolean).join(' · ')}
+          </Text>
+        </View>
+        <TouchableOpacity onPress={onClose} style={styles.modalDone}>
+          <Text style={styles.modalDoneText}>Done</Text>
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+        {holes.length === 0 ? (
+          <Text style={styles.empty}>No hole-by-hole data for this tee yet.</Text>
+        ) : (
+          <>
+            <View style={styles.totalsCard}>
+              <View style={styles.totalCell}>
+                <Text style={styles.totalLabel}>PAR</Text>
+                <Text style={styles.totalValue}>{totalPar}</Text>
+              </View>
+              <View style={styles.totalCell}>
+                <Text style={styles.totalLabel}>YARDS</Text>
+                <Text style={[styles.totalValue, { color: C.gold }]}>
+                  {totalYards ? totalYards.toLocaleString() : '—'}
+                </Text>
+              </View>
+              <View style={styles.totalCell}>
+                <Text style={styles.totalLabel}>HOLES</Text>
+                <Text style={[styles.totalValue, { color: C.textMuted }]}>
+                  {teebox.num_holes ?? holes.length}
+                </Text>
+              </View>
+            </View>
+
+            {front.length > 0 && <TeeNineGrid label="OUT" holes={front} />}
+            {back.length > 0 && <TeeNineGrid label="IN" holes={back} />}
+          </>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+/** One nine of a generic scorecard: Hole / Par / Yards / HCP rows + a subtotal. */
+function TeeNineGrid({ label, holes }: { label: string; holes: any[] }) {
+  const parTotal = holes.reduce((a, h) => a + (h.par || 0), 0);
+  const yardTotal = holes.reduce((a, h) => a + (h.yardage || 0), 0);
+  const key = (h: any) => h.hole_id ?? h.hole_num;
+  return (
+    <View style={{ marginTop: 14 }}>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Hole</Text>
+        {holes.map((h) => <Text key={key(h)} style={styles.scNum}>{h.hole_num}</Text>)}
+        <Text style={styles.scTotal}>{label}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Par</Text>
+        {holes.map((h) => <Text key={key(h)} style={styles.scParCell}>{h.par ?? '—'}</Text>)}
+        <Text style={styles.scTotal}>{parTotal}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>Yards</Text>
+        {holes.map((h) => <Text key={key(h)} style={styles.scParCell}>{h.yardage ?? '—'}</Text>)}
+        <Text style={styles.scTotal}>{yardTotal || '—'}</Text>
+      </View>
+      <View style={styles.scGrid}>
+        <Text style={styles.scLabel}>HCP</Text>
+        {holes.map((h) => <Text key={key(h)} style={styles.scParCell}>{h.handicap ?? '—'}</Text>)}
+        <Text style={styles.scTotal}> </Text>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   centered: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center' },
@@ -354,6 +486,7 @@ const styles = StyleSheet.create({
   teeRight: { alignItems: 'flex-end' },
   teeRating: { color: C.gold, fontWeight: '700', fontSize: 12 },
   teeSlope: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  teeChev: { color: C.textDim, fontSize: 22, marginLeft: 8 },
 
   lbTabRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 20, marginBottom: 12 },
   lbTab: {

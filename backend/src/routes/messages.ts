@@ -42,8 +42,9 @@ const VOICE_MIME_EXT: Record<string, string> = {
 
 /** Decode + persist a base64 voice clip. Returns the public URL or null if
  *  validation failed (size cap, mime, duration). Caller decides whether to
- *  surface a 400 or just drop the field. */
-function persistVoiceClip(
+ *  surface a 400 or just drop the field. Exported so routes/users.ts can
+ *  reuse it for theme-song voice uploads (same storage shape, same caps). */
+export function persistVoiceClip(
   base64: string,
   mimeType: string,
   durationMs: number,

@@ -37,7 +37,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing, Modal,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import * as themePlayer from '../lib/themePlayer';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
@@ -99,7 +99,6 @@ export function HoleScoreCelebration({ event, onDismiss }: Props) {
   const burstScale = useRef(new Animated.Value(0)).current;
   const stormPulse = useRef(new Animated.Value(0)).current;
 
-  const soundRef = useRef<Audio.Sound | null>(null);
   // Track the event we last animated. Same kind back-to-back (a player
   // birdies hole 4 then birdies hole 5) should re-fire animation — so we
   // key on the parent passing a fresh event object.
@@ -150,34 +149,15 @@ export function HoleScoreCelebration({ event, onDismiss }: Props) {
   }, [event, kind, fadeIn, labelScale, cardSlide, burstScale, stormPulse, onDismiss]);
 
   // ── Audio lifecycle ────────────────────────────────────────────────
-  // Plays the scoring player's theme for the duration of the overlay.
-  // Hard-cut on dismiss (no fade-out — expo-av's volume ramping is fiddly
-  // and a hard cut suits the punchy moment).
+  // Hand the celebration's theme off to the singleton player. The Sound
+  // is owned at the module level so it keeps playing past the overlay's
+  // hard-dismiss — the full 30s preview rides through whatever comes
+  // next (scoring screen, hole transition). Previously the cleanup ran
+  // stopAsync + unloadAsync the moment the overlay went away, clipping
+  // most of the song. The player self-unloads on didJustFinish.
   useEffect(() => {
     if (!event?.themePreview) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: event.themePreview! },
-          { shouldPlay: true, volume: 1.0 },
-        );
-        if (cancelled) {
-          await sound.unloadAsync();
-          return;
-        }
-        soundRef.current = sound;
-      } catch { /* audio is non-essential */ }
-    })();
-    return () => {
-      cancelled = true;
-      if (soundRef.current) {
-        soundRef.current.stopAsync().catch(() => { });
-        soundRef.current.unloadAsync().catch(() => { });
-        soundRef.current = null;
-      }
-    };
+    themePlayer.play(event.themePreview);
   }, [event?.themePreview]);
 
   // ── Sparkle ring positions ─────────────────────────────────────────

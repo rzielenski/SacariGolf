@@ -73,6 +73,13 @@ export async function runPairingPass() {
         WHERE m.completed = false
           AND m.cancelled = false
           AND m.is_practice = false
+          -- Arena (ffa) matches are invite-only by design — the host
+          -- creates the match and personally invites everyone. Excluding
+          -- ffa here was the missing guard: two Arena hosts each sitting
+          -- on their match waiting for invitees were getting auto-merged
+          -- by this pass, slamming one host onto another's match as
+          -- side=2 and confusing both sets of invitees.
+          AND m.match_type <> 'ffa'
           AND m.superseded_by_match_id IS NULL
           AND m.created_at > NOW() - INTERVAL '24 hours'
           AND NOT EXISTS (
@@ -110,6 +117,11 @@ export async function runPairingPass() {
             AND m2.completed = false
             AND m2.cancelled = false
             AND m2.is_practice = false
+            -- Belt-and-suspenders: the candidates query above already
+            -- excludes ffa so $2 will never be 'ffa' on this branch, but
+            -- the explicit filter here keeps any future change to the
+            -- candidate query from accidentally re-introducing the bug.
+            AND m2.match_type <> 'ffa'
             AND m2.superseded_by_match_id IS NULL
             AND m2.match_type = $2
             AND m2.format = $3
@@ -270,6 +282,7 @@ export async function backfillRoundPosts() {
 let cleanupHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
+let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
 
 export function startCleanupSchedule() {
   // Re-entrancy: stop any previously-running intervals first. If the module
@@ -292,6 +305,23 @@ export function startCleanupSchedule() {
   // so the home feed always reflects everyone's recent rounds.
   backfillRoundPosts();
   feedBackfillHandle = setInterval(backfillRoundPosts, 5 * 60 * 1000);
+
+  // Weekly Sacari Cup — ensure the current week's cup exists and resolve
+  // any finished cup that hasn't paid out yet. 60-second cadence keeps
+  // the Sunday-23:59 → Monday-00:00 handover crisp without burning DB
+  // (the queries hit a unique index + a tiny status='active' set).
+  weeklyCupTick();
+  weeklyCupHandle = setInterval(weeklyCupTick, 60 * 1000);
+}
+
+async function weeklyCupTick(): Promise<void> {
+  try {
+    const { ensureCurrentCup, resolveFinishedCups } = await import('./weeklyCup');
+    await ensureCurrentCup();
+    await resolveFinishedCups();
+  } catch (err) {
+    console.error('[weekly-cup] tick failed:', err);
+  }
 }
 
 /** Stop all background tasks. Idempotent; safe to call multiple times. */
@@ -299,4 +329,5 @@ export function stopCleanupSchedule() {
   if (cleanupHandle) { clearInterval(cleanupHandle); cleanupHandle = null; }
   if (pairingHandle) { clearInterval(pairingHandle); pairingHandle = null; }
   if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
+  if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }
 }

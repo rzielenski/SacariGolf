@@ -1064,14 +1064,30 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     };
 
     /**
-     * Arena (free-for-all) ELO resolution. Each player is on their own side.
-     * For N players we run N×(N−1)/2 virtual 1v1s and average each player's
-     * cumulative delta by (N−1) so the per-match ELO magnitude stays
-     * comparable to a regular 1v1. Mathematically equivalent to "every player
-     * plays every other player and we count the average outcome."
+     * Arena (free-for-all) ELO resolution. Each player is on their own
+     * side and gets ranked against the entire field by score
+     * differential. For N players we run N×(N−1)/2 virtual 1v1s; each
+     * player's per-match delta is the SUM of their virtual 1v1 results,
+     * divided by 2(N−1)/N — chosen so that every doubling of the field
+     * roughly doubles the ELO swing (the "this felt twice as big as a
+     * 1v1" intuition, taken seriously).
      *
-     * Tie handling: differentials within 0.05 strokes of each other count as
-     * a draw for that pair (each gets 0.5). Standard chess-Elo tie semantics.
+     * Concretely, the magnitude a clean-sweep winner takes at K=24:
+     *
+     *   • N=2   (1v1)   →  divisor 1.000  →  +12 / −12
+     *   • N=4   arena   →  divisor 1.500  →  +24 / −24    (2× a 1v1)
+     *   • N=8   arena   →  divisor 1.750  →  +48 / −48    (4× a 1v1)
+     *   • N=16  arena   →  divisor 1.875  →  +96 / −96    (8× a 1v1)
+     *
+     * Mathematically the per-match swing is exactly linear in N
+     * (≈ K·N/4 for a sweep at equal ELOs). N=2 is continuous with the
+     * 1v1 path so the math doesn't jump when a 2-player Arena
+     * coincidentally happens. Cap the field at 16 elsewhere to keep
+     * the upper bound sane.
+     *
+     * Tie handling: differentials within 0.05 strokes of each other count
+     * as a draw for that pair (each gets 0.5). Standard chess-Elo tie
+     * semantics.
      *
      * Stableford support: when the match format is stableford we use the
      * negated points sum as the "differential" so lower = better, matching
@@ -1147,9 +1163,13 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         }
       }
 
-      // Normalise so a tournament-of-N gives roughly the same per-match ELO
-      // swing as a 1v1 (avoids 8-player arenas blowing your rating by ±100).
-      const divisor = Math.max(1, N - 1);
+      // divisor = 2(N−1)/N makes the per-match swing linear in N:
+      //   every doubling of field size doubles the ELO change.
+      //   (1v1 = ±12, 4-player = ±24, 8-player = ±48, 16-player = ±96.)
+      // Floor at 1 keeps N=2 continuous with the Solo / 1v1 path and
+      // guards against a degenerate N=1 (which should be impossible —
+      // Arena needs ≥2 — but cheap to defend against).
+      const divisor = Math.max(1, (2 * (N - 1)) / N);
 
       // Sort entries by differential (best → worst) to compute placements.
       const placement = [...entries].sort((a, b) => a.diff - b.diff);
@@ -1706,13 +1726,18 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
   if (!Array.isArray(holeScores)) return res.status(400).json({ error: 'holeScores required' });
   const cleanStats = cleanHoleStats(holeStats, holeScores.length);
 
-  // Don't accept progress for already-finished matches
+  // Don't accept progress for already-finished matches.
+  // We also pull format here so the scramble teammate-mirror below can
+  // tell whether to broadcast — scramble teams play ONE physical ball, so
+  // their scorecard is genuinely shared. Other formats (stroke / stableford
+  // / match_play / skins) keep per-player drafts as today.
   const { rows: matchRows } = await pool.query(
-    `SELECT completed FROM matches WHERE match_id = $1`,
+    `SELECT completed, format FROM matches WHERE match_id = $1`,
     [req.params.id]
   );
   if (!matchRows.length) return res.status(404).json({ error: 'Match not found' });
   if (matchRows[0]?.completed) return res.json({ success: true, ignored: 'completed' });
+  const matchFormat = matchRows[0]?.format as string | null;
 
   // If client passed a teeboxId, persist it on match_players when not already set
   if (teeboxId) {
@@ -1723,9 +1748,11 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
     );
   }
 
-  // Resolve teebox + course from match_players (now that we may have just set it)
+  // Resolve teebox + course + side from match_players (now that we may have just
+  // set teebox_id above). Side is included so the scramble mirror below knows
+  // which other rows to write to.
   const { rows: pRows } = await pool.query(
-    `SELECT mp.teebox_id, t.course_id FROM match_players mp
+    `SELECT mp.teebox_id, mp.side, t.course_id FROM match_players mp
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
      WHERE mp.match_id = $1 AND mp.user_id = $2`,
     [req.params.id, req.userId]
@@ -1742,6 +1769,41 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
     [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]
   );
+
+  // ── Scramble: mirror to teammates on the same side ─────────────────
+  // Scramble teams play ONE ball per shot — they share a single scorecard
+  // in real life — so the in-progress draft has to be shared too. We
+  // upsert each teammate's rounds row with the same hole_scores +
+  // hole_stats so their scoring screens see the latest edits on the
+  // next poll. Without this they each maintained an independent draft
+  // and only converged at submit time, which the user reported as the
+  // bug: "we each could put in our individual scores."
+  //
+  // Last-write-wins per hole; whichever teammate's POST lands at the
+  // server later overrides earlier values. In practice a single phone
+  // keeps the card, so collisions are vanishingly rare.
+  //
+  // We DON'T overwrite course_id / teebox_id when a teammate already
+  // picked their own — kept symmetric with the per-player UPSERT above
+  // so a player who set a different teebox doesn't lose it (rare for
+  // scramble, but harmless to be defensive).
+  if (matchFormat === 'scramble' && pRows[0].side != null) {
+    await pool.query(
+      `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats)
+       SELECT $1, mp.user_id, $3, $4, $5, $6
+         FROM match_players mp
+        WHERE mp.match_id = $1
+          AND mp.side    = $7
+          AND mp.user_id <> $2
+       ON CONFLICT (match_id, user_id)
+       DO UPDATE SET hole_scores = EXCLUDED.hole_scores,
+                     hole_stats  = EXCLUDED.hole_stats,
+                     course_id   = COALESCE(rounds.course_id, EXCLUDED.course_id),
+                     teebox_id   = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
+      [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id,
+       holeScores, JSON.stringify(cleanStats), pRows[0].side]
+    );
+  }
 
   // ── Celebration detection ──────────────────────────────────────────
   // Scan the just-saved hole_scores for any birdie/eagle/HIO. The unique

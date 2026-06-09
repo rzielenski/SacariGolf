@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing, Modal,
 } from 'react-native';
-import { Audio } from 'expo-av';
+import * as themePlayer from '../lib/themePlayer';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
@@ -65,7 +65,6 @@ export function MatchFoundIntro({
   const leftSlide = useRef(new Animated.Value(-300)).current;
   const rightSlide = useRef(new Animated.Value(300)).current;
   const versusScale = useRef(new Animated.Value(0)).current;
-  const soundRef = useRef<Audio.Sound | null>(null);
 
   // Pick the OPPONENT side's theme preview based on match type:
   //   • solo → opponent's personal theme only
@@ -109,32 +108,15 @@ export function MatchFoundIntro({
     ]).start();
   }, [visible]);
 
-  // Play / stop the opponent's theme as the modal opens / closes.
+  // Hand the opponent's theme off to the singleton player. The Sound is
+  // owned at the module level so it KEEPS playing after this modal
+  // dismisses — the previous version stopped after ~2.5s when the intro
+  // closed, cutting off 28s of a 30s preview. We never call stop() here
+  // because the user explicitly asked for the full preview to ride past
+  // the animation. The player self-unloads on didJustFinish.
   useEffect(() => {
     if (!visible || !opponentTheme) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: opponentTheme },
-          { shouldPlay: true, volume: 1.0 },
-        );
-        if (cancelled) {
-          await sound.unloadAsync();
-          return;
-        }
-        soundRef.current = sound;
-      } catch { /* preview is non-essential */ }
-    })();
-    return () => {
-      cancelled = true;
-      if (soundRef.current) {
-        soundRef.current.stopAsync().catch(() => { });
-        soundRef.current.unloadAsync().catch(() => { });
-        soundRef.current = null;
-      }
-    };
+    themePlayer.play(opponentTheme);
   }, [visible, opponentTheme]);
 
   // Don't early-return on !visible — the Modal handles that itself. Bailing

@@ -357,8 +357,32 @@ export default function ProfileScreen() {
     return '·';
   };
 
+  // Equipped cosmetics — visual_data resolved by the server so we just
+  // read it through. Falls back to no-op when nothing is equipped (the
+  // existing static styling keeps the screen looking normal).
+  const equipped = (user as any).equipped_visual ?? {};
+  const bgVisual = equipped.background ?? null;
+  const borderVisual = equipped.border ?? null;
+  const usernameVisual = equipped.username ?? null;
+  const profileBgOverlay = bgVisual
+    ? { backgroundColor: bgVisual.to ?? bgVisual.from ?? C.bg }
+    : null;
+  const borderFrameStyle = borderVisual
+    ? {
+        borderWidth: borderVisual.width ?? 2,
+        borderColor: borderVisual.color ?? C.gold,
+        borderRadius: 64, padding: 4,
+        ...(borderVisual.glow
+          ? { shadowColor: borderVisual.color ?? C.gold, shadowOpacity: 0.7, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } }
+          : null),
+      }
+    : null;
+  const usernameColorStyle = usernameVisual
+    ? { color: usernameVisual.color ?? C.text }
+    : null;
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.container} contentContainerStyle={[styles.content, profileBgOverlay]}>
       {/* Bell — old gothic, cracked */}
       <TouchableOpacity style={styles.bellBtn} onPress={openNotifications} activeOpacity={0.7}>
         <View style={styles.bellWrap}>
@@ -383,7 +407,7 @@ export default function ProfileScreen() {
           onPress={changeAvatar}
           disabled={uploadingAvatar}
           activeOpacity={0.8}
-          style={{ marginBottom: 12 }}
+          style={[{ marginBottom: 12 }, borderFrameStyle]}
         >
           <RankCrest elo={user.elo} size={96}>
             {uploadingAvatar ? (
@@ -403,7 +427,7 @@ export default function ProfileScreen() {
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>✎</Text>
           </View>
         </TouchableOpacity>
-        <Text style={styles.username}>{censor(user.username)}</Text>
+        <Text style={[styles.username, usernameColorStyle]}>{censor(user.username)}</Text>
         <View style={styles.usernameSubRow}>
           {isPremium(user as any) && (
             <View style={styles.premiumPill}>
@@ -664,6 +688,37 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.inviteBtnLabel}>✦ INVITE FRIENDS · EARN PERKS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
+      {/* Sacari Cup — weekly leaderboard, prizes, your live position. */}
+      <TouchableOpacity
+        style={styles.inviteBtn}
+        onPress={() => router.push('/sacari-cup' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.inviteBtnLabel}>★  SACARI CUP · THIS WEEK</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
+      {/* Locker Room — equip cosmetic borders, backgrounds, ball trails. */}
+      <TouchableOpacity
+        style={styles.inviteBtn}
+        onPress={() => router.push('/locker-room' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.inviteBtnLabel}>✦  LOCKER ROOM · COSMETICS</Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+
+      {/* Settings hub — theme song picker, max-volume toggle, content
+          filter, notifications, blocked users, etc. */}
+      <TouchableOpacity
+        style={styles.inviteBtn}
+        onPress={() => router.push('/settings' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.inviteBtnLabel}>⚙  SETTINGS</Text>
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
@@ -1172,11 +1227,12 @@ export default function ProfileScreen() {
         </View>
       </Modal>
 
-      {/* Personal theme picker — iTunes search */}
+      {/* Personal theme picker — iTunes search or voice memo */}
       <ThemeSongPicker
         visible={themePickerVisible}
         onClose={() => setThemePickerVisible(false)}
         onPick={setUserTheme}
+        onPickVoice={refreshUser}
       />
 
       {/* Manual handicap edit modal — moved from home tab. Validates the

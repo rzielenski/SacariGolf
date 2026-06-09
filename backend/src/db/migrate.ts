@@ -1236,6 +1236,18 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Theme song max-volume preference. When TRUE the mobile theme player
+    // overrides the silent switch and plays at max output (the most
+    // iOS will allow a third-party app — system volume itself is not
+    // programmatically controllable). Defaults FALSE so existing users
+    // keep "respect silent mode" behaviour.
+    name: 'users.theme_song_max_volume',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS theme_song_max_volume BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
+  {
     // Referral system:
     //   • users.referral_code        — the inviter's share code (in their
     //                                  /invite/<code> link). 7 chars,
@@ -1325,6 +1337,176 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       );
       CREATE INDEX IF NOT EXISTS scorecard_scans_user_created_idx
         ON scorecard_scans(user_id, created_at DESC);
+    `,
+  },
+  {
+    // F2P cosmetics. Five slot kinds today (border / background / username
+    // / ball_trail / fx) with one row per item in `cosmetics`, one row per
+    // owned item in `user_cosmetics`, and a denormalised "what's equipped
+    // right now" set on the users table itself so feed/profile reads
+    // don't have to join through a separate table on every render.
+    //
+    // unlock_kind discriminates how an item is acquired:
+    //   • 'free'        — everyone owns it (seed loop below grants to all)
+    //   • 'premium'     — premium members get it (granted on premium flip)
+    //   • 'cup_winner'  — won the weekly Sacari Cup at a specific place
+    //                     (1/2/3); awarded by the cup-resolution job
+    //   • 'rank'        — reached a specific rank tier (granted by the
+    //                     elo-tier promotion code path)
+    // visual_data is opaque JSON that the mobile renderer interprets per
+    // kind — e.g. { color: '#d4a93f' } for username flair, or a gradient
+    // pair for backgrounds. The catalog ships as data, not code, so a
+    // future cosmetic can be added without an app release.
+    name: 'cosmetics.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS cosmetics (
+        cosmetic_id  TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL CHECK (kind IN ('border','background','username','ball_trail','fx')),
+        name         TEXT NOT NULL,
+        rarity       TEXT NOT NULL DEFAULT 'common',
+        unlock_kind  TEXT NOT NULL CHECK (unlock_kind IN ('free','premium','cup_winner','rank')),
+        unlock_data  JSONB,
+        visual_data  JSONB NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS cosmetics_kind_idx ON cosmetics(kind);
+      CREATE INDEX IF NOT EXISTS cosmetics_unlock_kind_idx ON cosmetics(unlock_kind);
+
+      CREATE TABLE IF NOT EXISTS user_cosmetics (
+        user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        cosmetic_id    TEXT NOT NULL REFERENCES cosmetics(cosmetic_id) ON DELETE CASCADE,
+        unlocked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        unlock_source  TEXT,
+        PRIMARY KEY (user_id, cosmetic_id)
+      );
+      CREATE INDEX IF NOT EXISTS user_cosmetics_user_idx ON user_cosmetics(user_id);
+
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS equipped_border      TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_background  TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_username    TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_ball_trail  TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_fx          TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL;
+    `,
+  },
+  {
+    // Seed the starter catalog. Twelve items: enough for the screen to
+    // feel populated on day one without locking the user into a tiny set
+    // of cosmetics. Each item is idempotent via cosmetic_id PK.
+    //
+    // Naming scheme: <kind>_<theme> so adding new items doesn't risk
+    // collision with anything outside this seed.
+    name: 'cosmetics.seed_starter_catalog',
+    sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- Borders
+        ('border_classic',   'border', 'Classic',         'common',    'free',
+          NULL,
+          '{"color":"#aeb6c2","width":2}'::jsonb),
+        ('border_fairway',   'border', 'Fairway Stripe',  'common',    'free',
+          NULL,
+          '{"color":"#74bd9a","width":3}'::jsonb),
+        ('border_gold',      'border', 'Gold Frame',      'rare',      'premium',
+          NULL,
+          '{"color":"#d4a93f","width":3,"animated":true}'::jsonb),
+        ('border_champion',  'border', 'Champion Wreath', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","width":4,"animated":true,"glow":true}'::jsonb),
+        ('border_obsidian',  'border', 'Obsidian Edge',   'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"color":"#e8623a","width":3,"animated":true}'::jsonb),
+
+        -- Backgrounds
+        ('bg_default',       'background', 'Slate',         'common',    'free',
+          NULL,
+          '{"from":"#1a1a1d","to":"#26262b"}'::jsonb),
+        ('bg_fairway',       'background', 'Sunset Fairway','common',    'free',
+          NULL,
+          '{"from":"#0f3a2e","to":"#74bd9a"}'::jsonb),
+        ('bg_royal',         'background', 'Royal Velvet',  'rare',      'premium',
+          NULL,
+          '{"from":"#1a0a2e","to":"#a89cf0"}'::jsonb),
+        ('bg_gold_dust',     'background', 'Gold Dust',     'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"from":"#1a1410","to":"#d4a93f"}'::jsonb),
+
+        -- Username flair
+        ('uname_default',    'username',   'Standard',      'common',    'free',
+          NULL,
+          '{"color":"#ffffff"}'::jsonb),
+        ('uname_gold',       'username',   'Gold Text',     'rare',      'premium',
+          NULL,
+          '{"color":"#d4a93f"}'::jsonb),
+        ('uname_champion',   'username',   'Champion Gold', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","gradient":["#d4a93f","#ffe28a","#d4a93f"]}'::jsonb),
+
+        -- Ball trails (shot-map polyline color)
+        ('trail_default',    'ball_trail', 'White',         'common',    'free',
+          NULL,
+          '{"color":"#ffffff","width":2}'::jsonb),
+        ('trail_crimson',    'ball_trail', 'Crimson',       'common',    'free',
+          NULL,
+          '{"color":"#d83a5e","width":2}'::jsonb),
+        ('trail_lightning',  'ball_trail', 'Lightning',     'rare',      'premium',
+          NULL,
+          '{"color":"#74e0ff","width":3,"glow":true}'::jsonb),
+        ('trail_gold',       'ball_trail', 'Gold Streak',   'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","width":3,"glow":true,"animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO NOTHING;
+
+      -- Grant every 'free' item to every existing user so the locker room
+      -- shows owned items on day one. Idempotent via PK.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u
+          CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Grant every 'premium' item to current premium members. The flip
+      -- in routes/auth + premium handlers should also grant on future
+      -- premium upgrades; this catches the existing population once.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u
+          CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium'
+           AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Default equipped: nudge every user into the 'free' starter set
+      -- so the profile renders consistently even before they tap
+      -- into the locker room. Only sets columns that are still null
+      -- (won't overwrite anyone's existing pick).
+      UPDATE users SET
+        equipped_border     = COALESCE(equipped_border,     'border_classic'),
+        equipped_background = COALESCE(equipped_background, 'bg_default'),
+        equipped_username   = COALESCE(equipped_username,   'uname_default'),
+        equipped_ball_trail = COALESCE(equipped_ball_trail, 'trail_default');
+    `,
+  },
+  {
+    // Weekly Sacari Cup. Auto-recurring tournament; one row per week,
+    // keyed by Monday 00:00 UTC. The server boot routine in index.ts
+    // (a) creates the current week's cup if it's missing and (b)
+    // resolves any active cup whose week has ended.
+    //
+    // Resolution awards cup-winner cosmetics to top 3 finishers + posts
+    // a feed card + sends push notifications. The leaderboard query
+    // pulls each user's BEST round (lowest to-par with pro-rating for
+    // 9/18-hole rounds) submitted during the week window.
+    name: 'weekly_cups.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS weekly_cups (
+        cup_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        week_starts_at  TIMESTAMPTZ NOT NULL UNIQUE,
+        status          TEXT NOT NULL DEFAULT 'active',
+        resolved_at     TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS weekly_cups_status_idx
+        ON weekly_cups(status, week_starts_at DESC);
     `,
   },
 ];

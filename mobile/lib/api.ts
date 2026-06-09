@@ -265,8 +265,21 @@ export const api = {
        *  and curse words are censored everywhere user-generated text
        *  renders in the app. The user can flip this off in Profile. */
       censorOffensiveLanguage?: boolean;
+      /** When true, the mobile theme player overrides the silent switch
+       *  and plays at max output for the match-found intro + celebration
+       *  themes. iOS doesn't let third-party apps change system volume,
+       *  so this is the loudest the app can produce. */
+      themeSongMaxVolume?: boolean;
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
+    /** Upload a personal voice memo and set it as the caller's theme song.
+     *  Same file storage as DM voice messages; server caps at 2 MB / 60s.
+     *  Returns the new previewUrl that's been stamped onto the user's row. */
+    uploadThemeVoice: (voiceBase64: string, voiceMime: string, voiceDurationMs: number) =>
+      request<{ success: true; previewUrl: string; durationMs: number }>(
+        'POST', '/users/me/theme-voice',
+        { voiceBase64, voiceMime, voiceDurationMs },
+      ),
     notifications: () => request<{
       notifications: any[];
       unread_count: number;
@@ -481,6 +494,47 @@ export const api = {
         }[];
       }>('GET', `/seasons/current/standings${qs ? `?${qs}` : ''}`);
     },
+  },
+
+  cosmetics: {
+    /** Full cosmetic catalog. Every item has a kind, a rarity, an
+     *  unlock_kind (free|premium|cup_winner|rank), and an opaque
+     *  visual_data blob the mobile renderer interprets per kind. */
+    catalog: () => request<{ items: any[] }>('GET', '/cosmetics/catalog'),
+    /** Caller's owned set + currently-equipped slots. */
+    mine: () => request<{
+      owned: string[];
+      equipped: {
+        border:     string | null;
+        background: string | null;
+        username:   string | null;
+        ball_trail: string | null;
+        fx:         string | null;
+      };
+    }>('GET', '/users/me/cosmetics'),
+    /** Equip an owned item to its matching slot, or pass cosmetic_id=null
+     *  to clear that slot. Server enforces ownership + kind alignment. */
+    equip: (kind: 'border' | 'background' | 'username' | 'ball_trail' | 'fx',
+            cosmetic_id: string | null) =>
+      request<{ success: true; kind: string; cosmetic_id: string | null }>(
+        'POST', '/users/me/cosmetics/equip', { kind, cosmetic_id },
+      ),
+  },
+
+  weeklyCup: {
+    /** Current week's Sacari Cup leaderboard + caller's row + prizes. */
+    current: () => request<{
+      cup: { cup_id: string; week_starts_at: string; week_ends_at: string } | null;
+      leaderboard: Array<{
+        user_id: string; username: string; avatar_url: string | null;
+        elo: number; best_to_par: number; rank: number; is_me: boolean;
+      }>;
+      my_row: any | null;
+      past_champions: Array<{
+        week_starts_at: string; username: string; avatar_url: string | null;
+      }>;
+      prizes: { first: string; second: string; third: string };
+    }>('GET', '/weekly-cup/current'),
   },
 
   balls: {

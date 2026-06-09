@@ -361,15 +361,30 @@ export default function ScoringScreen() {
   const progressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasReportedOnce = useRef(false);
   const fetchCelebrationsRef = useRef<() => void>(() => {});
+  // Most recent hole_scores we've confirmed are on the server — either
+  // because we just successfully POSTed them, or because the scramble
+  // teammate-sync poll just read them. The sync diff below treats any
+  // server value that differs from this baseline as "a teammate edited
+  // it" and adopts it locally. Without this ref, the very first poll
+  // would always look like a teammate change and we'd stomp every par
+  // default on the user's screen.
+  const lastSyncedScoresRef = useRef<number[]>([]);
   useEffect(() => {
     if (selectingCourse || holes.length === 0 || scores.length === 0 || !teebox) return;
     const send = () => {
+      const sent = scores.slice(0, Math.max(currentHole + 1, 1));
       api.matches.progress(id, {
-        holeScores: scores.slice(0, Math.max(currentHole + 1, 1)),
+        holeScores: sent,
         holeStats: holeStats.slice(0, Math.max(currentHole + 1, 1)),
         teeboxId: teebox.teebox_id,
       })
-        .then(() => { fetchCelebrationsRef.current(); })
+        .then(() => {
+          // Our just-sent values are now canonical on the server; record
+          // them so the scramble poll below doesn't read them back as a
+          // "teammate change" on the next tick.
+          lastSyncedScoresRef.current = sent.slice();
+          fetchCelebrationsRef.current();
+        })
         .catch(() => { });
     };
     if (!hasReportedOnce.current) {
@@ -512,6 +527,89 @@ export default function ScoringScreen() {
     const t = setInterval(fetchCelebrations, 8_000);
     return () => clearInterval(t);
   }, [fetchCelebrations, selectingCourse]);
+
+  // ── Scramble: shared scorecard sync ────────────────────────────────
+  // For scramble matches the in-progress scorecard is shared across the
+  // whole team (the backend mirrors every /progress write to all
+  // teammates' rows; see backend/src/routes/matches.ts). This effect
+  // polls /matches/:id every 6s and adopts teammate edits into local
+  // state. Last-write-wins per hole — whoever's POST lands later at
+  // the server is what everyone ends up seeing within the next poll.
+  //
+  // We diff against `lastSyncedScoresRef` instead of `scores` so values
+  // we ourselves just sent (and that the progress POST already wrote
+  // into the ref) don't read back as "teammate changes" and re-trigger
+  // a setScores. enteredHoles is union'd, never shrunk — a teammate
+  // adding hole 7 shouldn't un-enter hole 6.
+  //
+  // Refs let the interval read the latest scores / enteredHoles without
+  // re-arming the timer on every keystroke.
+  const scoresRef = useRef(scores);
+  const enteredHolesRef = useRef(enteredHoles);
+  useEffect(() => { scoresRef.current = scores; }, [scores]);
+  useEffect(() => { enteredHolesRef.current = enteredHoles; }, [enteredHoles]);
+
+  const isScramble = match?.format === 'scramble' && !match?.completed;
+  const myUserId = user?.user_id;
+  useEffect(() => {
+    if (!isScramble || !myUserId || selectingCourse) return;
+
+    const syncOnce = async () => {
+      try {
+        const m = await api.matches.get(id);
+        const me = m.players?.find((p: any) => p.user_id === myUserId);
+        const mySide = me?.side;
+        if (mySide == null) return;
+
+        // Any same-side teammate's row carries the shared draft (the
+        // server keeps them in lockstep). Prefer a teammate's so we
+        // don't compare against our own pending writes; fall back to
+        // ours if we're somehow alone on the side.
+        const teammate = m.players?.find(
+          (p: any) => p.side === mySide && p.user_id !== myUserId,
+        );
+        const source = teammate ?? me;
+        const remote: number[] | null = Array.isArray(source?.hole_scores)
+          ? source.hole_scores : null;
+        if (!remote || remote.length === 0) return;
+
+        const baseline = lastSyncedScoresRef.current;
+        const localScores = scoresRef.current;
+        const localEntered = enteredHolesRef.current;
+
+        const nextScores = localScores.slice();
+        const nextEntered = new Set(localEntered);
+        let changed = false;
+        for (let i = 0; i < remote.length && i < nextScores.length; i++) {
+          const r = remote[i];
+          if (r == null) continue;
+          // Real player scores are positive ints; 0 is the "blank" sentinel
+          // some clients send. Treat it as "no value" so a teammate hasn't
+          // explicitly entered it.
+          if (r === 0) continue;
+          if (r !== baseline[i]) {
+            nextScores[i] = r;
+            nextEntered.add(i);
+            changed = true;
+          }
+        }
+
+        // Always snap the ref to whatever the server says now — even if
+        // nothing changed for the user, this prevents the next tick from
+        // re-detecting old diffs.
+        lastSyncedScoresRef.current = remote.slice();
+
+        if (changed) {
+          setScores(nextScores);
+          setEnteredHoles(nextEntered);
+        }
+      } catch { /* polling is best-effort */ }
+    };
+
+    syncOnce();
+    const t = setInterval(syncOnce, 6_000);
+    return () => clearInterval(t);
+  }, [isScramble, myUserId, selectingCourse, id]);
 
   // When the local player advances to a new hole, retry firing — events
   // that were queued waiting for the player to reach this hole_num now

@@ -7,6 +7,7 @@ import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
+import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -21,8 +22,17 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
-            u.theme_track_artwork, u.theme_track_preview,
+            u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
             u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
+            u.equipped_border, u.equipped_background, u.equipped_username,
+            u.equipped_ball_trail, u.equipped_fx,
+            (SELECT jsonb_build_object(
+              'border',     (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_border),
+              'background', (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_background),
+              'username',   (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_username),
+              'ball_trail', (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_ball_trail),
+              'fx',         (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_fx)
+            )) AS equipped_visual,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -44,7 +54,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -54,6 +64,15 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
   if (shareToTwitter !== undefined) {
     values.push(!!shareToTwitter);
     updates.push(`share_to_twitter = $${values.length}`);
+  }
+
+  // "Force theme songs to play loud" toggle. When TRUE the mobile theme
+  // player sets playsInSilentModeIOS + max output volume; when FALSE it
+  // respects the silent switch. iOS doesn't expose programmatic system
+  // volume control to third-party apps, so this is the most we can do.
+  if (themeSongMaxVolume !== undefined) {
+    values.push(!!themeSongMaxVolume);
+    updates.push(`theme_song_max_volume = $${values.length}`);
   }
 
   // Content-safety toggle. Booleanish — accepts true/false, also 0/1 from
@@ -202,6 +221,48 @@ router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) 
     [`${q}%`, req.userId]
   );
   return res.json(rows);
+}));
+
+/**
+ * Theme song voice upload. Records a personal voice memo (recorded
+ * client-side via the existing useVoiceRecorder hook) and points the
+ * caller's theme song at the uploaded clip. Same file storage as DM voice
+ * messages — reuses persistVoiceClip from routes/messages.ts so the size
+ * cap (2 MB) + mime whitelist stay in one place.
+ *
+ *   body: { voiceBase64, voiceMime, voiceDurationMs }
+ *   → { success: true, previewUrl }
+ *
+ * The voice-as-theme is encoded with theme_track_id = '__voice__' so the
+ * mobile player can branch on it (e.g. label "Your voice memo" instead of
+ * an artist line). Title falls back to the caller's username; artwork
+ * stays null since there's nothing meaningful to render.
+ */
+router.post('/me/theme-voice', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { voiceBase64, voiceMime, voiceDurationMs } = req.body ?? {};
+  const result = persistVoiceClip(
+    String(voiceBase64 ?? ''),
+    String(voiceMime ?? 'audio/m4a'),
+    Number(voiceDurationMs) || 0,
+  );
+  if ('error' in result) return res.status(400).json({ error: result.error });
+
+  const { rows: nameRows } = await pool.query(
+    `SELECT username FROM users WHERE user_id = $1`, [req.userId]
+  );
+  const username = nameRows[0]?.username ?? 'You';
+
+  await pool.query(
+    `UPDATE users
+        SET theme_track_id      = '__voice__',
+            theme_track_title   = 'Your voice memo',
+            theme_track_artist  = $2,
+            theme_track_artwork = NULL,
+            theme_track_preview = $3
+      WHERE user_id = $1`,
+    [req.userId, username, result.url]
+  );
+  return res.json({ success: true, previewUrl: result.url, durationMs: result.durationMs });
 }));
 
 // Friends — must be before /:id
