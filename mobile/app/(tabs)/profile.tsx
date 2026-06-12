@@ -613,17 +613,6 @@ export default function ProfileScreen() {
         <Text style={styles.statsBtnArrow}>›</Text>
       </TouchableOpacity>
 
-      {/* Match / round history entry point — shows in-progress, completed,
-          and practice rounds grouped by section. */}
-      <TouchableOpacity
-        style={styles.statsBtn}
-        onPress={() => router.push('/matches' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.statsBtnLabel}>MY MATCHES</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-
       {/* My Teams — replaces the old Social → Teams sub-tab.
           The header row has a "Browse / + New" affordance so finding
           teams to join is one tap from the profile. Empty state used
@@ -675,70 +664,22 @@ export default function ProfileScreen() {
         ))
       )}
 
-      {/* Premium upgrade entry point */}
-      <TouchableOpacity
-        style={styles.premiumBtn}
-        onPress={() => router.push('/premium' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.premiumBtnLabel}>
-          {isPremium(user as any) ? '👑 PREMIUM · MANAGE' : '👑 GO PREMIUM'}
-        </Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
+      {/* ── COMPETE ─────────────────────────────────────────────────
+          Every competitive surface in one labeled block. Season Ladder
+          and Ball Count used to be reachable ONLY through banners inside
+          the Leaderboard screen; now they're first-class rows. */}
+      <Text style={[styles.sectionHeader, styles.menuHeader]}>COMPETE</Text>
+      <MenuRow label="⚑  MY MATCHES" onPress={() => router.push('/matches' as any)} />
+      <MenuRow label="★  LEADERBOARD" onPress={() => router.push('/leaderboard' as any)} />
+      <MenuRow label="♛  TOURNAMENTS" onPress={() => router.push('/tournaments' as any)} />
+      <MenuRow label="🏆  SACARI CUP · THIS WEEK" onPress={() => router.push('/sacari-cup' as any)} />
+      <MenuRow label="▲  SEASON LADDER · DIVISIONS" onPress={() => router.push('/seasons' as any)} />
+      <MenuRow label="◉  BALL COUNT · FOUND VS LOST" onPress={() => router.push('/balls' as any)} />
 
-      {/* Invite Friends — shares a referral link. Each signup that uses
-          the code grants this user a Lucky Round perk. Stats + share UI
-          live on the /invite screen. */}
-      <TouchableOpacity
-        style={styles.inviteBtn}
-        onPress={() => router.push('/invite' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.inviteBtnLabel}>✦ INVITE FRIENDS · EARN PERKS</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-
-      {/* Sacari Cup — weekly leaderboard, prizes, your live position. */}
-      <TouchableOpacity
-        style={styles.inviteBtn}
-        onPress={() => router.push('/sacari-cup' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.inviteBtnLabel}>★  SACARI CUP · THIS WEEK</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-
-      {/* Locker Room — equip cosmetic borders, backgrounds, ball trails. */}
-      <TouchableOpacity
-        style={styles.inviteBtn}
-        onPress={() => router.push('/locker-room' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.inviteBtnLabel}>✦  LOCKER ROOM · COSMETICS</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-
-      {/* Season Pass — monthly progression, 10 rounds per pass. */}
-      <TouchableOpacity
-        style={styles.inviteBtn}
-        onPress={() => router.push('/season-pass' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.inviteBtnLabel}>▼  SEASON PASS · CLAIM REWARDS</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-
-      {/* Settings hub — theme song picker, max-volume toggle, content
-          filter, notifications, blocked users, etc. */}
-      <TouchableOpacity
-        style={styles.inviteBtn}
-        onPress={() => router.push('/settings' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.inviteBtnLabel}>⚙  SETTINGS</Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
+      {/* ── STYLE ──────────────────────────────────────────────────── */}
+      <Text style={[styles.sectionHeader, styles.menuHeader]}>STYLE</Text>
+      <MenuRow label="✦  LOCKER ROOM · COSMETICS" onPress={() => router.push('/locker-room' as any)} />
+      <MenuRow label="▼  SEASON PASS · CLAIM REWARDS" onPress={() => router.push('/season-pass' as any)} />
 
       {/* Personal theme song — plays during the match-found VS animation
           when no team theme is set. Solo players use this. */}
@@ -775,6 +716,21 @@ export default function ProfileScreen() {
         </View>
         <Text style={{ color: C.gold, fontSize: 22 }}>›</Text>
       </TouchableOpacity>
+
+      {/* ── ACCOUNT ────────────────────────────────────────────────── */}
+      <Text style={[styles.sectionHeader, styles.menuHeader]}>ACCOUNT</Text>
+      <MenuRow label="✦  INVITE FRIENDS · EARN PERKS" onPress={() => router.push('/invite' as any)} />
+      <TouchableOpacity
+        style={styles.premiumBtn}
+        onPress={() => router.push('/premium' as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.premiumBtnLabel}>
+          {isPremium(user as any) ? '👑 PREMIUM · MANAGE' : '👑 GO PREMIUM'}
+        </Text>
+        <Text style={styles.statsBtnArrow}>›</Text>
+      </TouchableOpacity>
+      <MenuRow label="⚙  SETTINGS" onPress={() => router.push('/settings' as any)} />
 
       {/* Aggregated round stats — only shown once user has any tracked data */}
       {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
@@ -1357,6 +1313,17 @@ function StatBox({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+/** One navigation row in the profile menu. All destination rows share
+ *  this so the COMPETE / STYLE / ACCOUNT sections read as one system. */
+function MenuRow({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={styles.inviteBtn} onPress={onPress} activeOpacity={0.7}>
+      <Text style={styles.inviteBtnLabel}>{label}</Text>
+      <Text style={styles.statsBtnArrow}>›</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   content: { padding: 20, paddingTop: 60, paddingBottom: 40 },
@@ -1373,6 +1340,9 @@ const styles = StyleSheet.create({
     color: C.gold, fontSize: 11, fontWeight: '900',
     letterSpacing: 1.4, marginTop: 14, marginBottom: 8,
   },
+  // Extra breathing room above the COMPETE / STYLE / ACCOUNT menu groups
+  // so each section reads as its own block in the long profile scroll.
+  menuHeader: { marginTop: 22 },
   teamsEmpty: {
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     marginBottom: 12, lineHeight: 17,

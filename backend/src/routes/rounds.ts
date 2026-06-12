@@ -59,7 +59,7 @@ router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: R
     [req.params.roundId, req.userId]
   );
   const { rows: cmRows } = await pool.query(
-    `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at,
+    `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at, c.client_id,
             (c.user_id = $2) AS mine
      FROM round_comments c
      JOIN users u ON u.user_id = c.user_id
@@ -121,19 +121,46 @@ router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, re
 }));
 
 // Post a comment
-//   body: { body: 'nice round' }
+//   body: { body: 'nice round', clientId?: '...' }
 router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
   if (!body) return res.status(400).json({ error: 'body required' });
+  // Client-generated idempotency key — same contract as chat sends. A retry
+  // after an ambiguous network failure (request landed, response lost)
+  // carries the same clientId; the partial unique index collapses it onto
+  // the original row and we return that row instead of double-posting.
+  const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+    ? req.body.clientId.slice(0, 64)
+    : null;
 
   const { rows: rd } = await pool.query(`SELECT 1 FROM rounds WHERE round_id = $1`, [req.params.roundId]);
   if (!rd.length) return res.status(404).json({ error: 'round not found' });
 
   const { rows } = await pool.query(
-    `INSERT INTO round_comments (user_id, round_id, body)
-     VALUES ($1, $2, $3) RETURNING comment_id, created_at`,
-    [req.userId, req.params.roundId, body]
+    `INSERT INTO round_comments (user_id, round_id, body, client_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+     RETURNING comment_id, created_at, client_id`,
+    [req.userId, req.params.roundId, body, clientId]
   );
+  if (!rows.length && clientId) {
+    // Duplicate retry — the original comment already landed. Return it and
+    // skip the push (the round owner was already notified).
+    const { rows: existing } = await pool.query(
+      `SELECT comment_id, created_at, client_id FROM round_comments
+       WHERE user_id = $1 AND client_id = $2`,
+      [req.userId, clientId]
+    );
+    if (existing.length) {
+      return res.json({
+        success: true,
+        comment_id: existing[0].comment_id,
+        created_at: existing[0].created_at,
+        client_id: existing[0].client_id,
+      });
+    }
+    return res.status(409).json({ error: 'Duplicate send' });
+  }
 
   // Push to round owner (fire-and-forget). Truncate body in the push so a
   // long comment doesn't make the notification overflow on lock screens.
@@ -148,7 +175,12 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
     );
   }).catch(() => { /* swallow */ });
 
-  return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
+  return res.json({
+    success: true,
+    comment_id: rows[0].comment_id,
+    created_at: rows[0].created_at,
+    client_id: rows[0].client_id,
+  });
 }));
 
 // Delete a comment (only your own)

@@ -179,7 +179,23 @@ export default function SocialScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Chats</Text>
+      {/* Title row + Find Friends. DMs are friends-only, so the place you
+          read chats needs a direct path to growing the friends list. It
+          used to live only behind Profile's follower counts. */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Text style={styles.title}>Chats</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/friends?tab=add' as any)}
+          activeOpacity={0.7}
+          style={{
+            flexDirection: 'row', alignItems: 'center', gap: 4,
+            borderWidth: 1, borderColor: C.gold + '66', borderRadius: 16,
+            paddingHorizontal: 12, paddingVertical: 6,
+          }}
+        >
+          <Text style={{ color: C.gold, fontSize: 12, fontWeight: '800' }}>+ Find Friends</Text>
+        </TouchableOpacity>
+      </View>
       <ScrollView style={{ flex: 1 }}>
         {/* ── Match Invites ─────────────────────────────────────────── */}
         {matchInvites.length > 0 && (

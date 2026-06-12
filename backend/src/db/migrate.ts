@@ -1935,6 +1935,23 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON friends(friend_id, status);
     `,
   },
+  {
+    // Comment send idempotency for round + post comments. Same contract as
+    // chat.client_id_idempotency: the composer stamps every send with a
+    // client-generated id, so a retry after an ambiguous network failure
+    // (request landed, response lost) hits the partial unique index and
+    // gets the original row back instead of double-posting the comment.
+    // Partial indexes so pre-existing NULL rows coexist.
+    name: 'comments.client_id_idempotency',
+    sql: `
+      ALTER TABLE round_comments ADD COLUMN IF NOT EXISTS client_id TEXT;
+      ALTER TABLE post_comments  ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS round_comments_client_dedupe
+        ON round_comments(user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS post_comments_client_dedupe
+        ON post_comments(user_id, client_id) WHERE client_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {

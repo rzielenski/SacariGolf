@@ -257,25 +257,27 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
-      {/* 2-wide nav grid: Leaderboard + Tournaments. PressableScale gives
-          tactile press feedback (subtle scale + opacity) on each tile. */}
-      <View style={styles.navGrid}>
-        <PressableScale
-          onPress={() => router.push('/leaderboard' as any)}
-          style={styles.navTile}
-        >
-          <Text style={styles.navTileMark}>★</Text>
-          <Text style={styles.navTileLabel}>Leaderboard</Text>
-          <Text style={styles.navTileSub}>See where you rank globally</Text>
-        </PressableScale>
-        <PressableScale
-          onPress={() => router.push('/tournaments' as any)}
-          style={styles.navTile}
-        >
-          <Text style={styles.navTileMark}>♛</Text>
-          <Text style={styles.navTileLabel}>Tournaments</Text>
-          <Text style={styles.navTileSub}>Leagues + bracketed events</Text>
-        </PressableScale>
+      {/* Quick-access hub: the home tab doubles as the app's map. Every
+          marquee surface is one tap from here, so features stop being
+          "buried somewhere in Profile". 3-wide compact tiles. */}
+      <View style={styles.hubGrid}>
+        {([
+          { mark: '★', label: 'Leaderboard', to: '/leaderboard' },
+          { mark: '♛', label: 'Tournaments', to: '/tournaments' },
+          { mark: '🏆', label: 'Sacari Cup', to: '/sacari-cup' },
+          { mark: '▼', label: 'Season Pass', to: '/season-pass' },
+          { mark: '✦', label: 'Locker Room', to: '/locker-room' },
+          { mark: '⛳︎', label: 'Range', to: '/range' },
+        ] as const).map((t) => (
+          <PressableScale
+            key={t.to}
+            onPress={() => router.push(t.to as any)}
+            style={styles.hubTile}
+          >
+            <Text style={styles.hubTileMark}>{t.mark}</Text>
+            <Text style={styles.hubTileLabel} numberOfLines={1}>{t.label}</Text>
+          </PressableScale>
+        ))}
       </View>
 
       <Text style={styles.feedHeader}>FEED</Text>
@@ -380,15 +382,21 @@ const styles = StyleSheet.create({
   // Each tile uses PressableScale for tactile press feedback. Slight
   // gold-tinted background wash makes the cards lift against the true-black
   // page background with the refined palette.
-  navGrid: { flexDirection: 'row', gap: 10, marginTop: 4, marginBottom: 24 },
-  navTile: {
-    flex: 1, backgroundColor: C.card, borderRadius: 10, padding: 14,
-    borderWidth: 1, borderColor: C.gold + '55', alignItems: 'flex-start',
+  hubGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 10,
+    marginTop: 4, marginBottom: 24,
+  },
+  hubTile: {
+    // Three per row: (100% - 2 gaps of 10) / 3. flexBasis + grow keeps
+    // rows balanced if the list isn't a multiple of three.
+    flexBasis: '30%', flexGrow: 1,
+    backgroundColor: C.card, borderRadius: 10,
+    paddingVertical: 12, paddingHorizontal: 8,
+    borderWidth: 1, borderColor: C.gold + '55', alignItems: 'center',
     shadowColor: C.gold, shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 0 },
   },
-  navTileMark: { color: C.gold, fontFamily: F.serif, fontSize: 22, fontWeight: '900' },
-  navTileLabel: { color: C.text, fontSize: 15, fontWeight: '800', marginTop: 6 },
-  navTileSub: { color: C.textMuted, fontSize: 11, marginTop: 3 },
+  hubTileMark: { color: C.gold, fontFamily: F.serif, fontSize: 20, fontWeight: '900' },
+  hubTileLabel: { color: C.text, fontSize: 12, fontWeight: '800', marginTop: 5 },
 
   feedHeader: {
     color: C.textMuted, fontSize: 11, fontWeight: '700',
