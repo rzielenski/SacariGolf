@@ -403,7 +403,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 // GET /posts/:id/comments → list, oldest first, each flagged `mine`.
 router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at,
+    `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
             (c.user_id = $2) AS mine,
             ${equippedVisualSql('u')} AS equipped_visual
        FROM post_comments c
@@ -415,10 +415,17 @@ router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Resp
   return res.json(rows);
 }));
 
-// POST /posts/:id/comments  body: { body }
+// POST /posts/:id/comments  body: { body, clientId? }
 router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
   if (!body) return res.status(400).json({ error: 'body required' });
+  // Client-generated idempotency key — same contract as chat sends. A retry
+  // after an ambiguous network failure (request landed, response lost)
+  // carries the same clientId; the partial unique index collapses it onto
+  // the original row and we return that row instead of double-posting.
+  const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+    ? req.body.clientId.slice(0, 64)
+    : null;
 
   // Verify the post exists + grab the owner for the push.
   const { rows: postRows } = await pool.query(
@@ -434,10 +441,30 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
   const post = postRows[0];
 
   const { rows } = await pool.query(
-    `INSERT INTO post_comments (post_id, user_id, body)
-     VALUES ($1, $2, $3) RETURNING comment_id, created_at`,
-    [req.params.id, req.userId, body]
+    `INSERT INTO post_comments (post_id, user_id, body, client_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+     RETURNING comment_id, created_at, client_id`,
+    [req.params.id, req.userId, body, clientId]
   );
+  if (!rows.length && clientId) {
+    // Duplicate retry — the original comment already landed. Return it and
+    // skip the push + mention processing (both fired on the original send).
+    const { rows: existing } = await pool.query(
+      `SELECT comment_id, created_at, client_id FROM post_comments
+       WHERE user_id = $1 AND client_id = $2`,
+      [req.userId, clientId]
+    );
+    if (existing.length) {
+      return res.json({
+        success: true,
+        comment_id: existing[0].comment_id,
+        created_at: existing[0].created_at,
+        client_id: existing[0].client_id,
+      });
+    }
+    return res.status(409).json({ error: 'Duplicate send' });
+  }
 
   // Notify the post owner (fire-and-forget). Skip if commenting on your
   // own post or the owner has no push token.
@@ -456,7 +483,12 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
   // viewable, so anyone can be mentioned). Fire-and-forget.
   processMentions(req.params.id, req.userId!, body);
 
-  return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
+  return res.json({
+    success: true,
+    comment_id: rows[0].comment_id,
+    created_at: rows[0].created_at,
+    client_id: rows[0].client_id,
+  });
 }));
 
 // DELETE /posts/:id/comments/:commentId — your own comment, OR the post

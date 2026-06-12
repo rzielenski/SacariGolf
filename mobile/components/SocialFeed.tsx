@@ -21,7 +21,7 @@
  * so the whole tab scrolls as one. Don't nest this inside a ScrollView.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert,
   FlatList, RefreshControl, Image, Modal, TextInput, ScrollView,
@@ -44,6 +44,14 @@ interface Props {
    *  to refresh. Use this to refresh stats / banners that live in the
    *  header. */
   onRefreshExtra?: () => Promise<void> | void;
+}
+
+/** Idempotency key for a single comment send attempt. The server has a
+ *  partial unique index on (user_id, client_id), so retrying with the same
+ *  id can never duplicate the comment — which makes retry-after-timeout
+ *  safe. Same scheme as chat sends. */
+function genClientId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
 }
 
 /** Feed audience. Mirrors the backend `?scope=` param on GET /posts/feed. */
@@ -382,9 +390,35 @@ function CommentsModal({
   onClose: () => void;
   onCountChange: (n: number) => void;
 }) {
+  const { user } = useAuth();
   const [comments, setComments] = useState<any[] | null>(null);
   const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
+  // Mirror of `comments` so transitions (optimistic append, confirm swap,
+  // retry, discard) can compute the next array without functional-updater
+  // gymnastics, and so the badge count can be derived in one place.
+  const commentsRef = useRef<any[] | null>(null);
+  // Local comments not yet confirmed by the server, keyed by client_id.
+  // Merged view = server rows + these; a local whose client_id shows up in
+  // a server row is dropped (its send landed — covers the "request
+  // succeeded but the response timed out" case).
+  const localsRef = useRef<Map<string, any>>(new Map());
+
+  /** Single setter: keeps the ref mirror in sync and reports the badge
+   *  count — confirmed rows only, so a pending/failed local never inflates
+   *  the card's comment count. */
+  const apply = useCallback((rows: any[]) => {
+    commentsRef.current = rows;
+    setComments(rows);
+    onCountChange(rows.filter((r) => !r._status).length);
+  }, [onCountChange]);
+
+  const mergeServer = useCallback((server: any[]) => {
+    const locals = localsRef.current;
+    for (const c of server) {
+      if (c.client_id && locals.has(c.client_id)) locals.delete(c.client_id);
+    }
+    return [...server, ...Array.from(locals.values())];
+  }, []);
   // Keyboard height, tracked manually. KeyboardAvoidingView mis-measures its
   // own frame inside a pageSheet Modal (the sheet is inset from the top of
   // the window), so on iOS it under-shifts and the composer stays hidden
@@ -405,28 +439,95 @@ function CommentsModal({
   const load = useCallback(async () => {
     try {
       const rows = await api.posts.comments(postId);
-      setComments(rows);
-      onCountChange(rows.length);
+      apply(mergeServer(rows));
     } catch {
-      setComments([]);
+      // Failed (re)fetch — keep whatever we're already showing rather than
+      // blanking the thread; just seed the empty state on a cold open.
+      // No count report so the badge keeps its last-known value.
+      if (!commentsRef.current) { commentsRef.current = []; setComments([]); }
     }
-  }, [postId, onCountChange]);
+  }, [postId, apply, mergeServer]);
 
   useEffect(() => { if (visible) load(); }, [visible, load]);
 
-  const submit = async () => {
-    const body = draft.trim();
-    if (!body || sending) return;
-    setSending(true);
+  /** POST one comment. On success the optimistic row is swapped for the
+   *  confirmed row; on failure it flips to 'failed' (tap to retry).
+   *  Retries reuse the same clientId, so duplicates are impossible. */
+  const postComment = useCallback(async (clientId: string, body: string) => {
     try {
-      await api.posts.addComment(postId, body);
-      setDraft('');
-      await load();
+      const r = await api.posts.addComment(postId, body, clientId);
+      const cur = localsRef.current.get(clientId);
+      localsRef.current.delete(clientId);
+      const confirmed = {
+        ...(cur ?? { user_id: user?.user_id, username: user?.username, body, mine: true }),
+        comment_id: r.comment_id,
+        created_at: r.created_at,
+        client_id: r.client_id ?? clientId,
+        _status: undefined,
+        _failReason: undefined,
+      };
+      const without = (commentsRef.current ?? []).filter((c) =>
+        (c.client_id ?? c.comment_id) !== clientId && c.comment_id !== confirmed.comment_id);
+      apply([...without, confirmed]);
     } catch (e: any) {
-      Alert.alert('Could not comment', e?.message ?? 'Try again.');
-    } finally {
-      setSending(false);
+      // 4xx = the server understood and said no (post deleted...). Surface
+      // the reason — a retry without fixing the cause fails the same way.
+      // Network-class failures stay quiet: the row shows the retry state.
+      const rejected = typeof e?.status === 'number' && e.status >= 400 && e.status < 500;
+      const cur = localsRef.current.get(clientId);
+      if (cur) {
+        const failed = {
+          ...cur, _status: 'failed',
+          _failReason: rejected ? (e?.message ?? 'Could not post') : undefined,
+        };
+        localsRef.current.set(clientId, failed);
+        apply((commentsRef.current ?? []).map((c) =>
+          (c.client_id ?? c.comment_id) === clientId ? failed : c));
+      }
+      if (rejected) Alert.alert('Could not comment', e?.message ?? 'Try again.');
     }
+  }, [postId, user?.user_id, user?.username, apply]);
+
+  /** Flip a failed comment back to 'sending' and re-POST it. */
+  const retryLocal = useCallback((clientId: string) => {
+    const cur = localsRef.current.get(clientId);
+    if (!cur) return;
+    const again = { ...cur, _status: 'sending', _failReason: undefined };
+    localsRef.current.set(clientId, again);
+    apply((commentsRef.current ?? []).map((c) =>
+      (c.client_id ?? c.comment_id) === clientId ? again : c));
+    void postComment(clientId, again.body);
+  }, [apply, postComment]);
+
+  /** Remove a failed local comment that never reached the server. */
+  const discardLocal = useCallback((clientId: string) => {
+    localsRef.current.delete(clientId);
+    apply((commentsRef.current ?? []).filter((c) =>
+      (c.client_id ?? c.comment_id) !== clientId));
+  }, [apply]);
+
+  const submit = () => {
+    const body = draft.trim();
+    if (!body || !user) return;
+    setDraft('');
+    // Optimistic: the comment appears instantly in 'sending' state and the
+    // POST happens behind it — same flow as chat bubbles. Failures show an
+    // explicit tap-to-retry row instead of silently eating the text.
+    const clientId = genClientId();
+    const local = {
+      comment_id: clientId,
+      client_id: clientId,
+      created_at: new Date().toISOString(),
+      body,
+      user_id: user.user_id,
+      username: user.username,
+      avatar_url: user.avatar_url ?? null,
+      mine: true,
+      _status: 'sending',
+    };
+    localsRef.current.set(clientId, local);
+    apply([...(commentsRef.current ?? []), local]);
+    void postComment(clientId, body);
   };
 
   const remove = (commentId: string) => {
@@ -462,7 +563,14 @@ function CommentsModal({
             <Text style={s.commentsEmpty}>No comments yet — be the first.</Text>
           ) : (
             comments.map((cm) => (
-              <View key={cm.comment_id} style={s.commentRow}>
+              // Tap a failed row to retry the send; sending rows render dimmed.
+              <TouchableOpacity
+                key={cm.client_id ?? cm.comment_id}
+                style={[s.commentRow, cm._status === 'sending' && { opacity: 0.55 }]}
+                disabled={cm._status !== 'failed'}
+                onPress={() => cm.client_id && retryLocal(cm.client_id)}
+                activeOpacity={0.7}
+              >
                 <TouchableOpacity onPress={() => router.push(`/user/${cm.user_id}` as any)}>
                   {cm.avatar_url ? (
                     <Image
@@ -480,14 +588,28 @@ function CommentsModal({
                     {censorText(cm.username, censor)}
                   </IdentityName>
                   <Text style={s.commentBody}>{censorText(cm.body, censor)}</Text>
-                  <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
+                  {cm._status === 'sending' ? (
+                    <Text style={s.commentTime}>Sending…</Text>
+                  ) : cm._status === 'failed' ? (
+                    <Text style={s.commentFailed}>
+                      {cm._failReason ? `${cm._failReason} · tap to retry` : 'Not sent · tap to retry'}
+                    </Text>
+                  ) : (
+                    <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
+                  )}
                 </View>
-                {cm.mine && (
+                {/* Failed locals get × to discard the unsent text; confirmed
+                    own comments keep the server delete. Hidden mid-send. */}
+                {cm._status === 'failed' && cm.client_id ? (
+                  <TouchableOpacity onPress={() => discardLocal(cm.client_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={s.deleteX}>×</Text>
+                  </TouchableOpacity>
+                ) : cm.mine && !cm._status ? (
                   <TouchableOpacity onPress={() => remove(cm.comment_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                     <Text style={s.deleteX}>×</Text>
                   </TouchableOpacity>
-                )}
-              </View>
+                ) : null}
+              </TouchableOpacity>
             ))
           )}
         </ScrollView>
@@ -505,14 +627,12 @@ function CommentsModal({
             multiline
           />
           <TouchableOpacity
-            style={[s.commentSendBtn, (!draft.trim() || sending) && { opacity: 0.4 }]}
+            style={[s.commentSendBtn, !draft.trim() && { opacity: 0.4 }]}
             onPress={submit}
-            disabled={!draft.trim() || sending}
+            disabled={!draft.trim()}
             activeOpacity={0.7}
           >
-            {sending
-              ? <ActivityIndicator color={C.bg} size="small" />
-              : <Text style={s.commentSendText}>Post</Text>}
+            <Text style={s.commentSendText}>Post</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -910,6 +1030,7 @@ const s = StyleSheet.create({
   commentAuthor: { color: C.text, fontWeight: '800', fontSize: 13 },
   commentBody: { color: C.text, fontSize: 14, lineHeight: 19, marginTop: 2 },
   commentTime: { color: C.textDim, fontSize: 10, marginTop: 3 },
+  commentFailed: { color: C.red, fontSize: 10, marginTop: 3, fontWeight: '700' },
   commentComposer: {
     flexDirection: 'row', alignItems: 'flex-end', gap: 8,
     paddingHorizontal: 12, paddingVertical: 10,

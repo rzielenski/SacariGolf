@@ -1,11 +1,35 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert } from 'react-native';
 import { api } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { scoreColor } from '../lib/golfMath';
 import type { HoleStat } from '../lib/scoringTypes';
 import { ShotMapModal } from './ShotMap';
 import { useCensor } from '../lib/censor';
+
+/** Idempotency key for a single comment send attempt. The server has a
+ *  partial unique index on (user_id, client_id), so retrying with the same
+ *  id can never duplicate the comment — which makes retry-after-timeout
+ *  safe. Same scheme as chat sends. */
+function genClientId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+}
+
+/** One comment row. `_status` / `_failReason` are LOCAL ONLY — never come
+ *  from the server. 'sending' renders the row dimmed; 'failed' renders the
+ *  tap-to-retry affordance. */
+type RoundComment = {
+  comment_id: string;
+  user_id: string;
+  username: string;
+  body: string;
+  created_at: string;
+  mine: boolean;
+  client_id?: string | null;
+  _status?: 'sending' | 'failed';
+  _failReason?: string;
+};
 
 // Re-export so existing importers of HoleStat from Scorecard keep working.
 export type { HoleStat };
@@ -297,17 +321,31 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
     allHoles.find((h: any) => h.hole_num === holeNum)?.par ?? null;
 
   // Reactions + comments — only enabled when a round_id is supplied
+  const { user } = useAuth();
   const [reactions, setReactions] = useState<{ reaction: string; count: number; mine: boolean }[]>([]);
-  const [comments, setComments] = useState<{ comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean }[]>([]);
+  const [comments, setComments] = useState<RoundComment[]>([]);
   const [commentDraft, setCommentDraft] = useState('');
-  const [posting, setPosting] = useState(false);
+
+  // Local comments that haven't been confirmed by the server yet, keyed by
+  // client_id. The merged view = server rows + these, with any local whose
+  // client_id shows up in a server row dropped (its send actually landed —
+  // covers the "request succeeded but the response timed out" case).
+  const localsRef = useRef<Map<string, RoundComment>>(new Map());
+
+  const mergeServer = useCallback((server: RoundComment[]) => {
+    const locals = localsRef.current;
+    for (const c of server) {
+      if (c.client_id && locals.has(c.client_id)) locals.delete(c.client_id);
+    }
+    return [...server, ...Array.from(locals.values())];
+  }, []);
 
   const loadSocial = useCallback(() => {
     if (!entry.round_id) return;
     api.rounds.social(entry.round_id)
-      .then((d) => { setReactions(d.reactions); setComments(d.comments); })
+      .then((d) => { setReactions(d.reactions); setComments(mergeServer(d.comments)); })
       .catch(() => { });
-  }, [entry.round_id]);
+  }, [entry.round_id, mergeServer]);
 
   useEffect(() => { loadSocial(); }, [loadSocial]);
 
@@ -329,16 +367,85 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
     catch { loadSocial(); /* revert via refetch */ }
   };
 
-  const submitComment = async () => {
-    const text = commentDraft.trim();
-    if (!text || !entry.round_id) return;
-    setPosting(true);
+  /** POST one comment. On success the optimistic row is swapped for the
+   *  confirmed row; on failure it flips to 'failed' (tap to retry).
+   *  Retries reuse the same clientId, so duplicates are impossible. */
+  const postComment = useCallback(async (clientId: string, bodyText: string) => {
+    if (!entry.round_id) return;
     try {
-      await api.rounds.addComment(entry.round_id, text);
-      setCommentDraft('');
-      loadSocial();
-    } catch (e: any) { Alert.alert('Error', e.message); }
-    finally { setPosting(false); }
+      const r = await api.rounds.addComment(entry.round_id, bodyText, clientId);
+      const cur = localsRef.current.get(clientId);
+      localsRef.current.delete(clientId);
+      const confirmed: RoundComment = {
+        ...(cur ?? { user_id: user?.user_id ?? '', username: user?.username ?? '', body: bodyText, mine: true }),
+        comment_id: r.comment_id,
+        created_at: r.created_at,
+        client_id: r.client_id ?? clientId,
+        _status: undefined,
+        _failReason: undefined,
+      };
+      setComments((prev) => {
+        const without = prev.filter((c) =>
+          (c.client_id ?? c.comment_id) !== clientId && c.comment_id !== confirmed.comment_id);
+        return [...without, confirmed];
+      });
+    } catch (e: any) {
+      // 4xx = the server understood and said no (round deleted...). Surface
+      // the reason — a retry without fixing the cause fails the same way.
+      // Network-class failures stay quiet: the row shows the retry state.
+      const rejected = typeof e?.status === 'number' && e.status >= 400 && e.status < 500;
+      const cur = localsRef.current.get(clientId);
+      if (cur) {
+        const failed: RoundComment = {
+          ...cur, _status: 'failed',
+          _failReason: rejected ? (e?.message ?? 'Could not post') : undefined,
+        };
+        localsRef.current.set(clientId, failed);
+        setComments((prev) => prev.map((c) =>
+          (c.client_id ?? c.comment_id) === clientId ? failed : c));
+      }
+      if (rejected) Alert.alert('Could not comment', e?.message ?? 'Try again.');
+    }
+  }, [entry.round_id, user?.user_id, user?.username]);
+
+  /** Flip a failed comment back to 'sending' and re-POST it. */
+  const retryComment = useCallback((clientId: string) => {
+    const cur = localsRef.current.get(clientId);
+    if (!cur) return;
+    const again: RoundComment = { ...cur, _status: 'sending', _failReason: undefined };
+    localsRef.current.set(clientId, again);
+    setComments((prev) => prev.map((c) =>
+      (c.client_id ?? c.comment_id) === clientId ? again : c));
+    void postComment(clientId, again.body);
+  }, [postComment]);
+
+  /** Remove a failed local comment that never reached the server. */
+  const discardComment = useCallback((clientId: string) => {
+    localsRef.current.delete(clientId);
+    setComments((prev) => prev.filter((c) => (c.client_id ?? c.comment_id) !== clientId));
+  }, []);
+
+  const submitComment = () => {
+    const text = commentDraft.trim();
+    if (!text || !entry.round_id || !user) return;
+    setCommentDraft('');
+    // Optimistic: the comment appears instantly in 'sending' state and the
+    // POST happens behind it — same flow as chat bubbles. Failures show an
+    // explicit tap-to-retry row instead of silently eating the text.
+    const clientId = genClientId();
+    const local: RoundComment = {
+      comment_id: clientId,
+      client_id: clientId,
+      created_at: new Date().toISOString(),
+      body: text,
+      user_id: user.user_id,
+      username: user.username,
+      mine: true,
+      _status: 'sending',
+    };
+    localsRef.current.set(clientId, local);
+    setComments((prev) => [...prev, local]);
+    void postComment(clientId, text);
   };
 
   const deleteComment = (commentId: string) => {
@@ -426,18 +533,39 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
             {comments.length === 0 ? (
               <Text style={s.emptyComment}>Be the first to comment.</Text>
             ) : comments.map((c) => (
-              <View key={c.comment_id} style={s.commentRow}>
+              // Tap a failed row to retry the send; sending rows render dimmed.
+              <TouchableOpacity
+                key={c.client_id ?? c.comment_id}
+                style={[s.commentRow, c._status === 'sending' && { opacity: 0.55 }]}
+                disabled={c._status !== 'failed'}
+                onPress={() => c.client_id && retryComment(c.client_id)}
+                activeOpacity={0.7}
+              >
                 <View style={{ flex: 1 }}>
                   <Text style={s.commentAuthor}>{censor(c.username)}</Text>
                   <Text style={s.commentBody}>{censor(c.body)}</Text>
-                  <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
+                  {c._status === 'sending' ? (
+                    <Text style={s.commentTime}>Sending…</Text>
+                  ) : c._status === 'failed' ? (
+                    <Text style={s.commentFailed}>
+                      {c._failReason ? `${c._failReason} · tap to retry` : 'Not sent · tap to retry'}
+                    </Text>
+                  ) : (
+                    <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
+                  )}
                 </View>
-                {c.mine && (
+                {/* Failed locals get Discard (drop the unsent text); confirmed
+                    own comments keep the server Delete. Hidden mid-send. */}
+                {c._status === 'failed' && c.client_id ? (
+                  <TouchableOpacity onPress={() => discardComment(c.client_id!)}>
+                    <Text style={s.commentDelete}>Discard</Text>
+                  </TouchableOpacity>
+                ) : c.mine && !c._status ? (
                   <TouchableOpacity onPress={() => deleteComment(c.comment_id)}>
                     <Text style={s.commentDelete}>Delete</Text>
                   </TouchableOpacity>
-                )}
-              </View>
+                ) : null}
+              </TouchableOpacity>
             ))}
 
             <View style={s.commentInputRow}>
@@ -451,11 +579,11 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
                 maxLength={280}
               />
               <TouchableOpacity
-                style={[s.commentSendBtn, (!commentDraft.trim() || posting) && { opacity: 0.4 }]}
+                style={[s.commentSendBtn, !commentDraft.trim() && { opacity: 0.4 }]}
                 onPress={submitComment}
-                disabled={!commentDraft.trim() || posting}
+                disabled={!commentDraft.trim()}
               >
-                <Text style={s.commentSendText}>{posting ? '...' : 'Post'}</Text>
+                <Text style={s.commentSendText}>Post</Text>
               </TouchableOpacity>
             </View>
           </>
@@ -682,6 +810,7 @@ const s = StyleSheet.create({
   commentAuthor: { color: C.gold, fontWeight: '800', fontSize: 12 },
   commentBody: { color: C.text, fontSize: 13, marginTop: 3, lineHeight: 18 },
   commentTime: { color: C.textDim, fontSize: 10, marginTop: 4 },
+  commentFailed: { color: C.red, fontSize: 10, marginTop: 4, fontWeight: '700' },
   commentDelete: { color: C.red, fontSize: 11, fontWeight: '700' },
   commentInputRow: {
     flexDirection: 'row', alignItems: 'flex-end', gap: 6, marginTop: 6,

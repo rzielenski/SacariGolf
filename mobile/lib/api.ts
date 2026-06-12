@@ -911,10 +911,13 @@ export const api = {
     comments: (id: string) => request<{
       comment_id: string; user_id: string; username: string;
       avatar_url: string | null; body: string; created_at: string; mine: boolean;
+      client_id?: string | null;
     }[]>('GET', `/posts/${id}/comments`),
-    addComment: (id: string, body: string) =>
-      request<{ success: true; comment_id: string; created_at: string }>(
-        'POST', `/posts/${id}/comments`, { body },
+    /** `clientId` makes the send idempotent — retrying with the same id
+     *  returns the original comment instead of double-posting. */
+    addComment: (id: string, body: string, clientId?: string) =>
+      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null }>(
+        'POST', `/posts/${id}/comments`, { body, clientId },
       ),
     deleteComment: (id: string, commentId: string) =>
       request<{ success: true }>('DELETE', `/posts/${id}/comments/${commentId}`),
@@ -947,12 +950,14 @@ export const api = {
   rounds: {
     social: (roundId: string) => request<{
       reactions: { reaction: string; count: number; mine: boolean }[];
-      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean }[];
+      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean; client_id?: string | null }[];
     }>('GET', `/rounds/${roundId}/social`),
     toggleReaction: (roundId: string, reaction: string) =>
       request<{ added: boolean }>('POST', `/rounds/${roundId}/reactions`, { reaction }),
-    addComment: (roundId: string, body: string) =>
-      request<{ success: true; comment_id: string; created_at: string }>('POST', `/rounds/${roundId}/comments`, { body }),
+    /** `clientId` makes the send idempotent — retrying with the same id
+     *  returns the original comment instead of double-posting. */
+    addComment: (roundId: string, body: string, clientId?: string) =>
+      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null }>('POST', `/rounds/${roundId}/comments`, { body, clientId }),
     deleteComment: (roundId: string, commentId: string) =>
       request<any>('DELETE', `/rounds/${roundId}/comments/${commentId}`),
   },
