@@ -1896,17 +1896,86 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON direct_messages(from_user_id, to_user_id, created_at);
     `,
   },
+  {
+    // Server-driven app configuration. The mobile app fetches /config on
+    // boot (cached locally); keys can be changed from the Railway console
+    // or POST /admin/config without an app release. Today: min_version
+    // (drives the in-app "update required" banner), banner (freeform
+    // announcement text or null), features (flag object for gating
+    // future work). Seed defaults never overwrite edited values.
+    name: 'app_config.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS app_config (
+        key        TEXT PRIMARY KEY,
+        value      JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO app_config (key, value) VALUES
+        ('min_version', '"1.0.0"'::jsonb),
+        ('banner',      'null'::jsonb),
+        ('features',    '{}'::jsonb)
+      ON CONFLICT (key) DO NOTHING;
+    `,
+  },
+  {
+    // Hot-path indexes for the highest-frequency reads: home feed, the
+    // profile screens' recent/best round queries, membership checks, and
+    // the friends graph that gates feed, DMs, and follower lists.
+    name: 'perf.hot_path_indexes',
+    sql: `
+      CREATE INDEX IF NOT EXISTS posts_created_idx
+        ON posts(created_at DESC);
+      CREATE INDEX IF NOT EXISTS rounds_user_created_idx
+        ON rounds(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS match_players_user_idx
+        ON match_players(user_id);
+      CREATE INDEX IF NOT EXISTS friends_user_status_idx
+        ON friends(user_id, status);
+      CREATE INDEX IF NOT EXISTS friends_friend_status_idx
+        ON friends(friend_id, status);
+    `,
+  },
 ];
 
 export async function runMigrations() {
+  // Ledger table first, outside the loop, so even a first-boot migration
+  // failure is visible remotely via GET /admin/migration-status instead
+  // of only in deploy logs. Each migration upserts its latest outcome —
+  // these are idempotent and re-run every boot, so the ledger reflects
+  // the MOST RECENT run, which is what "is prod healthy" actually means.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name        TEXT PRIMARY KEY,
+        ok          BOOLEAN NOT NULL,
+        error       TEXT,
+        last_ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+  } catch (err) {
+    console.error('Migration ledger create failed:', err);
+  }
+
   for (const m of MIGRATIONS) {
+    let ok = true;
+    let errText: string | null = null;
     try {
       await pool.query(m.sql);
       // Quiet on success — startup logs stay tidy.
     } catch (err) {
+      ok = false;
+      errText = err instanceof Error ? err.message : String(err);
       console.error(`Migration "${m.name}" failed:`, err);
       // Don't crash on migration failure — let the server start anyway so
       // other endpoints keep working. The failed feature simply won't function.
     }
+    try {
+      await pool.query(
+        `INSERT INTO schema_migrations (name, ok, error, last_ran_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (name)
+         DO UPDATE SET ok = $2, error = $3, last_ran_at = NOW()`,
+        [m.name, ok, errText],
+      );
+    } catch { /* ledger write is best-effort */ }
   }
 }

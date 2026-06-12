@@ -6,6 +6,8 @@ import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { api } from '../lib/api';
+import { loadAppConfig } from '../lib/appConfig';
+import { UpdateBanner } from '../components/UpdateBanner';
 import { init as initPurchases } from '../lib/purchases';
 import { ONBOARDING_KEY, setOnboardedState, subscribeOnboardedState } from '../lib/onboardingState';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
@@ -256,12 +258,27 @@ function KeyboardDismissOnBackground() {
 // + app foreground. Idempotent so re-mounts during HMR don't double-bind.
 installOutboxDrainTriggers();
 
+/** Fetch server config on boot + every foreground so min_version flips,
+ *  banners, and feature flags reach running apps within one resume. */
+function AppConfigLoader() {
+  useEffect(() => {
+    loadAppConfig();
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') loadAppConfig();
+    });
+    return () => sub.remove();
+  }, []);
+  return null;
+}
+
 export default function RootLayout() {
   return (
     <AppErrorBoundary>
       <AuthProvider>
         <StatusBar style="light" />
         <KeyboardDismissOnBackground />
+        <AppConfigLoader />
+        <UpdateBanner />
         <OfflineBanner />
         <AuthGuard />
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>

@@ -1,6 +1,47 @@
 import pool from '../db/pool';
 
 /**
+ * Postgres advisory lock around a cron tick so two server instances can't
+ * run the same job concurrently (double-pairing a match, double-resolving
+ * a cup). Single-instance today, but Railway redeploys briefly overlap
+ * old + new processes, and horizontal scaling would silently double every
+ * cron without this.
+ *
+ * Lock + unlock MUST happen on the same session: advisory locks are
+ * per-connection, and pool.query can hand unlock a different connection,
+ * leaking the lock until that session dies. So we pin one client.
+ */
+async function withCronLock(key: number, fn: () => Promise<void>): Promise<void> {
+  let client;
+  try {
+    client = await pool.connect();
+  } catch {
+    return; // pool exhausted / DB down — skip the tick, next one retries
+  }
+  try {
+    const { rows } = await client.query(
+      'SELECT pg_try_advisory_lock($1) AS got', [key],
+    );
+    if (!rows[0]?.got) return; // another instance is mid-tick
+    try {
+      await fn();
+    } finally {
+      await client.query('SELECT pg_advisory_unlock($1)', [key]).catch(() => { });
+    }
+  } catch (err) {
+    console.error(`[cron-lock ${key}] tick failed:`, err);
+  } finally {
+    client.release();
+  }
+}
+
+// One stable key per job — arbitrary but never reused across jobs.
+const LOCK_STALE_MATCHES = 42101;
+const LOCK_PAIRING       = 42102;
+const LOCK_FEED_BACKFILL = 42103;
+const LOCK_WEEKLY_CUP    = 42104;
+
+/**
  * Background cleanup job: cancels in-progress matches that have been idle
  * for over 24 hours. "Idle" = no activity (round creation, shot tracking,
  * score progress) on any of the match's players for the full window.
@@ -291,27 +332,33 @@ export function startCleanupSchedule() {
   stopCleanupSchedule();
 
   // Run once on boot to catch anything that drifted while the server was
-  // down, then every hour thereafter.
-  cancelStaleMatches();
-  cleanupHandle = setInterval(cancelStaleMatches, 60 * 60 * 1000);
+  // down, then every hour thereafter. Every tick takes its advisory lock
+  // so overlapping deploys / multiple instances can't double-run a job.
+  const staleTick   = () => withCronLock(LOCK_STALE_MATCHES, cancelStaleMatches);
+  const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
+  const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
+  const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
+
+  staleTick();
+  cleanupHandle = setInterval(staleTick, 60 * 60 * 1000);
 
   // Pairing runs more frequently than cleanup — every minute. Cheap query
   // (filtered by indexed columns + a small subset of recent matches).
-  runPairingPass();
-  pairingHandle = setInterval(runPairingPass, 60 * 1000);
+  pairingTick();
+  pairingHandle = setInterval(pairingTick, 60 * 1000);
 
   // Feed backfill — every 5 min. Catches any round that completed through
   // a path the auto-post hook missed (forfeits, supersession merges, etc.)
   // so the home feed always reflects everyone's recent rounds.
-  backfillRoundPosts();
-  feedBackfillHandle = setInterval(backfillRoundPosts, 5 * 60 * 1000);
+  feedTick();
+  feedBackfillHandle = setInterval(feedTick, 5 * 60 * 1000);
 
   // Weekly Sacari Cup — ensure the current week's cup exists and resolve
   // any finished cup that hasn't paid out yet. 60-second cadence keeps
   // the Sunday-23:59 → Monday-00:00 handover crisp without burning DB
   // (the queries hit a unique index + a tiny status='active' set).
-  weeklyCupTick();
-  weeklyCupHandle = setInterval(weeklyCupTick, 60 * 1000);
+  cupTick();
+  weeklyCupHandle = setInterval(cupTick, 60 * 1000);
 }
 
 async function weeklyCupTick(): Promise<void> {

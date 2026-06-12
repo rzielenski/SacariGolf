@@ -231,6 +231,13 @@ export const api = {
   patch: <T>(path: string, body: object) => request<T>('PATCH', path, body),
   delete: <T>(path: string) => request<T>('DELETE', path),
 
+  config: {
+    /** Public server-driven config (min_version, banner, feature flags).
+     *  No auth — must work pre-login so the update banner can show on
+     *  the login screen too. */
+    get: () => request<any>('GET', '/config', undefined, false),
+  },
+
   auth: {
     register: (username: string, email: string, password: string, referralCode?: string) =>
       request<{ token: string; user: any }>('POST', '/auth/register',

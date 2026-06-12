@@ -20,6 +20,7 @@ import postsRouter from './routes/posts';
 import seasonsRouter from './routes/seasons';
 import ballsRouter from './routes/balls';
 import cosmeticsRouter from './routes/cosmetics';
+import { configRouter, adminRouter } from './routes/config';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
 import { startTwitterDigestSchedule } from './utils/twitterDigest';
@@ -50,6 +51,9 @@ app.use('/tournaments', tournamentsRouter);
 app.use('/posts', postsRouter);
 app.use('/seasons', seasonsRouter);
 app.use('/balls', ballsRouter);
+// Server-driven config (public) + admin ops (x-admin-token gated).
+app.use('/config', configRouter);
+app.use('/admin', adminRouter);
 // Cosmetics router declares its own multi-prefix routes (/cosmetics/...,
 // /users/me/cosmetics/..., /weekly-cup/...) so it mounts at the root.
 app.use('/', cosmeticsRouter);
