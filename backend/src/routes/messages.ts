@@ -6,6 +6,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { equippedVisualSql } from '../utils/cosmeticSql';
 
 const router = Router();
 
@@ -264,6 +265,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const { rows } = await pool.query(
       `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
               u.username, u.avatar_url,
+              ${equippedVisualSql('u')} AS equipped_visual,
               dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id
        FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
        WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
@@ -285,6 +287,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.message_id, m.created_at, m.body, m.user_id,
             u.username, u.avatar_url,
+            ${equippedVisualSql('u')} AS equipped_visual,
             m.voice_url, m.voice_duration_ms, m.image_url, m.client_id
      FROM messages m JOIN users u ON u.user_id = m.user_id
      WHERE m.${col} = $1

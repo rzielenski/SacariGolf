@@ -14,6 +14,7 @@ import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
 import { VoiceMessageBubble } from '../../../components/VoiceMessageBubble';
 import { UserAvatar } from '../../../components/UserAvatar';
+import { IdentityName } from '../../../components/UserIdentity';
 import { MentionInput } from '../../../components/MentionInput';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { censorText } from '../../../lib/censor';
@@ -624,7 +625,11 @@ function MessageBubble({ msg, isMe, onReport, onRetry, onDiscard }: {
         isMe ? styles.bubbleMe : styles.bubbleThem,
         isFailed && styles.bubbleFailed,
       ]}>
-        {!isMe && <Text style={styles.bubbleName}>{censorText(msg.username, censor)}</Text>}
+        {!isMe && (
+          <IdentityName visual={(msg as any).equipped_visual} style={styles.bubbleName}>
+            {censorText(msg.username, censor)}
+          </IdentityName>
+        )}
         {msg.voice_url ? (
           <VoiceMessageBubble
             url={msg.voice_url}

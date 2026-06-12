@@ -12,6 +12,7 @@ import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
 import { RankCrest } from '../../components/RankCrest';
 import { AvatarViewer } from '../../components/AvatarViewer';
+import { CosmeticBackground, CosmeticBorder, CosmeticUsername } from '../../components/Cosmetics';
 import { fmtHandicap, parForHolesPlayed, toParForHolesPlayed, fmtToPar } from '../../lib/golfMath';
 import { useCensor } from '../../lib/censor';
 import { rankForElo, rankHeadline } from '../../lib/rank';
@@ -107,9 +108,21 @@ export default function UserProfileScreen() {
   const winRate = profile.total_matches > 0 ? Math.round((profile.total_wins / profile.total_matches) * 100) : 0;
   const joined = new Date(profile.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
+  // This user's equipped cosmetics — full animated treatment here. The
+  // public profile is the surface a cosmetic owner most wants seen, and
+  // it renders exactly one identity, so the animation budget is fine.
+  const equipped = profile.equipped_visual ?? {};
+  const bgVisual = equipped.background ?? null;
+  const borderVisual = equipped.border ?? null;
+  const usernameVisual = equipped.username ?? null;
+
   return (
+    <View style={{ flex: 1, backgroundColor: C.bg }}>
+    {bgVisual ? (
+      <CosmeticBackground visual={bgVisual} style={StyleSheet.absoluteFillObject} />
+    ) : null}
     <ScrollView
-      style={styles.container}
+      style={[styles.container, bgVisual && { backgroundColor: 'transparent' }]}
       contentContainerStyle={{ padding: 20, paddingTop: 60, paddingBottom: 40 }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
@@ -119,23 +132,27 @@ export default function UserProfileScreen() {
 
       {/* Header */}
       <View style={styles.headerSection}>
-        <RankCrest elo={profile.elo} size={96} style={{ marginBottom: 8 }}>
-          {profile.avatar_url ? (
-            // Tap to view the photo full-screen — same pattern as a Find.
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={() => setViewingAvatar(true)}
-              style={{ width: '100%', height: '100%' }}
-            >
-              <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.avatarLetterBg}>
-              <Text style={styles.avatarText}>{c(profile.username)[0]?.toUpperCase() ?? '?'}</Text>
-            </View>
-          )}
-        </RankCrest>
-        <Text style={styles.username}>{c(profile.username)}</Text>
+        <CosmeticBorder visual={borderVisual} size={96}>
+          <RankCrest elo={profile.elo} size={96} style={borderVisual ? undefined : { marginBottom: 8 }}>
+            {profile.avatar_url ? (
+              // Tap to view the photo full-screen — same pattern as a Find.
+              <TouchableOpacity
+                activeOpacity={0.85}
+                onPress={() => setViewingAvatar(true)}
+                style={{ width: '100%', height: '100%' }}
+              >
+                <Image source={{ uri: `${API_BASE}${profile.avatar_url}` }} style={styles.avatarImage} />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.avatarLetterBg}>
+                <Text style={styles.avatarText}>{c(profile.username)[0]?.toUpperCase() ?? '?'}</Text>
+              </View>
+            )}
+          </RankCrest>
+        </CosmeticBorder>
+        <CosmeticUsername visual={usernameVisual} style={styles.username}>
+          {c(profile.username)}
+        </CosmeticUsername>
         <View style={[styles.rankBadge, { borderColor: rank.color }]}>
           <Text style={[styles.rankLabel, { color: rank.color }]}>{rankHeadline(profile.elo)}</Text>
         </View>
@@ -561,6 +578,7 @@ export default function UserProfileScreen() {
         onClose={() => setViewingAvatar(false)}
       />
     </ScrollView>
+    </View>
   );
 }
 

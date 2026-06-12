@@ -20,7 +20,7 @@ import {
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
-import { UserAvatar } from '../components/UserAvatar';
+import { IdentityAvatar, IdentityName } from '../components/UserIdentity';
 import { fmtToPar } from '../lib/golfMath';
 
 type LBRow = {
@@ -101,12 +101,13 @@ export default function SacariCupScreen() {
                 </View>
               )}
 
-              {/* Prizes */}
+              {/* Prizes — only render places that actually pay out. The cup
+                  awards 1st only; second/third come back null. */}
               <View style={s.prizes}>
                 <Text style={s.prizesLabel}>PRIZES</Text>
-                <PrizeRow place="1st" reward={data.prizes.first} medal="🥇" />
-                <PrizeRow place="2nd" reward={data.prizes.second} medal="🥈" />
-                <PrizeRow place="3rd" reward={data.prizes.third} medal="🥉" />
+                {data.prizes.first  && <PrizeRow place="1st" reward={data.prizes.first}  medal="🥇" />}
+                {data.prizes.second && <PrizeRow place="2nd" reward={data.prizes.second} medal="🥈" />}
+                {data.prizes.third  && <PrizeRow place="3rd" reward={data.prizes.third}  medal="🥉" />}
               </View>
 
               <Text style={s.boardLabel}>LIVE LEADERBOARD</Text>
@@ -129,9 +130,16 @@ export default function SacariCupScreen() {
                 <Text style={s.boardLabel}>RECENT CHAMPIONS</Text>
                 {data.past_champions.map((c: any, i: number) => (
                   <View key={i} style={s.champRow}>
-                    <UserAvatar username={c.username} avatarUrl={c.avatar_url} size={32} />
+                    <IdentityAvatar
+                      visual={c.equipped_visual}
+                      username={c.username}
+                      avatarUrl={c.avatar_url}
+                      size={32}
+                    />
                     <View style={{ flex: 1, marginLeft: 10 }}>
-                      <Text style={s.champName}>{c.username}</Text>
+                      <IdentityName visual={c.equipped_visual} style={s.champName}>
+                        {c.username}
+                      </IdentityName>
                       <Text style={s.champWeek}>
                         Week of {new Date(c.week_starts_at).toLocaleDateString()}
                       </Text>
@@ -174,9 +182,17 @@ function LBItem({ row }: { row: LBRow }) {
       <Text style={[s.lbRank, { color: medalColor, fontFamily: row.rank <= 3 ? F.serif : undefined }]}>
         {row.rank <= 3 ? ['I', 'II', 'III'][row.rank - 1] : `#${row.rank}`}
       </Text>
-      <UserAvatar username={row.username} avatarUrl={row.avatar_url} size={40} borderRadius={6} />
+      <IdentityAvatar
+        visual={(row as any).equipped_visual}
+        username={row.username}
+        avatarUrl={row.avatar_url}
+        size={40}
+        borderRadius={6}
+      />
       <View style={{ flex: 1, marginLeft: 10 }}>
-        <Text style={s.lbName}>{row.username}{row.is_me ? '  (You)' : ''}</Text>
+        <IdentityName visual={(row as any).equipped_visual} style={s.lbName}>
+          {row.username}{row.is_me ? '  (You)' : ''}
+        </IdentityName>
         <Text style={s.lbMeta}>{row.elo} ELO</Text>
       </View>
       <View style={s.lbScoreBox}>

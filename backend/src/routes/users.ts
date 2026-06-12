@@ -7,6 +7,7 @@ import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
+import { equippedVisualSql } from '../utils/cosmeticSql';
 import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -268,7 +269,8 @@ router.post('/me/theme-voice', requireAuth, wrap(async (req: AuthRequest, res: R
 // Friends — must be before /:id
 router.get('/me/friends', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
-    `SELECT DISTINCT ON (u.user_id) u.user_id, u.username, u.elo, u.avatar_url, f.status
+    `SELECT DISTINCT ON (u.user_id) u.user_id, u.username, u.elo, u.avatar_url, f.status,
+            ${equippedVisualSql('u')} AS equipped_visual
      FROM friends f
      JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
      WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
@@ -1565,6 +1567,7 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
     const sql = `
       ${friendsOnly ? friendScopeCte : ''}
       SELECT u.user_id, u.username, u.elo, u.avatar_url,
+             ${equippedVisualSql('u')} AS equipped_visual,
              COUNT(*) FILTER (WHERE mr.winner_side = mp.side)::int AS mode_wins,
              COUNT(*)::int AS mode_matches
         FROM users u
@@ -1587,7 +1590,8 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
   if (friendsOnly) {
     const { rows } = await pool.query(
       `${friendScopeCte}
-       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
+       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+              ${equippedVisualSql('u')} AS equipped_visual
        FROM users u
        WHERE u.user_id IN (SELECT user_id FROM scope)
        ORDER BY u.elo DESC
@@ -1599,12 +1603,13 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
   // Apple Guideline 1.2: hide blocked users everywhere, including the
   // global leaderboard. Blocker only — blocked users still see the blocker.
   const { rows } = await pool.query(
-    `SELECT user_id, username, elo, total_matches, total_wins, avatar_url
-     FROM users
-     WHERE user_id NOT IN (
+    `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+            ${equippedVisualSql('u')} AS equipped_visual
+     FROM users u
+     WHERE u.user_id NOT IN (
        SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
      )
-     ORDER BY elo DESC LIMIT 100`,
+     ORDER BY u.elo DESC LIMIT 100`,
     [req.userId]
   );
   return res.json(rows);
@@ -1615,6 +1620,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.bio, u.home_course_id, u.drinks,
+            ${equippedVisualSql('u')} AS equipped_visual,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u
      LEFT JOIN courses c ON c.course_id = u.home_course_id
@@ -1746,7 +1752,8 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
 router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM (
          SELECT friend_id AS other_id, created_at FROM friends WHERE user_id = $1
          UNION
@@ -1769,7 +1776,8 @@ router.get('/:id/following', requireAuth, wrap(async (req: AuthRequest, res: Res
 router.get('/:id/followers', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM (
          SELECT user_id  AS other_id, created_at FROM friends WHERE friend_id = $1
          UNION

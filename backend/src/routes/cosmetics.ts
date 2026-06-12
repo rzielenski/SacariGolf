@@ -18,6 +18,7 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { equippedVisualSql } from '../utils/cosmeticSql';
 
 const router = Router();
 
@@ -153,7 +154,8 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
         GROUP BY r.user_id
      )
      SELECT b.user_id, b.best_to_par,
-            u.username, u.avatar_url, u.elo
+            u.username, u.avatar_url, u.elo,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM best b
        JOIN users u ON u.user_id = b.user_id
       ORDER BY b.best_to_par ASC, b.first_at ASC
@@ -179,7 +181,8 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
         ORDER BY week_starts_at DESC
         LIMIT 4
      )
-     SELECT res.week_starts_at, u.username, u.avatar_url
+     SELECT res.week_starts_at, u.username, u.avatar_url,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM resolved res
        JOIN LATERAL (
          SELECT r.user_id,
@@ -212,10 +215,13 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
     leaderboard: ranked,
     my_row: myRow,
     past_champions: pastChamps,
+    // The cup pays out exactly what utils/weeklyCup.ts awards: the
+    // champion border + a trophy + the home-page banner for the week.
+    // (The old gold-frame/gold-text payouts were cut from the catalog.)
     prizes: {
-      first:  'Champion Wreath border + Gold Dust background + Gold Streak ball trail + Champion Gold username',
-      second: 'Gold Frame border',
-      third:  'Gold Text username',
+      first:  'Champion Wreath border, a trophy on your profile, and your name on the home page all week',
+      second: null,
+      third:  null,
     },
   });
 }));
@@ -229,7 +235,8 @@ router.get('/weekly-cup/last-champion', requireAuth, wrap(async (_req: AuthReque
   const { rows } = await pool.query(
     `SELECT w.cup_id, w.user_id, w.best_to_par, w.decided_at,
             wc.week_starts_at,
-            u.username, u.avatar_url, u.elo
+            u.username, u.avatar_url, u.elo,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM weekly_cup_winners w
        JOIN weekly_cups wc ON wc.cup_id = w.cup_id
        JOIN users u        ON u.user_id = w.user_id

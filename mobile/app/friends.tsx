@@ -28,6 +28,7 @@ import { useAuth } from '../lib/auth';
 import { api, API_BASE } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { useCensor } from '../lib/censor';
+import { IdentityName } from '../components/UserIdentity';
 
 const { width: PAGE_W } = Dimensions.get('window');
 
@@ -204,7 +205,13 @@ function PeopleList({
         >
           <Avatar person={item} censor={censor} />
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={s.username} numberOfLines={1}>{censor(item.username)}</Text>
+            <IdentityName
+              visual={(item as any).equipped_visual}
+              style={s.username}
+              numberOfLines={1}
+            >
+              {censor(item.username)}
+            </IdentityName>
             <Text style={s.elo}>{item.elo} ELO</Text>
           </View>
           <Text style={s.chev}>›</Text>

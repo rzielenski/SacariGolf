@@ -4,6 +4,7 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
+import { equippedVisualSql } from '../utils/cosmeticSql';
 
 const router = Router();
 
@@ -359,6 +360,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   const { rows: players } = await pool.query(
     `SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
             u.username, u.elo, u.avatar_url, u.handicap_index,
+            ${equippedVisualSql('u')} AS equipped_visual,
             t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
             t.course_id, t.num_holes,
             c.course_name,

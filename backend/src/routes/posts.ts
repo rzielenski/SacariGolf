@@ -23,6 +23,7 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
 import { processMentions } from '../utils/mentions';
+import { equippedVisualSql } from '../utils/cosmeticSql';
 
 const router = Router();
 
@@ -313,6 +314,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      SELECT
        p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
        u.username AS author_username, u.avatar_url AS author_avatar,
+       ${equippedVisualSql('u')} AS author_equipped,
        m.match_type, m.format, m.completed AS match_completed,
        -- num_holes + holes_subset on the MATCH (what was actually played)
        -- so a 9-hole round of an 18-hole teebox is shown against the right
@@ -402,7 +404,8 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at,
-            (c.user_id = $2) AS mine
+            (c.user_id = $2) AS mine,
+            ${equippedVisualSql('u')} AS equipped_visual
        FROM post_comments c
        JOIN users u ON u.user_id = c.user_id
       WHERE c.post_id = $1

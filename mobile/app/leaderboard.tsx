@@ -9,6 +9,7 @@ import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
+import { IdentityAvatar, IdentityName } from '../components/UserIdentity';
 import { useCensor } from '../lib/censor';
 import { rankForElo } from '../lib/rank';
 
@@ -173,16 +174,18 @@ function PlayerRow({ player, rank, isMe, mode }: {
       <Text style={[styles.rank, { color: medalColor, fontFamily: rank <= 3 ? F.serif : undefined }]}>
         {rank <= 3 ? ['I', 'II', 'III'][rank - 1] : `#${rank}`}
       </Text>
-      <UserAvatar
+      <IdentityAvatar
+        visual={player.equipped_visual}
         username={player.username}
         avatarUrl={player.avatar_url}
         size={40}
         borderRadius={4}
-        tintColor={eloColor + '22'}
       />
       <View style={{ flex: 1 }}>
         <View style={styles.nameRow}>
-          <Text style={styles.username}>{c(player.username)}</Text>
+          <IdentityName visual={player.equipped_visual} style={styles.username}>
+            {c(player.username)}
+          </IdentityName>
           {isMe && <Text style={styles.youBadge}>You</Text>}
         </View>
         <Text style={styles.meta}>{metaLine}</Text>

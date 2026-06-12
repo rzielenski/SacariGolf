@@ -57,10 +57,13 @@ export function UserAvatar({
   };
 
   if (avatarUrl && !errored) {
+    // Server rows store relative paths; some legacy rows carry absolute
+    // URLs. Handle both so callers never have to pre-resolve.
+    const uri = avatarUrl.startsWith('http') ? avatarUrl : `${API_BASE}${avatarUrl}`;
     return (
       <View style={[baseStyle, style]}>
         <Image
-          source={{ uri: `${API_BASE}${avatarUrl}` }}
+          source={{ uri }}
           style={{ width: size, height: size }}
           onError={() => setErrored(true)}
         />

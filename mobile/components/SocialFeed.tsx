@@ -34,6 +34,7 @@ import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { censorText } from '../lib/censor';
 import { MentionInput } from './MentionInput';
+import { IdentityAvatar, IdentityName } from './UserIdentity';
 
 interface Props {
   /** Anything that should render above the feed items inside the same
@@ -275,9 +276,6 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [commentCount, setCommentCount] = useState<number>(post.comment_count ?? 0);
   const when = relativeTime(post.created_at);
-  const authorAvatar = post.author_avatar
-    ? (post.author_avatar.startsWith('http') ? post.author_avatar : `${API_BASE}${post.author_avatar}`)
-    : null;
   return (
     <TouchableOpacity
       style={s.card}
@@ -293,17 +291,16 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
           onPress={() => router.push(`/user/${post.user_id}` as any)}
           activeOpacity={0.7}
         >
-          {authorAvatar
-            ? <Image source={{ uri: authorAvatar }} style={s.avatar} />
-            : (
-              <View style={[s.avatar, s.avatarFallback]}>
-                <Text style={s.avatarFallbackText}>
-                  {(censorText(post.author_username ?? '?', censor))[0]?.toUpperCase()}
-                </Text>
-              </View>
-            )}
+          <IdentityAvatar
+            visual={(post as any).author_equipped}
+            username={post.author_username}
+            avatarUrl={post.author_avatar}
+            size={36}
+          />
           <View style={{ flex: 1 }}>
-            <Text style={s.authorName}>{post.author_username ? censorText(post.author_username, censor) : 'Unknown'}</Text>
+            <IdentityName visual={(post as any).author_equipped} style={s.authorName}>
+              {post.author_username ? censorText(post.author_username, censor) : 'Unknown'}
+            </IdentityName>
             <Text style={s.timestamp}>
               {when}
               {post.is_fof && <Text style={s.fof}> · via a friend</Text>}
@@ -479,7 +476,9 @@ function CommentsModal({
                   )}
                 </TouchableOpacity>
                 <View style={{ flex: 1 }}>
-                  <Text style={s.commentAuthor}>{censorText(cm.username, censor)}</Text>
+                  <IdentityName visual={(cm as any).equipped_visual} style={s.commentAuthor}>
+                    {censorText(cm.username, censor)}
+                  </IdentityName>
                   <Text style={s.commentBody}>{censorText(cm.body, censor)}</Text>
                   <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
                 </View>

@@ -27,6 +27,7 @@ import { C, F } from '../../lib/colors';
 import { SocialFeed } from '../../components/SocialFeed';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { GlowCard } from '../../components/ui/GlowCard';
+import { IdentityName } from '../../components/UserIdentity';
 import { useCensor } from '../../lib/censor';
 import { rankForElo } from '../../lib/rank';
 
@@ -120,7 +121,15 @@ export default function HomeScreen() {
           <Text style={styles.champTrophy}>🏆</Text>
           <View style={{ flex: 1 }}>
             <Text style={styles.champLabel}>LAST WEEK'S CHAMPION</Text>
-            <Text style={styles.champName}>{censor(lastChampion.username)}</Text>
+            {/* Champion's equipped name flair, fully animated — the banner
+                is the reward, so let it shine. */}
+            <IdentityName
+              visual={(lastChampion as any).equipped_visual}
+              style={styles.champName}
+              animated
+            >
+              {censor(lastChampion.username)}
+            </IdentityName>
             <Text style={styles.champMeta}>
               {lastChampion.best_to_par > 0
                 ? `+${lastChampion.best_to_par}`

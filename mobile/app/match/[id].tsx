@@ -13,6 +13,7 @@ import { C, F } from '../../lib/colors';
 import { Match, MatchPlayer } from '../../types';
 import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
+import { IdentityAvatar, IdentityName } from '../../components/UserIdentity';
 
 export default function MatchLobbyScreen() {
   const insets = useSafeAreaInsets();
@@ -757,13 +758,19 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
       onPress={onPress}
       activeOpacity={0.7}
     >
-      <View style={styles.playerAvatar}>
-        <Text style={styles.playerAvatarText}>{c(player.username)[0]?.toUpperCase() ?? '?'}</Text>
-      </View>
+      <IdentityAvatar
+        visual={(player as any).equipped_visual}
+        username={player.username}
+        avatarUrl={(player as any).avatar_url}
+        size={40}
+      />
       <View style={{ flex: 1 }}>
-        <Text style={styles.playerName}>
-          {c(player.username)} {isMe && <Text style={{ color: C.gold }}>(You)</Text>}
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+          <IdentityName visual={(player as any).equipped_visual} style={styles.playerName}>
+            {c(player.username)}
+          </IdentityName>
+          {isMe && <Text style={{ color: C.gold, fontWeight: '700' }}>(You)</Text>}
+        </View>
         <Text style={styles.playerElo}>{player.elo} ELO · Side {player.side}</Text>
         {player.teebox_name ? (
           <Text style={styles.playerTeebox} numberOfLines={1}>
