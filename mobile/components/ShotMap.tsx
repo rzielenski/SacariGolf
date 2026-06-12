@@ -1,15 +1,29 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator } from 'react-native';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
+import Svg, {
+  Circle, Path, Defs, LinearGradient as SvgLinearGradient, Stop,
+} from 'react-native-svg';
+import Animated, {
+  useSharedValue, useAnimatedProps, withTiming, withRepeat, withSequence,
+  withDelay, interpolate, Easing, cancelAnimation,
+} from 'react-native-reanimated';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { distYards, SHOT_COLORS } from '../lib/golfMath';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 /** Local narrower types — ShotMap accepts legacy point arrays and segment
  *  arrays and converts on load, so club + lie are optional here. The
  *  canonical scoring types in lib/scoringTypes.ts are a superset. */
 type Pt = { lat: number; lng: number };
 type Shot = { start: Pt; end: Pt; club?: string };
+
+/** A shot segment projected from lat/lng into map-view pixel space via
+ *  MapView.pointForCoordinate. Recomputed after every region change. */
+type PxSeg = { x1: number; y1: number; x2: number; y2: number };
 
 export function ShotMapModal({
   visible,
@@ -30,15 +44,18 @@ export function ShotMapModal({
 }) {
   const [shots, setShots] = useState<Shot[]>([]);
   const [loading, setLoading] = useState(false);
+  // The shooter's equipped ball-trail cosmetic (visual_data), if any.
+  const [trailVisual, setTrailVisual] = useState<any>(null);
 
   useEffect(() => {
-    if (!visible || !matchId || !userId || !holeNum) { setShots([]); return; }
+    if (!visible || !matchId || !userId || !holeNum) { setShots([]); setTrailVisual(null); return; }
     let cancelled = false;
     setLoading(true);
     api.matches.listShotTracks(matchId, userId)
       .then((rows) => {
         if (cancelled) return;
         const row = rows.find((r) => r.hole_num === holeNum);
+        setTrailVisual((row as any)?.trail_visual ?? (rows[0] as any)?.trail_visual ?? null);
         const raw = (row?.shots as any[]) ?? [];
         if (!raw.length) { setShots([]); return; }
         // Detect format and normalise to segment shape.
@@ -60,6 +77,39 @@ export function ShotMapModal({
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [visible, matchId, userId, holeNum]);
+
+  // ── Trail-effect overlay projection ─────────────────────────────────
+  // react-native-maps Polyline only does static strokes, so the animated
+  // cosmetic trail is drawn in an SVG overlay pinned over the map. After
+  // the map settles (onMapReady / onRegionChangeComplete) every shot
+  // endpoint is projected to pixel space with pointForCoordinate; during
+  // gestures the overlay hides (its pixels would be stale) and the plain
+  // map polylines keep the shape visible.
+  const mapRef = useRef<MapView>(null);
+  const [pxSegs, setPxSegs] = useState<PxSeg[] | null>(null);
+  const [mapSize, setMapSize] = useState<{ w: number; h: number } | null>(null);
+  const projectGen = useRef(0);
+
+  const projectShots = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map || !shots.length || !trailVisual) { setPxSegs(null); return; }
+    const gen = ++projectGen.current;
+    try {
+      const pts = await Promise.all(shots.flatMap((s) => [
+        map.pointForCoordinate({ latitude: s.start.lat, longitude: s.start.lng }),
+        map.pointForCoordinate({ latitude: s.end.lat, longitude: s.end.lng }),
+      ]));
+      if (gen !== projectGen.current) return; // a newer projection superseded us
+      const segs: PxSeg[] = [];
+      for (let i = 0; i < shots.length; i++) {
+        segs.push({
+          x1: pts[i * 2].x, y1: pts[i * 2].y,
+          x2: pts[i * 2 + 1].x, y2: pts[i * 2 + 1].y,
+        });
+      }
+      setPxSegs(segs);
+    } catch { /* projection unavailable (map tearing down) — keep overlay hidden */ }
+  }, [shots, trailVisual]);
 
   // Compute initial map region from all shot endpoints
   const region: Region | undefined = shots.length > 0
@@ -107,16 +157,34 @@ export function ShotMapModal({
           </View>
         ) : (
           <>
-            <View style={s.mapWrap}>
+            <View
+              style={s.mapWrap}
+              onLayout={(e) => setMapSize({
+                w: e.nativeEvent.layout.width,
+                h: e.nativeEvent.layout.height,
+              })}
+            >
               <MapView
+                ref={mapRef}
                 style={{ flex: 1 }}
                 initialRegion={region}
                 mapType="satellite"
                 pitchEnabled={false}
                 rotateEnabled={false}
+                onMapReady={projectShots}
+                onRegionChange={() => { if (pxSegs) setPxSegs(null); }}
+                onRegionChangeComplete={projectShots}
               >
                 {shots.map((shot, i) => {
-                  const color = SHOT_COLORS[i % SHOT_COLORS.length];
+                  // With a cosmetic trail equipped, the map polyline drops
+                  // to a dim neutral underlay: it keeps the shot shape
+                  // visible mid-gesture while the overlay paints the color.
+                  const color = trailVisual
+                    ? 'rgba(255,255,255,0.30)'
+                    : SHOT_COLORS[i % SHOT_COLORS.length];
+                  const markerColor = trailVisual
+                    ? (trailVisual.color ?? '#ffe28a')
+                    : SHOT_COLORS[i % SHOT_COLORS.length];
                   return (
                     <React.Fragment key={`shot-${i}`}>
                       <Polyline
@@ -125,13 +193,13 @@ export function ShotMapModal({
                           { latitude: shot.end.lat,   longitude: shot.end.lng },
                         ]}
                         strokeColor={color}
-                        strokeWidth={4}
+                        strokeWidth={trailVisual ? 2 : 4}
                       />
                       <Marker
                         coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
                         anchor={{ x: 0.5, y: 0.5 }}
                       >
-                        <View style={[s.dot, { backgroundColor: color }]}>
+                        <View style={[s.dot, { backgroundColor: markerColor }]}>
                           <Text style={s.dotText}>{i + 1}</Text>
                         </View>
                       </Marker>
@@ -139,12 +207,18 @@ export function ShotMapModal({
                         coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
                         anchor={{ x: 0.5, y: 0.5 }}
                       >
-                        <View style={[s.endDot, { borderColor: color }]} />
+                        <View style={[s.endDot, { borderColor: markerColor }]} />
                       </Marker>
                     </React.Fragment>
                   );
                 })}
               </MapView>
+              {/* Cosmetic trail effect, pixel-pinned over the map. */}
+              {trailVisual && pxSegs && mapSize ? (
+                <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+                  <TrailEffectOverlay segs={pxSegs} visual={trailVisual} w={mapSize.w} h={mapSize.h} />
+                </View>
+              ) : null}
             </View>
 
             {/* Distance summary */}
@@ -163,7 +237,11 @@ export function ShotMapModal({
             <View style={s.shotList}>
               {segments.map((seg, i) => (
                 <View key={i} style={s.shotRow}>
-                  <View style={[s.shotRowDot, { backgroundColor: SHOT_COLORS[i % SHOT_COLORS.length] }]}>
+                  <View style={[s.shotRowDot, {
+                    backgroundColor: trailVisual
+                      ? (trailVisual.color ?? '#d4a93f')
+                      : SHOT_COLORS[i % SHOT_COLORS.length],
+                  }]}>
                     <Text style={s.shotRowDotText}>SHOT {i + 1}</Text>
                   </View>
                   {seg.club && <Text style={s.shotRowClub}>{seg.club.toUpperCase()}</Text>}
@@ -176,6 +254,186 @@ export function ShotMapModal({
       </View>
     </Modal>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cosmetic trail effects — pixel-space SVG over the satellite map
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Deterministic 0..1 noise so the crackle path doesn't re-roll between
+ *  projections (which would make the bolt shape jump on every pan). */
+function frac(seed: number): number {
+  const x = Math.sin(seed) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+function TrailEffectOverlay({ segs, visual, w, h }: {
+  segs: PxSeg[]; visual: any; w: number; h: number;
+}) {
+  return (
+    <Svg width={w} height={h}>
+      {segs.map((g, i) => (
+        <SegmentEffect key={i} seg={g} index={i} visual={visual} />
+      ))}
+    </Svg>
+  );
+}
+
+/** One shot segment rendered in the equipped trail's style. Each segment
+ *  carries at most a couple of animation drivers; a full hole is ~6
+ *  segments, well inside the animation budget. */
+function SegmentEffect({ seg, index, visual }: { seg: PxSeg; index: number; visual: any }) {
+  const styleId: string = visual?.style ?? 'solid';
+  const color: string = visual?.color ?? '#74e0ff';
+  const accent: string = visual?.accent ?? '#ffffff';
+  const width = Math.max(2.5, Number(visual?.width) || 3);
+  const glow = visual?.glow !== false;
+
+  const dx = seg.x2 - seg.x1;
+  const dy = seg.y2 - seg.y1;
+  const len = Math.max(1, Math.hypot(dx, dy));
+
+  // Crackle gets a jagged bolt path; everything else is a straight line.
+  const d = useMemo(() => {
+    if (styleId !== 'crackle') return `M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`;
+    const steps = Math.max(4, Math.min(14, Math.round(len / 26)));
+    const nx = -dy / len;
+    const ny = dx / len;
+    let path = `M ${seg.x1} ${seg.y1}`;
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const jit = (frac(i * 12.9898 + index * 78.233) - 0.5) * Math.min(14, len * 0.12);
+      path += ` L ${seg.x1 + dx * t + nx * jit} ${seg.y1 + dy * t + ny * jit}`;
+    }
+    return `${path} L ${seg.x2} ${seg.y2}`;
+  }, [seg.x1, seg.y1, seg.x2, seg.y2, styleId, index, len, dx, dy]);
+
+  // Particle anchor points along the segment (embers / galaxy stars).
+  const particles = useMemo(() => [0.3, 0.55, 0.8].map((t, i) => ({
+    x: seg.x1 + dx * t,
+    y: seg.y1 + dy * t,
+    delay: index * 180 + i * 320,
+  })), [seg.x1, seg.y1, dx, dy, index]);
+
+  const runner = useSharedValue(0);
+  const flick = useSharedValue(1);
+  useEffect(() => {
+    runner.value = 0;
+    runner.value = withDelay(
+      index * 140,
+      withRepeat(withTiming(1, { duration: 1700, easing: Easing.linear }), -1, false),
+    );
+    if (styleId === 'crackle') {
+      flick.value = withRepeat(withSequence(
+        withTiming(1, { duration: 90 }),
+        withTiming(0.45, { duration: 140 }),
+        withTiming(0.95, { duration: 70 }),
+        withDelay(260, withTiming(0.65, { duration: 0 })),
+      ), -1, false);
+    } else if (styleId === 'pulse') {
+      flick.value = withRepeat(
+        withTiming(0.45, { duration: 850, easing: Easing.inOut(Easing.sin) }), -1, true,
+      );
+    } else {
+      flick.value = 1;
+    }
+    return () => { cancelAnimation(runner); cancelAnimation(flick); };
+  }, [styleId, index, runner, flick]);
+
+  const runnerProps = useAnimatedProps(() => ({
+    strokeDashoffset: interpolate(runner.value, [0, 1], [0, -len]),
+  }));
+  const flickProps = useAnimatedProps(() => ({ strokeOpacity: flick.value }));
+
+  const gradId = `trailgrad-${index}`;
+  const gradStops: string[] = styleId === 'rainbow'
+    ? ['#ff3b5c', '#ff9a3a', '#ffe23a', '#3aff7a', '#3ac8ff', '#a36bff']
+    : [color, accent];
+  const usesGradientStroke =
+    styleId === 'rainbow' || styleId === 'fire' || styleId === 'galaxy' || styleId === 'gradient';
+  const baseStroke = usesGradientStroke ? `url(#${gradId})` : color;
+  const showRunner =
+    styleId === 'traveling' || styleId === 'rainbow' || styleId === 'galaxy' || styleId === 'fire';
+
+  return (
+    <>
+      {usesGradientStroke && (
+        <Defs>
+          <SvgLinearGradient
+            id={gradId}
+            gradientUnits="userSpaceOnUse"
+            x1={seg.x1} y1={seg.y1} x2={seg.x2} y2={seg.y2}
+          >
+            {gradStops.map((c, i) => (
+              <Stop key={i} offset={`${(i / (gradStops.length - 1)) * 100}%`} stopColor={c} />
+            ))}
+          </SvgLinearGradient>
+        </Defs>
+      )}
+      {/* Soft glow underlay — SVG has no shadows, so fake it with a wide
+          low-opacity stroke under the core line. */}
+      {glow && (
+        <Path d={d} stroke={usesGradientStroke ? `url(#${gradId})` : color}
+          strokeWidth={width * 2.6} strokeOpacity={0.22} strokeLinecap="round" fill="none" />
+      )}
+      {/* Core stroke (flickers for crackle, breathes for pulse) */}
+      <AnimatedPath
+        d={d} stroke={baseStroke} strokeWidth={width}
+        strokeLinecap="round" fill="none" animatedProps={flickProps}
+      />
+      {/* Crackle's hot white core */}
+      {styleId === 'crackle' && (
+        <Path d={d} stroke={accent} strokeWidth={width * 0.4}
+          strokeLinecap="round" fill="none" opacity={0.9} />
+      )}
+      {/* Traveling highlight racing start → end */}
+      {showRunner && (
+        <AnimatedPath
+          d={`M ${seg.x1} ${seg.y1} L ${seg.x2} ${seg.y2}`}
+          stroke="#ffffff" strokeWidth={width * 0.55}
+          strokeLinecap="round" fill="none" opacity={0.85}
+          strokeDasharray={`${len * 0.16} ${len * 0.84}`}
+          animatedProps={runnerProps}
+        />
+      )}
+      {/* Particles: rising embers for fire, twinkling stars for galaxy */}
+      {styleId === 'fire' && particles.map((p, i) => (
+        <EmberDot key={i} x={p.x} y={p.y} delay={p.delay} color={accent} />
+      ))}
+      {styleId === 'galaxy' && particles.map((p, i) => (
+        <TwinkleDot key={i} x={p.x} y={p.y} delay={p.delay} />
+      ))}
+    </>
+  );
+}
+
+function EmberDot({ x, y, delay, color }: { x: number; y: number; delay: number; color: string }) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(
+      withTiming(1, { duration: 1100, easing: Easing.out(Easing.cubic) }), -1, false,
+    ));
+    return () => cancelAnimation(t);
+  }, [t, delay]);
+  const props = useAnimatedProps(() => ({
+    cy: interpolate(t.value, [0, 1], [y, y - 16]),
+    opacity: interpolate(t.value, [0, 0.2, 1], [0, 0.95, 0]),
+    r: interpolate(t.value, [0, 1], [2.4, 0.8]),
+  }));
+  return <AnimatedCircle cx={x} cy={y} r={2.4} fill={color} animatedProps={props} />;
+}
+
+function TwinkleDot({ x, y, delay }: { x: number; y: number; delay: number }) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: 1300 }), -1, true));
+    return () => cancelAnimation(t);
+  }, [t, delay]);
+  const props = useAnimatedProps(() => ({
+    opacity: interpolate(t.value, [0, 1], [0.3, 1]),
+    r: interpolate(t.value, [0, 1], [1.1, 2.1]),
+  }));
+  return <AnimatedCircle cx={x} cy={y} r={1.5} fill="#ffffff" animatedProps={props} />;
 }
 
 const s = StyleSheet.create({

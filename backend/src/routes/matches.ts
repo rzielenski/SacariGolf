@@ -2280,36 +2280,43 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
 router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const userFilter = req.query.user as string | undefined;
   const params: any[] = [req.params.id];
-  let where = `WHERE match_id = $1`;
-  if (userFilter) { params.push(userFilter); where += ` AND user_id = $2`; }
+  // Qualified with the shots alias: the users join makes a bare user_id
+  // ambiguous.
+  let where = `WHERE s.match_id = $1`;
+  if (userFilter) { params.push(userFilter); where += ` AND s.user_id = $2`; }
 
   const { rows } = await pool.query(
-    `SELECT user_id, hole_num,
+    `SELECT s.user_id, s.hole_num,
             json_agg(
               json_build_object(
-                'club',  club,
-                'lie',   lie,
+                'club',  s.club,
+                'lie',   s.lie,
                 'start', json_build_object(
-                  'lat', start_lat, 'lng', start_lng, 'elevation_m', start_elevation_m
+                  'lat', s.start_lat, 'lng', s.start_lng, 'elevation_m', s.start_elevation_m
                 ),
                 'end',   json_build_object(
-                  'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
+                  'lat', s.end_lat, 'lng', s.end_lng, 'elevation_m', s.end_elevation_m
                 ),
-                'recorded_at', recorded_at,
-                'plays_like_yds', plays_like_yds,
-                'total_yds', total_yds,
-                'lateral_yds', lateral_yds,
-                'lateral_ref', lateral_ref,
-                'aim', CASE WHEN aim_lat IS NOT NULL AND aim_lng IS NOT NULL
-                            THEN json_build_object('lat', aim_lat, 'lng', aim_lng)
+                'recorded_at', s.recorded_at,
+                'plays_like_yds', s.plays_like_yds,
+                'total_yds', s.total_yds,
+                'lateral_yds', s.lateral_yds,
+                'lateral_ref', s.lateral_ref,
+                'aim', CASE WHEN s.aim_lat IS NOT NULL AND s.aim_lng IS NOT NULL
+                            THEN json_build_object('lat', s.aim_lat, 'lng', s.aim_lng)
                             ELSE NULL END
               )
-              ORDER BY shot_index
-            ) AS shots
-     FROM shots
+              ORDER BY s.shot_index
+            ) AS shots,
+            -- Shooter's equipped ball-trail cosmetic, resolved to its
+            -- visual_data so the shot map can paint the trail effect.
+            (SELECT visual_data FROM cosmetics
+              WHERE cosmetic_id = u.equipped_ball_trail) AS trail_visual
+     FROM shots s
+     JOIN users u ON u.user_id = s.user_id
      ${where}
-     GROUP BY user_id, hole_num
-     ORDER BY user_id, hole_num`,
+     GROUP BY s.user_id, s.hole_num, u.equipped_ball_trail
+     ORDER BY s.user_id, s.hole_num`,
     params
   );
   return res.json(rows);
