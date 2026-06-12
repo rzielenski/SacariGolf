@@ -1873,6 +1873,29 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
     `,
   },
+  {
+    // Chat send idempotency. The mobile app stamps every send with a
+    // client-generated id; a retry after an ambiguous network failure
+    // (request landed, response lost) hits the partial unique index and
+    // returns the original row instead of duplicating the message. Also
+    // adds the thread-poll indexes: every open chat screen polls its
+    // thread every 5 seconds, which was a sequential scan before.
+    name: 'chat.client_id_idempotency',
+    sql: `
+      ALTER TABLE messages        ADD COLUMN IF NOT EXISTS client_id TEXT;
+      ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_client_dedupe
+        ON messages(user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS dm_client_dedupe
+        ON direct_messages(from_user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS messages_match_created_idx
+        ON messages(match_id, created_at) WHERE match_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS messages_clan_created_idx
+        ON messages(clan_id, created_at) WHERE clan_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS dm_pair_created_idx
+        ON direct_messages(from_user_id, to_user_id, created_at);
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -608,6 +608,10 @@ export const api = {
       imageBase64?: string;
       /** Image MIME type — defaults server-side to image/jpeg. */
       imageMime?: string;
+      /** Idempotency key. Retrying a send with the same clientId returns
+       *  the original message row instead of duplicating it, so the
+       *  ambiguous "request landed, response lost" case is safe to retry. */
+      clientId?: string;
     }) => request<any>('POST', '/messages', body),
     /** Report a message for abuse. Both DMs and channel messages route
      *  here via the `kind` discriminator. Idempotent — repeat reports

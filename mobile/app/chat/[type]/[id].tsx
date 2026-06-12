@@ -7,7 +7,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, API_BASE } from '../../../lib/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { api, API_BASE, subscribeConn } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { C, F } from '../../../lib/colors';
 import { ChatMessage } from '../../../types';
@@ -20,6 +21,19 @@ import { censorText } from '../../../lib/censor';
 /** Horizontal distance the user has to drag the mic LEFT, in pixels, before
  *  the gesture is interpreted as "cancel this recording" instead of "send". */
 const CANCEL_SLIDE_PX = 90;
+
+/** Idempotency key for a single send attempt. The server has a partial
+ *  unique index on (sender, client_id), so retrying with the same id can
+ *  never duplicate the message — which makes retry-after-timeout safe. */
+function genClientId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+}
+
+/** AsyncStorage key holding this thread's unsent text messages, so a
+ *  failed send survives leaving the screen or killing the app. */
+const pendingKey = (type: string, id: string) => `sacari.chat.pending.v1.${type}.${id}`;
+
+type PersistedPending = { client_id: string; body: string; created_at: string };
 
 export default function ChatScreen() {
   const insets = useSafeAreaInsets();
@@ -51,13 +65,42 @@ export default function ChatScreen() {
   // in the cancel intent so a brief drag-back-right doesn't re-arm send.
   const cancelLatched = useRef(false);
 
+  // Local bubbles that haven't been confirmed by the server yet, keyed by
+  // client_id. The merged view = server rows + these, with any local whose
+  // client_id shows up in a server row dropped (its send actually landed —
+  // covers the "request succeeded but the response timed out" case, which
+  // the next 5s poll heals automatically).
+  const localsRef = useRef<Map<string, ChatMessage>>(new Map());
+
+  const persistPendings = useCallback(() => {
+    // Only text bubbles survive an app restart — media payloads are too
+    // large to park in AsyncStorage, and re-picking a photo is cheap.
+    const rows: PersistedPending[] = [];
+    for (const m of localsRef.current.values()) {
+      if (!m.voice_url && !m.image_url && m.body && m.client_id) {
+        rows.push({ client_id: m.client_id, body: m.body, created_at: m.created_at });
+      }
+    }
+    AsyncStorage.setItem(pendingKey(type!, id!), JSON.stringify(rows)).catch(() => { });
+  }, [type, id]);
+
+  const mergeServer = useCallback((server: ChatMessage[]) => {
+    const locals = localsRef.current;
+    let dropped = false;
+    for (const m of server) {
+      if (m.client_id && locals.has(m.client_id)) { locals.delete(m.client_id); dropped = true; }
+    }
+    if (dropped) persistPendings();
+    return [...server, ...Array.from(locals.values())];
+  }, [persistPendings]);
+
   const load = useCallback(async () => {
     try {
       const params = type === 'match' ? { matchId: id } : type === 'clan' ? { clanId: id } : { toUserId: id };
       const data = await api.messages.list(params);
-      setMessages(data);
+      setMessages(mergeServer(data));
     } catch { /* silent */ } finally { setLoading(false); }
-  }, [type, id]);
+  }, [type, id, mergeServer]);
 
   useEffect(() => {
     load();
@@ -74,6 +117,105 @@ export default function ChatScreen() {
       markRead();
     };
   }, [load, type, id]);
+
+  /** POST one text message. On success the optimistic bubble is swapped
+   *  for the server row; on failure it flips to 'failed' (tap to retry).
+   *  Retries reuse the same clientId, so duplicates are impossible. */
+  const postText = useCallback(async (clientId: string, bodyText: string) => {
+    const params = type === 'match'
+      ? { matchId: id, body: bodyText, clientId }
+      : type === 'clan'
+      ? { clanId: id, body: bodyText, clientId }
+      : { toUserId: id, body: bodyText, clientId };
+    try {
+      const msg = await api.messages.send(params);
+      const server: ChatMessage = { ...msg, client_id: msg.client_id ?? clientId };
+      localsRef.current.delete(clientId);
+      persistPendings();
+      setMessages((prev) => {
+        const without = prev.filter((m) =>
+          (m.client_id ?? m.message_id) !== clientId && m.message_id !== server.message_id);
+        return [...without, server];
+      });
+    } catch (e: any) {
+      // 4xx = the server understood and said no (not friends, not a
+      // member...). Surface the reason — a retry without fixing the cause
+      // will fail the same way. Network-class failures stay quiet: the
+      // offline banner is already up and the bubble shows the retry state.
+      const rejected = typeof e?.status === 'number' && e.status >= 400 && e.status < 500;
+      const cur = localsRef.current.get(clientId);
+      if (cur) {
+        const failed: ChatMessage = {
+          ...cur, _status: 'failed',
+          _failReason: rejected ? (e?.message ?? 'Could not send') : undefined,
+        };
+        localsRef.current.set(clientId, failed);
+        persistPendings();
+        setMessages((prev) => prev.map((m) =>
+          (m.client_id ?? m.message_id) === clientId ? failed : m));
+      }
+      if (rejected) Alert.alert('Could not send', e?.message ?? 'Try again.');
+    }
+  }, [type, id, persistPendings]);
+
+  /** Flip a failed bubble back to 'sending' and re-POST it. */
+  const retryLocal = useCallback((clientId: string) => {
+    const cur = localsRef.current.get(clientId);
+    if (!cur || !cur.body) return;
+    const again: ChatMessage = { ...cur, _status: 'sending', _failReason: undefined };
+    localsRef.current.set(clientId, again);
+    setMessages((prev) => prev.map((m) =>
+      (m.client_id ?? m.message_id) === clientId ? again : m));
+    void postText(clientId, again.body);
+  }, [postText]);
+
+  /** Remove a failed local bubble (long-press → delete). */
+  const discardLocal = useCallback((clientId: string) => {
+    localsRef.current.delete(clientId);
+    persistPendings();
+    setMessages((prev) => prev.filter((m) => (m.client_id ?? m.message_id) !== clientId));
+  }, [persistPendings]);
+
+  // Restore unsent text messages from a previous session, then try them.
+  // Re-posting an id that's already in flight is safe: the server's
+  // client_id dedupe returns the original row.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(pendingKey(type!, id!));
+        if (!raw || cancelled) return;
+        const rows: PersistedPending[] = JSON.parse(raw);
+        if (!Array.isArray(rows) || !rows.length) return;
+        for (const r of rows) {
+          if (localsRef.current.has(r.client_id)) continue;
+          localsRef.current.set(r.client_id, {
+            message_id: r.client_id, client_id: r.client_id,
+            created_at: r.created_at, body: r.body,
+            user_id: user?.user_id ?? '', username: user?.username ?? '',
+            _status: 'sending',
+          });
+        }
+        setMessages((prev) => mergeServer(prev.filter((m) => !m._status)));
+        for (const r of rows) void postText(r.client_id, r.body);
+      } catch { /* corrupted pending cache — ignore */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, id, user?.user_id]);
+
+  // When connectivity returns, auto-retry every failed text bubble rather
+  // than waiting for the user to tap each one.
+  useEffect(() => {
+    const unsub = subscribeConn((state) => {
+      if (state !== 'online') return;
+      for (const [cid, m] of localsRef.current) {
+        if (m._status === 'failed' && m.body && !m._failReason) retryLocal(cid);
+      }
+    });
+    return unsub;
+  }, [retryLocal]);
 
   useEffect(() => {
     if (messages.length) {
@@ -101,30 +243,33 @@ export default function ChatScreen() {
     return () => { cancelled = true; };
   }, [type, id, user?.user_id]);
 
-  const sendText = async () => {
+  const sendText = () => {
     const trimmed = text.trim();
-    if (!trimmed || sending) return;
-    setSending(true);
+    if (!trimmed || !user) return;
     setText('');
-    try {
-      const params = type === 'match'
-        ? { matchId: id, body: trimmed }
-        : type === 'clan'
-        ? { clanId: id, body: trimmed }
-        : { toUserId: id, body: trimmed };
-      const msg = await api.messages.send(params);
-      setMessages((prev) => (
-        prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
-      ));
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
-    } catch (e: any) {
-      // Restore the text so the user can retry or edit, AND show why it
-      // failed. The silent catch here used to swallow 403 "you can only
-      // DM friends" responses, leaving the user staring at a tap that
-      // appeared to do nothing.
-      setText(trimmed);
-      Alert.alert('Could not send', e?.message ?? 'Try again.');
-    } finally { setSending(false); }
+    // Optimistic: the bubble appears instantly in 'sending' state and the
+    // POST happens behind it. The old flow held the whole composer hostage
+    // on the network round-trip, and on a timeout the message just
+    // vanished back into the input — the root of "my texts aren't
+    // sending". Now the message is visibly in the thread with an explicit
+    // sending / failed state, failures persist across app restarts, and
+    // retries are idempotent server-side.
+    const clientId = genClientId();
+    const bubble: ChatMessage = {
+      message_id: clientId,
+      client_id: clientId,
+      created_at: new Date().toISOString(),
+      body: trimmed,
+      user_id: user.user_id,
+      username: user.username,
+      avatar_url: (user as any)?.avatar_url ?? null,
+      _status: 'sending',
+    };
+    localsRef.current.set(clientId, bubble);
+    persistPendings();
+    setMessages((prev) => [...prev, bubble]);
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
+    void postText(clientId, trimmed);
   };
 
   /** Pick a photo from the library and send it as a chat message. Mirrors
@@ -154,6 +299,7 @@ export default function ChatScreen() {
         ...base,
         imageBase64: asset.base64!,
         imageMime: asset.mimeType ?? 'image/jpeg',
+        clientId: genClientId(),
       });
       setMessages((prev) => (
         prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
@@ -184,6 +330,7 @@ export default function ChatScreen() {
         voiceBase64: clip.base64,
         voiceMime: clip.mime,
         voiceDurationMs: clip.durationMs,
+        clientId: genClientId(),
       });
       setMessages((prev) => (
         prev.some((m) => m.message_id === msg.message_id) ? prev : [...prev, msg]
@@ -334,6 +481,12 @@ export default function ChatScreen() {
               msg={item}
               isMe={item.user_id === user?.user_id}
               onReport={() => reportMessage(item)}
+              onRetry={item._status === 'failed' && item.client_id
+                ? () => retryLocal(item.client_id!)
+                : undefined}
+              onDiscard={item._status === 'failed' && item.client_id
+                ? () => discardLocal(item.client_id!)
+                : undefined}
             />
           )}
           ListEmptyComponent={
@@ -419,8 +572,9 @@ export default function ChatScreen() {
   );
 }
 
-function MessageBubble({ msg, isMe, onReport }: {
+function MessageBubble({ msg, isMe, onReport, onRetry, onDiscard }: {
   msg: ChatMessage; isMe: boolean; onReport: () => void;
+  onRetry?: () => void; onDiscard?: () => void;
 }) {
   // Censor is opt-out (default ON). The viewer's preference governs what
   // THEY see — senders aren't policed; readers control their own surface.
@@ -428,6 +582,8 @@ function MessageBubble({ msg, isMe, onReport }: {
   const censor = user?.censor_offensive_language !== false;
   const [zoom, setZoom] = useState(false);
   const time = new Date(msg.created_at).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  const isSending = msg._status === 'sending';
+  const isFailed = msg._status === 'failed';
   const imageUri = msg.image_url
     ? (msg.image_url.startsWith('http') ? msg.image_url : `${API_BASE}${msg.image_url}`)
     : null;
@@ -435,12 +591,23 @@ function MessageBubble({ msg, isMe, onReport }: {
   // if so we don't render it as a text line (the media itself is the content).
   const isPlaceholderBody = msg.body === '📷 Photo' || msg.body === '🎤 Voice message';
 
-  // Long-press → report. Disabled for own messages (no point reporting self).
+  // Tap → retry a failed send. Long-press → report (others) or discard a
+  // failed local bubble (own). Disabled otherwise.
   return (
     <TouchableOpacity
-      style={[styles.bubbleRow, isMe && styles.bubbleRowMe]}
-      onLongPress={isMe ? undefined : onReport}
-      activeOpacity={1}
+      style={[styles.bubbleRow, isMe && styles.bubbleRowMe, isSending && { opacity: 0.65 }]}
+      onPress={onRetry}
+      onLongPress={
+        isMe
+          ? (isFailed && onDiscard
+              ? () => Alert.alert('Unsent message', undefined, [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Delete', style: 'destructive', onPress: onDiscard },
+                ])
+              : undefined)
+          : onReport
+      }
+      activeOpacity={isFailed ? 0.7 : 1}
       delayLongPress={400}
     >
       {!isMe && (
@@ -452,7 +619,11 @@ function MessageBubble({ msg, isMe, onReport }: {
           style={{ flexShrink: 0 }}
         />
       )}
-      <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
+      <View style={[
+        styles.bubble,
+        isMe ? styles.bubbleMe : styles.bubbleThem,
+        isFailed && styles.bubbleFailed,
+      ]}>
         {!isMe && <Text style={styles.bubbleName}>{censorText(msg.username, censor)}</Text>}
         {msg.voice_url ? (
           <VoiceMessageBubble
@@ -482,7 +653,15 @@ function MessageBubble({ msg, isMe, onReport }: {
         ) : (
           <Text style={[styles.bubbleBody, isMe && { color: '#000' }]}>{censorText(msg.body, censor)}</Text>
         )}
-        <Text style={[styles.bubbleTime, isMe && { color: 'rgba(0,0,0,0.4)' }]}>{time}</Text>
+        {isSending ? (
+          <Text style={[styles.bubbleTime, isMe && { color: 'rgba(0,0,0,0.4)' }]}>Sending…</Text>
+        ) : isFailed ? (
+          <Text style={styles.bubbleFailedText}>
+            {msg._failReason ? `${msg._failReason} · tap to retry` : 'Not sent · tap to retry'}
+          </Text>
+        ) : (
+          <Text style={[styles.bubbleTime, isMe && { color: 'rgba(0,0,0,0.4)' }]}>{time}</Text>
+        )}
       </View>
     </TouchableOpacity>
   );
@@ -518,6 +697,8 @@ const styles = StyleSheet.create({
   },
   bubbleMe: { backgroundColor: C.gold, borderColor: C.gold },
   bubbleThem: { backgroundColor: C.card, borderColor: C.border },
+  bubbleFailed: { borderColor: C.red, borderWidth: 1.5 },
+  bubbleFailedText: { color: C.red, fontSize: 10, marginTop: 4, textAlign: 'right', fontWeight: '700' },
   bubbleName: { color: C.gold, fontSize: 11, fontWeight: '700', marginBottom: 3 },
   bubbleBody: { color: C.text, fontSize: 14, lineHeight: 20 },
   bubbleTime: { color: C.textDim, fontSize: 10, marginTop: 4, textAlign: 'right' },

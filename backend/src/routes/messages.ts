@@ -264,7 +264,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const { rows } = await pool.query(
       `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
               u.username, u.avatar_url,
-              dm.voice_url, dm.voice_duration_ms, dm.image_url
+              dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id
        FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
        WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
           OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
@@ -285,7 +285,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT m.message_id, m.created_at, m.body, m.user_id,
             u.username, u.avatar_url,
-            m.voice_url, m.voice_duration_ms, m.image_url
+            m.voice_url, m.voice_duration_ms, m.image_url, m.client_id
      FROM messages m JOIN users u ON u.user_id = m.user_id
      WHERE m.${col} = $1
      ORDER BY m.created_at ASC
@@ -301,6 +301,13 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // Trim text; cap at 2000 chars. For voice/image messages the body becomes
   // the push-notification preview; text-only messages must have non-empty body.
   const text = typeof body === 'string' ? body.trim().slice(0, 2000) : '';
+  // Client-generated idempotency key. A retry after an ambiguous failure
+  // (request landed, response lost in transit) carries the same clientId;
+  // the partial unique index collapses it to the original row and we
+  // return that row instead of inserting a duplicate.
+  const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+    ? req.body.clientId.slice(0, 64)
+    : null;
 
   // Voice clip — optional. When present, decode to disk before the INSERT
   // so we have a URL to store. We unlink the file on any failure below so
@@ -360,13 +367,30 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     let rows: any[];
     try {
       ({ rows } = await pool.query(
-        `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms, image_url)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms, image_url, client_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (from_user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
          RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id,
-                   voice_url, voice_duration_ms, image_url`,
-        [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]
+                   voice_url, voice_duration_ms, image_url, client_id`,
+        [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null, clientId]
       ));
     } catch (err) { onFail(); throw err; }
+    if (!rows.length && clientId) {
+      // Duplicate retry — the original send already landed. Return it,
+      // skip the push (the recipient was already notified), and clean up
+      // the media files this retry just wrote to disk.
+      onFail();
+      const { rows: existing } = await pool.query(
+        `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
+                dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id,
+                u.username
+         FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
+         WHERE dm.from_user_id = $1 AND dm.client_id = $2`,
+        [req.userId, clientId]
+      );
+      if (existing.length) return res.status(200).json(existing[0]);
+      return res.status(409).json({ error: 'Duplicate send' });
+    }
     const msg = rows[0];
     const { rows: senderRows } = await pool.query('SELECT username FROM users WHERE user_id = $1', [req.userId]);
     const senderName = senderRows[0]?.username ?? 'Someone';
@@ -398,12 +422,28 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   let rows: any[];
   try {
     ({ rows } = await pool.query(
-      `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms, image_url`,
-      [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]
+      `INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms, image_url, client_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms, image_url, client_id`,
+      [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null, clientId]
     ));
   } catch (err) { onFail(); throw err; }
+  if (!rows.length && clientId) {
+    // Duplicate retry — return the original row, skip pushes, clean up
+    // any media files this retry wrote.
+    onFail();
+    const { rows: existing } = await pool.query(
+      `SELECT m.message_id, m.created_at, m.body, m.user_id,
+              m.voice_url, m.voice_duration_ms, m.image_url, m.client_id,
+              u.username
+       FROM messages m JOIN users u ON u.user_id = m.user_id
+       WHERE m.user_id = $1 AND m.client_id = $2`,
+      [req.userId, clientId]
+    );
+    if (existing.length) return res.status(200).json(existing[0]);
+    return res.status(409).json({ error: 'Duplicate send' });
+  }
   const msg = rows[0];
 
   const { rows: senderRows } = await pool.query(

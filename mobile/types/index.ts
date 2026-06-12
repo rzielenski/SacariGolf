@@ -59,6 +59,15 @@ export interface ChatMessage {
    *  if this message is an image. Body becomes a "📷 Photo" placeholder
    *  unless the sender also typed a caption. */
   image_url?: string | null;
+  /** Client-generated idempotency key. Present on rows sent from app
+   *  versions that stamp sends; used to reconcile optimistic bubbles
+   *  with their server rows after a poll. */
+  client_id?: string | null;
+  /** LOCAL ONLY — never comes from the server. 'sending' renders the
+   *  bubble dimmed; 'failed' renders the tap-to-retry affordance. */
+  _status?: 'sending' | 'failed';
+  /** LOCAL ONLY — server rejection reason for a failed send (4xx). */
+  _failReason?: string;
 }
 
 export interface MatchInvite {
