@@ -4,12 +4,14 @@ import {
   ActivityIndicator, RefreshControl, Modal, TextInput, Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { useCensor } from '../../lib/censor';
 
 export default function CourseInfoScreen() {
+  const insets = useSafeAreaInsets();
   const c = useCensor();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [course, setCourse] = useState<any>(null);
@@ -94,7 +96,7 @@ export default function CourseInfoScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>

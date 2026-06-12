@@ -29,7 +29,7 @@ export default function VerifyEmailScreen() {
   // bounce them back rather than showing a confusing form.
   useEffect(() => {
     if (user?.email_verified) {
-      router.replace('/(tabs)/');
+      router.replace('/');
     }
   }, [user?.email_verified]);
 
@@ -46,7 +46,7 @@ export default function VerifyEmailScreen() {
       Alert.alert(
         res.alreadyVerified ? 'Already verified' : 'Email verified',
         res.alreadyVerified ? 'Your email was already confirmed.' : 'Thanks for confirming.',
-        [{ text: 'OK', onPress: () => router.replace('/(tabs)/') }]
+        [{ text: 'OK', onPress: () => router.replace('/') }]
       );
     } catch (err: any) {
       Alert.alert('Could not verify', err?.message ?? 'Try again.');
@@ -61,7 +61,7 @@ export default function VerifyEmailScreen() {
       const res = await api.auth.resendVerification();
       if (res.alreadyVerified) {
         await refreshUser();
-        router.replace('/(tabs)/');
+        router.replace('/');
         return;
       }
       Alert.alert('Code sent', 'Check your email for a new 6-digit code.');

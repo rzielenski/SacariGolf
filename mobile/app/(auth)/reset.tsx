@@ -66,7 +66,7 @@ export default function ResetPasswordScreen() {
       // AuthGuard navigates us into the app.
       await api.auth.resetPassword(e, c, password);
       await login(e, password);
-      router.replace('/(tabs)/');
+      router.replace('/');
     } catch (err: any) {
       Alert.alert('Could not reset', err?.message ?? 'Try again.');
     } finally {

@@ -238,6 +238,25 @@ async function areFriends(a: string, b: string) {
   return rows.length > 0;
 }
 
+/** Block state between two users, both directions in one query. Blocking
+ *  someone doesn't tear down the friends row, so DM gating has to check
+ *  this separately from areFriends. */
+export async function blockStateBetween(sender: string, recipient: string): Promise<{
+  senderBlockedRecipient: boolean;
+  recipientBlockedSender: boolean;
+}> {
+  const { rows } = await pool.query(
+    `SELECT blocker_id FROM blocked_users
+     WHERE (blocker_id = $1 AND blocked_id = $2)
+        OR (blocker_id = $2 AND blocked_id = $1)`,
+    [sender, recipient]
+  );
+  return {
+    senderBlockedRecipient: rows.some((r) => r.blocker_id === sender),
+    recipientBlockedSender: rows.some((r) => r.blocker_id === recipient),
+  };
+}
+
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { matchId, clanId, toUserId } = req.query;
 
@@ -325,6 +344,19 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       onFail();
       return res.status(403).json({ error: 'You can only DM friends' });
     }
+    // Blocking doesn't remove the friends row, so check it explicitly.
+    // The blocked sender gets the same generic message as a non-friend
+    // (no "they blocked you" information leak); a sender who blocked the
+    // recipient is told plainly since that's their own action.
+    const blocks = await blockStateBetween(req.userId!, toUserId);
+    if (blocks.senderBlockedRecipient) {
+      onFail();
+      return res.status(403).json({ error: 'You blocked this user. Unblock them to send messages.' });
+    }
+    if (blocks.recipientBlockedSender) {
+      onFail();
+      return res.status(403).json({ error: 'You can only DM friends' });
+    }
     let rows: any[];
     try {
       ({ rows } = await pool.query(
@@ -385,10 +417,17 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // generic label if the lookup misses.
   let roomName = '';
   if (matchId) {
+    // Skip pushing to anyone who has blocked the sender — they can't avoid
+    // sharing a match chat with an opponent, but they shouldn't get that
+    // person's messages on their lock screen.
     const r = await pool.query(
       `SELECT u.push_token FROM match_players mp
        JOIN users u ON u.user_id = mp.user_id
-       WHERE mp.match_id = $1 AND mp.user_id != $2 AND u.push_token IS NOT NULL`,
+       WHERE mp.match_id = $1 AND mp.user_id != $2 AND u.push_token IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocked_users b
+           WHERE b.blocker_id = u.user_id AND b.blocked_id = $2
+         )`,
       [matchId, req.userId]
     );
     tokenRows = r.rows;
@@ -400,7 +439,11 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const r = await pool.query(
       `SELECT u.push_token FROM clan_members cm
        JOIN users u ON u.user_id = cm.user_id
-       WHERE cm.clan_id = $1 AND cm.user_id != $2 AND u.push_token IS NOT NULL`,
+       WHERE cm.clan_id = $1 AND cm.user_id != $2 AND u.push_token IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocked_users b
+           WHERE b.blocker_id = u.user_id AND b.blocked_id = $2
+         )`,
       [clanId, req.userId]
     );
     tokenRows = r.rows;

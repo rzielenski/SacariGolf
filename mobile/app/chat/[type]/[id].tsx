@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, API_BASE } from '../../../lib/api';
 import { useAuth } from '../../../lib/auth';
 import { C, F } from '../../../lib/colors';
@@ -21,6 +22,7 @@ import { censorText } from '../../../lib/censor';
 const CANCEL_SLIDE_PX = 90;
 
 export default function ChatScreen() {
+  const insets = useSafeAreaInsets();
   const { type, id, name } = useLocalSearchParams<{ type: 'match' | 'clan' | 'dm'; id: string; name?: string }>();
   const { user } = useAuth();
   // Censor flag for the OUTER screen — used for the header title (DM
@@ -308,7 +310,7 @@ export default function ChatScreen() {
       keyboardVerticalOffset={0}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>

@@ -1,9 +1,26 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import { api, setSessionInvalidHandler } from './api';
+import { api, setSessionInvalidHandler, NotAuthenticatedError } from './api';
 import { User } from '../types';
 import * as themePlayer from './themePlayer';
+
+/** Last successful /users/me payload, persisted so a launch with no signal
+ *  can hydrate the UI instead of logging the user out. Refreshed on every
+ *  successful me() fetch; cleared on logout / account delete. */
+const USER_CACHE_KEY = 'coc_user_cache_v1';
+
+async function readCachedUser(): Promise<User | null> {
+  try {
+    const raw = await AsyncStorage.getItem(USER_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as User) : null;
+  } catch { return null; }
+}
+
+function writeCachedUser(u: User | null) {
+  if (u) AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(u)).catch(() => { });
+  else AsyncStorage.removeItem(USER_CACHE_KEY).catch(() => { });
+}
 
 interface AuthContextType {
   user: User | null;
@@ -40,12 +57,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setToken(stored);
         try {
           const me = await api.users.me();
-          if (gen === authGenRef.current) setUser(me);
-        } catch {
-          // Token invalid/expired — clear fully so AuthGuard redirects to login
-          await AsyncStorage.removeItem('coc_token');
-          setToken(null);
-          setUser(null);
+          if (gen === authGenRef.current) {
+            setUser(me);
+            writeCachedUser(me);
+          }
+        } catch (err) {
+          if (err instanceof NotAuthenticatedError) {
+            // The server actually rejected the token — clear fully so
+            // AuthGuard redirects to login.
+            await AsyncStorage.removeItem('coc_token');
+            writeCachedUser(null);
+            setToken(null);
+            setUser(null);
+          } else {
+            // Transient failure (dead zone at the course, server hiccup).
+            // Logging the user out here was the old behavior and it meant
+            // "opened the app with one bar, got dumped to the login
+            // screen". Keep the token, hydrate from the cached profile,
+            // and let the next refreshUser() reconcile when the network
+            // returns. If there is no cache (fresh install + offline),
+            // fall through with user=null; AuthGuard shows login, but the
+            // token survives for the next launch.
+            const cached = await readCachedUser();
+            if (cached && gen === authGenRef.current) setUser(cached);
+          }
         }
       }
       setLoading(false);
@@ -79,6 +114,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await AsyncStorage.setItem('coc_token', t);
     setToken(t);
     setUser(u);
+    writeCachedUser(u);
   };
 
   const register = async (username: string, email: string, password: string, referralCode?: string) => {
@@ -86,6 +122,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await AsyncStorage.setItem('coc_token', t);
     setToken(t);
     setUser(u);
+    writeCachedUser(u);
   };
 
   const logout = async () => {
@@ -112,6 +149,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // login, so no fight.
     authGenRef.current += 1;
     await AsyncStorage.removeItem('coc_token').catch(() => { });
+    writeCachedUser(null);
     setToken(null);
     setUser(null);
     requestAnimationFrame(() => router.replace('/(auth)/login'));
@@ -129,6 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.warn('deleteAccount: server call failed', err);
     }
     await AsyncStorage.removeItem('coc_token').catch(() => { });
+    writeCachedUser(null);
     setToken(null);
     setUser(null);
     requestAnimationFrame(() => router.replace('/(auth)/login'));
@@ -142,6 +181,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // logged-out user (which would strand them on a zeroed-out profile).
     if (gen !== authGenRef.current) return;
     setUser(me);
+    writeCachedUser(me);
   };
 
   return (

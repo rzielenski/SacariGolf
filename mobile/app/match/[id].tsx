@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, isSilentError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { useCensor } from '../../lib/censor';
@@ -14,6 +15,7 @@ import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 
 export default function MatchLobbyScreen() {
+  const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
   // Drop-in censor function — pipes any user-controlled string through
@@ -293,7 +295,7 @@ export default function MatchLobbyScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.container} contentContainerStyle={[styles.content, { paddingTop: insets.top + 12 }]}>
       <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
         <Text style={styles.backBtnText}>← Back</Text>
       </TouchableOpacity>

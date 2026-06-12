@@ -65,13 +65,22 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = process.env.PORT || 3000;
-runMigrations()
-  .catch((e) => console.error('Migration runner crashed (continuing anyway):', e))
-  .finally(() => {
-    // Kick off the hourly cleanup that auto-cancels stale (>24h idle) rounds.
-    // Runs immediately once on boot too, in case we slept through a window.
-    startCleanupSchedule();
-    // Once-a-day @Sacari Twitter/X recap (no-op until TWITTER_* env is set).
-    startTwitterDigestSchedule();
-    app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
-  });
+
+// Migrations run TO COMPLETION before the server starts taking traffic.
+// The old .finally() pattern listened immediately, so for the first few
+// seconds after a deploy, requests could hit routes whose tables the
+// still-running migration hadn't created yet. Railway keeps the previous
+// deploy serving until this one binds the port, so the await costs nothing.
+(async () => {
+  try {
+    await runMigrations();
+  } catch (e) {
+    console.error('Migration runner crashed (continuing anyway):', e);
+  }
+  // Kick off the hourly cleanup that auto-cancels stale (>24h idle) rounds.
+  // Runs immediately once on boot too, in case we slept through a window.
+  startCleanupSchedule();
+  // Once-a-day @Sacari Twitter/X recap (no-op until TWITTER_* env is set).
+  startTwitterDigestSchedule();
+  app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
+})();

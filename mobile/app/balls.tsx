@@ -39,6 +39,7 @@ import {
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -59,6 +60,7 @@ function genClientId(): string {
 }
 
 export default function BallsScreen() {
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const censor = useCensor();
   const [totals, setTotals] = useState<Totals>({ found: 0, lost: 0, net: 0 });
@@ -235,7 +237,7 @@ export default function BallsScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>

@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { blockStateBetween } from './messages';
 
 const router = Router();
 router.use(requireAuth);
@@ -47,6 +48,14 @@ router.post('/:userId', wrap(async (req: AuthRequest, res: Response) => {
   const text = typeof req.body?.body === 'string' ? req.body.body.trim().slice(0, 2000) : '';
   if (!text) return res.status(400).json({ error: 'body required' });
   if (!(await areFriends(me, userId))) {
+    return res.status(403).json({ error: 'You can only DM friends' });
+  }
+  // Blocking doesn't remove the friends row — same gate as routes/messages.
+  const blocks = await blockStateBetween(me, userId);
+  if (blocks.senderBlockedRecipient) {
+    return res.status(403).json({ error: 'You blocked this user. Unblock them to send messages.' });
+  }
+  if (blocks.recipientBlockedSender) {
     return res.status(403).json({ error: 'You can only DM friends' });
   }
   const { rows } = await pool.query(

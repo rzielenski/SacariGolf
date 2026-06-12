@@ -4,6 +4,7 @@ import {
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
@@ -20,6 +21,7 @@ const MODES: { key: Mode; label: string }[] = [
 ];
 
 export default function LeaderboardScreen() {
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const [players, setPlayers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,7 +45,9 @@ export default function LeaderboardScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      {/* Safe-area padding: fixed 56pt sat under the Dynamic Island on Pro
+          models (59pt inset). */}
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
@@ -73,6 +77,7 @@ export default function LeaderboardScreen() {
             key={m.key}
             style={[styles.modeBtn, mode === m.key && styles.modeBtnActive]}
             onPress={() => { setMode(m.key); setLoading(true); }}
+            disabled={loading}
           >
             <Text style={[styles.modeBtnText, mode === m.key && styles.modeBtnTextActive]}>
               {m.label}
@@ -87,6 +92,7 @@ export default function LeaderboardScreen() {
             key={s}
             style={[styles.scopeBtn, scope === s && styles.scopeBtnActive]}
             onPress={() => { setScope(s); setLoading(true); }}
+            disabled={loading}
           >
             <Text style={[styles.scopeBtnText, scope === s && styles.scopeBtnTextActive]}>
               {s === 'global' ? 'Global' : 'Friends'}

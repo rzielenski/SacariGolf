@@ -135,12 +135,15 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
           </TouchableOpacity>
           {find && (
             <>
-              <Image
-                source={{ uri: `${API_BASE}${find.photo_url}` }}
-                style={{ width: '100%', height: '70%' }}
-                resizeMode="contain"
-                pointerEvents="none"
-              />
+              {/* pointerEvents lives on the wrapper: RN's ImageStyle typing
+                  rejects it as a style key and Image rejects it as a prop. */}
+              <View pointerEvents="none" style={{ width: '100%', height: '70%' }}>
+                <Image
+                  source={{ uri: `${API_BASE}${find.photo_url}` }}
+                  style={{ width: '100%', height: '100%' }}
+                  resizeMode="contain"
+                />
+              </View>
               {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }} pointerEvents="none">{c(find.description)}</Text> : null}
               <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {c(find.username)}  ·  {find.elo} ELO</Text>
               <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }} pointerEvents="none">Swipe or tap anywhere to dismiss</Text>

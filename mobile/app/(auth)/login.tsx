@@ -63,7 +63,7 @@ export default function LoginScreen() {
       setLoading(true);
       try {
         await login(email.trim().toLowerCase(), password);
-        router.replace('/(tabs)/');
+        router.replace('/');
       } catch (err: any) {
         Alert.alert('Wrong password', err.message);
       } finally {
@@ -95,7 +95,7 @@ export default function LoginScreen() {
           password,
           referral.trim().toUpperCase() || undefined,
         );
-        router.replace('/(tabs)/');
+        router.replace('/');
       } catch (err: any) {
         Alert.alert('Error', err.message);
       } finally {
