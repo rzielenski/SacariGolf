@@ -20,10 +20,12 @@
  * sub-component so logic stays focused):
  *
  *   background:  gradient | flag | storm | aurora | stars | flame | holographic |
- *                cyber | solar | ocean | sakura | liquid
- *   border:      glow | pulse | holographic | traveling | flame | plasma | frost
- *   username:    solid | gradient | shimmer | holographic
- *   ball_trail:  solid | gradient | crackle | galaxy | traveling | fire
+ *                cyber | solar | ocean | sakura | liquid | synthwave | eclipse |
+ *                matrix | dusk | thunder
+ *   border:      glow | pulse | holographic | traveling | flame | plasma | frost |
+ *                tesla | eclipse
+ *   username:    solid | gradient | shimmer | holographic | neon | glitch
+ *   ball_trail:  solid | gradient | crackle | galaxy | traveling | fire | rainbow
  *
  * Performance notes:
  *   • All looped animations use Reanimated worklets running on the UI thread,
@@ -111,6 +113,11 @@ export function CosmeticBackground({
     case 'ocean':       return <OceanBg        v={v} style={style}>{children}</OceanBg>;
     case 'sakura':      return <SakuraBg       v={v} style={style}>{children}</SakuraBg>;
     case 'liquid':      return <LiquidGoldBg   v={v} style={style}>{children}</LiquidGoldBg>;
+    case 'synthwave':   return <SynthwaveBg    v={v} style={style}>{children}</SynthwaveBg>;
+    case 'eclipse':     return <EclipseBg      v={v} style={style}>{children}</EclipseBg>;
+    case 'matrix':      return <MatrixBg       v={v} style={style}>{children}</MatrixBg>;
+    case 'dusk':        return <DuskLinksBg    v={v} style={style}>{children}</DuskLinksBg>;
+    case 'thunder':     return <ThunderBg      v={v} style={style}>{children}</ThunderBg>;
     default:
       return (
         <View style={[{ backgroundColor: v.from ?? C.bg }, style]}>
@@ -529,7 +536,10 @@ function SolarBg({ v, style, children }: BgProps) {
       {/* Solar core — static gradient sphere */}
       <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
         <Defs>
-          <RadialGradient id="solarCore" cx="0" cy="0" r="35" fx="0" fy="0">
+          {/* userSpaceOnUse: coords are viewBox units. The default
+              objectBoundingBox mode treats these numbers as multiples
+              of the bounding box and washes the gradient out. */}
+          <RadialGradient id="solarCore" cx="0" cy="0" r="35" fx="0" fy="0" gradientUnits="userSpaceOnUse">
             <Stop offset="0%" stopColor={core} stopOpacity="0.95" />
             <Stop offset="40%" stopColor={accent} stopOpacity="0.55" />
             <Stop offset="100%" stopColor={accent} stopOpacity="0" />
@@ -677,6 +687,398 @@ function LiquidGoldBg({ v, style, children }: BgProps) {
   );
 }
 
+// ── 13. Synthwave (retro sun + perspective grid) ────────────────────────────
+
+function SynthwaveBg({ v, style, children }: BgProps) {
+  const scan = useSharedValue(0);
+  const glow = useSharedValue(0);
+  useEffect(() => {
+    scan.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.linear }), -1, false);
+    glow.value = withRepeat(withTiming(1, { duration: 2800, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(scan); cancelAnimation(glow); };
+  }, [scan, glow]);
+  const scanStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: interpolate(scan.value, [0, 1], [0, 320]) }],
+  }));
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(glow.value, [0, 1], [0.55, 0.95]),
+  }));
+  const pink = v.accent ?? '#ff2d95';
+  const grid = v.grid ?? '#ff2d95';
+
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={['#16042e', '#3d0a55', '#a3155e'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Banded retro sun, dropped behind the grid horizon */}
+      <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: '16%', alignSelf: 'center', width: 150, height: 150 }, glowStyle]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100">
+          <Defs>
+            <SvgLinearGradient id="synthSun" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0%"  stopColor="#ffe28a" />
+              <Stop offset="55%" stopColor="#ff9a3a" />
+              <Stop offset="100%" stopColor={pink} />
+            </SvgLinearGradient>
+            <Mask id="sunBands">
+              <Circle cx="50" cy="50" r="42" fill="#ffffff" />
+              {/* Horizontal slices get thicker toward the bottom of the disc */}
+              <Rect x="0" y="58" width="100" height="2.5" fill="#000000" />
+              <Rect x="0" y="66" width="100" height="3.5" fill="#000000" />
+              <Rect x="0" y="75" width="100" height="4.5" fill="#000000" />
+              <Rect x="0" y="85" width="100" height="5.5" fill="#000000" />
+            </Mask>
+          </Defs>
+          <Circle cx="50" cy="50" r="42" fill="url(#synthSun)" mask="url(#sunBands)" />
+        </Svg>
+      </Animated.View>
+      {/* Perspective grid below the horizon */}
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        {/* Horizon glow line */}
+        <Line x1={0} y1={58} x2={100} y2={58} stroke={pink} strokeOpacity="0.9" strokeWidth="0.5" />
+        {/* Radial floor lines fanning out from the vanishing point */}
+        {[-80, -52, -30, -12, 4, 20, 38, 62, 96, 130, 152, 180].map((endX, i) => (
+          <Line key={`r${i}`} x1={50} y1={58} x2={endX} y2={100} stroke={grid} strokeOpacity="0.45" strokeWidth="0.3" />
+        ))}
+        {/* Horizontal floor lines, quadratically spaced for depth */}
+        {Array.from({ length: 7 }).map((_, i) => (
+          <Line key={`h${i}`} x1={0} y1={58 + (i + 1) * (i + 1) * 0.85} x2={100} y2={58 + (i + 1) * (i + 1) * 0.85} stroke={grid} strokeOpacity="0.4" strokeWidth="0.3" />
+        ))}
+      </Svg>
+      {/* Scanline glow sweeping down the floor */}
+      <Animated.View pointerEvents="none" style={[
+        { position: 'absolute', left: 0, right: 0, top: '50%', height: 50 },
+        scanStyle,
+      ]}>
+        <LinearGradient
+          colors={['transparent', pink + '33', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+      {/* A few stars in the sky band */}
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        {[[8, 7, 0.5], [22, 13, 0.35], [38, 5, 0.45], [70, 9, 0.5], [86, 15, 0.4], [93, 4, 0.3]].map(([x, y, r], i) => (
+          <Circle key={i} cx={x} cy={y} r={r} fill="#ffd9ec" opacity={0.8} />
+        ))}
+      </Svg>
+      {children}
+    </View>
+  );
+}
+
+// ── 14. Eclipse (corona + moon disc) ────────────────────────────────────────
+
+function EclipseBg({ v, style, children }: BgProps) {
+  const breathe = useSharedValue(0);
+  const rot = useSharedValue(0);
+  const rim = useSharedValue(0);
+  useEffect(() => {
+    breathe.value = withRepeat(withTiming(1, { duration: 4200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    rot.value = withRepeat(withTiming(1, { duration: 40000, easing: Easing.linear }), -1, false);
+    rim.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(breathe); cancelAnimation(rot); cancelAnimation(rim); };
+  }, [breathe, rot, rim]);
+
+  const coronaStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: interpolate(breathe.value, [0, 1], [1, 1.07]) }],
+    opacity: interpolate(breathe.value, [0, 1], [0.8, 1]),
+  }));
+  const rayStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(rot.value, [0, 1], [0, 360])}deg` }],
+  }));
+  const rimStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(rim.value, [0, 1], [0.55, 1]),
+  }));
+
+  const corona = v.accent ?? '#ffdf8a';
+  const stars = useMemo(() => Array.from({ length: 40 }, () => ({
+    cx: Math.random() * 100,
+    cy: Math.random() * 100,
+    r: Math.random() * 1.1 + 0.25,
+    delay: Math.random() * 2500,
+    duration: TIMING.star + Math.random() * 1500,
+  })), []);
+
+  const DISC = 86;
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={['#05060d', '#0a0d18'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        {stars.map((s, i) => <TwinklingStar key={i} {...s} />)}
+      </Svg>
+      {/* Corona bloom behind the disc */}
+      <Animated.View pointerEvents="none" style={[
+        { position: 'absolute', top: '22%', alignSelf: 'center', width: 190, height: 190 },
+        coronaStyle,
+      ]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100">
+          <Defs>
+            <RadialGradient id="eclipseCorona" cx="50" cy="50" r="50" gradientUnits="userSpaceOnUse">
+              <Stop offset="0%"  stopColor="#fff8e0" stopOpacity="0.9" />
+              <Stop offset="38%" stopColor={corona} stopOpacity="0.5" />
+              <Stop offset="100%" stopColor={corona} stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <Circle cx="50" cy="50" r="50" fill="url(#eclipseCorona)" />
+        </Svg>
+      </Animated.View>
+      {/* Slow-rotating faint rays */}
+      <Animated.View pointerEvents="none" style={[
+        { position: 'absolute', top: '22%', alignSelf: 'center', width: 190, height: 190 },
+        rayStyle,
+      ]}>
+        <Svg width="100%" height="100%" viewBox="-50 -50 100 100">
+          {Array.from({ length: 12 }).map((_, i) => {
+            const ang = (i * 30) * (Math.PI / 180);
+            return (
+              <Line key={i}
+                x1={Math.cos(ang) * 24} y1={Math.sin(ang) * 24}
+                x2={Math.cos(ang) * 50} y2={Math.sin(ang) * 50}
+                stroke={corona} strokeOpacity="0.16" strokeWidth="1.6" strokeLinecap="round" />
+            );
+          })}
+        </Svg>
+      </Animated.View>
+      {/* The moon disc with a glowing rim */}
+      <Animated.View pointerEvents="none" style={[
+        {
+          position: 'absolute', top: '22%', alignSelf: 'center',
+          marginTop: (190 - DISC) / 2, width: DISC, height: DISC, borderRadius: DISC / 2,
+          backgroundColor: '#04050c', borderWidth: 1.5, borderColor: '#fff8e0',
+          shadowColor: '#fff8e0', shadowOpacity: 0.9, shadowRadius: 12,
+        },
+        rimStyle,
+      ]} />
+      {children}
+    </View>
+  );
+}
+
+// ── 15. Matrix (digital rain) ───────────────────────────────────────────────
+
+const MATRIX_GLYPHS = 'アイウエオカキクケコサシスセソタチツテト0123456789Φ$#';
+
+function MatrixBg({ v, style, children }: BgProps) {
+  const columns = useMemo(() => Array.from({ length: 8 }, (_, i) => ({
+    left: `${i * 12.5 + 2}%`,
+    glyphs: Array.from({ length: 22 }, () =>
+      MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)]).join('\n'),
+    dur: 2600 + Math.random() * 2800,
+    delay: Math.random() * 2000,
+    opacity: 0.35 + Math.random() * 0.55,
+  })), []);
+
+  return (
+    <View style={[{ overflow: 'hidden', backgroundColor: '#010a04' }, style]}>
+      {columns.map((c, i) => <MatrixColumn key={i} {...c} color={v.color ?? '#00ff41'} />)}
+      {/* Soft vignette top + bottom so the glyphs fade in/out of frame */}
+      <LinearGradient pointerEvents="none"
+        colors={['#010a04', 'transparent', 'transparent', '#010a04'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.18, 0.8, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {children}
+    </View>
+  );
+}
+
+function MatrixColumn({ left, glyphs, dur, delay, opacity, color }: {
+  left: any; glyphs: string; dur: number; delay: number; opacity: number; color: string;
+}) {
+  // Two stacked copies translate upward-to-downward in a seamless wrap:
+  // 22 glyphs x lineHeight 16 = 352px per copy.
+  const COPY_H = 352;
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, dur, delay]);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: interpolate(t.value, [0, 1], [-COPY_H, 0]) }],
+  }));
+  const textStyle = {
+    color, fontSize: 13, lineHeight: 16, fontWeight: '600' as const,
+    textShadowColor: color, textShadowRadius: 6, textShadowOffset: { width: 0, height: 0 },
+  };
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: 0, left, opacity }, animStyle]}>
+      <Text style={textStyle}>{glyphs}</Text>
+      <Text style={textStyle}>{glyphs}</Text>
+    </Animated.View>
+  );
+}
+
+// ── 16. Golden Hour (golf links at dusk) ────────────────────────────────────
+
+function DuskLinksBg({ v, style, children }: BgProps) {
+  const sun = useSharedValue(0);
+  useEffect(() => {
+    sun.value = withRepeat(withTiming(1, { duration: 3600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(sun);
+  }, [sun]);
+  const sunStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(sun.value, [0, 1], [0.75, 1]),
+    transform: [{ scale: interpolate(sun.value, [0, 1], [1, 1.06]) }],
+  }));
+
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      {/* Sky: deep indigo through burnt orange to gold at the horizon */}
+      <LinearGradient
+        colors={['#1c1440', '#5e2a50', '#c2542e', '#ffb14a'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.42, 0.66, 0.8]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Setting sun, pulsing gently just above the hills */}
+      <Animated.View pointerEvents="none" style={[
+        {
+          position: 'absolute', top: '52%', left: '24%',
+          width: 56, height: 56, borderRadius: 28,
+          backgroundColor: '#ffe9a8',
+          shadowColor: '#ff9a3a', shadowOpacity: 0.95, shadowRadius: 26,
+        },
+        sunStyle,
+      ]} />
+      {/* Drifting clouds, warm-tinted */}
+      <DriftingCloud top="14%" width={130} dur={34000} delay={0} />
+      <DriftingCloud top="26%" width={90}  dur={26000} delay={9000} />
+      {/* Course silhouette: layered hills + flagstick */}
+      <Svg pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '34%' }} viewBox="0 0 100 40" preserveAspectRatio="none">
+        {/* Far ridge */}
+        <Path d="M0 22 Q 18 14 36 20 T 70 18 Q 85 15 100 20 V40 H0 Z" fill="#241024" opacity="0.85" />
+        {/* Near fairway hill */}
+        <Path d="M0 30 Q 25 20 55 27 T 100 26 V40 H0 Z" fill="#120816" />
+        {/* Flagstick + flag on the near hill */}
+        <Line x1={62} y1={26.5} x2={62} y2={14} stroke="#0a050c" strokeWidth="0.7" />
+        <Path d="M62 14 L69.5 16.6 L62 19.2 Z" fill="#0a050c" />
+      </Svg>
+      {children}
+    </View>
+  );
+}
+
+function DriftingCloud({ top, width, dur, delay }: { top: any; width: number; dur: number; delay: number }) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, dur, delay]);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(t.value, [0, 1], [0, 560]) }],
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[
+      {
+        position: 'absolute', top, left: -width - 30,
+        width, height: width * 0.22, borderRadius: width,
+        backgroundColor: 'rgba(255, 206, 150, 0.20)',
+      },
+      animStyle,
+    ]} />
+  );
+}
+
+// ── 17. Tempest (forked bolts + driving rain) ───────────────────────────────
+
+function ThunderBg({ v, style, children }: BgProps) {
+  const flash = useSharedValue(0);
+  const bolt1 = useSharedValue(0);
+  const bolt2 = useSharedValue(0);
+  useEffect(() => {
+    flash.value = withRepeat(withSequence(
+      withDelay(2200 + Math.random() * 2400, withTiming(1, { duration: 60 })),
+      withTiming(0.25, { duration: 90 }),
+      withTiming(0.85, { duration: 50 }),
+      withTiming(0, { duration: 260 }),
+    ), -1, false);
+    bolt1.value = withRepeat(withSequence(
+      withDelay(1800 + Math.random() * 2600, withTiming(1, { duration: 50 })),
+      withTiming(0.4, { duration: 90 }),
+      withTiming(0.9, { duration: 50 }),
+      withTiming(0, { duration: 220 }),
+    ), -1, false);
+    bolt2.value = withRepeat(withSequence(
+      withDelay(3600 + Math.random() * 3000, withTiming(1, { duration: 70 })),
+      withTiming(0, { duration: 300 }),
+    ), -1, false);
+    return () => { cancelAnimation(flash); cancelAnimation(bolt1); cancelAnimation(bolt2); };
+  }, [flash, bolt1, bolt2]);
+
+  const flashStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(flash.value, [0, 1], [0, 0.5]),
+  }));
+  const b1Props = useAnimatedProps(() => ({ opacity: bolt1.value }));
+  const b2Props = useAnimatedProps(() => ({ opacity: bolt2.value }));
+
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#0b0918', v.to ?? '#2a2440'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Forked bolts: main channel + branches as subpaths of one Path */}
+      <Svg style={StyleSheet.absoluteFill} pointerEvents="none" preserveAspectRatio="none" viewBox="0 0 100 200">
+        <AnimatedPath
+          d="M28 0 L24 42 L33 50 L20 98 L30 106 L17 160 M25 52 L14 76 M27 102 L38 128"
+          stroke="#dcd2ff" strokeWidth="1.3" fill="none" strokeLinejoin="round"
+          animatedProps={b1Props}
+        />
+        <AnimatedPath
+          d="M74 8 L70 46 L79 54 L66 104 L76 112 L63 172 M71 58 L84 84"
+          stroke="#c4b8ff" strokeWidth="1.1" fill="none" strokeLinejoin="round"
+          animatedProps={b2Props}
+        />
+      </Svg>
+      {/* Driving rain: two staggered groups of slanted streaks */}
+      <RainLayer dur={850} delay={0} opacity={0.32} />
+      <RainLayer dur={1150} delay={400} opacity={0.2} />
+      {/* Sheet-lightning wash */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, flashStyle, { backgroundColor: '#cfc4ff' }]} />
+      {children}
+    </View>
+  );
+}
+
+function RainLayer({ dur, delay, opacity }: { dur: number; delay: number; opacity: number }) {
+  const streaks = useMemo(() => Array.from({ length: 7 }, (_, i) => ({
+    left: `${(i * 14 + Math.random() * 8) % 100}%`,
+    top: `${(i * 29) % 90}%`,
+  })), []);
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, dur, delay]);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(t.value, [0, 1], [-140, 140]) },
+      { translateX: interpolate(t.value, [0, 1], [40, -40]) },
+    ],
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity }, animStyle]}>
+      {streaks.map((s, i) => (
+        <View key={i} style={{
+          position: 'absolute', left: s.left as any, top: s.top as any,
+          width: 1.5, height: 26, borderRadius: 1,
+          backgroundColor: '#bec8ff',
+          transform: [{ rotate: '16deg' }],
+        }} />
+      ))}
+    </Animated.View>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // BORDER (wraps an avatar / crest)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -691,6 +1093,8 @@ export function CosmeticBorder({
     case 'flame':      return <FlameBorder v={v} size={size}>{children}</FlameBorder>;
     case 'plasma':     return <PlasmaBorder v={v} size={size}>{children}</PlasmaBorder>;
     case 'frost':      return <FrostBorder v={v} size={size}>{children}</FrostBorder>;
+    case 'tesla':      return <TeslaBorder v={v} size={size}>{children}</TeslaBorder>;
+    case 'eclipse':    return <CoronaBorder v={v} size={size}>{children}</CoronaBorder>;
     case 'pulse':      return <PulseBorder v={v} size={size}>{children}</PulseBorder>;
     case 'glow':       return <GlowBorder v={v} size={size}>{children}</GlowBorder>;
     default:
@@ -930,6 +1334,146 @@ function FrostBorder({ v, size, children }: BorderProps) {
   );
 }
 
+/** Tesla: electric arc segments flicker at random points around the ring,
+ *  with an occasional full-ring discharge flash. */
+function TeslaBorder({ v, size, children }: BorderProps) {
+  const width = v.width ?? 3;
+  const padded = size + width * 2 + 16;
+  const r = (padded - width) / 2 - 4;
+  const cx = padded / 2;
+  const circ = 2 * Math.PI * r;
+  const color = v.color ?? '#74e0ff';
+  const accent = v.accent ?? '#e4ecff';
+
+  const a = useSharedValue(0);
+  const b = useSharedValue(0);
+  const c = useSharedValue(0);
+  const d = useSharedValue(0);
+  const discharge = useSharedValue(0);
+  useEffect(() => {
+    const arcFlicker = (sv: SharedValue<number>, lull: number) => {
+      sv.value = withRepeat(withSequence(
+        withDelay(lull, withTiming(1, { duration: 45 })),
+        withTiming(0.25, { duration: 70 }),
+        withTiming(0.9, { duration: 40 }),
+        withTiming(0, { duration: 130 }),
+      ), -1, false);
+    };
+    arcFlicker(a, 500);
+    arcFlicker(b, 1100);
+    arcFlicker(c, 1700);
+    arcFlicker(d, 2400);
+    discharge.value = withRepeat(withSequence(
+      withDelay(3200, withTiming(0.85, { duration: 60 })),
+      withTiming(0, { duration: 320 }),
+    ), -1, false);
+    return () => { [a, b, c, d, discharge].forEach(cancelAnimation); };
+  }, [a, b, c, d, discharge]);
+
+  const arcAProps = useAnimatedProps(() => ({ strokeOpacity: a.value }));
+  const arcBProps = useAnimatedProps(() => ({ strokeOpacity: b.value }));
+  const arcCProps = useAnimatedProps(() => ({ strokeOpacity: c.value }));
+  const arcDProps = useAnimatedProps(() => ({ strokeOpacity: d.value }));
+  const ringProps = useAnimatedProps(() => ({ strokeOpacity: discharge.value }));
+
+  // Four arc segments parked at 12 / 3 / 6 / 9 o'clock via dashoffset.
+  const seg = `${circ * 0.09} ${circ * 0.91}`;
+  const arcProps = [arcAProps, arcBProps, arcCProps, arcDProps];
+
+  return (
+    <View style={{ width: padded, height: padded, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={padded} height={padded} style={StyleSheet.absoluteFill}>
+        {/* Faint cage ring always present */}
+        <Circle cx={cx} cy={cx} r={r} stroke={color + '3a'} strokeWidth={width * 0.8} fill="none" />
+        {/* Flickering arc segments */}
+        {arcProps.map((p, i) => (
+          <AnimatedCircle key={i}
+            cx={cx} cy={cx} r={r}
+            stroke={i % 2 ? accent : color} strokeWidth={width}
+            fill="none" strokeLinecap="round"
+            strokeDasharray={seg}
+            strokeDashoffset={-(circ * (i / 4))}
+            animatedProps={p}
+          />
+        ))}
+        {/* Spark zigzags just outside the ring at the diagonals */}
+        {[45, 135, 225, 315].map((deg, i) => {
+          const ang = deg * (Math.PI / 180);
+          const sx = cx + Math.cos(ang) * (r + 2);
+          const sy = cx + Math.sin(ang) * (r + 2);
+          const ex = cx + Math.cos(ang) * (r + 9);
+          const ey = cx + Math.sin(ang) * (r + 9);
+          const mx = (sx + ex) / 2 + Math.cos(ang + Math.PI / 2) * 3;
+          const my = (sy + ey) / 2 + Math.sin(ang + Math.PI / 2) * 3;
+          return (
+            <AnimatedPath key={`s${i}`}
+              d={`M ${sx} ${sy} L ${mx} ${my} L ${ex} ${ey}`}
+              stroke={accent} strokeWidth={1.4} fill="none" strokeLinecap="round"
+              animatedProps={arcProps[(i + 1) % 4]}
+            />
+          );
+        })}
+        {/* Occasional full-ring discharge */}
+        <AnimatedCircle cx={cx} cy={cx} r={r} stroke={accent} strokeWidth={width * 0.6} fill="none" animatedProps={ringProps} />
+      </Svg>
+      <View style={{ shadowColor: color, shadowOpacity: 0.85, shadowRadius: 12 }}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
+/** Corona: a dark eclipse ring with a bright gradient flare arc sweeping
+ *  around it, like the sun peeking around the moon's edge. */
+function CoronaBorder({ v, size, children }: BorderProps) {
+  const width = v.width ?? 3;
+  const padded = size + width * 2 + 10;
+  const r = (padded - width) / 2 - 2;
+  const cx = padded / 2;
+  const circ = 2 * Math.PI * r;
+  const color = v.color ?? '#d4a93f';
+  const accent = v.accent ?? '#ffe28a';
+
+  const rot = useSharedValue(0);
+  const breathe = useSharedValue(0);
+  useEffect(() => {
+    rot.value = withRepeat(withTiming(1, { duration: 4200, easing: Easing.linear }), -1, false);
+    breathe.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(rot); cancelAnimation(breathe); };
+  }, [rot, breathe]);
+  const rotStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(rot.value, [0, 1], [0, 360])}deg` }],
+  }));
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(breathe.value, [0, 1], [0.6, 1]),
+  }));
+
+  return (
+    <View style={{ width: padded, height: padded, alignItems: 'center', justifyContent: 'center' }}>
+      {/* Dark base ring: the "moon" */}
+      <Svg width={padded} height={padded} style={StyleSheet.absoluteFill}>
+        <Circle cx={cx} cy={cx} r={r} stroke="#171204" strokeWidth={width + 1.5} fill="none" />
+        <Circle cx={cx} cy={cx} r={r} stroke={color + '30'} strokeWidth={width} fill="none" />
+      </Svg>
+      {/* Sweeping flare arc: a 25% arc + a thinner hot core riding it */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, rotStyle]}>
+        <Svg width={padded} height={padded}>
+          <Circle cx={cx} cy={cx} r={r}
+            stroke={color} strokeWidth={width} fill="none" strokeLinecap="round"
+            strokeDasharray={`${circ * 0.25} ${circ * 0.75}`} />
+          <Circle cx={cx} cy={cx} r={r}
+            stroke={accent} strokeWidth={width * 0.45} fill="none" strokeLinecap="round"
+            strokeDasharray={`${circ * 0.16} ${circ * 0.84}`}
+            strokeDashoffset={-(circ * 0.045)} />
+        </Svg>
+      </Animated.View>
+      <Animated.View style={[{ shadowColor: accent, shadowOpacity: 0.9, shadowRadius: 13 }, glowStyle]}>
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // USERNAME
 // ═══════════════════════════════════════════════════════════════════════════
@@ -942,6 +1486,8 @@ export function CosmeticUsername({
     case 'gradient':    return <GradientUsername v={v} style={style}>{children}</GradientUsername>;
     case 'shimmer':     return <ShimmerUsername v={v} style={style}>{children}</ShimmerUsername>;
     case 'holographic': return <HolographicUsername v={v} style={style}>{children}</HolographicUsername>;
+    case 'neon':        return <NeonUsername v={v} style={style}>{children}</NeonUsername>;
+    case 'glitch':      return <GlitchUsername v={v} style={style}>{children}</GlitchUsername>;
     case 'solid':
     default:
       return <SolidUsername v={v} style={style}>{children}</SolidUsername>;
@@ -1051,6 +1597,85 @@ function HolographicUsername({ v, style, children }: UnameProps) {
   );
 }
 
+/** Neon sign: hot-white core with a strong colored halo, plus the
+ *  characteristic double-blink flicker of a tube that is about to give up. */
+function NeonUsername({ v, style, children }: UnameProps) {
+  const color = v.color ?? '#ff2d95';
+  const t = useSharedValue(1);
+  useEffect(() => {
+    t.value = withRepeat(withSequence(
+      withDelay(1400, withTiming(0.45, { duration: 50 })),
+      withTiming(1, { duration: 80 }),
+      withDelay(2300, withTiming(0.7, { duration: 40 })),
+      withTiming(1, { duration: 60 }),
+      withDelay(900, withTiming(1, { duration: 0 })),
+    ), -1, false);
+    return () => cancelAnimation(t);
+  }, [t]);
+  const flicker = useAnimatedStyle(() => ({ opacity: t.value }));
+  return (
+    <Animated.View style={flicker}>
+      <Text style={[style, {
+        color: '#fff6fb',
+        textShadowColor: color,
+        textShadowRadius: 12,
+        textShadowOffset: { width: 0, height: 0 },
+      }]}>
+        {children}
+      </Text>
+    </Animated.View>
+  );
+}
+
+/** Glitch: chromatic-aberration ghosts (cyan / magenta) jitter behind the
+ *  base text in quick bursts, like a corrupted video frame. */
+function GlitchUsername({ v, style, children }: UnameProps) {
+  const jit = useSharedValue(0);
+  useEffect(() => {
+    jit.value = withRepeat(withSequence(
+      withDelay(1700, withTiming(1, { duration: 40 })),
+      withTiming(-1, { duration: 50 }),
+      withTiming(0.6, { duration: 40 }),
+      withTiming(0, { duration: 60 }),
+      withDelay(700, withTiming(-0.8, { duration: 35 })),
+      withTiming(0, { duration: 55 }),
+    ), -1, false);
+    return () => cancelAnimation(jit);
+  }, [jit]);
+
+  const ghostA = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: jit.value * 2.4 },
+      { translateY: jit.value * -0.8 },
+    ],
+    opacity: 0.75,
+  }));
+  const ghostB = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: jit.value * -2.4 },
+      { translateY: jit.value * 0.8 },
+    ],
+    opacity: 0.75,
+  }));
+  const baseJit = useAnimatedStyle(() => ({
+    transform: [{ translateX: jit.value * 0.7 }],
+  }));
+
+  return (
+    <View>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, ghostA]}>
+        <Text style={[style, { color: '#00f0ff' }]}>{children}</Text>
+      </Animated.View>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, ghostB]}>
+        <Text style={[style, { color: '#ff00d4' }]}>{children}</Text>
+      </Animated.View>
+      <Animated.View style={baseJit}>
+        <Text style={[style, { color: v.color ?? '#ffffff' }]}>{children}</Text>
+      </Animated.View>
+    </View>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // BALL TRAIL PREVIEW
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1063,6 +1688,7 @@ export function CosmeticTrailPreview({ visual }: { visual: VisualData }) {
     case 'galaxy':     return <GalaxyTrailPreview v={v} />;
     case 'traveling':  return <TravelingTrailPreview v={v} />;
     case 'fire':       return <FireTrailPreview v={v} />;
+    case 'rainbow':    return <RainbowTrailPreview v={v} />;
     case 'pulse':      return <PulseTrailPreview v={v} />;
     case 'solid':
     default:           return <SolidTrailPreview v={v} />;
@@ -1246,6 +1872,41 @@ function Ember({ x, delay, color }: { x: number; delay: number; color: string })
       { position: 'absolute', top: 5, left: `${x}%`, width: 5, height: 5, borderRadius: 2.5, backgroundColor: color },
       animStyle,
     ]} />
+  );
+}
+
+/** Prism Ribbon: full-spectrum gradient bar with a white highlight pulse
+ *  racing along it. */
+function RainbowTrailPreview({ v }: TrailProps) {
+  const t = useSharedValue(0);
+  const len = 100;
+  useEffect(() => {
+    t.value = withRepeat(withTiming(1, { duration: 1500, easing: Easing.linear }), -1, false);
+    return () => cancelAnimation(t);
+  }, [t]);
+  const animProps = useAnimatedProps(() => ({
+    strokeDashoffset: interpolate(t.value, [0, 1], [0, -len]),
+  }));
+  const h = v.width ?? 3;
+  return (
+    <View style={{ width: '75%', height: 12, justifyContent: 'center',
+      shadowColor: '#ffffff', shadowOpacity: v.glow ? 0.7 : 0.3, shadowRadius: 5 }}>
+      <View style={{ height: h + 1, borderRadius: 3, overflow: 'hidden' }}>
+        <LinearGradient
+          colors={['#ff3b5c', '#ff9a3a', '#ffe23a', '#3aff7a', '#3ac8ff', '#a36bff'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ flex: 1 }}
+        />
+      </View>
+      <Svg viewBox="0 0 100 12" preserveAspectRatio="none" style={StyleSheet.absoluteFill}>
+        <AnimatedPath
+          d="M 0 6 L 100 6"
+          stroke="#ffffff" strokeWidth={h * 0.5} strokeLinecap="round" fill="none"
+          strokeDasharray="14 86" opacity="0.85"
+          animatedProps={animProps}
+        />
+      </Svg>
+    </View>
   );
 }
 

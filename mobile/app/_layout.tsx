@@ -298,6 +298,17 @@ export default function RootLayout() {
             because it's a focused capture surface — same UX rhythm as
             the system camera. */}
         <Stack.Screen name="range/camera" options={{ animation: 'slide_from_bottom', headerShown: true }} />
+        {/* Cosmetics + account suite. These set their own titles via
+            Stack.Screen inside the file, but the title only renders if
+            the route is registered here with headerShown — the root
+            default hides headers, and without the nav bar the content
+            starts under the status bar / Dynamic Island. */}
+        <Stack.Screen name="locker-room" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="sacari-cup"  options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="season-pass" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="settings"    options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="invite"      options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="resume"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
       </AuthProvider>

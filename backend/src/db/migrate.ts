@@ -1800,6 +1800,79 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
     `,
   },
+  {
+    // Catalog v4: ten artistic, VFX-heavy additions. Each maps to a new
+    // renderer style shipped in the same binary as v3's styles, so there
+    // is no live-binary regression risk: nothing existing is restyled,
+    // these are purely new rows. Same idempotent UPSERT + grant pattern
+    // as v3.
+    name: 'cosmetics.catalog_v4',
+    sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── Backgrounds (5) ──────────────────────────────────────────
+        ('bg_synthwave',   'background', 'Synthwave',     'epic',      'premium',
+          NULL,
+          '{"style":"synthwave","accent":"#ff2d95","grid":"#ff2d95","animated":true}'::jsonb),
+        ('bg_eclipse',     'background', 'Total Eclipse', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"eclipse","accent":"#ffdf8a","animated":true}'::jsonb),
+        ('bg_matrix',      'background', 'Digital Rain',  'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"matrix","color":"#00ff41","animated":true}'::jsonb),
+        ('bg_dusk',        'background', 'Golden Hour',   'epic',      'premium',
+          NULL,
+          '{"style":"dusk","animated":true}'::jsonb),
+        ('bg_thunder',     'background', 'Tempest',       'legendary', 'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"thunder","from":"#0b0918","to":"#2a2440","animated":true}'::jsonb),
+
+        -- ── Borders (2) ──────────────────────────────────────────────
+        ('border_tesla',   'border', 'Storm Cage', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"tesla","color":"#74e0ff","accent":"#e4ecff","width":3,"animated":true}'::jsonb),
+        ('border_corona',  'border', 'Corona',     'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"eclipse","color":"#d4a93f","accent":"#ffe28a","width":3,"animated":true}'::jsonb),
+
+        -- ── Usernames (2) ────────────────────────────────────────────
+        ('uname_neon',     'username', 'Neon Sign', 'epic', 'premium',
+          NULL,
+          '{"style":"neon","color":"#ff2d95","animated":true}'::jsonb),
+        ('uname_glitch',   'username', 'Glitch',    'epic', 'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"glitch","color":"#ffffff","animated":true}'::jsonb),
+
+        -- ── Ball trails (1) ──────────────────────────────────────────
+        ('trail_rainbow',  'ball_trail', 'Prism Ribbon', 'epic', 'premium',
+          NULL,
+          '{"style":"rainbow","width":3,"animated":true,"glow":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium' AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'admin_grant'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE LOWER(u.username) = 'rickybobbyfairways'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+  },
 ];
 
 export async function runMigrations() {
