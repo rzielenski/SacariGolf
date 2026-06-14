@@ -61,6 +61,10 @@ export async function cancelStaleMatches() {
         WHERE m.completed = FALSE
           AND m.cancelled = FALSE
           AND m.is_practice = FALSE
+          -- Never cancel a LINKED match. It already has an opponent (its
+          -- paired match), so it's matched, not abandoned-waiting.
+          -- Cancelling one half would dangle the other's paired_match_id.
+          AND m.paired_match_id IS NULL
           -- NEVER cancel a match where a player has already FINISHED their
           -- round. A duo/squad that completed its round but is still
           -- waiting for an opponent represents real, played golf — the
@@ -259,8 +263,145 @@ export async function runPairingPass() {
         client.release();
       }
     }
+
+    // ── Linked pairing (duo/squad with a shared player) ───────────────
+    // The merge pass above refuses any opponent that shares a player,
+    // because merging two matches into one can't put a player on both
+    // sides (match_players PK + rounds UNIQUE are both (match_id,user_id)).
+    // Those matches fall through to here and get LINKED instead: both stay
+    // separate, paired_match_id points each at the other, every player
+    // plays their own round, and resolution compares the two teams. This
+    // is what lets the same player anchor two teams across two matches.
+    //
+    // The 7-day window (vs 24h for merge) also backfills the current
+    // waiting backlog: a duo that finished its round but never found an
+    // opponent is kept alive by the stale-match cron, so it can be days
+    // old by the time this rule ships.
+    await runLinkedPairingPass(paired);
   } catch (err) {
     console.error('[pair] runPairingPass failed:', err);
+  }
+}
+
+/**
+ * Link duo/squad matches that share a player but aren't the same roster.
+ * `alreadyPaired` carries the match_ids the merge pass consumed this tick
+ * so we never touch them. Idempotent: only ever links matches whose
+ * paired_match_id is still NULL, under a FOR UPDATE recheck.
+ */
+async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
+  const { rows: candidates } = await pool.query(
+    `SELECT m.match_id, m.match_type, m.format, m.num_holes
+       FROM matches m
+      WHERE m.completed = false
+        AND m.cancelled = false
+        AND m.is_practice = false
+        AND m.match_type IN ('duo','squad')
+        AND m.superseded_by_match_id IS NULL
+        AND m.paired_match_id IS NULL
+        AND m.created_at > NOW() - INTERVAL '7 days'
+        AND NOT EXISTS (
+          SELECT 1 FROM match_players mp WHERE mp.match_id = m.match_id AND mp.side != 1
+        )
+      ORDER BY m.created_at ASC`
+  );
+
+  const linked = new Set<string>();
+  for (const m of candidates) {
+    if (linked.has(m.match_id) || alreadyPaired.has(m.match_id)) continue;
+
+    const { rows: opps } = await pool.query(
+      `SELECT m2.match_id
+         FROM matches m2
+        WHERE m2.match_id != $1
+          AND m2.completed = false
+          AND m2.cancelled = false
+          AND m2.is_practice = false
+          AND m2.superseded_by_match_id IS NULL
+          AND m2.paired_match_id IS NULL
+          AND m2.match_type = $2
+          AND m2.format = $3
+          AND m2.num_holes = $4
+          AND m2.created_at > NOW() - INTERVAL '7 days'
+          AND NOT EXISTS (
+            SELECT 1 FROM match_players mp WHERE mp.match_id = m2.match_id AND mp.side != 1
+          )
+          -- Must share at least one player — the case the merge pass skips.
+          AND EXISTS (
+            SELECT 1 FROM match_players a
+            JOIN match_players b ON a.user_id = b.user_id
+            WHERE a.match_id = $1 AND b.match_id = m2.match_id
+          )
+          -- ...but NOT be the same roster (a duo of {A,B} vs {A,B} is a
+          -- mirror match that always ties — pointless). Require at least
+          -- one player in m1 who isn't in m2.
+          AND EXISTS (
+            SELECT 1 FROM match_players a
+            WHERE a.match_id = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM match_players b
+                WHERE b.match_id = m2.match_id AND b.user_id = a.user_id
+              )
+          )
+          -- Same-clan guard, ignoring the shared player(s): don't pit two
+          -- DIFFERENT clanmates against each other. A shared player
+          -- trivially shares a clan with themselves, so exclude equal ids.
+          AND NOT EXISTS (
+            SELECT 1
+              FROM match_players mp_a
+              JOIN clan_members cm_a ON cm_a.user_id = mp_a.user_id
+              JOIN clan_members cm_b ON cm_b.clan_id = cm_a.clan_id
+              JOIN match_players mp_b ON mp_b.user_id = cm_b.user_id
+             WHERE mp_a.match_id = $1
+               AND mp_b.match_id = m2.match_id
+               AND mp_a.user_id != mp_b.user_id
+          )
+        ORDER BY ABS(
+          COALESCE((SELECT AVG(u.elo) FROM match_players mpx
+                    JOIN users u ON u.user_id = mpx.user_id
+                    WHERE mpx.match_id = $1), 1200) -
+          COALESCE((SELECT AVG(u.elo) FROM match_players mpy
+                    JOIN users u ON u.user_id = mpy.user_id
+                    WHERE mpy.match_id = m2.match_id), 1200)
+        )
+        LIMIT 1`,
+      [m.match_id, m.match_type, m.format, m.num_holes]
+    );
+
+    if (!opps.length) continue;
+    const oppId = opps[0].match_id as string;
+    if (linked.has(oppId) || alreadyPaired.has(oppId)) continue;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Re-check both are still unpaired + open under a row lock so two
+      // ticks (or instances) can't link the same match twice.
+      const { rows: chk } = await client.query(
+        `SELECT match_id FROM matches
+          WHERE match_id IN ($1, $2)
+            AND paired_match_id IS NULL
+            AND completed = false
+            AND cancelled = false
+          FOR UPDATE`,
+        [m.match_id, oppId]
+      );
+      if (chk.length === 2) {
+        await client.query(`UPDATE matches SET paired_match_id = $2 WHERE match_id = $1`, [m.match_id, oppId]);
+        await client.query(`UPDATE matches SET paired_match_id = $1 WHERE match_id = $2`, [m.match_id, oppId]);
+        await client.query('COMMIT');
+        linked.add(m.match_id);
+        linked.add(oppId);
+        console.log(`[pair] linked ${m.match_id} <-> ${oppId} (${m.match_type})`);
+      } else {
+        await client.query('ROLLBACK');
+      }
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[pair] link failed', err);
+    } finally {
+      client.release();
+    }
   }
 }
 

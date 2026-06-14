@@ -1918,6 +1918,22 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Linked matches. Two waiting duo/squad matches that share a player
+    // can't be MERGED (one match can't hold a player on both sides or two
+    // rounds for them — match_players PK and rounds UNIQUE are both
+    // (match_id,user_id)). Instead they're LINKED: both stay separate,
+    // paired_match_id points each at the other, every player plays their
+    // own round, and resolution compares the two teams. Nullable + ON
+    // DELETE SET NULL so deleting one match doesn't cascade-orphan.
+    name: 'matches.paired_match_id',
+    sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS paired_match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS matches_paired_idx
+        ON matches(paired_match_id) WHERE paired_match_id IS NOT NULL;
+    `,
+  },
+  {
     // Hot-path indexes for the highest-frequency reads: home feed, the
     // profile screens' recent/best round queries, membership checks, and
     // the friends graph that gates feed, DMs, and follower lists.
