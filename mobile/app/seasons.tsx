@@ -228,8 +228,8 @@ function StandingRowView({ row, isMe, censor }: { row: StandingRow; isMe: boolea
         <Text style={styles.meta}>{row.wins}–{row.losses}–{row.ties} · {rankHeadline(row.elo)}</Text>
       </View>
       <View style={styles.ptsBox}>
-        <Text style={styles.pts}>{row.points}</Text>
-        <Text style={styles.ptsLabel}>PTS</Text>
+        <Text style={styles.pts}>{row.elo}</Text>
+        <Text style={styles.ptsLabel}>ELO</Text>
       </View>
     </TouchableOpacity>
   );

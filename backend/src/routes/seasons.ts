@@ -253,7 +253,7 @@ router.get('/current/standings', requireAuth, wrap(async (req: AuthRequest, res:
        LEFT JOIN streaks st ON st.user_id = s.user_id
       WHERE u.elo >= $3 AND u.elo < $4
         ${friendClause}
-      ORDER BY s.points DESC, s.wins DESC, s.matches ASC, u.elo DESC
+      ORDER BY u.elo DESC, s.wins DESC, s.matches ASC
       LIMIT 100`,
     params
   );
