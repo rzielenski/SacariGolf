@@ -1968,6 +1968,26 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON post_comments(user_id, client_id) WHERE client_id IS NOT NULL;
     `,
   },
+  {
+    // Owner group. users.is_owner flags staff/owner accounts: they
+    // dynamically own every cosmetic, count as premium, and can broadcast
+    // an "@everyone" announcement post that pushes to all users. Add or
+    // remove an owner straight from the DB, no app change:
+    //   UPDATE users SET is_owner = true  WHERE LOWER(username) = 'someone';
+    //   UPDATE users SET is_owner = false WHERE LOWER(username) = 'someone';
+    // posts.is_announcement marks an owner's @everyone broadcast so it
+    // surfaces in EVERY user's feed (bypassing the friends/local scope),
+    // and the partial index keeps that feed union cheap.
+    name: 'owner_group.create',
+    sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_announcement BOOLEAN NOT NULL DEFAULT FALSE;
+      CREATE INDEX IF NOT EXISTS posts_announcement_idx
+        ON posts(created_at DESC) WHERE is_announcement = TRUE;
+      -- Seed the existing test/owner account so it works out of the box.
+      UPDATE users SET is_owner = TRUE WHERE LOWER(username) = 'rickybobbyfairways';
+    `,
+  },
 ];
 
 export async function runMigrations() {

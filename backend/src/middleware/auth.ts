@@ -39,12 +39,15 @@ export async function requirePremium(req: AuthRequest, res: Response, next: Next
   if (OPEN_BETA_PREMIUM) return next();
   try {
     const { rows } = await pool.query(
-      `SELECT is_premium, premium_until
+      `SELECT is_premium, premium_until, is_owner
          FROM users
         WHERE user_id = $1`,
       [req.userId]
     );
     const u = rows[0];
+    // Owners always pass — premium is one of the "unlockables" the owner
+    // group has access to.
+    if (u?.is_owner) return next();
     const active = u?.is_premium && (!u.premium_until || new Date(u.premium_until) > new Date());
     if (!active) {
       return res.status(402).json({ error: 'Premium required', upgrade_required: true });

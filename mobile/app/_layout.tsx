@@ -187,6 +187,7 @@ function AuthGuard() {
           // Team chat room.
           if (typeof data.clanId === 'string') router.push(`/chat/clan/${data.clanId}` as any);
           break;
+        case 'announcement':
         case 'post':
         case 'mention':
         case 'post_comment':

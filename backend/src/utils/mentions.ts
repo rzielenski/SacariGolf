@@ -83,3 +83,54 @@ export async function processMentions(
     console.error('processMentions failed:', err);
   }
 }
+
+/** True if the body contains an "@everyone" broadcast tag (case-insensitive,
+ *  word-bounded so "@everyonething" doesn't match). */
+export function hasEveryoneTag(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return /@everyone\b/i.test(text);
+}
+
+/**
+ * Broadcast an owner's @everyone announcement: push to EVERY user with a
+ * registered device (except the author). sendPush chunks to Expo's 100/req
+ * limit internally, so one call covers the whole user base. Best-effort —
+ * never throws, so a push failure can't break post creation.
+ *
+ * Caller is responsible for verifying the author is an owner BEFORE calling
+ * this — there's no permission check here.
+ */
+export async function broadcastToEveryone(
+  postId: string,
+  authorId: string,
+  text: string | null | undefined,
+): Promise<void> {
+  try {
+    const { rows: a } = await pool.query(
+      `SELECT username FROM users WHERE user_id = $1`,
+      [authorId],
+    );
+    const authorName: string = a[0]?.username ?? 'Sacari';
+    // Strip the @everyone tag from the preview so the notification reads
+    // cleanly ("Big news!" not "@everyone Big news!").
+    const preview = (text ?? '').replace(/@everyone\b/ig, '').trim().slice(0, 140);
+
+    const { rows: recipients } = await pool.query(
+      `SELECT push_token FROM users
+        WHERE push_token IS NOT NULL AND user_id <> $1`,
+      [authorId],
+    );
+    const tokens = recipients.map((r) => r.push_token);
+    if (!tokens.length) return;
+
+    await sendPush(
+      tokens,
+      `📣 ${authorName}`,
+      preview || `${authorName} posted an announcement`,
+      { type: 'announcement', postId },
+    );
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('broadcastToEveryone failed:', err);
+  }
+}

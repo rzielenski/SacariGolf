@@ -22,8 +22,9 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
-import { processMentions } from '../utils/mentions';
+import { processMentions, hasEveryoneTag, broadcastToEveryone } from '../utils/mentions';
 import { equippedVisualSql } from '../utils/cosmeticSql';
+import { isOwner } from '../utils/owner';
 
 const router = Router();
 
@@ -87,14 +88,19 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     return res.status(400).json({ error: 'body or image required' });
   }
 
+  // @everyone broadcast — OWNERS ONLY. A normal user typing @everyone just
+  // posts it as text (it resolves to no one). For an owner it flags the post
+  // as an announcement (shown in every user's feed) and pushes all users.
+  const wantsBroadcast = hasEveryoneTag(text) && await isOwner(req.userId);
+
   const kind = imageUrl ? 'photo' : 'text';
   let rows: any[];
   try {
     ({ rows } = await pool.query(
-      `INSERT INTO posts (user_id, kind, body, image_url)
-       VALUES ($1, $2, $3, $4)
-       RETURNING post_id, user_id, kind, body, image_url, match_id, created_at`,
-      [req.userId, kind, text || null, imageUrl]
+      `INSERT INTO posts (user_id, kind, body, image_url, is_announcement)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING post_id, user_id, kind, body, image_url, match_id, created_at, is_announcement`,
+      [req.userId, kind, text || null, imageUrl, wantsBroadcast]
     ));
   } catch (err) {
     // INSERT failed — unlink the orphan image (if any) before re-throwing
@@ -105,6 +111,8 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // Tag anyone @mentioned in the body — records the mention + pushes them a
   // "tagged you" notification. Fire-and-forget; never blocks the response.
   if (text) processMentions(rows[0].post_id, req.userId!, text);
+  // Owner @everyone → push every user. Fire-and-forget; never blocks.
+  if (wantsBroadcast) broadcastToEveryone(rows[0].post_id, req.userId!, text);
   return res.status(201).json(rows[0]);
 }));
 
@@ -313,6 +321,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      )${localCte}
      SELECT
        p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
+       p.is_announcement,
        u.username AS author_username, u.avatar_url AS author_avatar,
        ${equippedVisualSql('u')} AS author_equipped,
        m.match_type, m.format, m.completed AS match_completed,
@@ -377,7 +386,9 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      LEFT JOIN rounds r_me         ON r_me.match_id = p.match_id AND r_me.user_id = p.user_id
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
-     WHERE TRUE${beforeClause}${scopeClause}
+     -- Owner @everyone announcements bypass the scope filter so they reach
+     -- every user's feed; everything else honors friends / local scope.
+     WHERE (TRUE${scopeClause} OR p.is_announcement = TRUE)${beforeClause}
      ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`,
     params

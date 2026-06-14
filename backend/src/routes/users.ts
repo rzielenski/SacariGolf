@@ -21,7 +21,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
-            u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
+            u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
             u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
@@ -50,6 +50,12 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     row.is_premium = true;
     row.premium_plan = row.premium_plan ?? 'open_beta';
     row.premium_until = null; // null = lifetime / no expiry for client purposes
+  }
+  // Owners are always premium (it's one of the unlockables the owner group
+  // gets) and the app reads is_owner to surface the @everyone broadcast UI.
+  if (row.is_owner) {
+    row.is_premium = true;
+    row.premium_until = null;
   }
   return res.json(row);
 }));

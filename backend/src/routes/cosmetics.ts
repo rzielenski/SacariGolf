@@ -19,6 +19,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
+import { isOwner } from '../utils/owner';
 
 const router = Router();
 
@@ -43,13 +44,18 @@ router.get('/cosmetics/catalog', requireAuth, wrap(async (_req: AuthRequest, res
 router.get('/users/me/cosmetics', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // Owned set + the equipped slot for each kind. Single round-trip; the
   // mobile screen renders the catalog separately and intersects.
+  const owner = await isOwner(req.userId);
   const [{ rows: owned }, { rows: equippedRows }] = await Promise.all([
-    pool.query(
-      `SELECT cosmetic_id, unlocked_at, unlock_source
-         FROM user_cosmetics
-        WHERE user_id = $1`,
-      [req.userId],
-    ),
+    // Owners dynamically own the entire catalog — no per-item grant rows,
+    // so the locker is always complete even as the catalog grows.
+    owner
+      ? pool.query(`SELECT cosmetic_id FROM cosmetics`)
+      : pool.query(
+          `SELECT cosmetic_id, unlocked_at, unlock_source
+             FROM user_cosmetics
+            WHERE user_id = $1`,
+          [req.userId],
+        ),
     pool.query(
       `SELECT equipped_border, equipped_background, equipped_username,
               equipped_ball_trail, equipped_fx
@@ -88,15 +94,23 @@ router.post('/users/me/cosmetics/equip', requireAuth, wrap(async (req: AuthReque
 
   // Ownership + kind check. We do BOTH to prevent equipping a border into
   // the username slot (mismatched-kind UI confusion) AND equipping an item
-  // the user doesn't own.
-  const { rows: check } = await pool.query(
-    `SELECT c.kind
-       FROM cosmetics c
-       JOIN user_cosmetics uc ON uc.cosmetic_id = c.cosmetic_id
-      WHERE uc.user_id = $1 AND c.cosmetic_id = $2`,
-    [req.userId, cosmetic_id],
-  );
-  if (!check.length) return res.status(403).json({ error: 'You do not own that cosmetic' });
+  // the user doesn't own. Owners skip the ownership half (they own
+  // everything) but the kind check still applies to everyone.
+  const owner = await isOwner(req.userId);
+  const { rows: check } = owner
+    ? await pool.query(`SELECT kind FROM cosmetics WHERE cosmetic_id = $1`, [cosmetic_id])
+    : await pool.query(
+        `SELECT c.kind
+           FROM cosmetics c
+           JOIN user_cosmetics uc ON uc.cosmetic_id = c.cosmetic_id
+          WHERE uc.user_id = $1 AND c.cosmetic_id = $2`,
+        [req.userId, cosmetic_id],
+      );
+  if (!check.length) {
+    return res.status(403).json({
+      error: owner ? 'No such cosmetic' : 'You do not own that cosmetic',
+    });
+  }
   if (check[0].kind !== kind) {
     return res.status(400).json({ error: `That cosmetic is a ${check[0].kind}, not a ${kind}` });
   }

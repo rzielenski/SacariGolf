@@ -778,6 +778,8 @@ function ComposeModal({
   onClose: () => void;
   onPosted: (post: any) => void;
 }) {
+  const { user } = useAuth();
+  const isOwner = !!(user as any)?.is_owner;
   const [body, setBody] = useState('');
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [imageMime, setImageMime] = useState<string | null>(null);
@@ -868,6 +870,18 @@ function ComposeModal({
             maxLength={1000}
           />
           <Text style={s.charCount}>{body.length}/1000</Text>
+
+          {/* Owner-only: typing @everyone broadcasts this post to every
+              user (feed + push). Hint surfaces only for owner accounts. */}
+          {isOwner ? (
+            <View style={s.ownerHint}>
+              <Text style={s.ownerHintText}>
+                {/everyone\b/i.test(body)
+                  ? '📣 This will be sent to EVERY user as an announcement.'
+                  : 'Owner tip: include @everyone to broadcast this to all users.'}
+              </Text>
+            </View>
+          ) : null}
 
           {imagePreviewUri ? (
             <View style={s.composeImageWrap}>
@@ -999,6 +1013,12 @@ const s = StyleSheet.create({
     textAlignVertical: 'top',
   },
   charCount: { color: C.textDim, fontSize: 10, alignSelf: 'flex-end', marginTop: 4 },
+
+  ownerHint: {
+    marginTop: 6, padding: 10, borderRadius: 8,
+    backgroundColor: C.gold + '18', borderWidth: 1, borderColor: C.gold + '55',
+  },
+  ownerHintText: { color: C.gold, fontSize: 12, fontWeight: '600' },
 
   composePickBtn: {
     marginTop: 20, paddingVertical: 14, borderRadius: 6, alignItems: 'center',
