@@ -327,23 +327,19 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
           AND NOT EXISTS (
             SELECT 1 FROM match_players mp WHERE mp.match_id = m2.match_id AND mp.side != 1
           )
-          -- Must share at least one player — the case the merge pass skips.
-          AND EXISTS (
-            SELECT 1 FROM match_players a
+          -- Share EXACTLY ONE player — the single anchor the rule allows.
+          -- This count is symmetric, so it can't slip through in one
+          -- direction the way a one-sided check could:
+          --   0 shared → the normal merge pass's job, not linked here
+          --   1 shared → the intended "same player on both teams" case
+          --   2+ shared → the two groups are essentially the same team
+          --               (including the identical-roster {A,B} vs {A,B}
+          --               mirror) — never match them.
+          AND (
+            SELECT COUNT(*) FROM match_players a
             JOIN match_players b ON a.user_id = b.user_id
             WHERE a.match_id = $1 AND b.match_id = m2.match_id
-          )
-          -- ...but NOT be the same roster (a duo of {A,B} vs {A,B} is a
-          -- mirror match that always ties — pointless). Require at least
-          -- one player in m1 who isn't in m2.
-          AND EXISTS (
-            SELECT 1 FROM match_players a
-            WHERE a.match_id = $1
-              AND NOT EXISTS (
-                SELECT 1 FROM match_players b
-                WHERE b.match_id = m2.match_id AND b.user_id = a.user_id
-              )
-          )
+          ) = 1
           -- Same-clan guard, ignoring the shared player(s): don't pit two
           -- DIFFERENT clanmates against each other. A shared player
           -- trivially shares a clan with themselves, so exclude equal ids.
