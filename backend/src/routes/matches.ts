@@ -410,6 +410,256 @@ const MATCH_SCORING_PLAYERS_SQL = `
   LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
   WHERE mp.match_id = $1`;
 
+/**
+ * Resolve a LINKED pair of matches (matchA's team vs matchB's team).
+ *
+ * Single source of truth for linked resolution — called from BOTH the
+ * score-submit handler (when the last player of the pair finishes) AND
+ * the cron link pass (to immediately resolve a pair that was ALREADY
+ * fully played before being linked, e.g. two finished-and-waiting matches
+ * the backfill just connected).
+ *
+ * Self-contained and idempotent: loads both matches' meta + players +
+ * par-by-hole itself, returns null (no-op) unless BOTH matches are fully
+ * played and neither is already completed. Applies ELO exactly once
+ * across both rosters, writes a perspective-correct match_results row to
+ * each match (its own players = side 1; winner_side + signed deltas flip),
+ * completes both, and posts a round card per player on their own match.
+ *
+ * A shared player appears in both rosters with two different rounds: they
+ * net ~0 ELO (win one side, lose the other) and both matches count toward
+ * their record, because they genuinely played two rounds.
+ *
+ * MUST be passed a client already inside a transaction.
+ */
+export async function resolveLinkedPair(
+  client: any,
+  matchAId: string,
+  matchBId: string,
+): Promise<any | null> {
+  const { rows: meta } = await client.query(
+    `SELECT match_id, match_type, format, holes_subset, num_holes, completed, is_practice
+       FROM matches WHERE match_id IN ($1, $2)`,
+    [matchAId, matchBId]
+  );
+  const a = meta.find((m: any) => m.match_id === matchAId);
+  const b = meta.find((m: any) => m.match_id === matchBId);
+  if (!a || !b) return null;
+  if (a.completed || b.completed) return null;       // already resolved
+  if (a.is_practice || b.is_practice) return null;
+
+  const { rows: curPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [matchAId]);
+  const { rows: parPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [matchBId]);
+  if (!curPlayers.length || !parPlayers.length) return null;
+  if (!curPlayers.every((p: any) => p.strokes != null)) return null;
+  if (!parPlayers.every((p: any) => p.strokes != null)) return null;
+
+  const matchFormat: string = a.format ?? 'stroke';
+  const holesSubsetForCalc: string = a.holes_subset ?? 'full';
+  const matchType: string = a.match_type;
+
+  // Per-hole pars for the played slice (hole-by-hole formats only).
+  let parByHoleIdx: number[] = [];
+  const tbId = curPlayers.find((p: any) => p.teebox_id)?.teebox_id;
+  if (tbId) {
+    const { rows: holeRows } = await client.query(
+      `SELECT hole_num, par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`,
+      [tbId]
+    );
+    const offset = holesSubsetForCalc === 'back' ? 9 : 0;
+    const want = a.num_holes ?? 18;
+    parByHoleIdx = holeRows.slice(offset, offset + want).map((r: any) => r.par);
+  }
+
+  // ── Format-perf helpers (lower = better), mirroring the 1v1/team path ──
+  const modifiedStablefordPoints = (score: number, par: number): number => {
+    const d = score - par;
+    if (d <= -2) return 5;
+    if (d === -1) return 2;
+    if (d === 0) return 0;
+    if (d === 1) return -1;
+    return -3;
+  };
+  const bestHoleScore = (side: any[], idx: number): number | null => {
+    let best: number | null = null;
+    for (const p of side) {
+      const s = (p.hole_scores as number[] | null)?.[idx];
+      if (typeof s !== 'number') continue;
+      if (best == null || s < best) best = s;
+    }
+    return best;
+  };
+  const computeFormatPerf = (format: string, side1: any[], side2: any[]) => {
+    const N = parByHoleIdx.length;
+    if (!N) return null;
+    if (format === 'stableford') {
+      let s1 = 0, s2 = 0;
+      for (let i = 0; i < N; i++) {
+        const x = bestHoleScore(side1, i);
+        const y = bestHoleScore(side2, i);
+        if (x != null) s1 += modifiedStablefordPoints(x, parByHoleIdx[i]);
+        if (y != null) s2 += modifiedStablefordPoints(y, parByHoleIdx[i]);
+      }
+      return { side1Perf: -s1, side2Perf: -s2, details: { s1Points: s1, s2Points: s2 } };
+    }
+    if (format === 'match_play') {
+      let s1Wins = 0, s2Wins = 0, halved = 0;
+      for (let i = 0; i < N; i++) {
+        const x = bestHoleScore(side1, i);
+        const y = bestHoleScore(side2, i);
+        if (x == null || y == null) continue;
+        if (x < y) s1Wins++; else if (y < x) s2Wins++; else halved++;
+      }
+      return { side1Perf: -s1Wins, side2Perf: -s2Wins, details: { s1Holes: s1Wins, s2Holes: s2Wins, halved } };
+    }
+    if (format === 'skins') {
+      let s1Skins = 0, s2Skins = 0, carry = 1;
+      for (let i = 0; i < N; i++) {
+        const x = bestHoleScore(side1, i);
+        const y = bestHoleScore(side2, i);
+        if (x == null || y == null) continue;
+        const value = carry;
+        if (x < y) { s1Skins += value; carry = 1; }
+        else if (y < x) { s2Skins += value; carry = 1; }
+        else { carry += 1; }
+      }
+      return { side1Perf: -s1Skins, side2Perf: -s2Skins, details: { s1Skins, s2Skins } };
+    }
+    return null;
+  };
+
+  const getDiff = (ps: any[], topN?: number) => {
+    const diffs = ps.map((p: any) => {
+      if (!p.course_rating || !p.slope_rating) return p.strokes;
+      const overrideRating =
+        holesSubsetForCalc === 'front' ? p.front_course_rating
+        : holesSubsetForCalc === 'back'  ? p.back_course_rating
+        : null;
+      const overrideSlope =
+        holesSubsetForCalc === 'front' ? p.front_slope_rating
+        : holesSubsetForCalc === 'back'  ? p.back_slope_rating
+        : null;
+      return diff18(
+        p.strokes, p.course_rating, p.slope_rating,
+        p.holes_played, p.teebox_num_holes || p.holes_played,
+        overrideRating, overrideSlope,
+      );
+    }).sort((x: number, y: number) => x - y);
+    const used = topN ? diffs.slice(0, topN) : diffs;
+    return used.reduce((x: number, y: number) => x + y, 0) / used.length;
+  };
+
+  const compareCount = Math.min(curPlayers.length, parPlayers.length);
+  const strokeCurDiff = getDiff(curPlayers, compareCount);
+  const strokeParDiff = getDiff(parPlayers, compareCount);
+  const formatPerf = computeFormatPerf(matchFormat, curPlayers, parPlayers);
+  const curDiff = formatPerf ? formatPerf.side1Perf : strokeCurDiff;
+  const parDiff = formatPerf ? formatPerf.side2Perf : strokeParDiff;
+  const formatDetails = formatPerf?.details ?? null;
+
+  const isTie = Math.abs(curDiff - parDiff) < 0.05;
+  const curWins = !isTie && curDiff < parDiff;
+
+  const c1 = curPlayers[0];
+  const p1 = parPlayers[0];
+  const expCur = expectedScore(c1.elo, p1.elo);
+  const k = kFactor(c1.total_matches, c1.elo);
+  const curActual = isTie ? 0.5 : (curWins ? 1 : 0);
+  const curDelta = Math.round(k * (curActual - expCur));
+  const parDelta = -curDelta;
+
+  const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
+  const allIds = [...curPlayers, ...parPlayers].map((p: any) => p.user_id);
+  const { rows: perkRows } = await client.query(
+    `SELECT DISTINCT ON (user_id) user_id, perk_id
+     FROM user_perks
+     WHERE user_id = ANY($1)
+       AND consumed_at IS NULL
+       AND (earned_match_id IS NULL OR (earned_match_id != $2 AND earned_match_id != $3))
+     ORDER BY user_id, earned_at ASC`,
+    [allIds, matchAId, matchBId]
+  );
+  const perkByUser = new Map<string, string>(perkRows.map((r: any) => [r.user_id, r.perk_id]));
+  const perkConsumed = new Set<string>();
+
+  const applySide = async (ps: any[], delta: number, sideWon: boolean) => {
+    for (const p of ps) {
+      let eloChange = delta;
+      const perkId = perkByUser.get(p.user_id);
+      // A shared player can appear on both sides; let their perk fire once.
+      if (perkId && delta !== 0 && !perkConsumed.has(p.user_id)) {
+        if (eloChange < 0) eloChange = 0; else eloChange = eloChange * 2;
+        perkConsumed.add(p.user_id);
+        await client.query(
+          `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+          [perkId, matchAId]
+        );
+        perkApplications.push({ user_id: p.user_id, original: delta, adjusted: eloChange, type: 'lucky_round' });
+      }
+      await client.query(
+        `UPDATE users
+         SET elo = GREATEST(100, elo + $1),
+             total_matches = total_matches + 1,
+             total_wins = total_wins + $2,
+             total_ties = total_ties + $3
+         WHERE user_id = $4`,
+        [eloChange, sideWon ? 1 : 0, isTie ? 1 : 0, p.user_id]
+      );
+    }
+  };
+  await applySide(curPlayers, curDelta, !isTie && curWins);
+  await applySide(parPlayers, parDelta, !isTie && !curWins);
+
+  const writeResult = async (
+    matchId: string, s1: any[], s2: any[],
+    s1Diff: number, s2Diff: number, s1Delta: number, s2Delta: number, s1Won: boolean,
+  ) => {
+    await client.query(
+      `INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+       side2_score_differential, delta_elo, details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (match_id) DO NOTHING`,
+      [
+        matchId, matchType,
+        isTie ? null : (s1Won ? 1 : 2),
+        s1Diff, s2Diff, Math.abs(curDelta),
+        JSON.stringify({
+          side1Players: s1.map((p: any) => p.user_id),
+          side2Players: s2.map((p: any) => p.user_id),
+          tied: isTie,
+          side1DeltaSignedElo: s1Delta,
+          side2DeltaSignedElo: s2Delta,
+          perks: perkApplications,
+          format: matchFormat,
+          formatDetails,
+          linked: true,
+        }),
+      ]
+    );
+    await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
+    await client.query(
+      `INSERT INTO posts (user_id, kind, match_id, body)
+       SELECT pid, 'round', $2, r.caption
+         FROM unnest($1::uuid[]) AS pid
+         LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
+      [s1.map((p: any) => p.user_id), matchId]
+    );
+  };
+
+  await writeResult(matchAId, curPlayers, parPlayers, curDiff, parDiff, curDelta, parDelta, curWins);
+  await writeResult(matchBId, parPlayers, curPlayers, parDiff, curDiff, parDelta, curDelta, !isTie && !curWins);
+
+  return {
+    linked: true,
+    winnerSide: isTie ? null : (curWins ? 1 : 2),
+    tied: isTie,
+    deltaElo: Math.abs(curDelta),
+    side1Diff: curDiff,
+    side2Diff: parDiff,
+    perks: perkApplications,
+  };
+}
+
 // Get match details
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: matchRows } = await pool.query(
@@ -1087,165 +1337,11 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       };
     };
 
-    /**
-     * Linked-match resolution: two SEPARATE matches (cur, par) whose teams
-     * play each other. Unlike resolveElo (one match, two sides in its own
-     * rows) this applies ELO exactly ONCE across both rosters, then writes
-     * a perspective-correct match_results row to EACH match (each match
-     * treats its own players as side 1) and completes both.
-     *
-     * A shared player legitimately appears in BOTH rosters (they anchor
-     * both teams with two different rounds). They're updated once per side
-     * — +delta on the winning side, −delta on the losing side, netting ~0
-     * — and both matches count toward their record, because they really
-     * did play two rounds. Mirrors resolveElo's math exactly; getDiff is
-     * duplicated rather than shared so the proven 1v1/team path is left
-     * byte-for-byte untouched.
-     */
-    const resolveEloLinked = async (
-      curPlayers: typeof allPlayers,
-      parPlayers: typeof allPlayers,
-      curId: string,
-      parId: string,
-      matchType: string,
-    ) => {
-      const getDiff = (ps: typeof allPlayers, topN?: number) => {
-        const diffs = ps.map((p) => {
-          if (!p.course_rating || !p.slope_rating) return p.strokes;
-          const subset = holesSubsetForCalc;
-          const overrideRating =
-            subset === 'front' ? p.front_course_rating
-            : subset === 'back'  ? p.back_course_rating
-            : null;
-          const overrideSlope =
-            subset === 'front' ? p.front_slope_rating
-            : subset === 'back'  ? p.back_slope_rating
-            : null;
-          return diff18(
-            p.strokes, p.course_rating, p.slope_rating,
-            p.holes_played, p.teebox_num_holes || p.holes_played,
-            overrideRating, overrideSlope,
-          );
-        }).sort((a: number, b: number) => a - b);
-        const used = topN ? diffs.slice(0, topN) : diffs;
-        return used.reduce((a: number, b: number) => a + b, 0) / used.length;
-      };
-
-      const compareCount = Math.min(curPlayers.length, parPlayers.length);
-      const strokeCurDiff = getDiff(curPlayers, compareCount);
-      const strokeParDiff = getDiff(parPlayers, compareCount);
-
-      const formatPerf = computeFormatPerf(matchFormat, curPlayers, parPlayers);
-      const curDiff = formatPerf ? formatPerf.side1Perf : strokeCurDiff;
-      const parDiff = formatPerf ? formatPerf.side2Perf : strokeParDiff;
-      const formatDetails = formatPerf?.details ?? null;
-
-      const isTie = Math.abs(curDiff - parDiff) < 0.05;
-      const curWins = !isTie && curDiff < parDiff;
-
-      const c1 = curPlayers[0];
-      const p1 = parPlayers[0];
-      const expCur = expectedScore(c1.elo, p1.elo);
-      const k = kFactor(c1.total_matches, c1.elo);
-      const curActual = isTie ? 0.5 : (curWins ? 1 : 0);
-      const curDelta = Math.round(k * (curActual - expCur));
-      const parDelta = -curDelta;
-
-      const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
-      const allIds = [...curPlayers, ...parPlayers].map((p) => p.user_id);
-      const { rows: perkRows } = await client.query(
-        `SELECT DISTINCT ON (user_id) user_id, perk_id
-         FROM user_perks
-         WHERE user_id = ANY($1)
-           AND consumed_at IS NULL
-           AND (earned_match_id IS NULL OR (earned_match_id != $2 AND earned_match_id != $3))
-         ORDER BY user_id, earned_at ASC`,
-        [allIds, curId, parId]
-      );
-      const perkByUser = new Map<string, string>(perkRows.map((r: any) => [r.user_id, r.perk_id]));
-      const perkConsumed = new Set<string>();
-
-      const applySide = async (ps: typeof allPlayers, delta: number, sideWon: boolean) => {
-        for (const p of ps) {
-          let eloChange = delta;
-          const perkId = perkByUser.get(p.user_id);
-          // A shared player can appear on both sides; only let their perk
-          // fire once across the pair.
-          if (perkId && delta !== 0 && !perkConsumed.has(p.user_id)) {
-            if (eloChange < 0) eloChange = 0; else eloChange = eloChange * 2;
-            perkConsumed.add(p.user_id);
-            await client.query(
-              `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
-              [perkId, curId]
-            );
-            perkApplications.push({ user_id: p.user_id, original: delta, adjusted: eloChange, type: 'lucky_round' });
-          }
-          await client.query(
-            `UPDATE users
-             SET elo = GREATEST(100, elo + $1),
-                 total_matches = total_matches + 1,
-                 total_wins = total_wins + $2,
-                 total_ties = total_ties + $3
-             WHERE user_id = $4`,
-            [eloChange, sideWon ? 1 : 0, isTie ? 1 : 0, p.user_id]
-          );
-        }
-      };
-      await applySide(curPlayers, curDelta, !isTie && curWins);
-      await applySide(parPlayers, parDelta, !isTie && !curWins);
-
-      // One result row per match, each from its own perspective (its
-      // players = side 1). winner_side, differentials, and signed deltas
-      // all flip between the two rows. ON CONFLICT guards a double-trigger.
-      const writeResult = async (
-        matchId: string, s1: typeof allPlayers, s2: typeof allPlayers,
-        s1Diff: number, s2Diff: number, s1Delta: number, s2Delta: number, s1Won: boolean,
-      ) => {
-        await client.query(
-          `INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
-           side2_score_differential, delta_elo, details)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (match_id) DO NOTHING`,
-          [
-            matchId, matchType,
-            isTie ? null : (s1Won ? 1 : 2),
-            s1Diff, s2Diff, Math.abs(curDelta),
-            JSON.stringify({
-              side1Players: s1.map((p) => p.user_id),
-              side2Players: s2.map((p) => p.user_id),
-              tied: isTie,
-              side1DeltaSignedElo: s1Delta,
-              side2DeltaSignedElo: s2Delta,
-              perks: perkApplications,
-              format: matchFormat,
-              formatDetails,
-              linked: true,
-            }),
-          ]
-        );
-        await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
-        await client.query(
-          `INSERT INTO posts (user_id, kind, match_id, body)
-           SELECT pid, 'round', $2, r.caption
-             FROM unnest($1::uuid[]) AS pid
-             LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
-          [s1.map((p) => p.user_id), matchId]
-        );
-      };
-
-      await writeResult(curId, curPlayers, parPlayers, curDiff, parDiff, curDelta, parDelta, curWins);
-      await writeResult(parId, parPlayers, curPlayers, parDiff, curDiff, parDelta, curDelta, !isTie && !curWins);
-
-      return {
-        linked: true,
-        winnerSide: isTie ? null : (curWins ? 1 : 2),
-        tied: isTie,
-        deltaElo: Math.abs(curDelta),
-        side1Diff: curDiff,
-        side2Diff: parDiff,
-        perks: perkApplications,
-      };
-    };
+    // Linked-match resolution lives in the module-level resolveLinkedPair()
+    // (defined above, near the player-projection SQL). It's shared with the
+    // cron link pass so a pair that was ALREADY fully played before being
+    // linked — two finished-and-waiting matches the backfill just connected
+    // — resolves the instant it's linked, not only on a future score submit.
 
     /**
      * Arena (free-for-all) ELO resolution. Each player is on their own
@@ -1478,20 +1574,10 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     if (pairedMatchId && !matchRows[0].is_practice && matchRows[0].match_type !== 'ffa') {
       linkedHandled = true;
       if (allDone) {
-        const { rows: parPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [pairedMatchId]);
-        const parAllDone = parPlayers.length > 0 && parPlayers.every((p: any) => p.strokes != null);
-        if (parAllDone) {
-          // Don't double-resolve if both final submits race in together.
-          const { rows: doneChk } = await client.query(
-            `SELECT 1 FROM matches WHERE match_id IN ($1, $2) AND completed = true LIMIT 1`,
-            [req.params.id, pairedMatchId]
-          );
-          if (!doneChk.length) {
-            result = await resolveEloLinked(
-              allPlayers, parPlayers, req.params.id, pairedMatchId, matchRows[0].match_type,
-            );
-          }
-        }
+        // resolveLinkedPair is a no-op unless BOTH matches are fully played
+        // and neither is already completed — so it's safe to call on every
+        // submit, and it also guards the double-submit race itself.
+        result = await resolveLinkedPair(client, req.params.id, pairedMatchId);
       }
     }
 

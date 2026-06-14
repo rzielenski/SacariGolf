@@ -273,10 +273,11 @@ export async function runPairingPass() {
     // plays their own round, and resolution compares the two teams. This
     // is what lets the same player anchor two teams across two matches.
     //
-    // The 7-day window (vs 24h for merge) also backfills the current
+    // The 30-day window (vs 24h for merge) also backfills the current
     // waiting backlog: a duo that finished its round but never found an
-    // opponent is kept alive by the stale-match cron, so it can be days
-    // old by the time this rule ships.
+    // opponent is kept alive by the stale-match cron, so it can be days or
+    // weeks old by the time this rule ships. When the linked pair is
+    // already fully played, runLinkedPairingPass resolves it on the spot.
     await runLinkedPairingPass(paired);
   } catch (err) {
     console.error('[pair] runPairingPass failed:', err);
@@ -299,7 +300,7 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
         AND m.match_type IN ('duo','squad')
         AND m.superseded_by_match_id IS NULL
         AND m.paired_match_id IS NULL
-        AND m.created_at > NOW() - INTERVAL '7 days'
+        AND m.created_at > NOW() - INTERVAL '30 days'
         AND NOT EXISTS (
           SELECT 1 FROM match_players mp WHERE mp.match_id = m.match_id AND mp.side != 1
         )
@@ -322,7 +323,7 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
           AND m2.match_type = $2
           AND m2.format = $3
           AND m2.num_holes = $4
-          AND m2.created_at > NOW() - INTERVAL '7 days'
+          AND m2.created_at > NOW() - INTERVAL '30 days'
           AND NOT EXISTS (
             SELECT 1 FROM match_players mp WHERE mp.match_id = m2.match_id AND mp.side != 1
           )
@@ -389,6 +390,14 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
       if (chk.length === 2) {
         await client.query(`UPDATE matches SET paired_match_id = $2 WHERE match_id = $1`, [m.match_id, oppId]);
         await client.query(`UPDATE matches SET paired_match_id = $1 WHERE match_id = $2`, [m.match_id, oppId]);
+        // If BOTH teams already finished their rounds — a finished-and-
+        // waiting backlog pair we just connected — resolve right now in the
+        // same transaction (atomic with the link). resolveLinkedPair is a
+        // no-op when either side isn't fully played, so a fresh link just
+        // waits for the next score submit. If it throws, the outer catch
+        // rolls back the link too, so we never leave a half-resolved pair.
+        const { resolveLinkedPair } = await import('../routes/matches');
+        await resolveLinkedPair(client, m.match_id, oppId);
         await client.query('COMMIT');
         linked.add(m.match_id);
         linked.add(oppId);
