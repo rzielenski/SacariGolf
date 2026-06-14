@@ -340,19 +340,13 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
             JOIN match_players b ON a.user_id = b.user_id
             WHERE a.match_id = $1 AND b.match_id = m2.match_id
           ) = 1
-          -- Same-clan guard, ignoring the shared player(s): don't pit two
-          -- DIFFERENT clanmates against each other. A shared player
-          -- trivially shares a clan with themselves, so exclude equal ids.
-          AND NOT EXISTS (
-            SELECT 1
-              FROM match_players mp_a
-              JOIN clan_members cm_a ON cm_a.user_id = mp_a.user_id
-              JOIN clan_members cm_b ON cm_b.clan_id = cm_a.clan_id
-              JOIN match_players mp_b ON mp_b.user_id = cm_b.user_id
-             WHERE mp_a.match_id = $1
-               AND mp_b.match_id = m2.match_id
-               AND mp_a.user_id != mp_b.user_id
-          )
+          -- NOTE: no same-clan guard here, on purpose. The regular merge
+          -- pass uses one to avoid pitting a clan against itself in a real
+          -- 4-distinct-player match. But the linked pass IS the deliberate
+          -- shared-player case (teams {anchor,B} vs {anchor,C} — only three
+          -- people), who in a small group are almost always clanmates. A
+          -- clan guard here just blocks the exact pairing this rule exists
+          -- to allow, so it's intentionally omitted.
         ORDER BY ABS(
           COALESCE((SELECT AVG(u.elo) FROM match_players mpx
                     JOIN users u ON u.user_id = mpx.user_id
