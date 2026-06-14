@@ -9,7 +9,7 @@ import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
 import { useCensor } from '../lib/censor';
-import { rankForElo, rankHeadline } from '../lib/rank';
+import { rankForElo, rankBadge } from '../lib/rank';
 
 type SeasonData = Awaited<ReturnType<typeof api.seasons.current>>;
 type StandingRow = Awaited<ReturnType<typeof api.seasons.standings>>['standings'][number];
@@ -219,17 +219,15 @@ function StandingRowView({ row, isMe, censor }: { row: StandingRow; isMe: boolea
         {row.rank <= 3 ? ['I', 'II', 'III'][row.rank - 1] : `#${row.rank}`}
       </Text>
       <UserAvatar username={row.username} avatarUrl={row.avatar_url} size={40} borderRadius={4} />
-      <View style={{ flex: 1 }}>
+      <View style={styles.middle}>
         <View style={styles.nameRow}>
-          <Text style={styles.username}>{censor(row.username)}</Text>
-          {isMe && <Text style={styles.youBadge}>You</Text>}
+          <Text style={[styles.username, { flexShrink: 1 }]} numberOfLines={1}>{censor(row.username)}</Text>
           {row.current_streak >= 2 && <Text style={styles.streakBadge}>🔥{row.current_streak}</Text>}
         </View>
-        <Text style={styles.meta}>{row.wins}–{row.losses}–{row.ties} · {rankHeadline(row.elo)}</Text>
+        <Text style={styles.meta} numberOfLines={1}>{row.wins}–{row.losses}–{row.ties}</Text>
       </View>
       <View style={styles.ptsBox}>
-        <Text style={styles.pts}>{row.elo}</Text>
-        <Text style={styles.ptsLabel}>ELO</Text>
+        <Text style={styles.pts} numberOfLines={1}>{rankBadge(row.elo)}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -299,17 +297,15 @@ const styles = StyleSheet.create({
   },
   rowMe: { borderColor: C.gold },
   rank: { width: 32, textAlign: 'center', fontSize: 13, fontWeight: '700' },
+  // Shrinkable middle column so a long name ellipsizes instead of
+  // colliding with the streak badge or the rank stat on the right.
+  middle: { flex: 1, minWidth: 0 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   username: { color: C.text, fontWeight: '700', fontSize: 15 },
-  youBadge: {
-    color: C.gold, fontSize: 10, fontWeight: '700',
-    backgroundColor: C.gold + '22', borderRadius: 4,
-    paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: C.gold,
-  },
-  streakBadge: { color: '#ff8a3d', fontSize: 11, fontWeight: '900' },
+  streakBadge: { color: '#ff8a3d', fontSize: 11, fontWeight: '900', flexShrink: 0 },
   meta: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  ptsBox: { alignItems: 'center', minWidth: 44 },
-  pts: { fontFamily: F.serif, fontSize: 20, fontWeight: '700', color: C.gold },
+  ptsBox: { alignItems: 'flex-end', minWidth: 66, flexShrink: 0 },
+  pts: { fontFamily: F.serif, fontSize: 16, fontWeight: '800', color: C.gold, letterSpacing: 0.5 },
   ptsLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   emptyText: { color: C.textMuted, fontSize: 14, textAlign: 'center' },

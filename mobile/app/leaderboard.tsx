@@ -11,7 +11,7 @@ import { C, F } from '../lib/colors';
 import { UserAvatar } from '../components/UserAvatar';
 import { IdentityAvatar, IdentityName } from '../components/UserIdentity';
 import { useCensor } from '../lib/censor';
-import { rankForElo } from '../lib/rank';
+import { rankForElo, rankBadge } from '../lib/rank';
 
 type Mode = 'all' | 'solo' | 'duo' | 'squad';
 const MODES: { key: Mode; label: string }[] = [
@@ -154,9 +154,9 @@ function PlayerRow({ player, rank, isMe }: {
   const winRate = player.total_matches > 0
     ? Math.round((player.total_wins / player.total_matches) * 100)
     : 0;
-  const statValue = String(player.elo);
-  const statLabel = 'ELO';
-  const metaLine = `${r.label} · ${player.total_matches}M · ${winRate}% WR`;
+  // Division + LP, e.g. "B III 23". Obsidian shows raw ELO ("OBS 1620").
+  const badge = rankBadge(player.elo);
+  const metaLine = `${player.total_matches}M · ${winRate}% WR`;
 
   return (
     <TouchableOpacity
@@ -174,18 +174,18 @@ function PlayerRow({ player, rank, isMe }: {
         size={40}
         borderRadius={4}
       />
-      <View style={{ flex: 1 }}>
-        <View style={styles.nameRow}>
-          <IdentityName visual={player.equipped_visual} style={styles.username}>
-            {c(player.username)}
-          </IdentityName>
-          {isMe && <Text style={styles.youBadge}>You</Text>}
-        </View>
-        <Text style={styles.meta}>{metaLine}</Text>
+      <View style={styles.middle}>
+        <IdentityName
+          visual={player.equipped_visual}
+          style={styles.username}
+          numberOfLines={1}
+        >
+          {c(player.username)}
+        </IdentityName>
+        <Text style={styles.meta} numberOfLines={1}>{metaLine}</Text>
       </View>
       <View style={styles.eloBox}>
-        <Text style={[styles.elo, { color: eloColor }]}>{statValue}</Text>
-        <Text style={styles.eloLabel}>{statLabel}</Text>
+        <Text style={[styles.rankBadgeText, { color: eloColor }]} numberOfLines={1}>{badge}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -217,15 +217,12 @@ function TeamRow({ team, rank }: { team: any; rank: number }) {
         {rank <= 3 ? ['I', 'II', 'III'][rank - 1] : `#${rank}`}
       </Text>
       <UserAvatar username={team.name} avatarUrl={team.avatar_url} size={40} borderRadius={8} />
-      <View style={{ flex: 1 }}>
-        <View style={styles.nameRow}>
-          <Text style={styles.username} numberOfLines={1}>{c(team.name)}</Text>
-          {isMine && <Text style={styles.youBadge}>Yours</Text>}
-        </View>
-        <Text style={styles.meta}>{team.member_count} members · {winRate}% WR</Text>
+      <View style={styles.middle}>
+        <Text style={styles.username} numberOfLines={1}>{c(team.name)}</Text>
+        <Text style={styles.meta} numberOfLines={1}>{team.member_count} members · {winRate}% WR</Text>
       </View>
       <View style={styles.eloBox}>
-        <Text style={[styles.elo, { color: C.gold }]}>{team.team_elo}</Text>
+        <Text style={[styles.elo, { color: C.gold }]} numberOfLines={1}>{team.team_elo}</Text>
         <Text style={styles.eloLabel}>TEAM ELO</Text>
       </View>
     </TouchableOpacity>
@@ -256,21 +253,20 @@ const styles = StyleSheet.create({
   },
   rowMe: { borderColor: C.gold },
 
-  rank: { width: 32, textAlign: 'center', fontSize: 13, fontWeight: '700', color: C.textDim },
+  rank: { width: 28, textAlign: 'center', fontSize: 13, fontWeight: '700', color: C.textDim },
   avatar: { width: 40, height: 40, borderRadius: 4, justifyContent: 'center', alignItems: 'center' },
   avatarText: { fontWeight: '800', fontSize: 16 },
-  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  // Shrinkable middle column. minWidth:0 lets the name/meta ellipsize
+  // instead of pushing the rank stat off the row or overlapping it.
+  middle: { flex: 1, minWidth: 0 },
   username: { color: C.text, fontWeight: '700', fontSize: 15 },
-  youBadge: {
-    color: C.gold, fontSize: 10, fontWeight: '700',
-    backgroundColor: C.gold + '22', borderRadius: 4,
-    paddingHorizontal: 6, paddingVertical: 2,
-    borderWidth: 1, borderColor: C.gold,
-  },
   meta: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  eloBox: { alignItems: 'center', minWidth: 48 },
+  // Right-side stat. flexShrink:0 + right-align so it never collides with
+  // a long name; wide enough for "B III 23" / "TEAM ELO".
+  eloBox: { alignItems: 'flex-end', minWidth: 66, flexShrink: 0 },
   elo: { fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },
+  rankBadgeText: { fontFamily: F.serif, fontSize: 16, fontWeight: '800', letterSpacing: 0.5 },
 
   emptyText: { color: C.textMuted, fontSize: 15 },
 

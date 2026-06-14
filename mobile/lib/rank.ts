@@ -129,6 +129,15 @@ export function rankHeadline(eloRaw: number): string {
   return r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
 }
 
+/** Compact leaderboard badge: tier letter + roman division + LP within
+ *  that division, e.g. "B III 23" (Bronze 3, 23 LP). Obsidian has no
+ *  division, so it shows the raw ELO: "OBS 1620". */
+export function rankBadge(eloRaw: number): string {
+  const r = rankForElo(eloRaw);
+  if (r.isObsidian) return `OBS ${r.displayElo}`;
+  return `${r.tier.name[0]} ${ROMAN[r.division ?? 0]} ${r.lp}`;
+}
+
 /**
  * Per-tier crest artwork. Drop the generated PNGs into mobile/assets/crests/
  * and uncomment each line as the file lands — until then RankCrest falls back
