@@ -1559,28 +1559,61 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
        WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
     )`;
 
-  // ── Per-mode leaderboard (ranked by wins in that match type) ─────────
-  if (mode !== 'all') {
+  // ── Duo / Squad: TEAM leaderboard, ranked by ELO ────────────────────
+  // Teams are clans (clan_mode = duo | squad). clans.elo is never updated
+  // by match resolution (only users.elo is), so ranking by it would put
+  // every team at the 1200 default. Instead a team's rating is the average
+  // of its current members' individual ELO — meaningful from day one with
+  // no change to the resolution path. `is_mine` flags teams the caller is
+  // in so the app can highlight them. The friends toggle doesn't map onto
+  // teams, so it's ignored here; private teams still appear if the caller
+  // is a member.
+  if (mode === 'duo' || mode === 'squad') {
+    const { rows } = await pool.query(
+      `SELECT c.clan_id, c.name, c.clan_mode, c.avatar_url,
+              ROUND(AVG(u.elo))::int AS team_elo,
+              COUNT(cm.user_id)::int AS member_count,
+              c.total_matches, c.total_wins,
+              bool_or(cm.user_id = $1) AS is_mine
+         FROM clans c
+         JOIN clan_members cm ON cm.clan_id = c.clan_id
+         JOIN users u ON u.user_id = cm.user_id
+        WHERE c.clan_mode = $2
+          AND (c.is_public = true OR EXISTS (
+            SELECT 1 FROM clan_members me
+            WHERE me.clan_id = c.clan_id AND me.user_id = $1
+          ))
+        GROUP BY c.clan_id
+        ORDER BY team_elo DESC, c.total_wins DESC, c.name ASC
+        LIMIT 100`,
+      [req.userId, mode]
+    );
+    return res.json(rows);
+  }
+
+  // ── Solo / FFA: individuals ranked by ELO ───────────────────────────
+  // All boards rank by ELO now (the old per-mode WINS ranking is gone).
+  // Restricted to players who've actually played that mode so the tab
+  // stays distinct from Overall, but ordered purely by global ELO.
+  if (mode === 'solo' || mode === 'ffa') {
     const scopeFilter = friendsOnly
-      ? 'mp.user_id IN (SELECT user_id FROM scope)'
+      ? 'u.user_id IN (SELECT user_id FROM scope)'
       : 'u.user_id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = $1)';
     const sql = `
       ${friendsOnly ? friendScopeCte : ''}
-      SELECT u.user_id, u.username, u.elo, u.avatar_url,
-             ${equippedVisualSql('u')} AS equipped_visual,
-             COUNT(*) FILTER (WHERE mr.winner_side = mp.side)::int AS mode_wins,
-             COUNT(*)::int AS mode_matches
+      SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+             ${equippedVisualSql('u')} AS equipped_visual
         FROM users u
-        JOIN match_players mp ON mp.user_id = u.user_id
-        JOIN matches m ON m.match_id = mp.match_id
-                      AND m.match_type = $2
-                      AND m.completed = true
-                      AND m.is_practice = false
-        LEFT JOIN match_results mr ON mr.match_id = m.match_id
        WHERE ${scopeFilter}
-       GROUP BY u.user_id
-      HAVING COUNT(*) > 0
-       ORDER BY mode_wins DESC, mode_matches DESC, u.elo DESC
+         AND EXISTS (
+           SELECT 1 FROM match_players mp
+           JOIN matches m ON m.match_id = mp.match_id
+          WHERE mp.user_id = u.user_id
+            AND m.match_type = $2
+            AND m.completed = true
+            AND m.is_practice = false
+         )
+       ORDER BY u.elo DESC
        LIMIT 100`;
     const { rows } = await pool.query(sql, [req.userId, mode]);
     return res.json(rows);

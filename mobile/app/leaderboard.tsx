@@ -42,7 +42,10 @@ export default function LeaderboardScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  const myRank = players.findIndex((p) => p.user_id === user?.user_id) + 1;
+  const isTeamMode = mode === 'duo' || mode === 'squad';
+  // "You are #N" only applies to the individual boards (you can be in
+  // several teams, so it's ambiguous on the team boards — skip it there).
+  const myRank = isTeamMode ? 0 : players.findIndex((p) => p.user_id === user?.user_id) + 1;
 
   return (
     <View style={styles.container}>
@@ -107,23 +110,23 @@ export default function LeaderboardScreen() {
       ) : (
         <FlatList
           data={players}
-          keyExtractor={(p) => p.user_id}
+          // Player rows key on user_id; team (duo/squad) rows on clan_id.
+          keyExtractor={(item) => item.user_id ?? item.clan_id}
           contentContainerStyle={styles.listContent}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
           renderItem={({ item, index }) => (
-            <PlayerRow
-              player={item}
-              rank={index + 1}
-              isMe={item.user_id === user?.user_id}
-              mode={mode}
-            />
+            isTeamMode
+              ? <TeamRow team={item} rank={index + 1} />
+              : <PlayerRow player={item} rank={index + 1} isMe={item.user_id === user?.user_id} />
           )}
           ListEmptyComponent={
             <View style={styles.centered}>
               <Text style={styles.emptyText}>
                 {mode === 'all'
                   ? 'No players yet.'
-                  : `No ${MODES.find((m) => m.key === mode)?.label.toLowerCase()} matches played yet.`}
+                  : isTeamMode
+                  ? `No ${MODES.find((m) => m.key === mode)?.label.toLowerCase()} teams yet.`
+                  : `No ${MODES.find((m) => m.key === mode)?.label.toLowerCase()} players yet.`}
               </Text>
             </View>
           }
@@ -133,8 +136,11 @@ export default function LeaderboardScreen() {
   );
 }
 
-function PlayerRow({ player, rank, isMe, mode }: {
-  player: any; rank: number; isMe: boolean; mode: Mode;
+// Individual board row (Overall / Solo). Every board ranks by ELO now,
+// so the display is the same on all of them: rank tier (or raw ELO at
+// obsidian) + global match count and win rate.
+function PlayerRow({ player, rank, isMe }: {
+  player: any; rank: number; isMe: boolean;
 }) {
   const c = useCensor();
   const r = rankForElo(player.elo);
@@ -145,25 +151,12 @@ function PlayerRow({ player, rank, isMe, mode }: {
     rank === 2 ? '#c0c0c0' :
     rank === 3 ? '#a1673a' : C.textDim;
 
-  // Overall board → ELO + win-rate meta. Mode board → wins + W/L meta.
-  let statValue: string;
-  let statLabel: string;
-  let metaLine: string;
-  if (mode === 'all') {
-    const winRate = player.total_matches > 0
-      ? Math.round((player.total_wins / player.total_matches) * 100)
-      : 0;
-    statValue = r.isObsidian ? String(player.elo) : r.shortLabel;
-    statLabel = r.isObsidian ? 'ELO' : 'RANK';
-    metaLine = `${player.total_matches}M · ${winRate}% WR`;
-  } else {
-    const wins = player.mode_wins ?? 0;
-    const matches = player.mode_matches ?? 0;
-    const wr = matches > 0 ? Math.round((wins / matches) * 100) : 0;
-    statValue = String(wins);
-    statLabel = 'WINS';
-    metaLine = `${matches} played · ${wr}% WR`;
-  }
+  const winRate = player.total_matches > 0
+    ? Math.round((player.total_wins / player.total_matches) * 100)
+    : 0;
+  const statValue = r.isObsidian ? String(player.elo) : r.shortLabel;
+  const statLabel = r.isObsidian ? 'ELO' : 'RANK';
+  const metaLine = `${player.total_matches}M · ${winRate}% WR`;
 
   return (
     <TouchableOpacity
@@ -193,6 +186,47 @@ function PlayerRow({ player, rank, isMe, mode }: {
       <View style={styles.eloBox}>
         <Text style={[styles.elo, { color: eloColor }]}>{statValue}</Text>
         <Text style={styles.eloLabel}>{statLabel}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// Team board row (Duo / Squad). Shows the team name + its ELO (the
+// average of its members' ratings, computed server-side) and highlights
+// teams the current user belongs to. Tapping opens the clan screen.
+function TeamRow({ team, rank }: { team: any; rank: number }) {
+  const c = useCensor();
+  const isMine = !!team.is_mine;
+
+  const medalColor =
+    rank === 1 ? C.gold :
+    rank === 2 ? '#c0c0c0' :
+    rank === 3 ? '#a1673a' : C.textDim;
+
+  const winRate = team.total_matches > 0
+    ? Math.round((team.total_wins / team.total_matches) * 100)
+    : 0;
+
+  return (
+    <TouchableOpacity
+      style={[styles.row, isMine && styles.rowMe]}
+      onPress={() => router.push(`/clan/${team.clan_id}` as any)}
+      activeOpacity={0.7}
+    >
+      <Text style={[styles.rank, { color: medalColor, fontFamily: rank <= 3 ? F.serif : undefined }]}>
+        {rank <= 3 ? ['I', 'II', 'III'][rank - 1] : `#${rank}`}
+      </Text>
+      <UserAvatar username={team.name} avatarUrl={team.avatar_url} size={40} borderRadius={8} />
+      <View style={{ flex: 1 }}>
+        <View style={styles.nameRow}>
+          <Text style={styles.username} numberOfLines={1}>{c(team.name)}</Text>
+          {isMine && <Text style={styles.youBadge}>Yours</Text>}
+        </View>
+        <Text style={styles.meta}>{team.member_count} members · {winRate}% WR</Text>
+      </View>
+      <View style={styles.eloBox}>
+        <Text style={[styles.elo, { color: C.gold }]}>{team.team_elo}</Text>
+        <Text style={styles.eloLabel}>TEAM ELO</Text>
       </View>
     </TouchableOpacity>
   );
