@@ -432,7 +432,7 @@ router.delete('/admin/wipe-matches', async (req, res) => {
     if (resetStats) {
       const { rowCount } = await client.query(
         `UPDATE users
-            SET elo = 1200,
+            SET elo = 100,
                 total_matches = 0,
                 total_wins = 0,
                 total_ties = 0`

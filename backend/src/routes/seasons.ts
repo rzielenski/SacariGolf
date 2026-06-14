@@ -117,7 +117,7 @@ router.get('/current', requireAuth, wrap(async (req: AuthRequest, res: Response)
     `SELECT elo FROM users WHERE user_id = $1`,
     [req.userId]
   );
-  const elo = uRows[0]?.elo ?? 1200;
+  const elo = uRows[0]?.elo ?? 100;
   const division = divisionForElo(elo);
   const next = nextDivision(division);
 
@@ -202,7 +202,7 @@ router.get('/current/standings', requireAuth, wrap(async (req: AuthRequest, res:
     band = { min: d.min, max: d.max === Infinity ? Number.MAX_SAFE_INTEGER : d.max };
   } else {
     const { rows } = await pool.query(`SELECT elo FROM users WHERE user_id = $1`, [req.userId]);
-    const d = divisionForElo(rows[0]?.elo ?? 1200);
+    const d = divisionForElo(rows[0]?.elo ?? 100);
     band = { min: d.min, max: d.max === Infinity ? Number.MAX_SAFE_INTEGER : d.max };
   }
 

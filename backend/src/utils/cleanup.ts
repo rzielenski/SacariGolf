@@ -215,10 +215,10 @@ export async function runPairingPass() {
           ORDER BY ABS(
             COALESCE((SELECT AVG(u.elo) FROM match_players mp_x
                       JOIN users u ON u.user_id = mp_x.user_id
-                      WHERE mp_x.match_id = $1), 1200) -
+                      WHERE mp_x.match_id = $1), 100) -
             COALESCE((SELECT AVG(u.elo) FROM match_players mp_y
                       JOIN users u ON u.user_id = mp_y.user_id
-                      WHERE mp_y.match_id = m2.match_id), 1200)
+                      WHERE mp_y.match_id = m2.match_id), 100)
           )
           LIMIT 1`,
         [m.match_id, m.match_type, m.format, m.num_holes]
@@ -351,10 +351,10 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
         ORDER BY ABS(
           COALESCE((SELECT AVG(u.elo) FROM match_players mpx
                     JOIN users u ON u.user_id = mpx.user_id
-                    WHERE mpx.match_id = $1), 1200) -
+                    WHERE mpx.match_id = $1), 100) -
           COALESCE((SELECT AVG(u.elo) FROM match_players mpy
                     JOIN users u ON u.user_id = mpy.user_id
-                    WHERE mpy.match_id = m2.match_id), 1200)
+                    WHERE mpy.match_id = m2.match_id), 100)
         )
         LIMIT 1`,
       [m.match_id, m.match_type, m.format, m.num_holes]

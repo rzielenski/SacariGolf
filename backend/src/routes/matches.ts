@@ -5,6 +5,7 @@ import { sendPush } from '../utils/notify';
 import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
+import { currentSeason } from './seasons';
 
 const router = Router();
 
@@ -17,6 +18,58 @@ function kFactor(totalMatches: number, elo: number) {
   if (totalMatches < 30) return 32;
   if (elo >= 2400) return 16;
   return 24;
+}
+
+// ── Ranked-climb shaping (League-style) ───────────────────────────────
+// Two levers make the ladder feel climbable instead of glacial:
+//   • PLACEMENTS — your first few ranked matches each SEASON swing much
+//     harder (both ways), so a new or returning player rockets to their
+//     true rank instead of grinding up from the floor. This is what lets
+//     you "skip divisions": a placement win can be worth a whole band.
+//   • MINIMUM WIN — every win moves you up by at least a floor amount, so
+//     beating a weaker opponent still progresses you (the classic "I won
+//     but gained +1" stall at the top of a band is gone).
+// The seasonal partial reset (utils/cleanup.ts) mops up the mild ELO
+// inflation the minimum-win floor introduces, so it stays self-correcting.
+const PLACEMENT_MATCHES = 5;          // mirrors seasons.ts
+const PLACEMENT_MULTIPLIER = 3;       // placement results swing 3x
+const PLACEMENT_MIN_WIN_DELTA = 50;   // a placement WIN is at least this
+const MIN_WIN_DELTA = 12;             // any other win is at least this
+
+/** Set of user_ids still in their season placements — fewer than
+ *  PLACEMENT_MATCHES completed ranked matches THIS season (excluding the
+ *  match currently resolving). Those players get the big placement swing. */
+async function placementUserSet(
+  client: any, userIds: string[], excludeMatchId: string,
+): Promise<Set<string>> {
+  if (!userIds.length) return new Set();
+  const season = currentSeason();
+  const { rows } = await client.query(
+    `SELECT mp.user_id, COUNT(*)::int AS n
+       FROM match_results mr
+       JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
+       JOIN match_players mp ON mp.match_id = mr.match_id
+      WHERE mp.user_id = ANY($1)
+        AND mr.match_id <> $2
+        AND mr.created_at >= $3 AND mr.created_at < $4
+      GROUP BY mp.user_id`,
+    [userIds, excludeMatchId, season.starts_at, season.ends_at]
+  );
+  const counts = new Map<string, number>(rows.map((r: any) => [r.user_id, r.n]));
+  return new Set(userIds.filter((id) => (counts.get(id) ?? 0) < PLACEMENT_MATCHES));
+}
+
+/** Shape a base signed ELO delta: apply the placement multiplier, then
+ *  floor a win to its minimum. Placement losses scale 3x too (you fall to
+ *  your true rank fast); losses are otherwise left as computed. */
+function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
+  let d = isPlacement ? base * PLACEMENT_MULTIPLIER : base;
+  d = Math.round(d);
+  if (won) {
+    const floor = isPlacement ? PLACEMENT_MIN_WIN_DELTA : MIN_WIN_DELTA;
+    if (d < floor) d = floor;
+  }
+  return d;
 }
 
 // Score differential scaled to an 18-hole equivalent so players on different
@@ -251,10 +304,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
          ORDER BY ABS(
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
                      JOIN users u ON u.user_id = mp_a.user_id
-                     WHERE mp_a.match_id = $1), 1200) -
+                     WHERE mp_a.match_id = $1), 100) -
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_b
                      JOIN users u ON u.user_id = mp_b.user_id
-                     WHERE mp_b.match_id = m.match_id), 1200)
+                     WHERE mp_b.match_id = m.match_id), 100)
          )
          LIMIT 1
          FOR UPDATE SKIP LOCKED`,
@@ -582,20 +635,31 @@ export async function resolveLinkedPair(
   const perkByUser = new Map<string, string>(perkRows.map((r: any) => [r.user_id, r.perk_id]));
   const perkConsumed = new Set<string>();
 
-  const applySide = async (ps: any[], delta: number, sideWon: boolean) => {
+  // Placement shaping. The shared player is on BOTH sides, so each side's
+  // final delta is tracked separately — their match-A screen should show
+  // their side-A delta, their match-B screen the side-B delta.
+  const placementSet = await placementUserSet(client, allIds, matchAId);
+  const curDeltas: Record<string, number> = {};
+  const parDeltas: Record<string, number> = {};
+
+  const applySide = async (
+    ps: any[], delta: number, sideWon: boolean, into: Record<string, number>,
+  ) => {
     for (const p of ps) {
-      let eloChange = delta;
+      let eloChange = shapeDelta(delta, sideWon, placementSet.has(p.user_id));
       const perkId = perkByUser.get(p.user_id);
       // A shared player can appear on both sides; let their perk fire once.
-      if (perkId && delta !== 0 && !perkConsumed.has(p.user_id)) {
+      if (perkId && eloChange !== 0 && !perkConsumed.has(p.user_id)) {
+        const before = eloChange;
         if (eloChange < 0) eloChange = 0; else eloChange = eloChange * 2;
         perkConsumed.add(p.user_id);
         await client.query(
           `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
           [perkId, matchAId]
         );
-        perkApplications.push({ user_id: p.user_id, original: delta, adjusted: eloChange, type: 'lucky_round' });
+        perkApplications.push({ user_id: p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
       }
+      into[p.user_id] = eloChange;
       await client.query(
         `UPDATE users
          SET elo = GREATEST(100, elo + $1),
@@ -607,12 +671,13 @@ export async function resolveLinkedPair(
       );
     }
   };
-  await applySide(curPlayers, curDelta, !isTie && curWins);
-  await applySide(parPlayers, parDelta, !isTie && !curWins);
+  await applySide(curPlayers, curDelta, !isTie && curWins, curDeltas);
+  await applySide(parPlayers, parDelta, !isTie && !curWins, parDeltas);
 
   const writeResult = async (
     matchId: string, s1: any[], s2: any[],
     s1Diff: number, s2Diff: number, s1Delta: number, s2Delta: number, s1Won: boolean,
+    playerDeltas: Record<string, number>,
   ) => {
     await client.query(
       `INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
@@ -629,6 +694,7 @@ export async function resolveLinkedPair(
           tied: isTie,
           side1DeltaSignedElo: s1Delta,
           side2DeltaSignedElo: s2Delta,
+          playerDeltas,
           perks: perkApplications,
           format: matchFormat,
           formatDetails,
@@ -646,8 +712,10 @@ export async function resolveLinkedPair(
     );
   };
 
-  await writeResult(matchAId, curPlayers, parPlayers, curDiff, parDiff, curDelta, parDelta, curWins);
-  await writeResult(matchBId, parPlayers, curPlayers, parDiff, curDiff, parDelta, curDelta, !isTie && !curWins);
+  // Each row's playerDeltas favors ITS side-1 players (the shared player's
+  // side-appropriate delta wins the merge).
+  await writeResult(matchAId, curPlayers, parPlayers, curDiff, parDiff, curDelta, parDelta, curWins, { ...parDeltas, ...curDeltas });
+  await writeResult(matchBId, parPlayers, curPlayers, parDiff, curDiff, parDelta, curDelta, !isTie && !curWins, { ...curDeltas, ...parDeltas });
 
   return {
     linked: true,
@@ -697,16 +765,24 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     const result = resultRows[0];
     const me = players.find((p: any) => p.user_id === req.userId);
     if (me) {
-      if (result.winner_side === null) {
+      // Prefer the per-player delta (placement + perk already baked in;
+      // also the only correct source for FFA). Fall back to the side-level
+      // value for legacy result rows written before playerDeltas existed.
+      const pd = result.details?.playerDeltas;
+      const mine = pd && req.userId ? pd[req.userId] : undefined;
+      if (mine != null) {
+        my_delta_elo = mine;
+      } else if (result.winner_side === null) {
         const key = me.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
         my_delta_elo = result.details?.[key] ?? 0;
       } else {
         my_delta_elo = result.winner_side === me.side ? result.delta_elo : -result.delta_elo;
       }
-      // Apply perk override if I consumed one on this match
+      // Perk badge for the result screen. The delta override only matters
+      // for legacy rows — playerDeltas already includes the perk.
       const perks = result.details?.perks ?? [];
       my_perk = perks.find((pa: any) => pa.user_id === req.userId) ?? null;
-      if (my_perk) my_delta_elo = my_perk.adjusted;
+      if (my_perk && mine == null) my_delta_elo = my_perk.adjusted;
     }
   }
 
@@ -778,7 +854,13 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // Compute signed my_delta_elo per row, honoring perks.
   const decorated = rows.map((r) => {
     let my_delta_elo: number | null = null;
-    if (r.delta_elo != null && r.my_side != null) {
+    // Prefer the per-player delta (placement + perk baked in; correct for
+    // FFA too). Fall back to the side-level value for legacy rows.
+    const pd = r.details?.playerDeltas;
+    const mine = pd && req.userId ? pd[req.userId] : undefined;
+    if (mine != null) {
+      my_delta_elo = mine;
+    } else if (r.delta_elo != null && r.my_side != null) {
       if (r.winner_side == null) {
         const key = r.my_side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
         my_delta_elo = r.details?.[key] ?? 0;
@@ -1257,27 +1339,37 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         perkRows.map((r: any) => [r.user_id, r.perk_id])
       );
 
+      // Placement status per player + the actual signed delta each player
+      // ends up with (after placement shaping + perk), so the result screen
+      // shows the real number instead of the side-level approximation.
+      const placementSet = await placementUserSet(client, allPlayerIds, matchId);
+      const playerDeltas: Record<string, number> = {};
+
       for (const p of [...side1Players, ...side2Players]) {
         const onSide1 = side1Players.includes(p);
         const baseChange = onSide1 ? side1Delta : side2Delta;
         const won = !isTie && onSide1 === side1Wins;
 
+        // Placement multiplier + minimum-win floor (see shapeDelta).
+        let eloChange = shapeDelta(baseChange, won, placementSet.has(p.user_id));
+
         // Check for an unused 'lucky_round' perk and apply it.
         // - Loss  → set ELO change to 0 (loss prevention)
         // - Win   → double the ELO gain
         // - 0 ELO → don't consume (no benefit; nothing to absorb or double)
-        let eloChange = baseChange;
         const perkId = perkByUser.get(p.user_id);
-        if (perkId && baseChange !== 0) {
+        if (perkId && eloChange !== 0) {
+          const before = eloChange;
           if (eloChange < 0) eloChange = 0;
           else eloChange = eloChange * 2;
           await client.query(
             `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
             [perkId, matchId]
           );
-          perkApplications.push({ user_id: p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+          perkApplications.push({ user_id: p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
         }
 
+        playerDeltas[p.user_id] = eloChange;
         await client.query(
           `UPDATE users
            SET elo = GREATEST(100, elo + $1),
@@ -1306,6 +1398,9 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
             tied: isTie,
             side1DeltaSignedElo: side1Delta,
             side2DeltaSignedElo: side2Delta,
+            // Per-player final signed delta (placement + perk shaped). The
+            // read endpoints prefer this over the side-level value.
+            playerDeltas,
             perks: perkApplications,
             // Stableford / match_play / skins details so the result screen
             // can render "12 to 9 in points" / "won 5&3" / "8 skins to 4" etc.
@@ -1471,20 +1566,27 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       const perkByUser = new Map<string, string>(perkRows.map((r: any) => [r.user_id, r.perk_id]));
       const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
 
+      const placementSet = await placementUserSet(client, allPlayerIds, matchId);
+      const playerDeltas: Record<string, number> = {};
+
       for (const e of entries) {
         const baseRaw = (deltaByUser.get(e.p.user_id) ?? 0) / divisor;
         const baseChange = Math.round(baseRaw);
-        let eloChange = baseChange;
+        // Placement multiplier + min-win floor. A net-positive field result
+        // counts as a "win" for the floor.
+        let eloChange = shapeDelta(baseChange, baseChange > 0, placementSet.has(e.p.user_id));
         const perkId = perkByUser.get(e.p.user_id);
-        if (perkId && baseChange !== 0) {
+        if (perkId && eloChange !== 0) {
+          const before = eloChange;
           if (eloChange < 0) eloChange = 0;
           else eloChange = eloChange * 2;
           await client.query(
             `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
             [perkId, matchId]
           );
-          perkApplications.push({ user_id: e.p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+          perkApplications.push({ user_id: e.p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
         }
+        playerDeltas[e.p.user_id] = eloChange;
 
         const place = placementByUser.get(e.p.user_id) ?? 0;
         const isWinner = place === 1;
@@ -1513,7 +1615,9 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         place: placementByUser.get(e.p.user_id) ?? 0,
         strokes: e.p.strokes,
         diff: e.diff,
-        delta_elo_signed: Math.round((deltaByUser.get(e.p.user_id) ?? 0) / divisor),
+        // The ACTUAL applied change (placement + perk shaped), not the raw
+        // pre-shaping value.
+        delta_elo_signed: playerDeltas[e.p.user_id] ?? 0,
         stableford_points: e.rawPoints,
       }));
 
@@ -1539,6 +1643,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           JSON.stringify({
             ffa: true,
             placements,
+            playerDeltas,
             tied: isOverallTie,
             perks: perkApplications,
             format: matchFormat,
@@ -1726,24 +1831,30 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     // Decorate the response with the submitter's signed ELO delta so the
     // client doesn't have to figure out which side they were on.
     if (result) {
-      const tied = result.tied || result.winnerSide === null;
-      const submitterIsSide1 = myeSide === 1;
-      const baseDelta = result.deltaElo ?? 0;
-      if (tied) {
-        const { rows: mrRows } = await client.query(
-          `SELECT details FROM match_results WHERE match_id = $1`,
-          [req.params.id]
-        );
-        const details = mrRows[0]?.details;
-        const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
-        result.myDeltaElo = details?.[key] ?? 0;
+      const { rows: mrRows } = await client.query(
+        `SELECT details FROM match_results WHERE match_id = $1`,
+        [req.params.id]
+      );
+      const details = mrRows[0]?.details;
+      // Prefer the per-player delta (placement + perk baked in). Fall back
+      // to the side-level computation for legacy rows.
+      const mine = details?.playerDeltas && req.userId ? details.playerDeltas[req.userId] : undefined;
+      if (mine != null) {
+        result.myDeltaElo = mine;
       } else {
-        const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
-        result.myDeltaElo = won ? baseDelta : -baseDelta;
+        const tied = result.tied || result.winnerSide === null;
+        const submitterIsSide1 = myeSide === 1;
+        const baseDelta = result.deltaElo ?? 0;
+        if (tied) {
+          const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+          result.myDeltaElo = details?.[key] ?? 0;
+        } else {
+          const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
+          result.myDeltaElo = won ? baseDelta : -baseDelta;
+        }
+        const myPerk = (result.perks ?? []).find((pa: any) => pa.user_id === req.userId);
+        if (myPerk) result.myDeltaElo = myPerk.adjusted;
       }
-      // Override with per-player perk-adjusted delta if the submitter consumed a perk
-      const myPerk = (result.perks ?? []).find((pa: any) => pa.user_id === req.userId);
-      if (myPerk) result.myDeltaElo = myPerk.adjusted;
     }
 
     // Surface whether THIS submission earned the user a fresh perk
@@ -1779,10 +1890,14 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           const tied = winnerSide == null;
           const won = !tied && row.side === winnerSide;
           const key = row.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
-          let delta: number = detailsBlob[key] ?? 0;
-          // Apply per-player perk override if any
-          const perk = (detailsBlob.perks ?? []).find((p: any) => p.user_id === row.user_id);
-          if (perk) delta = perk.adjusted;
+          // Per-player delta (placement + perk baked in) preferred; legacy
+          // rows fall back to the side-level value + perk override.
+          const perPlayer = detailsBlob.playerDeltas?.[row.user_id];
+          let delta: number = perPlayer ?? detailsBlob[key] ?? 0;
+          if (perPlayer == null) {
+            const perk = (detailsBlob.perks ?? []).find((p: any) => p.user_id === row.user_id);
+            if (perk) delta = perk.adjusted;
+          }
           const sign = delta > 0 ? '+' : '';
           const title = tied ? 'Match drawn' : won ? 'You won!' : 'Match decided';
           const body = tied
