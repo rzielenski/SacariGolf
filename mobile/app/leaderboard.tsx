@@ -136,9 +136,9 @@ export default function LeaderboardScreen() {
   );
 }
 
-// Individual board row (Overall / Solo). Every board ranks by ELO now,
-// so the display is the same on all of them: rank tier (or raw ELO at
-// obsidian) + global match count and win rate.
+// Individual board row (Overall / Solo). Every board ranks by ELO and
+// shows the raw ELO number as the headline stat (rank tier still drives
+// the accent color + the meta line for context).
 function PlayerRow({ player, rank, isMe }: {
   player: any; rank: number; isMe: boolean;
 }) {
@@ -154,9 +154,9 @@ function PlayerRow({ player, rank, isMe }: {
   const winRate = player.total_matches > 0
     ? Math.round((player.total_wins / player.total_matches) * 100)
     : 0;
-  const statValue = r.isObsidian ? String(player.elo) : r.shortLabel;
-  const statLabel = r.isObsidian ? 'ELO' : 'RANK';
-  const metaLine = `${player.total_matches}M · ${winRate}% WR`;
+  const statValue = String(player.elo);
+  const statLabel = 'ELO';
+  const metaLine = `${r.label} · ${player.total_matches}M · ${winRate}% WR`;
 
   return (
     <TouchableOpacity
