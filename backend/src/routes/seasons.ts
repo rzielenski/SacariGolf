@@ -76,7 +76,7 @@ function nextDivision(d: Division): Division | null {
  *   • SUMMER — May 1 → Nov 1 (the May-through-October playing season).
  *   • WINTER — Nov 1 → May 1 (the off-season; spans the year boundary).
  *  Six months each, so the division climb carries real weight before reset. */
-function currentSeason() {
+export function currentSeason() {
   const now = new Date();
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth(); // 0 = Jan

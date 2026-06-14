@@ -40,6 +40,7 @@ const LOCK_STALE_MATCHES = 42101;
 const LOCK_PAIRING       = 42102;
 const LOCK_FEED_BACKFILL = 42103;
 const LOCK_WEEKLY_CUP    = 42104;
+const LOCK_ELO_RESET     = 42105;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -464,6 +465,88 @@ let cleanupHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
+let seasonResetHandle: ReturnType<typeof setInterval> | null = null;
+
+// ── Partial ELO reset at season rollover ──────────────────────────────
+// Anchor + retention for the soft reset: at each new competitive season,
+// every rating is pulled halfway back toward the new-player baseline:
+//   new = ANCHOR + (elo - ANCHOR) * KEEP   (floored at ANCHOR)
+// 100 = the users.elo starting value; 0.5 = "Standard" strength. Skill
+// order is preserved (a higher rating still resets higher), but the
+// spread compresses so each season is a fresh climb.
+const ELO_RESET_ANCHOR = 100;
+const ELO_RESET_KEEP = 0.5;
+
+/**
+ * Apply the partial ELO reset ONCE per season rollover.
+ *
+ * The competitive season id (e.g. "2026-summer") comes from seasons.ts.
+ * We track the last season we reset for in app_config.elo_reset_season:
+ *   • unset (first ever run) → record the CURRENT season as the baseline
+ *     and do NOT reset. This is critical — it stops a deploy in the middle
+ *     of a season from nuking everyone's ELO immediately. The reset only
+ *     fires when the season id actually CHANGES afterward.
+ *   • same as current → nothing to do.
+ *   • different → a rollover happened → apply the reset to every user,
+ *     then record the new season id.
+ *
+ * The whole thing runs under a FOR UPDATE lock on the config row (plus the
+ * cron advisory lock), so overlapping instances can't double-apply it.
+ */
+async function applySeasonEloReset(): Promise<void> {
+  const { currentSeason } = await import('../routes/seasons');
+  const seasonId: string = currentSeason().id;
+
+  const { rows } = await pool.query(
+    `SELECT value FROM app_config WHERE key = 'elo_reset_season'`
+  );
+  const lastId = typeof rows[0]?.value === 'string' ? rows[0].value : null;
+
+  if (!lastId) {
+    // First run: establish the baseline season, never reset mid-season.
+    await pool.query(
+      `INSERT INTO app_config (key, value, updated_at)
+       VALUES ('elo_reset_season', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify(seasonId)]
+    );
+    console.log(`[season] ELO-reset baseline set to ${seasonId} (no reset on first run)`);
+    return;
+  }
+  if (lastId === seasonId) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Re-read under a row lock so a second instance that already applied
+    // the reset this rollover makes us a no-op.
+    const { rows: chk } = await client.query(
+      `SELECT value FROM app_config WHERE key = 'elo_reset_season' FOR UPDATE`
+    );
+    const curLast = typeof chk[0]?.value === 'string' ? chk[0].value : null;
+    if (curLast === seasonId) { await client.query('ROLLBACK'); return; }
+
+    const { rowCount } = await client.query(
+      `UPDATE users
+          SET elo = GREATEST($1, ROUND($1 + (elo - $1) * $2))::int
+        WHERE elo > $1`,
+      [ELO_RESET_ANCHOR, ELO_RESET_KEEP]
+    );
+    await client.query(
+      `INSERT INTO app_config (key, value, updated_at)
+       VALUES ('elo_reset_season', $1::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify(seasonId)]
+    );
+    await client.query('COMMIT');
+    console.log(`[season] partial ELO reset applied for ${seasonId}: ${rowCount} users`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('[season] ELO reset failed:', err);
+  } finally {
+    client.release();
+  }
+}
 
 export function startCleanupSchedule() {
   // Re-entrancy: stop any previously-running intervals first. If the module
@@ -478,9 +561,16 @@ export function startCleanupSchedule() {
   const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
   const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
+  const eloResetTick = () => withCronLock(LOCK_ELO_RESET, applySeasonEloReset);
 
   staleTick();
   cleanupHandle = setInterval(staleTick, 60 * 60 * 1000);
+
+  // Partial ELO reset at season rollover. Checked hourly — the boundary is
+  // a 6-month one, so hourly is plenty to catch it within an hour of the
+  // new season starting. Runs once on boot to establish the baseline.
+  eloResetTick();
+  seasonResetHandle = setInterval(eloResetTick, 60 * 60 * 1000);
 
   // Pairing runs more frequently than cleanup — every minute. Cheap query
   // (filtered by indexed columns + a small subset of recent matches).
@@ -525,4 +615,5 @@ export function stopCleanupSchedule() {
   if (pairingHandle) { clearInterval(pairingHandle); pairingHandle = null; }
   if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
   if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }
+  if (seasonResetHandle) { clearInterval(seasonResetHandle); seasonResetHandle = null; }
 }
