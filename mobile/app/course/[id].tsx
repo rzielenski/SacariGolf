@@ -126,7 +126,6 @@ export default function CourseInfoScreen() {
         onPress={() => router.push({ pathname: '/match/scoring/[id]', params: { id: 'preview', preview: '1', course: id } } as any)}
         activeOpacity={0.85}
       >
-        <Text style={styles.previewBtnIcon}>⛳</Text>
         <View style={{ flex: 1 }}>
           <Text style={styles.previewBtnTitle}>Course Preview</Text>
           <Text style={styles.previewBtnSub}>Walk every hole · rangefinder · club heatmaps</Text>
@@ -241,7 +240,7 @@ export default function CourseInfoScreen() {
         onPress={() => router.push(`/course/admin-pins/${id}` as any)}
         activeOpacity={0.7}
       >
-        <Text style={styles.adminBtnText}>📍 Place / Correct Pins</Text>
+        <Text style={styles.adminBtnText}>Place / Correct Pins</Text>
       </TouchableOpacity>
 
       {/* Mark tee boxes — powers the Course Preview's tee→green lines. Per
@@ -251,7 +250,7 @@ export default function CourseInfoScreen() {
         onPress={() => router.push(`/course/admin-tees/${id}` as any)}
         activeOpacity={0.7}
       >
-        <Text style={styles.adminBtnText}>⛳ Mark Tee Boxes</Text>
+        <Text style={styles.adminBtnText}>Mark Tee Boxes</Text>
       </TouchableOpacity>
 
       <ScorecardModal
@@ -560,7 +559,6 @@ const styles = StyleSheet.create({
     marginHorizontal: 20, marginTop: 16, padding: 16, borderRadius: 10,
     backgroundColor: C.gold + '14', borderWidth: 1, borderColor: C.gold + '66',
   },
-  previewBtnIcon: { fontSize: 26 },
   previewBtnTitle: { color: C.gold, fontWeight: '900', fontSize: 16 },
   previewBtnSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   previewBtnChev: { color: C.gold, fontSize: 24, fontWeight: '300' },

@@ -857,15 +857,40 @@ export default function ScoringScreen() {
 
   // Location tracking handled by useLocation hook (declared above).
 
-  // Follow user on map
+  // Follow user on map (live rounds only — preview frames the hole instead).
   useEffect(() => {
+    if (preview) return;
     if (following && onCourse && userCoord && mapRef.current) {
       mapRef.current.animateToRegion(
         { latitude: userCoord.latitude, longitude: userCoord.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
         400,
       );
     }
-  }, [userCoord, following, onCourse]);
+  }, [userCoord, following, onCourse, preview]);
+
+  // Preview: frame the current hole (tee → green) whenever you switch holes.
+  useEffect(() => {
+    if (!preview || !mapRef.current) return;
+    const h: any = holes[currentHole];
+    if (!h) return;
+    const pts: { lat: number; lng: number }[] = [];
+    if (typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') pts.push({ lat: h.tee_lat, lng: h.tee_lng });
+    if (typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') pts.push({ lat: h.pin_lat, lng: h.pin_lng });
+    if (!pts.length) {
+      const cl = Number((course as any)?.latitude), cn = Number((course as any)?.longitude);
+      if (Number.isFinite(cl) && Number.isFinite(cn)) pts.push({ lat: cl, lng: cn });
+    }
+    if (!pts.length) return;
+    const lats = pts.map((p) => p.lat), lngs = pts.map((p) => p.lng);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+    mapRef.current.animateToRegion({
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLng + maxLng) / 2,
+      latitudeDelta: Math.max((maxLat - minLat) * 1.8, 0.0025),
+      longitudeDelta: Math.max((maxLng - minLng) * 1.8, 0.0025),
+    }, 600);
+  }, [preview, currentHole, holes, course]);
 
   // ── Course selection helpers ─────────────────────────────────────────────────
 
@@ -2408,7 +2433,7 @@ export default function ScoringScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         initialRegion={initialRegion}
-        showsUserLocation={locGranted}
+        showsUserLocation={locGranted && !preview}
         showsMyLocationButton={false}
         showsCompass
         mapType="satellite"
@@ -2416,7 +2441,9 @@ export default function ScoringScreen() {
         // into userCoord. This is the same source as the blue user dot, which
         // field reports showed staying live while the expo-location watch
         // froze and left distances/measure-line stuck at a stale position.
-        onUserLocationChange={(e) => noteMapFix(e.nativeEvent.coordinate as any)}
+        // In preview the player is pinned to the tee, so we ignore this stream
+        // entirely (otherwise it overwrites the forced tee with real GPS).
+        onUserLocationChange={preview ? undefined : (e) => noteMapFix(e.nativeEvent.coordinate as any)}
         onPress={(e) => {
           // Suppress the single phantom tap that bleeds through from the
           // Clear button overlay. Consume the flag on the very next event so
