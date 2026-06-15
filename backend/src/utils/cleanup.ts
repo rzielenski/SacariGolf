@@ -41,6 +41,7 @@ const LOCK_PAIRING       = 42102;
 const LOCK_FEED_BACKFILL = 42103;
 const LOCK_WEEKLY_CUP    = 42104;
 const LOCK_ELO_RESET     = 42105;
+const LOCK_UNPAIR        = 42106;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -379,8 +380,8 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
         [m.match_id, oppId]
       );
       if (chk.length === 2) {
-        await client.query(`UPDATE matches SET paired_match_id = $2 WHERE match_id = $1`, [m.match_id, oppId]);
-        await client.query(`UPDATE matches SET paired_match_id = $1 WHERE match_id = $2`, [m.match_id, oppId]);
+        await client.query(`UPDATE matches SET paired_match_id = $2, paired_at = NOW() WHERE match_id = $1`, [m.match_id, oppId]);
+        await client.query(`UPDATE matches SET paired_match_id = $1, paired_at = NOW() WHERE match_id = $2`, [m.match_id, oppId]);
         // If BOTH teams already finished their rounds — a finished-and-
         // waiting backlog pair we just connected — resolve right now in the
         // same transaction (atomic with the link). resolveLinkedPair is a
@@ -402,6 +403,119 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
     } finally {
       client.release();
     }
+  }
+}
+
+/** True when every player on a match has finished their round (and there is
+ *  at least one player). A linked match is one team, so this is that team's
+ *  "side complete" signal. */
+async function sideComplete(client: any, matchId: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE NOT completed) AS pending
+       FROM match_players WHERE match_id = $1`,
+    [matchId],
+  );
+  const total = Number(rows[0]?.total ?? 0);
+  const pending = Number(rows[0]?.pending ?? 0);
+  return total > 0 && pending === 0;
+}
+
+/**
+ * Release linked pairs that have gone stale. If a match has been linked
+ * (paired_match_id set) for more than 3 days and the pair still hasn't
+ * resolved (one side never finished their round), un-pair both so the side
+ * that DID finish can search for a fresh opponent. The side(s) that never
+ * finished are cancelled (they abandoned) — that also stops the two from
+ * simply re-linking to each other on the next pairing tick.
+ *
+ *   • both sides done (rare — would normally have resolved): un-pair + reopen
+ *     both so the next pairing pass re-links and resolves them.
+ *   • one side done: reopen the finished side (reset created_at so the pairing
+ *     windows include it again), cancel the unfinished side.
+ *   • neither done: cancel both — nobody played.
+ *
+ * Backfilled to the current backlog via matches.paired_at = created_at.
+ */
+export async function unpairStaleLinkedMatches() {
+  try {
+    const { rows: stale } = await pool.query(
+      `SELECT m.match_id, m.paired_match_id
+         FROM matches m
+        WHERE m.paired_match_id IS NOT NULL
+          AND m.completed = false
+          AND m.cancelled = false
+          AND m.is_practice = false
+          AND m.paired_at IS NOT NULL
+          AND m.paired_at < NOW() - INTERVAL '3 days'`,
+    );
+
+    const handled = new Set<string>();
+    for (const row of stale) {
+      const a = row.match_id as string;
+      const b = row.paired_match_id as string;
+      if (handled.has(a) || handled.has(b)) continue;
+      handled.add(a); handled.add(b);
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Lock both and re-verify they're still a mutually-linked, unresolved
+        // pair (another tick / a late submit may have changed things).
+        const { rows: chk } = await client.query(
+          `SELECT match_id, paired_match_id, completed, cancelled
+             FROM matches WHERE match_id IN ($1, $2) FOR UPDATE`,
+          [a, b],
+        );
+        const ma = chk.find((r: any) => r.match_id === a);
+        const mb = chk.find((r: any) => r.match_id === b);
+        if (!ma || !mb
+            || ma.paired_match_id !== b || mb.paired_match_id !== a
+            || ma.completed || mb.completed || ma.cancelled || mb.cancelled) {
+          await client.query('ROLLBACK');
+          continue;
+        }
+
+        const aDone = await sideComplete(client, a);
+        const bDone = await sideComplete(client, b);
+
+        // Un-pair both.
+        await client.query(
+          `UPDATE matches SET paired_match_id = NULL, paired_at = NULL WHERE match_id IN ($1, $2)`,
+          [a, b],
+        );
+
+        const reopen: string[] = [];
+        const cancel: string[] = [];
+        (aDone ? reopen : cancel).push(a);
+        (bDone ? reopen : cancel).push(b);
+
+        // Reopen finished side(s): reset created_at so the pairing windows
+        // (merge 24h / linked 30d) treat them as freshly searching.
+        if (reopen.length) {
+          await client.query(
+            `UPDATE matches SET created_at = NOW() WHERE match_id = ANY($1)`,
+            [reopen],
+          );
+        }
+        // Cancel abandoned side(s).
+        if (cancel.length) {
+          await client.query(
+            `UPDATE matches SET cancelled = true WHERE match_id = ANY($1)`,
+            [cancel],
+          );
+        }
+
+        await client.query('COMMIT');
+        console.log(`[unpair] released stale linked pair ${a} <-> ${b} (reopen=${reopen.length}, cancel=${cancel.length})`);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[unpair] pair release failed', err);
+      } finally {
+        client.release();
+      }
+    }
+  } catch (err) {
+    console.error('[unpair] unpairStaleLinkedMatches failed:', err);
   }
 }
 
@@ -462,6 +576,7 @@ export async function backfillRoundPosts() {
 // the process state so this only matters in dev, but it's the kind of
 // drift that takes hours to track down once it surfaces.
 let cleanupHandle: ReturnType<typeof setInterval> | null = null;
+let unpairHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
@@ -558,6 +673,7 @@ export function startCleanupSchedule() {
   // down, then every hour thereafter. Every tick takes its advisory lock
   // so overlapping deploys / multiple instances can't double-run a job.
   const staleTick   = () => withCronLock(LOCK_STALE_MATCHES, cancelStaleMatches);
+  const unpairTick  = () => withCronLock(LOCK_UNPAIR, unpairStaleLinkedMatches);
   const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
   const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
@@ -565,6 +681,11 @@ export function startCleanupSchedule() {
 
   staleTick();
   cleanupHandle = setInterval(staleTick, 60 * 60 * 1000);
+
+  // Release stale linked pairs (3-day rule). Hourly is plenty — the window is
+  // measured in days. Runs once on boot to clear any current backlog.
+  unpairTick();
+  unpairHandle = setInterval(unpairTick, 60 * 60 * 1000);
 
   // Partial ELO reset at season rollover. Checked hourly — the boundary is
   // a 6-month one, so hourly is plenty to catch it within an hour of the
@@ -612,6 +733,7 @@ async function weeklyCupTick(): Promise<void> {
 /** Stop all background tasks. Idempotent; safe to call multiple times. */
 export function stopCleanupSchedule() {
   if (cleanupHandle) { clearInterval(cleanupHandle); cleanupHandle = null; }
+  if (unpairHandle) { clearInterval(unpairHandle); unpairHandle = null; }
   if (pairingHandle) { clearInterval(pairingHandle); pairingHandle = null; }
   if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
   if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }

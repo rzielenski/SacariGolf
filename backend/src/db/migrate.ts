@@ -2014,6 +2014,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS tee_set_by UUID REFERENCES users(user_id);
     `,
   },
+  {
+    // When a match was LINKED to its opponent (paired_match_id set). The
+    // un-pair cron releases a linked pair after 3 days if one side never
+    // finished. Backfill existing linked matches from created_at so the rule
+    // applies to the current backlog of paired-but-unresolved matches too.
+    name: 'matches.paired_at',
+    sql: `
+      ALTER TABLE matches ADD COLUMN IF NOT EXISTS paired_at TIMESTAMPTZ;
+      UPDATE matches
+         SET paired_at = created_at
+       WHERE paired_match_id IS NOT NULL AND paired_at IS NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {
