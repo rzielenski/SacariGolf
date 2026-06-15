@@ -123,13 +123,13 @@ export default function CourseInfoScreen() {
           your shot heatmaps) without playing a round. */}
       <TouchableOpacity
         style={styles.previewBtn}
-        onPress={() => router.push(`/course/preview/${id}` as any)}
+        onPress={() => router.push({ pathname: '/match/scoring/[id]', params: { id: 'preview', preview: '1', course: id } } as any)}
         activeOpacity={0.85}
       >
         <Text style={styles.previewBtnIcon}>⛳</Text>
         <View style={{ flex: 1 }}>
           <Text style={styles.previewBtnTitle}>Course Preview</Text>
-          <Text style={styles.previewBtnSub}>Walk every hole · distances · your heatmaps</Text>
+          <Text style={styles.previewBtnSub}>Walk every hole · rangefinder · club heatmaps</Text>
         </View>
         <Text style={styles.previewBtnChev}>›</Text>
       </TouchableOpacity>

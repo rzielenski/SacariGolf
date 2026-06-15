@@ -296,7 +296,6 @@ export default function RootLayout() {
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/admin-pins/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/admin-tees/[id]" options={{ animation: 'slide_from_right' }} />
-        <Stack.Screen name="course/preview/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="user/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="stats" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="premium" options={{ animation: 'slide_from_bottom', headerShown: true, presentation: 'modal' }} />

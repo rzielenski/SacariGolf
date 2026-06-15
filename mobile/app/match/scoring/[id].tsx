@@ -68,7 +68,12 @@ const stepperStyles = StyleSheet.create({
 // ── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ScoringScreen() {
-  const { id, holes: holesParam, subset: subsetParam } = useLocalSearchParams<{ id: string; holes?: string; subset?: string }>();
+  const { id, holes: holesParam, subset: subsetParam, preview: previewParam, course: courseParam, teebox: teeboxParam } =
+    useLocalSearchParams<{ id: string; holes?: string; subset?: string; preview?: string; course?: string; teebox?: string }>();
+  // Course-preview mode: scout the course hole-by-hole, pinned to the tee, with
+  // no score entry. Reuses this entire screen (map, rangefinder, club heatmap),
+  // just with location forced to the tee and scoring/serverside writes disabled.
+  const preview = previewParam === '1';
   // numHoles is a state so it can be corrected after loading the match's existing teebox
   const [numHoles, setNumHoles] = useState<number>(holesParam ? parseInt(holesParam, 10) : 18);
   // Whether to play the front 9, back 9, or full round. Only meaningful for
@@ -227,13 +232,26 @@ export default function ScoringScreen() {
   // ever be lost.
   const ignoreNextMapTap = useRef(false);
   const [following, setFollowing] = useState(true);
+  // In preview, the "player" stands on the current hole's tee (→ pin → course
+  // center as fallbacks). Forcing this into useLocation makes the rangefinder,
+  // club heatmap and distance readouts all work from the tee automatically.
+  const previewCoord = useMemo(() => {
+    if (!preview) return null;
+    const h: any = holes[currentHole];
+    if (h && typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') return { latitude: h.tee_lat, longitude: h.tee_lng, altitude: null };
+    if (h && typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') return { latitude: h.pin_lat, longitude: h.pin_lng, altitude: null };
+    const cl = Number((course as any)?.latitude), cn = Number((course as any)?.longitude);
+    if (Number.isFinite(cl) && Number.isFinite(cn)) return { latitude: cl, longitude: cn, altitude: null };
+    return null;
+  }, [preview, holes, currentHole, course]);
   const {
     userCoord, onCourse, locGranted,
     gpsAccuracyM, hasQualityFix,
     getAveragedFix, getRelativeAltitudeM,
     getMsSinceLastFix, refreshGps, resetFixBuffer, noteMapFix,
   } = useLocation({
-    enabled: !selectingCourse,
+    enabled: !selectingCourse && !preview,
+    forced: previewCoord,
     courseLat: course?.latitude,
     courseLng: course?.longitude,
     onOffCourse: () => setFollowing(false),
@@ -328,10 +346,10 @@ export default function ScoringScreen() {
   // AppState listener below short-circuits this debounce — backgrounding
   // the app flushes immediately so even a sub-debounce kill survives.
   useEffect(() => {
-    if (loading || selectingCourse) return;
+    if (loading || selectingCourse || preview) return;
     const t = setTimeout(() => { persistDraft(); }, 400);
     return () => clearTimeout(t);
-  }, [scores, holeStats, currentHole, loading, selectingCourse, persistDraft]);
+  }, [scores, holeStats, currentHole, loading, selectingCourse, preview, persistDraft]);
 
   // Background flush + unmount flush. iOS gives JS a small window between
   // 'inactive' and 'background' to finish work — writing synchronously here
@@ -370,7 +388,7 @@ export default function ScoringScreen() {
   // default on the user's screen.
   const lastSyncedScoresRef = useRef<number[]>([]);
   useEffect(() => {
-    if (selectingCourse || holes.length === 0 || scores.length === 0 || !teebox) return;
+    if (selectingCourse || preview || holes.length === 0 || scores.length === 0 || !teebox) return;
     const send = () => {
       const sent = scores.slice(0, Math.max(currentHole + 1, 1));
       api.matches.progress(id, {
@@ -476,7 +494,7 @@ export default function ScoringScreen() {
   }, [celebrationEvent, currentHole, holes.length]);
 
   const fetchCelebrations = useCallback(async () => {
-    if (selectingCourse) return;
+    if (selectingCourse || preview) return;
     try {
       const rows = await api.matches.celebrations(id, lastSinceRef.current);
       if (!rows.length) return;
@@ -710,7 +728,39 @@ export default function ScoringScreen() {
     setSelectingCourse(false);
   }, [SAVE_KEY, numHoles, holesSubset, user?.user_id]);
 
+  // Course preview: load a course directly (no match) and seed a synthetic
+  // "match" so the rest of the screen runs unchanged. No server writes.
+  const loadPreview = useCallback(async () => {
+    try {
+      const c: any = await api.courses.get(courseParam!);
+      const tbs = (c?.teeboxes ?? []) as any[];
+      const tb = tbs.find((t) => t.teebox_id === teeboxParam)
+        ?? [...tbs].sort((a, b) => (b?.holes?.length ?? 0) - (a?.holes?.length ?? 0))[0];
+      if (!tb || !(tb.holes?.length)) {
+        Alert.alert('No hole data', 'This course has no hole-by-hole data to preview yet.');
+        setLoading(false);
+        return;
+      }
+      const sorted = [...(tb.holes ?? [])].sort((a: any, b: any) => a.hole_num - b.hole_num);
+      setMatch({ match_id: 'preview', is_practice: true, preview: true, players: [], num_holes: sorted.length });
+      setCourse(c);
+      setTeebox(tb);
+      setHoles(sorted);
+      setScores(sorted.map((h: any) => h.par));
+      setHoleStats(sorted.map(() => ({})));
+      setEnteredHoles(new Set());
+      setNumHoles(sorted.length);
+      setCurrentHole(0);
+      setSelectingCourse(false);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message ?? 'Could not load course');
+    } finally {
+      setLoading(false);
+    }
+  }, [courseParam, teeboxParam]);
+
   const load = useCallback(async () => {
+    if (preview) { await loadPreview(); return; }
     try {
       const m = await api.matches.get(id);
 
@@ -784,7 +834,7 @@ export default function ScoringScreen() {
     } finally {
       setLoading(false);
     }
-  }, [id, user?.user_id]);
+  }, [id, user?.user_id, preview, loadPreview]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2303,6 +2353,26 @@ export default function ScoringScreen() {
   const scoreToPar = totalScore - totalPar;
   const isLastHole = currentHole === holes.length - 1;
 
+  // Preview-only: drop the current hole's tee / pin at the last tapped point.
+  const savePreviewTee = async () => {
+    if (!preview || !measurePin || !teebox || !hole) return;
+    try {
+      await api.courses.setTeeboxes(teebox.teebox_id, [{ holeNum: hole.hole_num, lat: measurePin.latitude, lng: measurePin.longitude }]);
+      setHoles((prev) => prev.map((h, i) => (i === currentHole ? ({ ...h, tee_lat: measurePin.latitude, tee_lng: measurePin.longitude } as any) : h)));
+      setMeasurePin(null);
+      Alert.alert('Tee set', `Saved the ${teebox.name} tee for hole ${hole.hole_num}.`);
+    } catch (e: any) { Alert.alert('Save failed', e?.message ?? 'Try again.'); }
+  };
+  const savePreviewPin = async () => {
+    if (!preview || !measurePin || !course || !hole) return;
+    try {
+      await api.courses.setPins((course as any).course_id, [{ holeNum: hole.hole_num, lat: measurePin.latitude, lng: measurePin.longitude }]);
+      setHoles((prev) => prev.map((h, i) => (i === currentHole ? ({ ...h, pin_lat: measurePin.latitude, pin_lng: measurePin.longitude } as any) : h)));
+      setMeasurePin(null);
+      Alert.alert('Pin set', `Saved the pin for hole ${hole.hole_num}.`);
+    } catch (e: any) { Alert.alert('Save failed', e?.message ?? 'Try again.'); }
+  };
+
   const front = holes.slice(0, 9);
   const back = holes.slice(9);
   const frontParTotal = front.reduce((a, h) => a + h.par, 0);
@@ -2759,7 +2829,9 @@ export default function ScoringScreen() {
         </TouchableOpacity>
 
         {/* TRACK SHOT — toggles start/stop. Long-press while idle removes
-            the most recent shot; long-press while tracking cancels. */}
+            the most recent shot; long-press while tracking cancels. Hidden in
+            preview (you're pinned to the tee, so there's no shot to walk). */}
+        {!preview && (
         <TouchableOpacity
           style={[
             styles.topChip,
@@ -2791,6 +2863,7 @@ export default function ScoringScreen() {
                 : `Shot ${currentShots.length + 1}`}
           </Text>
         </TouchableOpacity>
+        )}
 
         {/* CLUB picker. Required before TRACK can be pressed. Premium users
             see the auto-suggested club here unless they've picked manually. */}
@@ -3229,13 +3302,19 @@ export default function ScoringScreen() {
                 Hole {hole.hole_num}
                 <Text style={styles.holeSummaryPar}>  Par {hole.par}{hole.yardage ? `  ·  ${hole.yardage} yds` : ''}</Text>
               </Text>
-              <View style={styles.scoreSummaryRow}>
-                <Text style={[styles.scoreSummaryNum, { color: sl.color }]}>{scoreDisplay}</Text>
-                <Text style={[styles.scoreSummaryLabel, { color: sl.color }]}>{sl.label}</Text>
-              </View>
+              {preview ? (
+                <View style={styles.scoreSummaryRow}>
+                  <Text style={[styles.scoreSummaryLabel, { color: C.gold }]}>PREVIEW</Text>
+                </View>
+              ) : (
+                <View style={styles.scoreSummaryRow}>
+                  <Text style={[styles.scoreSummaryNum, { color: sl.color }]}>{scoreDisplay}</Text>
+                  <Text style={[styles.scoreSummaryLabel, { color: sl.color }]}>{sl.label}</Text>
+                </View>
+              )}
             </View>
 
-            {isLastHole ? (
+            {(!preview && isLastHole) ? (
               <TouchableOpacity
                 style={styles.miniSubmitBtn}
                 onPress={(e) => { e.stopPropagation?.(); handleSubmit(); }}
@@ -3247,8 +3326,9 @@ export default function ScoringScreen() {
               </TouchableOpacity>
             ) : (
               <TouchableOpacity
-                style={styles.miniNavBtn}
+                style={[styles.miniNavBtn, isLastHole && styles.miniNavBtnDisabled]}
                 onPress={(e) => { e.stopPropagation?.(); goToHole(1); }}
+                disabled={isLastHole}
               >
                 <Text style={styles.miniNavText}>→</Text>
               </TouchableOpacity>
@@ -3256,7 +3336,7 @@ export default function ScoringScreen() {
           </View>
         </View>
 
-        {panelExpanded && (
+        {panelExpanded && !preview && (
           <View style={styles.expandedContent}>
             {hole.handicap != null && (
               <Text style={styles.hcapLine}>Handicap {hole.handicap}</Text>
@@ -3340,6 +3420,49 @@ export default function ScoringScreen() {
                   <Text style={styles.nextBtnText}>Next →</Text>
                 </TouchableOpacity>
               )}
+            </View>
+          </View>
+        )}
+
+        {panelExpanded && preview && (
+          <View style={styles.expandedContent}>
+            {hole.handicap != null && (
+              <Text style={styles.hcapLine}>Handicap {hole.handicap}{hole.yardage ? `  ·  ${hole.yardage} yds` : ''}</Text>
+            )}
+            <Text style={styles.previewHint}>
+              {measurePin ? 'Save the tapped point as this hole’s tee or pin:' : 'Tap the map to measure, pick a club for its heatmap, or set the tee/pin.'}
+            </Text>
+            <View style={styles.scoreRow}>
+              <TouchableOpacity
+                style={[styles.previewSetBtn, !measurePin && styles.previewSetBtnDisabled]}
+                onPress={savePreviewTee}
+                disabled={!measurePin}
+              >
+                <Text style={styles.previewSetBtnText}>Set Tee Here</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.previewSetBtn, !measurePin && styles.previewSetBtnDisabled]}
+                onPress={savePreviewPin}
+                disabled={!measurePin}
+              >
+                <Text style={styles.previewSetBtnText}>Set Pin Here</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.navRow}>
+              <TouchableOpacity
+                style={[styles.navBtn, currentHole === 0 && styles.navBtnDisabled]}
+                onPress={() => goToHole(-1)}
+                disabled={currentHole === 0}
+              >
+                <Text style={styles.navBtnText}>← Prev</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.nextBtn, isLastHole && styles.navBtnDisabled]}
+                onPress={() => goToHole(1)}
+                disabled={isLastHole}
+              >
+                <Text style={styles.nextBtnText}>Next →</Text>
+              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -3858,6 +3981,13 @@ const styles = StyleSheet.create({
   // Expanded panel content
   expandedContent: { paddingHorizontal: 16, paddingBottom: 36 },
   hcapLine: { color: C.textDim, fontSize: 11, letterSpacing: 1, textAlign: 'center', marginBottom: 8 },
+  previewHint: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginBottom: 12, paddingHorizontal: 12 },
+  previewSetBtn: {
+    flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: 'center',
+    backgroundColor: C.gold + '1c', borderWidth: 1, borderColor: C.gold + '88', marginHorizontal: 4,
+  },
+  previewSetBtnDisabled: { opacity: 0.4 },
+  previewSetBtnText: { color: C.gold, fontWeight: '800', fontSize: 14 },
 
   scoreRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
   scoreBtn: {

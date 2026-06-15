@@ -111,9 +111,12 @@ interface UseLocationArgs {
   courseLat?: number | null;
   courseLng?: number | null;
   onOffCourse?: () => void;
+  /** When set, GPS is skipped entirely and this fixed coord is reported as
+   *  userCoord. Used by Course Preview to pin the player to the tee box. */
+  forced?: UserCoord | null;
 }
 
-export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseLocationArgs) {
+export function useLocation({ enabled, courseLat, courseLng, onOffCourse, forced }: UseLocationArgs) {
   const [userCoord, setUserCoord] = useState<UserCoord | null>(null);
   const [onCourse, setOnCourse] = useState(true);
   const [locGranted, setLocGranted] = useState(false);
@@ -140,6 +143,16 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
   offCourseCb.current = onOffCourse;
 
   useEffect(() => {
+    // Forced coord (Course Preview): no GPS — just report the fixed point as
+    // the player's position so every distance/heatmap consumer works from it.
+    if (forced) {
+      setUserCoord(forced);
+      setOnCourse(true);
+      setLocGranted(true);
+      setHasQualityFix(true);
+      setGpsAccuracyM(null);
+      return;
+    }
     if (!enabled) return;
     let active = true;
     const cLat = courseLat ?? 0;
@@ -438,7 +451,7 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse }: UseL
       appStateSub.remove();
       clearInterval(watchdog);
     };
-  }, [enabled, courseLat, courseLng]);
+  }, [enabled, courseLat, courseLng, forced?.latitude, forced?.longitude]);
 
   /** Inverse-variance weighted average of fixes received in the last
    *  `windowMs`. Returns null if no fixes have been buffered yet — caller
