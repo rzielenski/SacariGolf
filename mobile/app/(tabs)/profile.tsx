@@ -580,18 +580,19 @@ export default function ProfileScreen() {
         </GlowCard>
       </PressableScale>
 
-      {/* Rank progress — rank + division on the left, raw ELO on the right */}
+      {/* Rank progress — rank + division and total ELO on the left, the big
+          number is your ELO within the current division (LP). */}
       <View style={styles.card}>
         <View style={styles.eloHeaderRow}>
           <View style={{ flexShrink: 1 }}>
             <Text style={[styles.rankNameBig, { color: rank.color }]} numberOfLines={1}>{rank.label}</Text>
             <Text style={styles.eloLabel}>
-              {rank.isObsidian ? 'Top tier · no divisions' : `${rank.lp}/${rank.lpNeeded} LP this division`}
+              {rank.isObsidian ? 'Top tier · no divisions' : `${user.elo} total ELO`}
             </Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
-            <Text style={styles.eloNum}>{user.elo}</Text>
-            <Text style={styles.eloLabel}>ELO</Text>
+            <Text style={styles.eloNum}>{rank.isObsidian ? user.elo : rank.lp}</Text>
+            <Text style={styles.eloLabel}>{rank.isObsidian ? 'ELO' : `/ ${rank.lpNeeded} LP`}</Text>
           </View>
         </View>
         {!rank.isObsidian && rank.next && (
