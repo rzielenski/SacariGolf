@@ -868,14 +868,36 @@ export default function ScoringScreen() {
     }
   }, [userCoord, following, onCourse, preview]);
 
-  // Preview: frame the current hole (tee → green) whenever you switch holes.
+  // Preview: reframe the map on each hole. When both tee and green are known,
+  // orient the camera looking from the tee toward the green (hole runs "up" the
+  // screen). Otherwise just fit whatever points exist, north-up.
   useEffect(() => {
     if (!preview || !mapRef.current) return;
     const h: any = holes[currentHole];
     if (!h) return;
+    const tee = (typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') ? { lat: h.tee_lat, lng: h.tee_lng } : null;
+    const green = (typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') ? { lat: h.pin_lat, lng: h.pin_lng } : null;
+
+    if (tee && green) {
+      const heading = bearingDeg(tee.lat, tee.lng, green.lat, green.lng);
+      const midLat = (tee.lat + green.lat) / 2, midLng = (tee.lng + green.lng) / 2;
+      const distM = distMetres(tee.lat, tee.lng, green.lat, green.lng);
+      const screenH = Dimensions.get('window').height;
+      // Choose a zoom so the hole (+margin) fits the screen height.
+      const wantM = Math.max(distM * 1.7, 80);
+      const mpp = wantM / Math.max(screenH * 0.78, 1);
+      const zoom = Math.log2((156543.03392 * Math.cos(midLat * Math.PI / 180)) / mpp);
+      mapRef.current.animateCamera(
+        { center: { latitude: midLat, longitude: midLng }, heading, pitch: 0, zoom: Math.max(13, Math.min(19, zoom)) },
+        { duration: 600 },
+      );
+      return;
+    }
+
+    // Single point (or none): north-up fit.
     const pts: { lat: number; lng: number }[] = [];
-    if (typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') pts.push({ lat: h.tee_lat, lng: h.tee_lng });
-    if (typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') pts.push({ lat: h.pin_lat, lng: h.pin_lng });
+    if (tee) pts.push(tee);
+    if (green) pts.push(green);
     if (!pts.length) {
       const cl = Number((course as any)?.latitude), cn = Number((course as any)?.longitude);
       if (Number.isFinite(cl) && Number.isFinite(cn)) pts.push({ lat: cl, lng: cn });
@@ -884,12 +906,13 @@ export default function ScoringScreen() {
     const lats = pts.map((p) => p.lat), lngs = pts.map((p) => p.lng);
     const minLat = Math.min(...lats), maxLat = Math.max(...lats);
     const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-    mapRef.current.animateToRegion({
-      latitude: (minLat + maxLat) / 2,
-      longitude: (minLng + maxLng) / 2,
-      latitudeDelta: Math.max((maxLat - minLat) * 1.8, 0.0025),
-      longitudeDelta: Math.max((maxLng - minLng) * 1.8, 0.0025),
-    }, 600);
+    mapRef.current.animateCamera(
+      {
+        center: { latitude: (minLat + maxLat) / 2, longitude: (minLng + maxLng) / 2 },
+        heading: 0, pitch: 0,
+      },
+      { duration: 600 },
+    );
   }, [preview, currentHole, holes, course]);
 
   // ── Course selection helpers ─────────────────────────────────────────────────
@@ -2066,6 +2089,10 @@ export default function ScoringScreen() {
   }, [id, SAVE_KEY]);
 
   const handleLeave = useCallback(() => {
+    // Preview is just a scouting view — no match to cancel/forfeit, so leaving
+    // simply backs out.
+    if (preview) { router.back(); return; }
+
     // "Cancel" (no ELO) is offered when the user is still in course selection
     // OR has not advanced past hole 0 with no score changes — backend enforces
     // the real rule (no player completed = safe to cancel).
@@ -2109,7 +2136,7 @@ export default function ScoringScreen() {
     }
 
     Alert.alert('Leave Round', 'What would you like to do?', buttons);
-  }, [saveAndLeave, doCancel, doForfeit, selectingCourse, currentHole]);
+  }, [preview, saveAndLeave, doCancel, doForfeit, selectingCourse, currentHole]);
 
   // ── Scoring helpers ─────────────────────────────────────────────────────────
 
@@ -2668,6 +2695,18 @@ export default function ScoringScreen() {
           </Marker>
         )}
 
+        {/* Subtle tee-box mark for the current hole — shown in every round type
+            (and preview) when the tee has been marked for this teebox. */}
+        {hole && (hole as any).tee_lat != null && (hole as any).tee_lng != null && (
+          <Marker
+            coordinate={{ latitude: (hole as any).tee_lat, longitude: (hole as any).tee_lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            tracksViewChanges={false}
+          >
+            <View style={styles.teeBoxMarker} />
+          </Marker>
+        )}
+
 
         {/* Saved shots for the current hole — each as a colored start→end
             polyline, with a numbered start dot and end dot. */}
@@ -2760,11 +2799,12 @@ export default function ScoringScreen() {
 
       {/* ── Top bar (floats over map) ── */}
       <View style={styles.topBar}>
-        {/* Leave button — replaces the old ✕ + separate leaveBtn */}
+        {/* Leave button — a plain back arrow in preview (just leave), the
+            ⋮ leave/cancel/forfeit menu in a real round. */}
         <TouchableOpacity onPress={handleLeave} style={styles.topBarLeave} disabled={forfeiting}>
           {forfeiting
             ? <ActivityIndicator color={C.textMuted} size="small" />
-            : <Text style={styles.topBarLeaveText}>⋮</Text>}
+            : <Text style={styles.topBarLeaveText}>{preview ? '←' : '⋮'}</Text>}
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.topBarCenter}
@@ -3931,6 +3971,12 @@ const styles = StyleSheet.create({
   pinMarkerStaff: {
     width: 1.5, height: 16, backgroundColor: '#fff',
     marginTop: -1,
+  },
+  // Subtle tee-box mark — a small translucent square (like real tee markers).
+  teeBoxMarker: {
+    width: 12, height: 12, borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.4)',
+    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.9)',
   },
 
   // Measure pin
