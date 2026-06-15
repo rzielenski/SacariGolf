@@ -128,7 +128,18 @@ export async function runPairingPass() {
           -- side=2 and confusing both sets of invitees.
           AND m.match_type <> 'ffa'
           AND m.superseded_by_match_id IS NULL
-          AND m.created_at > NOW() - INTERVAL '24 hours'
+          -- Fresh matches search for 24h; a match where a side already FINISHED
+          -- keeps searching for up to 30 days (don't strand a played round
+          -- whose opponent never showed). Abandoned, never-played matches stop
+          -- at 24h (and get cancelled by the 3-day rule).
+          AND m.created_at > NOW() - INTERVAL '30 days'
+          AND (
+            m.created_at > NOW() - INTERVAL '24 hours'
+            OR EXISTS (
+              SELECT 1 FROM match_players mpc
+              WHERE mpc.match_id = m.match_id AND mpc.completed = true
+            )
+          )
           AND NOT EXISTS (
             SELECT 1 FROM match_players mp
             WHERE mp.match_id = m.match_id AND mp.side != 1
@@ -153,6 +164,17 @@ export async function runPairingPass() {
     for (const m of candidates) {
       if (paired.has(m.match_id)) continue;
 
+      // Is THIS candidate already finished (a played round waiting for an
+      // opponent)? Resolution only fires on a post-merge score submit, so two
+      // already-finished matches must never merge each other (nobody would
+      // submit again → the merged match would hang unresolved forever).
+      const { rows: cf } = await pool.query(
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE NOT completed) AS pending
+           FROM match_players WHERE match_id = $1 AND side = 1`,
+        [m.match_id],
+      );
+      const candidateFinished = Number(cf[0]?.total ?? 0) > 0 && Number(cf[0]?.pending ?? 0) === 0;
+
       // Look for an opposing match with matching params, ELO-closest first.
       // Excludes matches that have any player in common with this match.
       const { rows: opps } = await pool.query(
@@ -173,10 +195,27 @@ export async function runPairingPass() {
             AND m2.match_type = $2
             AND m2.format = $3
             AND m2.num_holes = $4
-            AND m2.created_at > NOW() - INTERVAL '24 hours'
+            AND m2.created_at > NOW() - INTERVAL '30 days'
+            AND (
+              m2.created_at > NOW() - INTERVAL '24 hours'
+              OR EXISTS (
+                SELECT 1 FROM match_players mpc2
+                WHERE mpc2.match_id = m2.match_id AND mpc2.completed = true
+              )
+            )
             AND NOT EXISTS (
               SELECT 1 FROM match_players mp_opp
               WHERE mp_opp.match_id = m2.match_id AND mp_opp.side != 1
+            )
+            -- Never merge two already-finished matches (see candidateFinished):
+            -- if this candidate is finished, the opponent must still have a
+            -- round left to play so its submit resolves the merged match.
+            AND (
+              $5 = false
+              OR EXISTS (
+                SELECT 1 FROM match_players mpx
+                WHERE mpx.match_id = m2.match_id AND mpx.completed = false
+              )
             )
             -- No shared player.
             AND NOT EXISTS (
@@ -222,7 +261,7 @@ export async function runPairingPass() {
                       WHERE mp_y.match_id = m2.match_id), 100)
           )
           LIMIT 1`,
-        [m.match_id, m.match_type, m.format, m.num_holes]
+        [m.match_id, m.match_type, m.format, m.num_holes, candidateFinished]
       );
 
       if (!opps.length || paired.has(opps[0].match_id)) continue;
@@ -519,6 +558,95 @@ export async function unpairStaleLinkedMatches() {
   }
 }
 
+/** Strip the side that never finished and promote the finished side to side 1,
+ *  so a half-played MERGED match re-enters matchmaking for the player who
+ *  actually played. The match keeps that player's completed round. */
+async function reopenFinishedSide(client: any, matchId: string, keepSide: number, dropSide: number) {
+  // Remove the no-show side's partial rounds + roster rows.
+  await client.query(
+    `DELETE FROM rounds
+       WHERE match_id = $1
+         AND user_id IN (SELECT user_id FROM match_players WHERE match_id = $1 AND side = $2)`,
+    [matchId, dropSide],
+  );
+  await client.query(`DELETE FROM match_players WHERE match_id = $1 AND side = $2`, [matchId, dropSide]);
+  if (keepSide !== 1) {
+    await client.query(`UPDATE match_players SET side = 1 WHERE match_id = $1 AND side = $2`, [matchId, keepSide]);
+  }
+  // Reset the matchmaking clock so the pairing windows include it again.
+  await client.query(`UPDATE matches SET created_at = NOW(), paired_at = NULL WHERE match_id = $1`, [matchId]);
+}
+
+/**
+ * The general 3-day rule for non-linked matches. Any unresolved, non-practice
+ * match older than 3 days:
+ *   • one side finished, the other never played (e.g. a merged 1v1 where the
+ *     opponent ghosted) → strip the no-show side and reopen the finished side
+ *     so it searches for a NEW opponent (keeps the played round).
+ *   • nobody finished → cancel it (a round not finished 3 days after it
+ *     started is abandoned).
+ *   • both finished but somehow unresolved → leave it for normal resolution.
+ * Finished-but-waiting matches (a side played, no opponent yet) are left alone
+ * here — the widened pairing window keeps them searchable.
+ */
+export async function reopenOrCancelStaleMatches() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.match_id
+         FROM matches m
+        WHERE m.completed = false
+          AND m.cancelled = false
+          AND m.is_practice = false
+          AND m.paired_match_id IS NULL          -- linked pairs handled separately
+          AND m.superseded_by_match_id IS NULL
+          AND m.match_type <> 'ffa'              -- arena is invite-only
+          AND m.created_at < NOW() - INTERVAL '3 days'`,
+    );
+
+    for (const row of rows) {
+      const id = row.match_id as string;
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const { rows: chk } = await client.query(
+          `SELECT completed, cancelled FROM matches WHERE match_id = $1 FOR UPDATE`, [id],
+        );
+        if (!chk.length || chk[0].completed || chk[0].cancelled) { await client.query('ROLLBACK'); continue; }
+
+        const { rows: sides } = await client.query(
+          `SELECT side, COUNT(*) AS total, COUNT(*) FILTER (WHERE completed) AS done
+             FROM match_players WHERE match_id = $1 GROUP BY side`, [id],
+        );
+        const s1 = sides.find((r: any) => Number(r.side) === 1);
+        const s2 = sides.find((r: any) => Number(r.side) === 2);
+        const side1Done = !!s1 && Number(s1.total) > 0 && Number(s1.done) === Number(s1.total);
+        const side2Exists = !!s2 && Number(s2.total) > 0;
+        const side2Done = side2Exists && Number(s2.done) === Number(s2.total);
+
+        let action = 'skip';
+        if (side2Exists) {
+          if (side1Done && !side2Done) { await reopenFinishedSide(client, id, 1, 2); action = 'reopen side1'; }
+          else if (side2Done && !side1Done) { await reopenFinishedSide(client, id, 2, 1); action = 'reopen side2'; }
+          else if (!side1Done && !side2Done) { await client.query(`UPDATE matches SET cancelled = true WHERE match_id = $1`, [id]); action = 'cancel (neither finished)'; }
+        } else {
+          // No opponent ever attached.
+          if (!side1Done) { await client.query(`UPDATE matches SET cancelled = true WHERE match_id = $1`, [id]); action = 'cancel (never finished)'; }
+          else { await client.query(`UPDATE matches SET created_at = NOW() WHERE match_id = $1`, [id]); action = 'reopen (waiting)'; }
+        }
+        await client.query('COMMIT');
+        if (action !== 'skip') console.log(`[stale-3d] ${id}: ${action}`);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[stale-3d] failed for', id, err);
+      } finally {
+        client.release();
+      }
+    }
+  } catch (err) {
+    console.error('[stale-3d] reopenOrCancelStaleMatches failed:', err);
+  }
+}
+
 /**
  * Backfill round-posts for every completed non-practice match that doesn't
  * already have one. The auto-post hooks in `resolveElo` / `resolveEloFFA`
@@ -673,7 +801,10 @@ export function startCleanupSchedule() {
   // down, then every hour thereafter. Every tick takes its advisory lock
   // so overlapping deploys / multiple instances can't double-run a job.
   const staleTick   = () => withCronLock(LOCK_STALE_MATCHES, cancelStaleMatches);
-  const unpairTick  = () => withCronLock(LOCK_UNPAIR, unpairStaleLinkedMatches);
+  const unpairTick  = () => withCronLock(LOCK_UNPAIR, async () => {
+    await unpairStaleLinkedMatches();    // linked pairs (paired_match_id)
+    await reopenOrCancelStaleMatches();  // merged + waiting matches (3-day rule)
+  });
   const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
   const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
