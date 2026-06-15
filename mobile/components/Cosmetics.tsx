@@ -39,7 +39,7 @@
  *     supported by react-native-svg without Skia.
  */
 
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle,
 } from 'react-native';
@@ -152,138 +152,135 @@ function GradientBg({ v, style, children }: BgProps) {
 
 // ── 2. Flag (Stars & Stripes, waving in the wind) ───────────────────────────
 
-/** SVG path for a 5-point star centered at (cx,cy) with outer radius r. */
-function starPath(cx: number, cy: number, r: number): string {
-  const pts: string[] = [];
-  for (let i = 0; i < 10; i++) {
-    const ang = (Math.PI / 5) * i - Math.PI / 2;
-    const rad = i % 2 === 0 ? r : r * 0.4;
-    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(2)},${(cy + rad * Math.sin(ang)).toFixed(2)}`);
-  }
-  return `M${pts.join(' L')} Z`;
-}
+// Star counts per canton row: 9 rows alternating 6 and 5 (= 50 stars).
+const FLAG_STAR_ROWS = [6, 5, 6, 5, 6, 5, 6, 5, 6];
 
-/** The official 50-star canton: 9 rows alternating 6 and 5 stars, the 5-star
- *  rows offset half a column. Laid out in a 0..100 viewBox. */
-const FLAG_STARS: { cx: number; cy: number }[] = (() => {
-  const out: { cx: number; cy: number }[] = [];
-  for (let row = 0; row < 9; row++) {
-    const six = row % 2 === 0;
-    const count = six ? 6 : 5;
-    const cy = 7 + row * 10.7;
-    for (let col = 0; col < count; col++) {
-      out.push({ cx: six ? 9 + col * 16.4 : 17.2 + col * 16.4, cy });
-    }
-  }
-  return out;
-})();
-
-// Flag drawn in a 190×100 viewBox (the real 1.9:1 ratio). Everything is vector
-// (SVG), so it stays crisp and anti-aliased at any rendered size — no raster
-// columns, no pixelation.
-const FLAG_VB_W = 190;
-const FLAG_VB_H = 100;
-const FLAG_STRIPES = 13;
-const FLAG_AMP = 9;        // peak vertical whip, in viewBox units (at the fly)
-const FLAG_WAVES = 2.2;    // ripples across the width
-const FLAG_OVERSCAN = 16;  // top/bottom stripe extension so a whip never exposes an edge
-
+/**
+ * Stars & Stripes. Built entirely from native primitives — a single crisp
+ * LinearGradient for the 13 stripes, a solid canton, and real ★ glyphs for the
+ * 50 stars — so it renders at full device resolution with zero pixelation (the
+ * same toolkit as the clean Sakura / Aurora backgrounds). The "wind" comes from
+ * a gentle whole-cloth billow plus soft light/shadow folds drifting across, not
+ * from rasterised geometry, so nothing ever looks jagged.
+ */
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
   const RED = v.red ?? stripes[0] ?? '#b22234';
   const WHITE = v.white ?? stripes[1] ?? '#ffffff';
   const CANTON = v.canton ?? '#3c3b6e';
 
-  // One phase driver for the travelling cloth wave; one for the light/shadow
-  // folds that sweep across so the ripples read as fabric catching light.
-  const wave = useSharedValue(0);
-  const fold = useSharedValue(0);
-  useEffect(() => {
-    wave.value = withRepeat(withTiming(1, { duration: 1300, easing: Easing.linear }), -1, false);
-    fold.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.linear }), -1, false);
-    return () => { cancelAnimation(wave); cancelAnimation(fold); };
-  }, [wave, fold]);
+  // 13 crisp hard-edged stripe stops (red on top + bottom).
+  const { colors, locations } = useMemo(() => {
+    const c: string[] = []; const l: number[] = [];
+    for (let i = 0; i < 13; i++) {
+      const col = i % 2 === 0 ? RED : WHITE;
+      c.push(col, col); l.push(i / 13, (i + 1) / 13);
+    }
+    return {
+      colors: c as unknown as readonly [string, string, ...string[]],
+      locations: l as unknown as readonly [number, number, ...number[]],
+    };
+  }, [RED, WHITE]);
 
-  // The canton is at the hoist (left), which a real flag whips least — give it
-  // only a whisper of motion so the stars stay legible.
-  const cantonStyle = useAnimatedStyle(() => {
-    const ang = wave.value * Math.PI * 2;
-    return { transform: [{ translateY: Math.sin(ang) * 2.5 }, { skewY: `${Math.cos(ang) * 1}deg` }] };
-  });
-  const sheenStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(fold.value, [0, 1], [-300, 300]) }],
+  const billow = useSharedValue(0);
+  const foldA = useSharedValue(0);
+  const foldB = useSharedValue(0);
+  useEffect(() => {
+    billow.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    foldA.value = withRepeat(withTiming(1, { duration: 2300, easing: Easing.linear }), -1, false);
+    foldB.value = withRepeat(withTiming(1, { duration: 3400, easing: Easing.linear }), -1, false);
+    return () => { cancelAnimation(billow); cancelAnimation(foldA); cancelAnimation(foldB); };
+  }, [billow, foldA, foldB]);
+
+  // Whole-cloth billow: a gentle skew + vertical breathe so the sheet ripples.
+  const flagStyle = useAnimatedStyle(() => ({
+    transform: [
+      { perspective: 700 },
+      { skewY: `${interpolate(billow.value, [0, 1], [-1.8, 1.8])}deg` },
+      { skewX: `${interpolate(billow.value, [0, 0.5, 1], [-0.8, 0.8, -0.8])}deg` },
+      { scaleY: interpolate(billow.value, [0, 0.5, 1], [1, 1.03, 1]) },
+    ],
   }));
-  const shadowStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(fold.value, [0, 1], [300, -300]) }],
+  // Soft folds drift across; each also bobs vertically so they undulate like
+  // real ridges of cloth rather than flat bars.
+  const shadow1 = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: interpolate(foldA.value, [0, 1], [-320, 320]) },
+      { translateY: interpolate(foldA.value, [0, 0.5, 1], [-6, 6, -6]) },
+    ],
   }));
+  const shadow2 = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: interpolate(foldB.value, [0, 1], [-320, 320]) },
+      { translateY: interpolate(foldB.value, [0, 0.5, 1], [5, -5, 5]) },
+    ],
+  }));
+  const sheen = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: interpolate(foldB.value, [0, 1], [320, -320]) },
+      { translateY: interpolate(foldB.value, [0, 0.5, 1], [-4, 4, -4]) },
+    ],
+  }));
+
+  const [cantonW, setCantonW] = useState(0);
+  const starSize = cantonW > 0 ? cantonW * 0.12 : 9;
 
   return (
     <View style={[{ overflow: 'hidden', backgroundColor: RED }, style]}>
-      {/* Smooth vector stripes that ripple as one sheet of cloth */}
-      <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
-        {Array.from({ length: FLAG_STRIPES }).map((_, i) => (
-          <FlagWaveStripe key={i} index={i} color={i % 2 === 0 ? RED : WHITE} wave={wave} />
-        ))}
-      </Svg>
-      {/* Blue canton with 50 real 5-point stars, calm near the hoist */}
-      <Animated.View pointerEvents="none" style={[
-        { position: 'absolute', top: 0, left: 0, width: '40%', height: '53.8%', backgroundColor: CANTON },
-        cantonStyle,
-      ]}>
-        <Svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
-          {FLAG_STARS.map((s, i) => (
-            <Path key={i} d={starPath(s.cx, s.cy, 4.1)} fill="#ffffff" />
+      <Animated.View style={[StyleSheet.absoluteFill, flagStyle]}>
+        {/* Crisp full-bleed stripes (overscanned so the billow never bares an edge) */}
+        <LinearGradient
+          colors={colors} locations={locations}
+          start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+          style={{ position: 'absolute', left: 0, right: 0, top: '-6%', height: '112%' }}
+        />
+        {/* Canton + 50 real ★ glyphs (native text = perfectly crisp) */}
+        <View
+          onLayout={(e) => setCantonW(e.nativeEvent.layout.width)}
+          pointerEvents="none"
+          style={{ position: 'absolute', top: 0, left: 0, width: '40%', height: '53.8%', backgroundColor: CANTON, paddingVertical: '1.5%' }}
+        >
+          {FLAG_STAR_ROWS.map((count, r) => (
+            <View key={r} style={{
+              flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-evenly',
+              paddingHorizontal: count === 5 ? starSize * 0.55 : 0,
+            }}>
+              {Array.from({ length: count }).map((__, i) => (
+                <Text key={i} style={{ color: '#ffffff', fontSize: starSize, lineHeight: starSize * 1.05 }}>★</Text>
+              ))}
+            </View>
           ))}
-        </Svg>
+        </View>
       </Animated.View>
-      {/* Light fold sweeping across the fabric */}
-      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, sheenStyle]}>
+
+      {/* Drifting folds — soft, multi-stop gradients so they never band */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadow1]}>
         <LinearGradient
-          colors={['transparent', 'rgba(255,255,255,0.20)', 'transparent'] as const as readonly [string, string, ...string[]]}
-          start={{ x: 0, y: 0.15 }} end={{ x: 1, y: 0.85 }}
-          style={{ width: '55%', height: '100%' }}
+          colors={['transparent', 'rgba(0,0,0,0.06)', 'rgba(0,0,0,0.26)', 'rgba(0,0,0,0.06)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ width: '34%', height: '100%' }}
         />
       </Animated.View>
-      {/* Counter-drifting shadow fold for depth */}
-      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadowStyle]}>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadow2]}>
         <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.24)', 'transparent'] as const as readonly [string, string, ...string[]]}
-          start={{ x: 0, y: 0.85 }} end={{ x: 1, y: 0.15 }}
-          style={{ width: '48%', height: '100%' }}
+          colors={['transparent', 'rgba(0,0,0,0.05)', 'rgba(0,0,0,0.18)', 'rgba(0,0,0,0.05)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ width: '30%', height: '100%' }}
         />
       </Animated.View>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, sheen]}>
+        <LinearGradient
+          colors={['transparent', 'rgba(255,255,255,0.05)', 'rgba(255,255,255,0.22)', 'rgba(255,255,255,0.05)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ width: '26%', height: '100%' }}
+        />
+      </Animated.View>
+
       {/* Vignette so the flag doesn't fight foreground text */}
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.20)' }]} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.16)' }]} />
       {children}
     </View>
   );
-}
-
-/** One stripe as a filled vector band whose top + bottom edges follow the same
- *  travelling sine wave, so all 13 ripple together as a single sheet of cloth.
- *  Amplitude grows from 0 at the hoist to full at the fly end. The `d` is
- *  rebuilt each frame on the UI thread — cheap for a single background. */
-function FlagWaveStripe({ index, color, wave }: { index: number; color: string; wave: SharedValue<number> }) {
-  const animatedProps = useAnimatedProps(() => {
-    const h = FLAG_VB_H / FLAG_STRIPES;
-    const top = index === 0 ? -FLAG_OVERSCAN : index * h;
-    const bot = index === FLAG_STRIPES - 1 ? FLAG_VB_H + FLAG_OVERSCAN : (index + 1) * h;
-    const steps = 22;
-    const phase = wave.value * Math.PI * 2;
-    let d = '';
-    for (let s = 0; s <= steps; s++) {
-      const x = (s / steps) * FLAG_VB_W;
-      const off = (x / FLAG_VB_W) * FLAG_AMP * Math.sin((x / FLAG_VB_W) * Math.PI * 2 * FLAG_WAVES - phase);
-      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + off).toFixed(2)} `;
-    }
-    for (let s = steps; s >= 0; s--) {
-      const x = (s / steps) * FLAG_VB_W;
-      const off = (x / FLAG_VB_W) * FLAG_AMP * Math.sin((x / FLAG_VB_W) * Math.PI * 2 * FLAG_WAVES - phase);
-      d += `L${x.toFixed(1)} ${(bot + off).toFixed(2)} `;
-    }
-    return { d: d + 'Z' };
-  });
-  return <AnimatedPath animatedProps={animatedProps} fill={color} />;
 }
 
 // ── 3. Storm (lightning + flashes) ──────────────────────────────────────────
