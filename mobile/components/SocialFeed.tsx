@@ -62,6 +62,9 @@ const SCOPES: { key: FeedScope; label: string }[] = [
   { key: 'friends', label: 'Friends' },
 ];
 
+/** Posts per page — small first paint, then infinite-scroll more in. */
+const PAGE_SIZE = 10;
+
 export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   const { user } = useAuth();
   const [posts, setPosts] = useState<any[]>([]);
@@ -78,6 +81,13 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   // the message so the empty-state can say "Couldn't reach the feed" instead
   // of the generic "No posts yet". Pull-to-refresh clears it.
   const [error, setError] = useState<string | null>(null);
+  // Infinite scroll: load a page at a time, fetch the next page when the user
+  // nears the bottom. `hasMore` goes false once a page comes back short.
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const loadingMoreRef = useRef(false);   // guards against double onEndReached
+  const postsRef = useRef<any[]>(posts);
+  postsRef.current = posts;               // latest list for the cursor
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -86,10 +96,12 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       // the home tab) in parallel with the feed fetch so a single pull
       // updates everything in one round-trip wait.
       const [res] = await Promise.all([
-        api.posts.feed({ limit: 30, scope }),
+        api.posts.feed({ limit: PAGE_SIZE, scope }),
         isRefresh && onRefreshExtra ? Promise.resolve(onRefreshExtra()) : Promise.resolve(),
       ]);
-      setPosts(res.posts ?? []);
+      const list = res.posts ?? [];
+      setPosts(list);
+      setHasMore(list.length >= PAGE_SIZE);
       setLocalUnavailable(!!res.localUnavailable);
       setError(null);
     } catch (e: any) {
@@ -102,6 +114,35 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
     finally { setLoading(false); setRefreshing(false); }
   }, [onRefreshExtra, scope]);
 
+  /** Fetch the next page (older posts) using a keyset cursor built from the
+   *  last loaded post: "createdAt|postId". Appended, de-duped by post_id. */
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current || !hasMore) return;
+    const cur = postsRef.current;
+    const last = cur[cur.length - 1];
+    if (!last?.created_at || !last?.post_id) return;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    try {
+      const res = await api.posts.feed({
+        limit: PAGE_SIZE, scope, before: `${last.created_at}|${last.post_id}`,
+      });
+      const more = res.posts ?? [];
+      if (more.length) {
+        setPosts((prev) => {
+          const seen = new Set(prev.map((p) => p.post_id));
+          return [...prev, ...more.filter((p: any) => !seen.has(p.post_id))];
+        });
+      }
+      setHasMore(more.length >= PAGE_SIZE);
+    } catch {
+      // Leave the list as-is; a later scroll retries.
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [hasMore, scope]);
+
   useEffect(() => { load(); }, [load]);
 
   /** Switch the feed audience. Clears the list immediately so the user sees
@@ -113,6 +154,8 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
     setPosts([]);
     setLoading(true);
     setError(null);
+    setHasMore(true);
+    loadingMoreRef.current = false;
   };
 
   const handleDelete = (postId: string) => {
@@ -203,6 +246,13 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
         }
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />
+        }
+        onEndReached={loadMore}
+        onEndReachedThreshold={0.4}
+        ListFooterComponent={
+          loadingMore
+            ? <ActivityIndicator color={C.gold} style={{ marginVertical: 20 }} />
+            : null
         }
         renderItem={({ item }) => (
           <PostCard
