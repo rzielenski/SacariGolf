@@ -178,77 +178,129 @@ const FLAG_STARS: { cx: number; cy: number }[] = (() => {
   return out;
 })();
 
+// 13 stripes as hard-edged LinearGradient stops (red top + bottom), so each
+// rippling column is a single GPU layer instead of 13 stacked Views.
+function buildStripes(red: string, white: string): { colors: readonly [string, string, ...string[]]; locations: readonly [number, number, ...number[]] } {
+  const colors: string[] = [];
+  const locations: number[] = [];
+  for (let i = 0; i < 13; i++) {
+    const c = i % 2 === 0 ? red : white;
+    colors.push(c, c);
+    locations.push(i / 13, (i + 1) / 13);
+  }
+  return {
+    colors: colors as unknown as readonly [string, string, ...string[]],
+    locations: locations as unknown as readonly [number, number, ...number[]],
+  };
+}
+
+const FLAG_COLUMNS = 22;
+
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
   const RED = v.red ?? stripes[0] ?? '#b22234';
   const WHITE = v.white ?? stripes[1] ?? '#ffffff';
   const CANTON = v.canton ?? '#3c3b6e';
+  const { colors, locations } = useMemo(() => buildStripes(RED, WHITE), [RED, WHITE]);
 
-  // Two drivers: a slow cloth sway (skew + breathe) and a faster pass of
-  // light/shadow fold bands drifting across the fabric. Together they read as
-  // wind rippling the flag rather than a flat image sliding.
-  const sway = useSharedValue(0);
+  // One phase driver for the travelling cloth wave; one for the light/shadow
+  // folds that sweep across so the ripples read as fabric catching light.
+  const wave = useSharedValue(0);
   const fold = useSharedValue(0);
   useEffect(() => {
-    sway.value = withRepeat(withTiming(1, { duration: 3400, easing: Easing.inOut(Easing.sin) }), -1, true);
-    fold.value = withRepeat(withTiming(1, { duration: 3800, easing: Easing.linear }), -1, false);
-    return () => { cancelAnimation(sway); cancelAnimation(fold); };
-  }, [sway, fold]);
+    wave.value = withRepeat(withTiming(1, { duration: 1300, easing: Easing.linear }), -1, false);
+    fold.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.linear }), -1, false);
+    return () => { cancelAnimation(wave); cancelAnimation(fold); };
+  }, [wave, fold]);
 
-  const clothStyle = useAnimatedStyle(() => ({
-    transform: [
-      { perspective: 600 },
-      { skewX: `${interpolate(sway.value, [0, 1], [-2, 2])}deg` },
-      { skewY: `${interpolate(sway.value, [0, 0.5, 1], [-0.6, 0.6, -0.6])}deg` },
-      { scaleY: interpolate(sway.value, [0, 0.5, 1], [1, 1.03, 1]) },
-    ],
-  }));
+  // The canton is at the hoist (left), which a real flag whips least — give it
+  // only a whisper of motion so the stars stay legible.
+  const cantonStyle = useAnimatedStyle(() => {
+    const ang = wave.value * Math.PI * 2;
+    return { transform: [{ translateY: Math.sin(ang) * 3 }, { skewY: `${Math.cos(ang) * 1}deg` }] };
+  });
   const sheenStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(fold.value, [0, 1], [-260, 260]) }],
+    transform: [{ translateX: interpolate(fold.value, [0, 1], [-300, 300]) }],
   }));
   const shadowStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(fold.value, [0, 1], [260, -260]) }],
+    transform: [{ translateX: interpolate(fold.value, [0, 1], [300, -300]) }],
   }));
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
-      <Animated.View style={[StyleSheet.absoluteFill, clothStyle]}>
-        {/* 13 stripes, red on top + bottom */}
-        {Array.from({ length: 13 }).map((_, i) => (
-          <View key={i} style={{ flex: 1, backgroundColor: i % 2 === 0 ? RED : WHITE }} />
+      {/* Static base so the gaps between sheared columns never reveal the void */}
+      <LinearGradient
+        colors={colors} locations={locations}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Rippling columns — amplitude grows toward the fly end (right) */}
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { flexDirection: 'row' }]}>
+        {Array.from({ length: FLAG_COLUMNS }).map((_, i) => (
+          <FlagColumn key={i} i={i} n={FLAG_COLUMNS} wave={wave} colors={colors} locations={locations} />
         ))}
-        {/* Blue canton with 50 real 5-point stars */}
-        <View pointerEvents="none" style={{
-          position: 'absolute', top: 0, left: 0,
-          width: '40%', height: '53.8%', backgroundColor: CANTON,
-        }}>
-          <Svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
-            {FLAG_STARS.map((s, i) => (
-              <Path key={i} d={starPath(s.cx, s.cy, 4.1)} fill="#ffffff" />
-            ))}
-          </Svg>
-        </View>
+      </View>
+      {/* Blue canton with 50 real 5-point stars, calm near the hoist */}
+      <Animated.View pointerEvents="none" style={[
+        { position: 'absolute', top: 0, left: 0, width: '40%', height: '53.8%', backgroundColor: CANTON },
+        cantonStyle,
+      ]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
+          {FLAG_STARS.map((s, i) => (
+            <Path key={i} d={starPath(s.cx, s.cy, 4.1)} fill="#ffffff" />
+          ))}
+        </Svg>
       </Animated.View>
-      {/* Moving light fold — a soft white diagonal band sweeping across */}
+      {/* Light fold sweeping across the fabric */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, sheenStyle]}>
         <LinearGradient
           colors={['transparent', 'rgba(255,255,255,0.22)', 'transparent'] as const as readonly [string, string, ...string[]]}
-          start={{ x: 0, y: 0.2 }} end={{ x: 1, y: 0.8 }}
+          start={{ x: 0, y: 0.15 }} end={{ x: 1, y: 0.85 }}
           style={{ width: '55%', height: '100%' }}
         />
       </Animated.View>
-      {/* Moving shadow fold, counter-drifting, for depth */}
+      {/* Counter-drifting shadow fold for depth */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadowStyle]}>
         <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.24)', 'transparent'] as const as readonly [string, string, ...string[]]}
-          start={{ x: 0, y: 0.8 }} end={{ x: 1, y: 0.2 }}
-          style={{ width: '45%', height: '100%' }}
+          colors={['transparent', 'rgba(0,0,0,0.26)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0.85 }} end={{ x: 1, y: 0.15 }}
+          style={{ width: '48%', height: '100%' }}
         />
       </Animated.View>
       {/* Vignette so the flag doesn't fight foreground text */}
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.28)' }]} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.22)' }]} />
       {children}
     </View>
+  );
+}
+
+/** One vertical slice of the flag. Each column shifts up/down on a travelling
+ *  sine wave (and shears to meet its neighbours), with the amplitude scaling
+ *  from 0 at the hoist to full at the fly end — exactly how cloth whips in wind. */
+function FlagColumn({ i, n, wave, colors, locations }: {
+  i: number; n: number; wave: SharedValue<number>;
+  colors: readonly [string, string, ...string[]]; locations: readonly [number, number, ...number[]];
+}) {
+  const animStyle = useAnimatedStyle(() => {
+    const reach = i / (n - 1);                          // 0 at hoist → 1 at fly
+    const amp = reach * 26;                             // px of vertical whip
+    const ang = wave.value * Math.PI * 2 + (i / n) * Math.PI * 2 * 2; // ~2 waves across
+    return {
+      transform: [
+        { translateY: Math.sin(ang) * amp },
+        { skewY: `${Math.cos(ang) * reach * 8}deg` },
+      ],
+    };
+  });
+  return (
+    <Animated.View style={[{ flex: 1, overflow: 'hidden' }, animStyle]}>
+      {/* Taller than the frame + parked high, so vertical whip never exposes an edge */}
+      <LinearGradient
+        colors={colors} locations={locations}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={{ position: 'absolute', left: 0, right: 0, top: '-30%', height: '160%' }}
+      />
+    </Animated.View>
   );
 }
 
@@ -1161,15 +1213,25 @@ export function CosmeticBorder({
 function GlowBorder({ v, size, children }: BorderProps) {
   const width = v.width ?? 3;
   const padded = size + width * 2 + 6;
+  // A slow breathe so even the plainest ring has life everywhere it appears.
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(t);
+  }, [t]);
+  const animStyle = useAnimatedStyle(() => ({
+    shadowOpacity: interpolate(t.value, [0, 1], [0.5, 0.95]),
+    shadowRadius: interpolate(t.value, [0, 1], [9, 16]),
+  }));
   return (
-    <View style={{
+    <Animated.View style={[{
       width: padded, height: padded, borderRadius: padded / 2,
       borderWidth: width, borderColor: v.color ?? C.gold,
       alignItems: 'center', justifyContent: 'center',
-      shadowColor: v.color ?? C.gold, shadowOpacity: 0.85, shadowRadius: 14,
-    }}>
+      shadowColor: v.color ?? C.gold, shadowOffset: { width: 0, height: 0 },
+    }, animStyle]}>
       {children}
-    </View>
+    </Animated.View>
   );
 }
 

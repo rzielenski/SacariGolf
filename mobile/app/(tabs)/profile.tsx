@@ -18,7 +18,7 @@ import { ThemeSongPicker, ThemeTrack } from '../../components/ThemeSongPicker';
 import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
-import { RankCrest } from '../../components/RankCrest';
+import { RankCrest, crestFootprint } from '../../components/RankCrest';
 import { rankForElo } from '../../lib/rank';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
 import { PressableScale } from '../../components/ui/PressableScale';
@@ -413,7 +413,7 @@ export default function ProfileScreen() {
           activeOpacity={0.8}
           style={{ marginBottom: 12 }}
         >
-        <CosmeticBorder visual={borderVisual} size={96}>
+        <CosmeticBorder visual={borderVisual} size={crestFootprint(user.elo, 96)}>
           <RankCrest elo={user.elo} size={96}>
             {uploadingAvatar ? (
               <View style={styles.avatarLoader}><ActivityIndicator color={C.gold} /></View>

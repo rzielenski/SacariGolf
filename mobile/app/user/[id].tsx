@@ -10,7 +10,7 @@ import { C, F } from '../../lib/colors';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle } from '../../components/Flourish';
 import { LiveSpectatorModal } from '../../components/LiveSpectator';
-import { RankCrest } from '../../components/RankCrest';
+import { RankCrest, crestFootprint } from '../../components/RankCrest';
 import { AvatarViewer } from '../../components/AvatarViewer';
 import { CosmeticBackground, CosmeticBorder, CosmeticUsername } from '../../components/Cosmetics';
 import { fmtHandicap, parForHolesPlayed, toParForHolesPlayed, fmtToPar } from '../../lib/golfMath';
@@ -132,7 +132,7 @@ export default function UserProfileScreen() {
 
       {/* Header */}
       <View style={styles.headerSection}>
-        <CosmeticBorder visual={borderVisual} size={96}>
+        <CosmeticBorder visual={borderVisual} size={crestFootprint(profile.elo, 96)}>
           <RankCrest elo={profile.elo} size={96} style={borderVisual ? undefined : { marginBottom: 8 }}>
             {profile.avatar_url ? (
               // Tap to view the photo full-screen — same pattern as a Find.

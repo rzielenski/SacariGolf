@@ -20,6 +20,20 @@ import { Animated, Image, StyleSheet, View, ViewStyle, Easing } from 'react-nati
 import { UserAvatar } from './UserAvatar';
 import { rankForElo, CREST_IMAGES, medallionFor } from '../lib/rank';
 
+/**
+ * The on-screen footprint of a crest for a given avatar `size`. In art mode the
+ * emblem is much larger than the avatar (the avatar sits in the emblem's
+ * medallion well), so a cosmetic ring drawn around the crest must be sized to
+ * THIS, not to `size`, or it disappears behind the emblem. Mirrors the footprint
+ * math in RankCrest below.
+ */
+export function crestFootprint(elo: number, size = 96): number {
+  const rank = rankForElo(elo);
+  const emblem = CREST_IMAGES[rank.tier.key];
+  if (emblem) return Math.round(size / medallionFor(rank.tier.key).diameter);
+  return Math.round(size * 1.5);
+}
+
 interface RankCrestProps {
   elo: number;
   /** Avatar diameter in px. The crest decoration extends around it. */
