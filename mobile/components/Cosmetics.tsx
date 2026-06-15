@@ -178,30 +178,21 @@ const FLAG_STARS: { cx: number; cy: number }[] = (() => {
   return out;
 })();
 
-// 13 stripes as hard-edged LinearGradient stops (red top + bottom), so each
-// rippling column is a single GPU layer instead of 13 stacked Views.
-function buildStripes(red: string, white: string): { colors: readonly [string, string, ...string[]]; locations: readonly [number, number, ...number[]] } {
-  const colors: string[] = [];
-  const locations: number[] = [];
-  for (let i = 0; i < 13; i++) {
-    const c = i % 2 === 0 ? red : white;
-    colors.push(c, c);
-    locations.push(i / 13, (i + 1) / 13);
-  }
-  return {
-    colors: colors as unknown as readonly [string, string, ...string[]],
-    locations: locations as unknown as readonly [number, number, ...number[]],
-  };
-}
-
-const FLAG_COLUMNS = 22;
+// Flag drawn in a 190×100 viewBox (the real 1.9:1 ratio). Everything is vector
+// (SVG), so it stays crisp and anti-aliased at any rendered size — no raster
+// columns, no pixelation.
+const FLAG_VB_W = 190;
+const FLAG_VB_H = 100;
+const FLAG_STRIPES = 13;
+const FLAG_AMP = 9;        // peak vertical whip, in viewBox units (at the fly)
+const FLAG_WAVES = 2.2;    // ripples across the width
+const FLAG_OVERSCAN = 16;  // top/bottom stripe extension so a whip never exposes an edge
 
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
   const RED = v.red ?? stripes[0] ?? '#b22234';
   const WHITE = v.white ?? stripes[1] ?? '#ffffff';
   const CANTON = v.canton ?? '#3c3b6e';
-  const { colors, locations } = useMemo(() => buildStripes(RED, WHITE), [RED, WHITE]);
 
   // One phase driver for the travelling cloth wave; one for the light/shadow
   // folds that sweep across so the ripples read as fabric catching light.
@@ -217,7 +208,7 @@ function FlagBg({ v, style, children }: BgProps) {
   // only a whisper of motion so the stars stay legible.
   const cantonStyle = useAnimatedStyle(() => {
     const ang = wave.value * Math.PI * 2;
-    return { transform: [{ translateY: Math.sin(ang) * 3 }, { skewY: `${Math.cos(ang) * 1}deg` }] };
+    return { transform: [{ translateY: Math.sin(ang) * 2.5 }, { skewY: `${Math.cos(ang) * 1}deg` }] };
   });
   const sheenStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: interpolate(fold.value, [0, 1], [-300, 300]) }],
@@ -227,19 +218,13 @@ function FlagBg({ v, style, children }: BgProps) {
   }));
 
   return (
-    <View style={[{ overflow: 'hidden' }, style]}>
-      {/* Static base so the gaps between sheared columns never reveal the void */}
-      <LinearGradient
-        colors={colors} locations={locations}
-        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
-        style={StyleSheet.absoluteFill}
-      />
-      {/* Rippling columns — amplitude grows toward the fly end (right) */}
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { flexDirection: 'row' }]}>
-        {Array.from({ length: FLAG_COLUMNS }).map((_, i) => (
-          <FlagColumn key={i} i={i} n={FLAG_COLUMNS} wave={wave} colors={colors} locations={locations} />
+    <View style={[{ overflow: 'hidden', backgroundColor: RED }, style]}>
+      {/* Smooth vector stripes that ripple as one sheet of cloth */}
+      <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
+        {Array.from({ length: FLAG_STRIPES }).map((_, i) => (
+          <FlagWaveStripe key={i} index={i} color={i % 2 === 0 ? RED : WHITE} wave={wave} />
         ))}
-      </View>
+      </Svg>
       {/* Blue canton with 50 real 5-point stars, calm near the hoist */}
       <Animated.View pointerEvents="none" style={[
         { position: 'absolute', top: 0, left: 0, width: '40%', height: '53.8%', backgroundColor: CANTON },
@@ -254,7 +239,7 @@ function FlagBg({ v, style, children }: BgProps) {
       {/* Light fold sweeping across the fabric */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, sheenStyle]}>
         <LinearGradient
-          colors={['transparent', 'rgba(255,255,255,0.22)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          colors={['transparent', 'rgba(255,255,255,0.20)', 'transparent'] as const as readonly [string, string, ...string[]]}
           start={{ x: 0, y: 0.15 }} end={{ x: 1, y: 0.85 }}
           style={{ width: '55%', height: '100%' }}
         />
@@ -262,46 +247,43 @@ function FlagBg({ v, style, children }: BgProps) {
       {/* Counter-drifting shadow fold for depth */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadowStyle]}>
         <LinearGradient
-          colors={['transparent', 'rgba(0,0,0,0.26)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          colors={['transparent', 'rgba(0,0,0,0.24)', 'transparent'] as const as readonly [string, string, ...string[]]}
           start={{ x: 0, y: 0.85 }} end={{ x: 1, y: 0.15 }}
           style={{ width: '48%', height: '100%' }}
         />
       </Animated.View>
       {/* Vignette so the flag doesn't fight foreground text */}
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.22)' }]} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.20)' }]} />
       {children}
     </View>
   );
 }
 
-/** One vertical slice of the flag. Each column shifts up/down on a travelling
- *  sine wave (and shears to meet its neighbours), with the amplitude scaling
- *  from 0 at the hoist to full at the fly end — exactly how cloth whips in wind. */
-function FlagColumn({ i, n, wave, colors, locations }: {
-  i: number; n: number; wave: SharedValue<number>;
-  colors: readonly [string, string, ...string[]]; locations: readonly [number, number, ...number[]];
-}) {
-  const animStyle = useAnimatedStyle(() => {
-    const reach = i / (n - 1);                          // 0 at hoist → 1 at fly
-    const amp = reach * 26;                             // px of vertical whip
-    const ang = wave.value * Math.PI * 2 + (i / n) * Math.PI * 2 * 2; // ~2 waves across
-    return {
-      transform: [
-        { translateY: Math.sin(ang) * amp },
-        { skewY: `${Math.cos(ang) * reach * 8}deg` },
-      ],
-    };
+/** One stripe as a filled vector band whose top + bottom edges follow the same
+ *  travelling sine wave, so all 13 ripple together as a single sheet of cloth.
+ *  Amplitude grows from 0 at the hoist to full at the fly end. The `d` is
+ *  rebuilt each frame on the UI thread — cheap for a single background. */
+function FlagWaveStripe({ index, color, wave }: { index: number; color: string; wave: SharedValue<number> }) {
+  const animatedProps = useAnimatedProps(() => {
+    const h = FLAG_VB_H / FLAG_STRIPES;
+    const top = index === 0 ? -FLAG_OVERSCAN : index * h;
+    const bot = index === FLAG_STRIPES - 1 ? FLAG_VB_H + FLAG_OVERSCAN : (index + 1) * h;
+    const steps = 22;
+    const phase = wave.value * Math.PI * 2;
+    let d = '';
+    for (let s = 0; s <= steps; s++) {
+      const x = (s / steps) * FLAG_VB_W;
+      const off = (x / FLAG_VB_W) * FLAG_AMP * Math.sin((x / FLAG_VB_W) * Math.PI * 2 * FLAG_WAVES - phase);
+      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + off).toFixed(2)} `;
+    }
+    for (let s = steps; s >= 0; s--) {
+      const x = (s / steps) * FLAG_VB_W;
+      const off = (x / FLAG_VB_W) * FLAG_AMP * Math.sin((x / FLAG_VB_W) * Math.PI * 2 * FLAG_WAVES - phase);
+      d += `L${x.toFixed(1)} ${(bot + off).toFixed(2)} `;
+    }
+    return { d: d + 'Z' };
   });
-  return (
-    <Animated.View style={[{ flex: 1, overflow: 'hidden' }, animStyle]}>
-      {/* Taller than the frame + parked high, so vertical whip never exposes an edge */}
-      <LinearGradient
-        colors={colors} locations={locations}
-        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
-        style={{ position: 'absolute', left: 0, right: 0, top: '-30%', height: '160%' }}
-      />
-    </Animated.View>
-  );
+  return <AnimatedPath animatedProps={animatedProps} fill={color} />;
 }
 
 // ── 3. Storm (lightning + flashes) ──────────────────────────────────────────
