@@ -150,48 +150,103 @@ function GradientBg({ v, style, children }: BgProps) {
   );
 }
 
-// ── 2. Flag (Stars & Stripes) ───────────────────────────────────────────────
+// ── 2. Flag (Stars & Stripes, waving in the wind) ───────────────────────────
+
+/** SVG path for a 5-point star centered at (cx,cy) with outer radius r. */
+function starPath(cx: number, cy: number, r: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const ang = (Math.PI / 5) * i - Math.PI / 2;
+    const rad = i % 2 === 0 ? r : r * 0.4;
+    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(2)},${(cy + rad * Math.sin(ang)).toFixed(2)}`);
+  }
+  return `M${pts.join(' L')} Z`;
+}
+
+/** The official 50-star canton: 9 rows alternating 6 and 5 stars, the 5-star
+ *  rows offset half a column. Laid out in a 0..100 viewBox. */
+const FLAG_STARS: { cx: number; cy: number }[] = (() => {
+  const out: { cx: number; cy: number }[] = [];
+  for (let row = 0; row < 9; row++) {
+    const six = row % 2 === 0;
+    const count = six ? 6 : 5;
+    const cy = 7 + row * 10.7;
+    for (let col = 0; col < count; col++) {
+      out.push({ cx: six ? 9 + col * 16.4 : 17.2 + col * 16.4, cy });
+    }
+  }
+  return out;
+})();
 
 function FlagBg({ v, style, children }: BgProps) {
-  const stripes: string[] = v.stripes ?? ['#bf0a30', '#ffffff'];
-  // Subtle wave: pan the whole flag horizontally a couple of pixels.
-  const wave = useSharedValue(0);
+  const stripes: string[] = v.stripes ?? [];
+  const RED = v.red ?? stripes[0] ?? '#b22234';
+  const WHITE = v.white ?? stripes[1] ?? '#ffffff';
+  const CANTON = v.canton ?? '#3c3b6e';
+
+  // Two drivers: a slow cloth sway (skew + breathe) and a faster pass of
+  // light/shadow fold bands drifting across the fabric. Together they read as
+  // wind rippling the flag rather than a flat image sliding.
+  const sway = useSharedValue(0);
+  const fold = useSharedValue(0);
   useEffect(() => {
-    wave.value = withRepeat(withTiming(1, { duration: 4500, easing: Easing.inOut(Easing.sin) }), -1, true);
-    return () => cancelAnimation(wave);
-  }, [wave]);
-  const waveStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(wave.value, [0, 1], [-3, 3]) }],
+    sway.value = withRepeat(withTiming(1, { duration: 3400, easing: Easing.inOut(Easing.sin) }), -1, true);
+    fold.value = withRepeat(withTiming(1, { duration: 3800, easing: Easing.linear }), -1, false);
+    return () => { cancelAnimation(sway); cancelAnimation(fold); };
+  }, [sway, fold]);
+
+  const clothStyle = useAnimatedStyle(() => ({
+    transform: [
+      { perspective: 600 },
+      { skewX: `${interpolate(sway.value, [0, 1], [-2, 2])}deg` },
+      { skewY: `${interpolate(sway.value, [0, 0.5, 1], [-0.6, 0.6, -0.6])}deg` },
+      { scaleY: interpolate(sway.value, [0, 0.5, 1], [1, 1.03, 1]) },
+    ],
+  }));
+  const sheenStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(fold.value, [0, 1], [-260, 260]) }],
+  }));
+  const shadowStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(fold.value, [0, 1], [260, -260]) }],
   }));
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
-      <Animated.View style={[StyleSheet.absoluteFill, waveStyle]}>
+      <Animated.View style={[StyleSheet.absoluteFill, clothStyle]}>
+        {/* 13 stripes, red on top + bottom */}
         {Array.from({ length: 13 }).map((_, i) => (
-          <View key={i} style={{ flex: 1, backgroundColor: stripes[i % stripes.length] }} />
+          <View key={i} style={{ flex: 1, backgroundColor: i % 2 === 0 ? RED : WHITE }} />
         ))}
-        {/* Blue canton with a 9×5 dot star grid. The "stars" are pure
-            white dots — actual 5-point stars would require SVG Polygon
-            and aren't worth the perf cost for a passive background. */}
+        {/* Blue canton with 50 real 5-point stars */}
         <View pointerEvents="none" style={{
           position: 'absolute', top: 0, left: 0,
-          width: '42%', height: '54%', backgroundColor: v.canton ?? '#002868',
+          width: '40%', height: '53.8%', backgroundColor: CANTON,
         }}>
-          {Array.from({ length: 9 }).map((_, row) => (
-            <View key={row} style={{ flex: 1, flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' }}>
-              {Array.from({ length: 5 }).map((__, col) => (
-                <View key={col} style={{
-                  width: 5, height: 5, borderRadius: 3,
-                  backgroundColor: '#ffffff', opacity: 0.95,
-                  shadowColor: '#ffffff', shadowOpacity: 0.6, shadowRadius: 2,
-                }} />
-              ))}
-            </View>
-          ))}
+          <Svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
+            {FLAG_STARS.map((s, i) => (
+              <Path key={i} d={starPath(s.cx, s.cy, 4.1)} fill="#ffffff" />
+            ))}
+          </Svg>
         </View>
       </Animated.View>
+      {/* Moving light fold — a soft white diagonal band sweeping across */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, sheenStyle]}>
+        <LinearGradient
+          colors={['transparent', 'rgba(255,255,255,0.22)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0.2 }} end={{ x: 1, y: 0.8 }}
+          style={{ width: '55%', height: '100%' }}
+        />
+      </Animated.View>
+      {/* Moving shadow fold, counter-drifting, for depth */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadowStyle]}>
+        <LinearGradient
+          colors={['transparent', 'rgba(0,0,0,0.24)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0.8 }} end={{ x: 1, y: 0.2 }}
+          style={{ width: '45%', height: '100%' }}
+        />
+      </Animated.View>
       {/* Vignette so the flag doesn't fight foreground text */}
-      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.30)' }]} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.28)' }]} />
       {children}
     </View>
   );
@@ -1510,20 +1565,16 @@ function GradientUsername({ v, style, children }: UnameProps) {
   const gradient = (v.gradient ?? ['#ff6b9d', '#74e0ff']) as readonly string[];
   const colors = gradient as readonly [string, string, ...string[]];
   return (
-    <MaskedView
-      maskElement={
-        <Text style={[style, { backgroundColor: 'transparent', color: 'black' }]}>
-          {children}
-        </Text>
-      }
-    >
+    <MaskedView maskElement={<Text style={style} numberOfLines={1}>{children}</Text>}>
+      {/* In-flow invisible copy sizes the MaskedView to the glyphs (an absolute
+          spacer gives zero width → blank text). The gradient then fills that
+          exact box and is clipped to the letters by the mask above. */}
+      <Text style={[style, { opacity: 0 }]} numberOfLines={1}>{children}</Text>
       <LinearGradient
         colors={colors}
         start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-        style={{ height: 50 }}
+        style={StyleSheet.absoluteFill}
       />
-      {/* Invisible spacer Text so MaskedView measures the right width */}
-      <Text style={[style, { opacity: 0, position: 'absolute' }]}>{children}</Text>
     </MaskedView>
   );
 }
@@ -1575,24 +1626,20 @@ function HolographicUsername({ v, style, children }: UnameProps) {
   }, [t]);
   const colors = ((v.gradient ?? ['#ff6b9d', '#74e0ff', '#a89cf0', '#ffe28a', '#ff6b9d']) as readonly string[]) as readonly [string, string, ...string[]];
   const animStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(t.value, [0, 1], [-150, 150]) }],
+    transform: [{ translateX: interpolate(t.value, [0, 1], [-60, 60]) }],
   }));
   return (
-    <MaskedView
-      maskElement={
-        <Text style={[style, { backgroundColor: 'transparent', color: 'black' }]}>
-          {children}
-        </Text>
-      }
-    >
-      <Animated.View style={[{ width: 400, height: 50 }, animStyle]}>
+    <MaskedView maskElement={<Text style={style} numberOfLines={1}>{children}</Text>}>
+      {/* Invisible in-flow copy sizes the box to the glyphs; the spectrum is
+          extra-wide and slides under the mask for the moving-rainbow look. */}
+      <Text style={[style, { opacity: 0 }]} numberOfLines={1}>{children}</Text>
+      <Animated.View style={[StyleSheet.absoluteFill, animStyle]}>
         <LinearGradient
           colors={colors}
           start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
-          style={{ flex: 1 }}
+          style={{ position: 'absolute', top: 0, bottom: 0, left: '-60%', width: '220%' }}
         />
       </Animated.View>
-      <Text style={[style, { opacity: 0, position: 'absolute' }]}>{children}</Text>
     </MaskedView>
   );
 }

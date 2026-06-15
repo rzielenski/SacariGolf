@@ -8,6 +8,7 @@ import { wrap } from '../utils/asyncHandler';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
+import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
 import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -656,13 +657,21 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // to a generous cap so a power user with thousands of shots doesn't
   // blow up memory; the most recent 5000 are plenty for stats.
   const { rows: shotRows } = await pool.query(
-    `SELECT shot_id, club, start_lat, start_lng, end_lat, end_lng,
-            plays_like_yds, recorded_at, total_yds, lateral_yds
-       FROM shots
-      WHERE user_id = $1
-        AND club IS NOT NULL
-        AND club <> 'unknown'
-      ORDER BY recorded_at DESC
+    // Club distances/dispersion reflect SOLO play only — a scramble shot
+    // isn't necessarily the player's own ball, and team/arena play
+    // shouldn't skew an individual's club profile. Shots from deleted
+    // matches (match_id NULL) drop out of the inner join, which is fine:
+    // we can't confirm they were solo.
+    `SELECT s.shot_id, s.club, s.start_lat, s.start_lng, s.end_lat, s.end_lng,
+            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds
+       FROM shots s
+       JOIN matches m ON m.match_id = s.match_id
+      WHERE s.user_id = $1
+        AND m.match_type = 'solo'
+        AND m.is_practice = false
+        AND s.club IS NOT NULL
+        AND s.club <> 'unknown'
+      ORDER BY s.recorded_at DESC
       LIMIT 5000`,
     [req.params.id]
   );
@@ -1993,6 +2002,7 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
             t.course_rating, t.slope_rating, t.num_holes AS teebox_holes,
             t.front_course_rating, t.front_slope_rating,
             t.back_course_rating, t.back_slope_rating,
+            m.holes_subset,
             t.name AS teebox_name, c.course_name
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
@@ -2000,37 +2010,20 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
      LEFT JOIN courses c ON c.course_id = t.course_id
      WHERE r.user_id = $1 AND r.total_score IS NOT NULL
        AND m.completed = true AND m.is_practice = false
+       -- Handicap reflects SOLO play only. Team (duo/squad) scores are
+       -- shared/scramble and Arena is multi-way, so they don't represent
+       -- an individual's score-to-rating.
+       AND m.match_type = 'solo'
        AND t.course_rating IS NOT NULL AND t.slope_rating IS NOT NULL
      ORDER BY r.created_at DESC
      LIMIT 20`,
     [req.params.id]
   );
 
-  // Score differential = (113 / slope) × (gross − rating)
-  // For 9-hole rounds, use the 9-hole slope and 9-hole rating as-is.
-  // The doubling of slope and (score − rating) cancel out, so no extra ×2 is needed.
-  //  - 18-hole round on 18-hole teebox: full 18 rating + slope
-  //  - 9-hole round on 9-hole teebox:    teebox.course_rating + slope_rating ARE the 9-hole values
-  //  - 9-hole round on 18-hole teebox:   use the front-9 rating/slope columns (assumes front 9)
+  // Per-round score differential, via the shared (slope-guarded) helper so
+  // the live view and the backfill always agree. See utils/handicap.ts.
   const differentials = rounds.map((r) => {
-    const isNineHoleRound = r.holes_played === 9;
-    const isNineHoleTeebox = r.teebox_holes === 9;
-
-    let rating: number;
-    let slope: number;
-
-    if (isNineHoleRound && !isNineHoleTeebox) {
-      // 9-hole round on an 18-hole teebox — prefer the dedicated front-9 ratings
-      rating = r.front_course_rating ?? (r.course_rating / 2);
-      slope = r.front_slope_rating ?? r.slope_rating;
-    } else {
-      // 9-hole teebox OR full 18-hole round — the teebox's primary rating/slope already match
-      rating = r.course_rating;
-      slope = r.slope_rating;
-    }
-
-    const diff = (113 / slope) * (r.total_score - rating);
-
+    const d = roundDifferential(r);
     return {
       round_id: r.round_id,
       created_at: r.created_at,
@@ -2038,41 +2031,19 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
       course_name: r.course_name,
       teebox_name: r.teebox_name,
       holes_played: r.holes_played,
-      course_rating_used: Math.round(rating * 10) / 10,
-      slope_used: slope,
-      differential: Math.round(diff * 10) / 10,
-      is_nine_hole: isNineHoleRound,
+      course_rating_used: Math.round(d.rating * 10) / 10,
+      slope_used: d.slope,
+      differential: Math.round(d.diff * 10) / 10,
+      is_nine_hole: r.holes_played === 9,
     };
   });
 
-  // WHS lookup: how many of the lowest differentials to use, plus an adjustment
-  const N = differentials.length;
-  let useCount = 0;
-  let adjustment = 0;
-  if (N >= 20) { useCount = 8; }
-  else if (N >= 19) { useCount = 7; }
-  else if (N >= 17) { useCount = 6; }
-  else if (N >= 15) { useCount = 5; }
-  else if (N >= 12) { useCount = 4; }
-  else if (N >= 9)  { useCount = 3; }
-  else if (N >= 7)  { useCount = 2; }
-  else if (N >= 6)  { useCount = 2; adjustment = -1; }
-  else if (N >= 5)  { useCount = 1; }
-  else if (N >= 4)  { useCount = 1; adjustment = -1; }
-  else if (N >= 3)  { useCount = 1; adjustment = -2; }
-
-  let handicapIndex: number | null = null;
-  if (useCount > 0) {
-    const sorted = [...differentials].map((d) => d.differential).sort((a, b) => a - b);
-    const best = sorted.slice(0, useCount);
-    const avg = best.reduce((a, b) => a + b, 0) / best.length;
-    handicapIndex = Math.round((avg + adjustment) * 10) / 10;
-  }
+  const { handicapIndex, useCount } = whsHandicapIndex(differentials.map((d) => d.differential));
 
   return res.json({
     handicap_index: handicapIndex,
     num_rounds_used: useCount,
-    total_rated_rounds: N,
+    total_rated_rounds: differentials.length,
     differentials,
   });
 }));

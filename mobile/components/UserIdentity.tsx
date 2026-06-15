@@ -15,13 +15,14 @@
  * new surface only needs these two components — and any future cosmetic
  * automatically shows up everywhere once the renderer knows its style.
  *
- * Perf contract: `animated` defaults to FALSE. Lists (feed, leaderboard,
- * friends, chat) render dozens of identities; running looped Reanimated
- * drivers per row would blow the simultaneous-animation budget. Static
- * mode draws the cosmetic's signature look (ring color, glow, name color)
- * with zero animation work. Pass animated={true} only on focused surfaces
- * with a handful of identities: public profile, match lobby, champion
- * banner.
+ * Perf contract: `animated` defaults to TRUE so equipped cosmetics animate
+ * everywhere, not just the profile. The big surfaces (feed, leaderboard,
+ * friends, chat, cup) are virtualized FlatLists, so only the ~10 on-screen
+ * rows are mounted and animating at any moment — the off-screen rows cost
+ * nothing. Each renderer cancels its drivers on unmount, so scrolling a row
+ * out of view stops its animation. Pass animated={false} to force the cheap
+ * static look (signature color + glow, no drivers) for a non-virtualized
+ * surface that could mount many identities at once.
  */
 
 import React from 'react';
@@ -48,7 +49,7 @@ function primaryColor(v: any): string | null {
 }
 
 export function IdentityAvatar({
-  visual, username, avatarUrl, size = 40, borderRadius, animated = false, style,
+  visual, username, avatarUrl, size = 40, borderRadius, animated = true, style,
 }: {
   visual: EquippedVisual;
   username?: string | null;
@@ -95,7 +96,7 @@ export function IdentityAvatar({
 }
 
 export function IdentityName({
-  visual, children, style, animated = false, numberOfLines,
+  visual, children, style, animated = true, numberOfLines,
 }: {
   visual: EquippedVisual;
   children: React.ReactNode;

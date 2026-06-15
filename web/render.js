@@ -45,6 +45,7 @@ function nav(active, authed) {
   return `<header class="topbar">
     <a class="brand" href="/">SACARI<span>GOLF</span></a>
     <nav class="nav">
+      ${link('/how-to-play', 'howto', 'How to Play')}
       ${link('/leaderboard', 'leaderboard', 'Rankings')}
       ${link('/courses', 'courses', 'Courses')}
       ${account}
@@ -56,6 +57,7 @@ function nav(active, authed) {
 function foot() {
   return `<footer class="foot">
     <div class="foot-links">
+      <a href="/how-to-play">How to Play</a>
       <a href="/leaderboard">Rankings</a>
       <a href="/courses">Courses</a>
       <a href="/support">Support</a>
@@ -119,41 +121,44 @@ function renderHome() {
     <p class="hero-sub">Climb from Wood to Obsidian, battle clans, and track every shot. The free, competitive way to play the game you already love.</p>
     <div class="hero-cta">
       ${appStoreButton('Download on the App Store')}
-      <a class="cta-ghost" href="/leaderboard">See the rankings</a>
+      <a class="cta-ghost" href="/how-to-play">How it works</a>
     </div>
     <img class="hero-crest" src="/crests/diamond.png" alt="Diamond rank crest" />
   </section>
 
   <section class="feature">
     <h2>Earn your rank</h2>
-    <p>Every ranked match moves you up a real ladder. Eight tiers, fifty LP per division, seasonal climbs, and crests you actually want to show off.</p>
+    <p>Every ranked match moves you up a real ladder. Eight tiers, four divisions each, and placement games that fast-track new players to their true rank. Crests you actually want to show off.</p>
     ${crestLadder()}
   </section>
 
   <section class="feature alt">
     <div class="feature-grid">
       <div class="feature-card">
-        <h3>Know your game</h3>
-        <p>Per-club dispersion heatmaps, strokes gained, and weather-adjusted plays-like distances from every tracked shot.</p>
+        <h3>Climb &amp; compete</h3>
+        <p>Ranked solo, duo, and squad matches with live ELO. Six-month seasons, the weekly Sacari Cup, and a partial reset each season so every climb counts.</p>
       </div>
       <div class="feature-card">
         <h3>Bring your crew</h3>
-        <p>Solo, duo, and full-squad matches. Form a clan, battle other clans, and talk trash in live match chat.</p>
+        <p>Form a clan to play as a duo or squad, climb the team leaderboard, and talk trash in live match chat. Agree to a live scoreboard and watch the battle hole-by-hole.</p>
       </div>
       <div class="feature-card">
-        <h3>Free, no paywall</h3>
-        <p>Every premium feature is unlocked free during open beta. GPS, stats, heatmaps, the works. No card, no ads.</p>
+        <h3>Make it yours</h3>
+        <p>Unlock animated borders, profile backgrounds, and ball-trail effects in the Locker Room and Season Pass. Your look follows your name everywhere.</p>
       </div>
       <div class="feature-card">
-        <h3>Your own profile</h3>
-        <p>A shareable page at sacarigolf.com/u/your-name showing your rank, record, and recent rounds.</p>
+        <h3>Know your game</h3>
+        <p>Per-club dispersion, strokes gained, and weather-adjusted plays-like distances from every tracked shot. Plus a shareable profile at sacarigolf.com/u/your-name.</p>
       </div>
     </div>
   </section>
 
   <section class="cta-band">
     <h2>Start climbing.</h2>
-    ${appStoreButton('Download on the App Store')}
+    <div class="hero-cta">
+      ${appStoreButton('Download on the App Store')}
+      <a class="cta-ghost" href="/how-to-play">Read the guide</a>
+    </div>
   </section>`;
 
   return page({
@@ -163,6 +168,63 @@ function renderHome() {
     ogUrl: SITE_URL || '',
     active: 'home',
     bodyClass: 'home',
+    body,
+  });
+}
+
+// ----- How to play ----------------------------------------------------------
+function renderHowTo() {
+  const step = (n, title, body) => `<li class="guide-step">
+    <span class="guide-num">${n}</span>
+    <div><h3>${title}</h3><p>${body}</p></div>
+  </li>`;
+  const card = (title, body) => `<div class="guide-card"><h3>${title}</h3><p>${body}</p></div>`;
+
+  const body = `
+  <section class="page-head">
+    <h1>How to play</h1>
+    <p>Everything you need to go from a fresh account to climbing the ranked ladder.</p>
+  </section>
+
+  <section class="guide">
+    <h2 class="guide-h">Get started</h2>
+    <ol class="guide-steps">
+      ${step(1, 'Download &amp; sign up', 'Grab Sacari Golf from the App Store and create an account. You start at the Wood floor (100 ELO) and climb from there.')}
+      ${step(2, 'Set your home course', 'Pick your home course in Profile so the app can center maps, measure shot distances, and put you on your local feed. Missing a course? Tap "+ Request" on the Courses tab to add it.')}
+      ${step(3, 'Play a ranked match', 'From the Play tab choose Solo, Duo, or Squad, pick your tees, and head out. Enter your score hole-by-hole; optionally track each shot on the satellite map for distances and stats.')}
+      ${step(4, 'Submit and get matched', 'Finish your round and submit. Solo rounds auto-match you against a similar-rated opponent who also played; duos and squads pair against another team. ELO is settled the moment both sides are in.')}
+    </ol>
+
+    <h2 class="guide-h">Climb the ladder</h2>
+    <p class="guide-lead">Eight tiers, Wood through Obsidian. Each tier has four divisions of 50 LP. Your rank is just your ELO, shown as division + LP (for example <strong>B III 23</strong> is Bronze 3, 23 LP).</p>
+    <div class="guide-grid">
+      ${card('Placement games', 'Your first 5 ranked matches each season swing hard, so a few good rounds rocket you toward your true rank instead of grinding up from the bottom.')}
+      ${card('Every win counts', 'A win always moves you up by a guaranteed minimum, so beating a weaker opponent still climbs you. No more winning and gaining nothing.')}
+      ${card('Seasons &amp; resets', 'Seasons run six months (Summer and Winter). At each rollover your ELO gets a partial reset toward the start, so every season is a fresh climb that still rewards skill.')}
+      ${card('The Sacari Cup', 'A weekly best-round competition. Top the cup and you earn the Champion Wreath border and a spot on the home page for the week.')}
+    </div>
+
+    <h2 class="guide-h">Team up</h2>
+    <p class="guide-lead">Form a clan to play as a duo or squad. Clans have their own name, roster, and a team leaderboard ranked by your combined rating. Talk trash in live match chat with friends, teammates, and opponents.</p>
+
+    <h2 class="guide-h">Make it yours</h2>
+    <div class="guide-grid">
+      ${card('The Locker Room', 'Equip animated avatar borders, profile backgrounds, ball-trail effects on the shot map, and username flair. They show up everywhere your name appears.')}
+      ${card('Season Pass', 'Earn cosmetics by playing ranked rounds each month. Ten rounds completes the pass. No paid skips.')}
+      ${card('Live scoreboard', 'In a match, both sides can agree to share scores in real time, so you can follow the battle hole-by-hole as it happens.')}
+      ${card('Know your game', 'Per-club dispersion, strokes gained, and weather-adjusted plays-like distances from every tracked shot.')}
+    </div>
+  </section>
+
+  <section class="cta-band">
+    <h2>Ready to climb?</h2>
+    ${appStoreButton('Download on the App Store')}
+  </section>`;
+
+  return page({
+    title: 'How to play. Sacari Golf',
+    description: 'Learn how to play Sacari Golf: ranked matches, divisions, placements, clans, cosmetics, and the live scoreboard.',
+    active: 'howto',
     body,
   });
 }
@@ -707,7 +769,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 }
 
 module.exports = {
-  renderHome, renderLeaderboard, renderCoursesIndex, renderCourse,
+  renderHome, renderHowTo, renderLeaderboard, renderCoursesIndex, renderCourse,
   renderProfile, renderStatic, renderNotFound, esc,
   renderLogin, renderDashboard, renderClubs, renderCoursePins,
   renderInvite,

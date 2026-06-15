@@ -85,6 +85,7 @@ async function resolveOne(cupId: string, weekStartsAt: Date): Promise<boolean> {
         WHERE r.total_score IS NOT NULL
           AND m.completed = true
           AND m.is_practice = false
+          AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
           AND r.created_at >= $1
           AND r.created_at <  $2
           AND t.par IS NOT NULL

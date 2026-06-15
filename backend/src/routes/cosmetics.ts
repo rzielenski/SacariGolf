@@ -162,6 +162,7 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
         WHERE r.total_score IS NOT NULL
           AND m.completed = true
           AND m.is_practice = false
+          AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
           AND r.created_at >= $1
           AND r.created_at <  $2
           AND t.par IS NOT NULL
@@ -210,6 +211,7 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
           WHERE r.total_score IS NOT NULL
             AND m.completed = true
             AND m.is_practice = false
+            AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
             AND r.created_at >= res.week_starts_at
             AND r.created_at <  res.week_ends_at
             AND t.par IS NOT NULL

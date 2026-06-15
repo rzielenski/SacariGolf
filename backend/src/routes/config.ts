@@ -22,6 +22,8 @@ import { Router, Request, Response } from 'express';
 import pool from '../db/pool';
 import { wrap } from '../utils/asyncHandler';
 import { isAdminAuthed } from '../utils/adminAuth';
+import { replayAllElo, restoreElo } from '../utils/eloReplay';
+import { backfillHandicaps } from '../utils/handicap';
 
 export const configRouter = Router();
 export const adminRouter = Router();
@@ -64,4 +66,43 @@ adminRouter.post('/config', wrap(async (req: Request, res: Response) => {
     [key, JSON.stringify(value)],
   );
   return res.json({ success: true, key, value });
+}));
+
+/**
+ * POST /admin/replay-elo  body: { confirm: "REPLAY" }
+ *
+ * One-off: backs up current ELO + match deltas (once), then replays every
+ * completed match in chronological order under the current placement
+ * system and overwrites every rating + recorded delta. DESTRUCTIVE but
+ * reversible via /admin/restore-elo. The confirm token is a deliberate
+ * speed-bump so it can't fire from a stray request.
+ */
+adminRouter.post('/replay-elo', wrap(async (req: Request, res: Response) => {
+  if (!isAdminAuthed(req, res)) return;
+  if (req.body?.confirm !== 'REPLAY') {
+    return res.status(400).json({ error: 'Send { "confirm": "REPLAY" } to run the destructive replay.' });
+  }
+  const summary = await replayAllElo();
+  return res.json({ success: true, ...summary });
+}));
+
+/** POST /admin/restore-elo — undo the replay from the backup tables. */
+adminRouter.post('/restore-elo', wrap(async (req: Request, res: Response) => {
+  if (!isAdminAuthed(req, res)) return;
+  const result = await restoreElo();
+  return res.json({ success: true, ...result });
+}));
+
+/**
+ * POST /admin/backfill-handicaps
+ *
+ * Recompute every player's stored handicap_index from their last 20 solo
+ * rated rounds using the slope-guarded WHS formula, so the profile value
+ * matches the live handicap view. Idempotent — safe to re-run. Overwrites a
+ * manually-entered handicap for anyone with 3+ rated solo rounds.
+ */
+adminRouter.post('/backfill-handicaps', wrap(async (req: Request, res: Response) => {
+  if (!isAdminAuthed(req, res)) return;
+  const result = await backfillHandicaps();
+  return res.json({ success: true, ...result });
 }));

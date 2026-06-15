@@ -1988,6 +1988,17 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       UPDATE users SET is_owner = TRUE WHERE LOWER(username) = 'rickybobbyfairways';
     `,
   },
+  {
+    // Live scoreboard opt-in. Each player can agree to share their scores
+    // live during a match; when at least one player on EACH side has opted
+    // in ("both sides agree"), the match's anti-cheat redaction lifts and
+    // everyone sees live scores hole-by-hole (Golf Game Book style).
+    name: 'match_players.live_scores_optin',
+    sql: `
+      ALTER TABLE match_players
+        ADD COLUMN IF NOT EXISTS live_scores_optin BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
 ];
 
 export async function runMigrations() {

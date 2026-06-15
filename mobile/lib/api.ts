@@ -796,6 +796,11 @@ export const api = {
     }) => request<any>('POST', `/matches/${id}/scores`, body),
     forfeit: (id: string) => request<any>('POST', `/matches/${id}/forfeit`, {}),
     cancel: (id: string) => request<any>('DELETE', `/matches/${id}`),
+    /** Opt this player in/out of the match's live scoreboard. When both
+     *  sides have a player opted in, GET /matches/:id stops redacting
+     *  opponent scores (refetch the match to see live_scores_active). */
+    setLiveScores: (id: string, optIn: boolean) =>
+      request<{ success: true; optIn: boolean }>('POST', `/matches/${id}/live-scores`, { optIn }),
     saveShotTrack: (id: string, holeNum: number, shots: any[]) =>
       // Accepts either segment-format or legacy point-format. The server
       // sanitises both and stores them as JSONB, so callers can pass through

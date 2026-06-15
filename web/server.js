@@ -172,6 +172,12 @@ app.get('/', (_req, res) => {
   res.send(R.renderHome());
 });
 
+// ----- How to play ----------------------------------------------------------
+app.get('/how-to-play', (_req, res) => {
+  res.set('Cache-Control', 'public, max-age=600');
+  res.send(R.renderHowTo());
+});
+
 // ----- Leaderboard ----------------------------------------------------------
 app.get('/leaderboard', async (_req, res) => {
   try {
@@ -415,7 +421,7 @@ app.get('/robots.txt', (_req, res) => {
 
 app.get('/sitemap.xml', async (_req, res) => {
   const base = SITE_URL || '';
-  const urls = ['/', '/leaderboard', '/courses', '/privacy', '/terms', '/support'];
+  const urls = ['/', '/how-to-play', '/leaderboard', '/courses', '/privacy', '/terms', '/support'];
   try {
     const [{ rows: players }, { rows: courses }] = await Promise.all([
       pool.query(`SELECT username FROM users WHERE total_matches > 0 ORDER BY elo DESC LIMIT 500`),

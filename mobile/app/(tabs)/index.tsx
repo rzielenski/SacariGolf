@@ -31,14 +31,6 @@ import { IdentityName } from '../../components/UserIdentity';
 import { useCensor } from '../../lib/censor';
 import { rankForElo } from '../../lib/rank';
 
-function EloRank(elo: number): { label: string; color: string } {
-  if (elo >= 2000) return { label: 'Diamond', color: '#a8d8f0' };
-  if (elo >= 1800) return { label: 'Platinum', color: '#c0c0d0' };
-  if (elo >= 1600) return { label: 'Gold', color: C.gold };
-  if (elo >= 1400) return { label: 'Silver', color: '#c0c0c0' };
-  return { label: 'Bronze', color: '#cd7f32' };
-}
-
 export default function HomeScreen() {
   const { user, refreshUser } = useAuth();
   const censor = useCensor();
@@ -90,7 +82,7 @@ export default function HomeScreen() {
 
   if (!user) return null;
 
-  const rank = EloRank(user.elo);
+  const rank = rankForElo(user.elo);
   const winRate = user.total_matches > 0
     ? Math.round((user.total_wins / user.total_matches) * 100)
     : 0;
@@ -157,11 +149,13 @@ export default function HomeScreen() {
             }
           }}
         >
-          <Text style={styles.eloNum} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.5}>
-            {rankForElo(user.elo).label}
+          <Text style={[styles.eloNum, { color: rank.color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.5}>
+            {rank.label}
           </Text>
           <Text style={styles.eloLabel}>
-            {rankForElo(user.elo).isObsidian ? `${user.elo} ELO` : `${rankForElo(user.elo).lp} LP`}
+            {rank.isObsidian
+              ? `${user.elo} ELO`
+              : `${rank.lp}/${rank.lpNeeded} LP · ${rank.lpToNext} to ${rank.next?.label ?? 'next'}`}
           </Text>
         </TouchableOpacity>
         <View style={styles.eloDivider} />

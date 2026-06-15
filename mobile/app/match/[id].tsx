@@ -30,6 +30,7 @@ export default function MatchLobbyScreen() {
   const [friends, setFriends] = useState<any[]>([]);
   const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [liveBusy, setLiveBusy] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   // Group-scoring modal: host can enter scorecards for non-account players.
@@ -189,6 +190,22 @@ export default function MatchLobbyScreen() {
   const opponents = match.players?.filter((p) => p.user_id !== user?.user_id) ?? [];
   const allReady = match.players && match.players.length >= 2;
   const isCompleted = match.completed;
+  const liveActive = !!(match as any).live_scores_active;
+  const myLiveOptin = !!(match as any).my_live_optin;
+
+  // Toggle this player's live-scoreboard opt-in, then refetch so the
+  // active/waiting state + revealed scores update.
+  const toggleLiveScores = async () => {
+    setLiveBusy(true);
+    try {
+      await api.matches.setLiveScores(id, !myLiveOptin);
+      await load();
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLiveBusy(false);
+    }
+  };
 
   const matchTypeRaw = match.match_type ?? 'match';
   const typeLabel = matchTypeRaw.charAt(0).toUpperCase() + matchTypeRaw.slice(1);
@@ -468,6 +485,28 @@ export default function MatchLobbyScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Live scoreboard — both sides must agree, then everyone sees scores
+          live. Only shown on an in-progress match that has an opponent. */}
+      {!isCompleted && myPlayer && allReady && (
+        <TouchableOpacity
+          style={[styles.liveBtn, liveActive && styles.liveBtnActive]}
+          onPress={toggleLiveScores}
+          disabled={liveBusy}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.liveBtnTitle, liveActive && { color: C.green }]}>
+            {liveActive ? '● Live scoreboard ON' : 'Live scoreboard'}
+          </Text>
+          <Text style={styles.liveBtnSub}>
+            {liveActive
+              ? 'Both sides agreed. Everyone sees scores live.'
+              : myLiveOptin
+              ? 'You agreed. Waiting for the other side to turn it on.'
+              : 'Tap to share scores live. Activates when both sides agree.'}
+          </Text>
+        </TouchableOpacity>
+      )}
+
       {/* Auto-rendered scorecards — appear as soon as any player submits scores,
           so per-round strokes-gained shows up without waiting on opponents.
           ANTI-SCOUT: until the match is completed, only the player and their
@@ -480,7 +519,8 @@ export default function MatchLobbyScreen() {
         const mySide = me?.side ?? null;
         const visiblePlayers = (match.players ?? []).filter((p) => {
           if (!p.hole_scores?.length) return false;
-          if (matchCompleted) return true;
+          // Both sides opted into the live scoreboard → everything visible.
+          if (matchCompleted || liveActive) return true;
           if (p.user_id === user?.user_id) return true;
           // Same-side teammates (duo/squad) — fine to see during play.
           // Different side (solo opponent, Arena rival) — hidden until done.
@@ -493,9 +533,9 @@ export default function MatchLobbyScreen() {
         <>
           <Divider style={{ marginTop: 24 }} />
           <OrnamentTitle title="Scorecards" align="center" />
-          {!matchCompleted && visiblePlayers.length < (match.players?.filter((p) => p.hole_scores?.length).length ?? 0) && (
+          {!matchCompleted && !liveActive && visiblePlayers.length < (match.players?.filter((p) => p.hole_scores?.length).length ?? 0) && (
             <Text style={styles.scoutHint}>
-              Opponent scorecards unlock when the match is final.
+              Opponent scorecards unlock when the match is final, or when both sides turn on the live scoreboard.
             </Text>
           )}
           {visiblePlayers.map((p) => {
@@ -902,6 +942,14 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '22',
   },
   inviteBtnText: { color: C.gold, fontWeight: '700', fontSize: 14 },
+
+  liveBtn: {
+    marginTop: 12, borderRadius: 8, paddingVertical: 12, paddingHorizontal: 14,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+  },
+  liveBtnActive: { borderColor: C.green, backgroundColor: C.green + '14' },
+  liveBtnTitle: { color: C.text, fontWeight: '800', fontSize: 14 },
+  liveBtnSub: { color: C.textMuted, fontSize: 11, marginTop: 3, lineHeight: 15 },
 
   scoutHint: {
     color: C.textMuted, fontSize: 11, textAlign: 'center', fontStyle: 'italic',

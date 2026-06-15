@@ -81,9 +81,12 @@ function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
 //                                              (caller provides via overrideRating);
 //                                              falls back to half the 18-hole rating
 //                                              when no front/back rating is available.
+//   18-hole round on a 9-hole teebox         → two loops: DOUBLE the 9-hole rating.
 //
-// The doubling converts a 9-hole "strokes over rating" into an 18-hole equivalent
-// so a 5-stroke-over diff on 9 holes is treated like a 10-stroke-over diff on 18.
+// Course RATING scales with the hole count (half a 9, double for two loops);
+// SLOPE does not — it's a ratio used unchanged. The final ×2 converts a 9-hole
+// "strokes over rating" into an 18-hole equivalent so a 5-over diff on 9 holes
+// is treated like a 10-over diff on 18.
 function diff18(
   gross: number,
   courseRating: number,
@@ -95,16 +98,32 @@ function diff18(
 ) {
   let r = courseRating;
   let s = slopeRating;
-  if (holesPlayed === 9 && teeboxHoles === 18) {
+  const playedNine = holesPlayed === 9;
+  // A course counts as 9-hole if num_holes says so OR its rating/slope is
+  // sub-55 (the data-model marker of a 9-hole course). No clamp — values as-is.
+  const teeNine =
+    teeboxHoles === 9 ||
+    (courseRating > 0 && courseRating < 55) ||
+    (slopeRating > 0 && slopeRating < 55);
+  if (!teeNine && playedNine) {
+    // 9 holes on an 18-hole course: prefer the dedicated front/back-9 rating
+    // (+ its slope) the caller resolved, else fall back to half the 18 rating.
     if (typeof overrideRating === 'number' && overrideRating > 0) {
       r = overrideRating;
       if (typeof overrideSlope === 'number' && overrideSlope > 0) s = overrideSlope;
     } else {
-      r = courseRating / 2; // legacy fallback: half the 18-hole rating
+      r = courseRating / 2;
     }
+  } else if (teeNine && !playedNine) {
+    // 18 holes (two loops) on a 9-hole course: double the 9-hole rating.
+    r = courseRating * 2;
   }
-  const raw = (gross - r) * (113 / s);
-  return holesPlayed === 9 ? raw * 2 : raw;
+  // Match the 113 reference to the slope's scale: a sub-55 (9-hole) slope uses
+  // 56.5, a full 18-hole slope uses 113. The ×2 below puts a 9-hole round on
+  // an 18-hole scale.
+  const reference = s < 55 ? 113 / 2 : 113;
+  const raw = (gross - r) * (reference / s);
+  return playedNine ? raw * 2 : raw;
 }
 
 // Kept for backwards compatibility / one place that still wants the un-doubled value
@@ -407,6 +426,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 // players are presented as the opponent side. $1 = match_id.
 const MATCH_DETAIL_PLAYERS_SQL = `
   SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
+         mp.live_scores_optin,
          u.username, u.elo, u.avatar_url, u.handicap_index,
          ${equippedVisualSql('u')} AS equipped_visual,
          t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
@@ -798,8 +818,17 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   const matchCompleted = !!matchRows[0].completed;
   const me = players.find((p: any) => p.user_id === req.userId);
   const mySide = me?.side ?? null;
+
+  // Live scoreboard: when at least one player on EACH side has opted in
+  // ("both sides agree"), the anti-cheat redaction lifts and everyone sees
+  // live scores hole-by-hole. Consensual, so it's not a cheat vector.
+  const side1Optin = players.some((p: any) => p.side === 1 && p.live_scores_optin);
+  const side2Optin = players.some((p: any) => p.side !== 1 && p.live_scores_optin);
+  const liveScoresActive = side1Optin && side2Optin;
+
   const redactedPlayers = players.map((p: any) => {
     if (matchCompleted) return p;
+    if (liveScoresActive) return p;          // both sides agreed → show live
     if (p.user_id === req.userId) return p;
     if (mySide != null && p.side === mySide) return p;
     const playedLen = Array.isArray(p.hole_scores) ? p.hole_scores.length : 0;
@@ -812,7 +841,15 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     };
   });
 
-  return res.json({ ...matchRows[0], players: redactedPlayers, result: resultRows[0] || null, my_delta_elo, my_perk });
+  return res.json({
+    ...matchRows[0],
+    players: redactedPlayers,
+    result: resultRows[0] || null,
+    my_delta_elo, my_perk,
+    // Live-scoreboard state for the client.
+    live_scores_active: liveScoresActive,
+    my_live_optin: !!me?.live_scores_optin,
+  });
 }));
 
 // List my matches
@@ -923,6 +960,21 @@ router.post('/:id/join', requireAuth, wrap(async (req: AuthRequest, res: Respons
   } finally {
     client.release();
   }
+}));
+
+// Opt in / out of the live scoreboard for a match. When at least one
+// player on EACH side has opted in, GET /:id stops redacting opponent
+// scores so everyone follows the round live (the client re-fetches the
+// match to pick up live_scores_active).
+router.post('/:id/live-scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const optIn = req.body?.optIn === true;
+  const { rowCount } = await pool.query(
+    `UPDATE match_players SET live_scores_optin = $3
+      WHERE match_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId, optIn]
+  );
+  if (!rowCount) return res.status(404).json({ error: 'Not in this match' });
+  return res.json({ success: true, optIn });
 }));
 
 // Sanitise a hole_stats array — same length as scores, each entry has
