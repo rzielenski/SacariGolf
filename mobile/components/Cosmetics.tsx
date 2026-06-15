@@ -183,42 +183,53 @@ function FlagBg({ v, style, children }: BgProps) {
   }, [RED, WHITE]);
 
   const billow = useSharedValue(0);
+  const billow2 = useSharedValue(0);
   const foldA = useSharedValue(0);
   const foldB = useSharedValue(0);
   useEffect(() => {
-    billow.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.sin) }), -1, true);
-    foldA.value = withRepeat(withTiming(1, { duration: 2300, easing: Easing.linear }), -1, false);
-    foldB.value = withRepeat(withTiming(1, { duration: 3400, easing: Easing.linear }), -1, false);
-    return () => { cancelAnimation(billow); cancelAnimation(foldA); cancelAnimation(foldB); };
-  }, [billow, foldA, foldB]);
+    // Fast, out-of-phase drivers so the cloth genuinely snaps in the wind.
+    billow.value = withRepeat(withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.sin) }), -1, true);
+    billow2.value = withRepeat(withTiming(1, { duration: 950, easing: Easing.inOut(Easing.sin) }), -1, true);
+    foldA.value = withRepeat(withTiming(1, { duration: 1400, easing: Easing.linear }), -1, false);
+    foldB.value = withRepeat(withTiming(1, { duration: 2000, easing: Easing.linear }), -1, false);
+    return () => { [billow, billow2, foldA, foldB].forEach(cancelAnimation); };
+  }, [billow, billow2, foldA, foldB]);
 
-  // Whole-cloth billow: a gentle skew + vertical breathe so the sheet ripples.
-  const flagStyle = useAnimatedStyle(() => ({
-    transform: [
-      { perspective: 700 },
-      { skewY: `${interpolate(billow.value, [0, 1], [-1.8, 1.8])}deg` },
-      { skewX: `${interpolate(billow.value, [0, 0.5, 1], [-0.8, 0.8, -0.8])}deg` },
-      { scaleY: interpolate(billow.value, [0, 0.5, 1], [1, 1.03, 1]) },
-    ],
-  }));
-  // Soft folds drift across; each also bobs vertically so they undulate like
-  // real ridges of cloth rather than flat bars.
+  // Aggressive whole-cloth whip: two out-of-phase skew drivers stack so the
+  // sheet cracks rather than gently sways, plus a vertical snap, scale pump and
+  // a touch of roll.
+  const flagStyle = useAnimatedStyle(() => {
+    const b = billow.value;
+    const b2 = billow2.value;
+    return {
+      transform: [
+        { perspective: 600 },
+        { skewY: `${interpolate(b, [0, 1], [-5, 5]) + interpolate(b2, [0, 1], [-2.5, 2.5])}deg` },
+        { skewX: `${interpolate(b2, [0, 0.5, 1], [-2.4, 2.4, -2.4])}deg` },
+        { scaleY: interpolate(b, [0, 0.5, 1], [0.97, 1.06, 0.97]) },
+        { translateY: interpolate(b2, [0, 0.5, 1], [-6, 6, -6]) },
+        { rotateZ: `${interpolate(b, [0, 1], [-1.1, 1.1])}deg` },
+      ],
+    };
+  });
+  // Folds drift across faster + harder, each bobbing vertically so they
+  // undulate like real ridges of cloth being driven by the wind.
   const shadow1 = useAnimatedStyle(() => ({
     transform: [
-      { translateX: interpolate(foldA.value, [0, 1], [-320, 320]) },
-      { translateY: interpolate(foldA.value, [0, 0.5, 1], [-6, 6, -6]) },
+      { translateX: interpolate(foldA.value, [0, 1], [-340, 340]) },
+      { translateY: interpolate(foldA.value, [0, 0.5, 1], [-12, 12, -12]) },
     ],
   }));
   const shadow2 = useAnimatedStyle(() => ({
     transform: [
-      { translateX: interpolate(foldB.value, [0, 1], [-320, 320]) },
-      { translateY: interpolate(foldB.value, [0, 0.5, 1], [5, -5, 5]) },
+      { translateX: interpolate(foldB.value, [0, 1], [-340, 340]) },
+      { translateY: interpolate(foldB.value, [0, 0.5, 1], [10, -10, 10]) },
     ],
   }));
   const sheen = useAnimatedStyle(() => ({
     transform: [
-      { translateX: interpolate(foldB.value, [0, 1], [320, -320]) },
-      { translateY: interpolate(foldB.value, [0, 0.5, 1], [-4, 4, -4]) },
+      { translateX: interpolate(foldB.value, [0, 1], [340, -340]) },
+      { translateY: interpolate(foldB.value, [0, 0.5, 1], [-8, 8, -8]) },
     ],
   }));
 
@@ -228,11 +239,11 @@ function FlagBg({ v, style, children }: BgProps) {
   return (
     <View style={[{ overflow: 'hidden', backgroundColor: RED }, style]}>
       <Animated.View style={[StyleSheet.absoluteFill, flagStyle]}>
-        {/* Crisp full-bleed stripes (overscanned so the billow never bares an edge) */}
+        {/* Crisp full-bleed stripes (heavily overscanned so the harder whip never bares an edge) */}
         <LinearGradient
           colors={colors} locations={locations}
           start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
-          style={{ position: 'absolute', left: 0, right: 0, top: '-6%', height: '112%' }}
+          style={{ position: 'absolute', left: '-4%', right: '-4%', top: '-16%', height: '132%' }}
         />
         {/* Canton + 50 real ★ glyphs (native text = perfectly crisp) */}
         <View
