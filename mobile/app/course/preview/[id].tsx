@@ -19,8 +19,10 @@ import {
 import MapView, { Marker, Polyline, Circle, Region } from 'react-native-maps';
 import { useLocalSearchParams, router } from 'expo-router';
 import { api } from '../../../lib/api';
+import { useAuth } from '../../../lib/auth';
+import { isPremium } from '../../../lib/premium';
 import { C, F } from '../../../lib/colors';
-import { distYards } from '../../../lib/golfMath';
+import { distYards, bearingDeg, projectYards } from '../../../lib/golfMath';
 
 type Hole = {
   hole_num: number; par: number; yardage?: number | null; handicap?: number | null;
@@ -31,6 +33,11 @@ type ShotRow = {
   hole_num: number; club: string | null;
   start_lat: number; start_lng: number; end_lat: number; end_lng: number; total_yds: number | null;
 };
+type ClubStat = {
+  club: string; shots: number; avg_yds: number; median_yds: number;
+  dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+};
+type LL = { lat: number; lng: number };
 
 export default function CoursePreviewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -42,7 +49,27 @@ export default function CoursePreviewScreen() {
   const [editTee, setEditTee] = useState(false);
   const [teeEdits, setTeeEdits] = useState<Record<number, { lat: number; lng: number }>>({});
   const [savingTee, setSavingTee] = useState(false);
+  // Tap-to-measure point. Also the aim the club heatmap rotates toward.
+  const [measurePin, setMeasurePin] = useState<LL | null>(null);
+  const [clubStats, setClubStats] = useState<ClubStat[] | null>(null);
+  const [selectedClub, setSelectedClub] = useState<string | null>(null);
   const mapRef = useRef<MapView>(null);
+
+  const { user } = useAuth();
+  const userIsPremium = isPremium(user as any);
+
+  // Per-club dispersion (premium consumer, like the in-round heatmap).
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    api.users.clubStats(user.user_id)
+      .then((d: any) => { if (!cancelled) setClubStats(d.clubs ?? []); })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, [user?.user_id]);
+
+  // Reset the measure point when you move to a different hole / teebox.
+  useEffect(() => { setMeasurePin(null); }, [idx, teeboxId]);
 
   useEffect(() => {
     (async () => {
@@ -104,6 +131,32 @@ export default function CoursePreviewScreen() {
   const playsYards = tee && green ? Math.round(distYards(tee.lat, tee.lng, green.lat, green.lng)) : null;
   const distLabel = playsYards ?? (hole?.yardage ?? null);
 
+  // Tap-to-measure: tee → tapped point (and tapped point → green).
+  const measureFromTee = tee && measurePin ? Math.round(distYards(tee.lat, tee.lng, measurePin.lat, measurePin.lng)) : null;
+  const measureToGreen = green && measurePin ? Math.round(distYards(measurePin.lat, measurePin.lng, green.lat, green.lng)) : null;
+
+  // Clubs with enough data to draw a dispersion (premium feature, like in-round).
+  const availableClubs = useMemo(
+    () => (clubStats ?? []).filter((c) => c.median_yds > 0 && (c.dispersion?.length ?? 0) >= 2),
+    [clubStats],
+  );
+  const activeClubStat = userIsPremium && selectedClub
+    ? availableClubs.find((c) => c.club === selectedClub) ?? null : null;
+
+  // Project the selected club's dispersion from the tee toward the aim (the
+  // tapped point, else the green) — same model as the in-round heatmap.
+  const heatmap = useMemo(() => {
+    if (!tee || !activeClubStat) return null;
+    const aim = measurePin ?? green;
+    if (!aim) return null;
+    const brg = bearingDeg(tee.lat, tee.lng, aim.lat, aim.lng);
+    const dots = activeClubStat.dispersion.slice(-150).map((d) =>
+      projectYards(tee.lat, tee.lng, brg, activeClubStat.median_yds + d.long_yds, d.lateral_yds));
+    const center = projectYards(tee.lat, tee.lng, brg, activeClubStat.median_yds, 0);
+    return { dots, center, median: Math.round(activeClubStat.median_yds) };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tee?.lat, tee?.lng, green?.lat, green?.lng, measurePin?.lat, measurePin?.lng, activeClubStat]);
+
   const regionForHole = (): Region | null => {
     const pts: { lat: number; lng: number }[] = [];
     if (tee) pts.push(tee);
@@ -132,11 +185,16 @@ export default function CoursePreviewScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx, teeboxId, shots.length]);
 
-  // Tap to set the current hole's tee while in Mark-Tee mode.
+  // Map tap: in Mark-Tee mode it sets the hole's tee; otherwise it drops the
+  // measure point (yardage from the tee + the aim for the club heatmap).
   const handleMapPress = (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
-    if (!editTee || !hole) return;
     const { latitude, longitude } = e.nativeEvent.coordinate;
-    setTeeEdits((prev) => ({ ...prev, [hole.hole_num]: { lat: latitude, lng: longitude } }));
+    if (editTee) {
+      if (!hole) return;
+      setTeeEdits((prev) => ({ ...prev, [hole.hole_num]: { lat: latitude, lng: longitude } }));
+    } else {
+      setMeasurePin({ lat: latitude, lng: longitude });
+    }
   };
 
   // Persist all staged tee edits for the selected teebox, then fold them into
@@ -226,6 +284,16 @@ export default function CoursePreviewScreen() {
               fillColor={'rgba(212,169,63,0.35)'}
             />
           ))}
+          {/* Selected-club dispersion, projected from the tee toward your aim */}
+          {heatmap?.dots.map((p, i) => (
+            <Circle
+              key={`disp-${i}`}
+              center={{ latitude: p.lat, longitude: p.lng }}
+              radius={4}
+              strokeColor="transparent"
+              fillColor={'rgba(77,163,255,0.40)'}
+            />
+          ))}
           {/* Tee → green reference line */}
           {tee && green && (
             <Polyline
@@ -243,6 +311,27 @@ export default function CoursePreviewScreen() {
           {green && (
             <Marker coordinate={{ latitude: green.lat, longitude: green.lng }} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
               <Text style={s.flag}>⛳</Text>
+            </Marker>
+          )}
+          {/* Club carry center (median distance for the selected club) */}
+          {heatmap && (
+            <Marker coordinate={{ latitude: heatmap.center.lat, longitude: heatmap.center.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+              <View style={s.carryDot} />
+            </Marker>
+          )}
+          {/* Measure line tee → tapped point + yardage label */}
+          {tee && measurePin && (
+            <Polyline
+              coordinates={[{ latitude: tee.lat, longitude: tee.lng }, { latitude: measurePin.lat, longitude: measurePin.lng }]}
+              strokeColor={'#ffffff'} strokeWidth={2}
+            />
+          )}
+          {measurePin && (
+            <Marker coordinate={{ latitude: measurePin.lat, longitude: measurePin.lng }} anchor={{ x: 0.5, y: 1 }} tracksViewChanges={false}>
+              <View style={s.measureLabel}>
+                <Text style={s.measureLabelText}>{measureFromTee != null ? `${measureFromTee} yds` : 'tap'}</Text>
+                {measureToGreen != null && <Text style={s.measureSub}>{measureToGreen} to green</Text>}
+              </View>
             </Marker>
           )}
         </MapView>
@@ -294,6 +383,38 @@ export default function CoursePreviewScreen() {
       {playsYards != null && hole?.yardage ? (
         <Text style={s.distNote}>Tee→green {playsYards} yds · card {hole.yardage} yds</Text>
       ) : null}
+
+      {/* Tap-to-measure readout */}
+      {measureFromTee != null && (
+        <Text style={s.measureReadout}>
+          To point: <Text style={{ color: C.gold, fontWeight: '900' }}>{measureFromTee} yds</Text>
+          {measureToGreen != null ? `  ·  ${measureToGreen} to green` : ''}  ·  tap to move
+        </Text>
+      )}
+
+      {/* Club dispersion selector (premium) — same heatmap model as a round */}
+      {userIsPremium && availableClubs.length > 0 && (
+        <View style={s.clubRowWrap}>
+          <Text style={s.clubRowLabel}>
+            CLUB HEATMAP{measurePin ? ' · AIMED AT YOUR POINT' : green ? ' · AIMED AT THE GREEN' : ''}
+          </Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.clubRow}>
+            {availableClubs.map((c) => {
+              const active = c.club === selectedClub;
+              return (
+                <TouchableOpacity
+                  key={c.club}
+                  style={[s.clubChip, active && s.clubChipActive]}
+                  onPress={() => setSelectedClub(active ? null : c.club)}
+                >
+                  <Text style={[s.clubChipText, active && s.clubChipTextActive]}>{c.club.toUpperCase()}</Text>
+                  <Text style={[s.clubChipMeta, active && s.clubChipMetaActive]}>{Math.round(c.median_yds)}y</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
 
       {/* Hole strip */}
       <View style={s.holeStripWrap}>
@@ -373,8 +494,9 @@ const s = StyleSheet.create({
   holeBadgeNum: { color: C.gold, fontWeight: '900', fontSize: 14, letterSpacing: 1 },
   holeBadgePar: { color: '#fff', fontSize: 11, marginTop: 1 },
 
+  // Top-LEFT, below the hole badge — keeps clear of the map compass (top-right).
   editToggle: {
-    position: 'absolute', top: 12, right: 12, minWidth: 96, alignItems: 'center',
+    position: 'absolute', top: 64, left: 12, minWidth: 96, alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8,
     borderWidth: 1, borderColor: '#4da3ff88',
   },
@@ -382,11 +504,35 @@ const s = StyleSheet.create({
   editToggleText: { color: '#9ccaff', fontSize: 13, fontWeight: '800' },
   editToggleTextOn: { color: '#000' },
   editCancel: {
-    position: 'absolute', top: 52, right: 12, alignItems: 'center',
+    position: 'absolute', top: 104, left: 12, alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6,
     borderWidth: 1, borderColor: C.border,
   },
   editCancelText: { color: C.textMuted, fontSize: 12, fontWeight: '700' },
+
+  carryDot: {
+    width: 14, height: 14, borderRadius: 7, backgroundColor: '#4da3ff',
+    borderWidth: 2, borderColor: '#fff',
+  },
+  measureLabel: {
+    backgroundColor: 'rgba(0,0,0,0.78)', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4,
+    alignItems: 'center', borderWidth: 1, borderColor: '#ffffff55', marginBottom: 4,
+  },
+  measureLabelText: { color: '#fff', fontWeight: '900', fontSize: 13 },
+  measureSub: { color: C.textMuted, fontSize: 10, marginTop: 1 },
+
+  clubRowWrap: { borderTopWidth: 1, borderTopColor: C.border, backgroundColor: C.bg },
+  clubRowLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, paddingHorizontal: 12, paddingTop: 8 },
+  clubRow: { paddingHorizontal: 10, paddingVertical: 8, gap: 6 },
+  clubChip: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1,
+    borderColor: '#4da3ff66', backgroundColor: C.card, alignItems: 'center',
+  },
+  clubChipActive: { backgroundColor: '#4da3ff', borderColor: '#4da3ff' },
+  clubChipText: { color: '#9ccaff', fontWeight: '800', fontSize: 13 },
+  clubChipTextActive: { color: '#001b33' },
+  clubChipMeta: { color: C.textDim, fontSize: 9, marginTop: 1 },
+  clubChipMetaActive: { color: '#001b33cc' },
   editBar: {
     position: 'absolute', bottom: 12, alignSelf: 'center',
     backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7,
@@ -403,6 +549,7 @@ const s = StyleSheet.create({
   statUnit: { color: C.textMuted, fontSize: 11, fontWeight: '600' },
   statLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginTop: 2 },
   distNote: { color: C.textDim, fontSize: 11, textAlign: 'center', paddingBottom: 6 },
+  measureReadout: { color: C.textMuted, fontSize: 12, textAlign: 'center', paddingBottom: 8 },
 
   holeStripWrap: { borderTopWidth: 1, borderTopColor: C.border, backgroundColor: C.bg },
   holeStrip: { padding: 10, gap: 6 },
