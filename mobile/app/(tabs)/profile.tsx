@@ -580,11 +580,19 @@ export default function ProfileScreen() {
         </GlowCard>
       </PressableScale>
 
-      {/* Rank progress */}
+      {/* Rank progress — rank + division on the left, raw ELO on the right */}
       <View style={styles.card}>
-        <View style={styles.cardRow}>
-          <Text style={styles.eloNum}>{rank.isObsidian ? user.elo : rank.lp}</Text>
-          <Text style={styles.eloLabel}>{rank.isObsidian ? 'ELO' : 'LP'}</Text>
+        <View style={styles.eloHeaderRow}>
+          <View style={{ flexShrink: 1 }}>
+            <Text style={[styles.rankNameBig, { color: rank.color }]} numberOfLines={1}>{rank.label}</Text>
+            <Text style={styles.eloLabel}>
+              {rank.isObsidian ? 'Top tier · no divisions' : `${rank.lp}/${rank.lpNeeded} LP this division`}
+            </Text>
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={styles.eloNum}>{user.elo}</Text>
+            <Text style={styles.eloLabel}>ELO</Text>
+          </View>
         </View>
         {!rank.isObsidian && rank.next && (
           <>
@@ -1615,7 +1623,9 @@ const styles = StyleSheet.create({
     marginBottom: 6, borderWidth: 1, borderColor: C.border,
   },
   cardRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
-  eloNum: { fontSize: 44, fontWeight: '900', color: C.gold },
+  eloHeaderRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 },
+  rankNameBig: { fontSize: 26, fontWeight: '900', letterSpacing: 0.3 },
+  eloNum: { fontSize: 40, fontWeight: '900', color: C.gold },
   eloLabel: { fontSize: 14, color: C.textMuted },
   progressText: { color: C.textMuted, fontSize: 11, marginTop: 4 },
 
