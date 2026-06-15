@@ -39,7 +39,7 @@
  *     supported by react-native-svg without Skia.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle,
 } from 'react-native';
@@ -152,13 +152,12 @@ function GradientBg({ v, style, children }: BgProps) {
 
 // ── 2. Flag (Stars & Stripes, waving in the wind) ───────────────────────────
 
-// Star counts per canton row: 9 rows alternating 6 and 5 (= 50 stars).
-const FLAG_STAR_ROWS = [6, 5, 6, 5, 6, 5, 6, 5, 6];
-
 // Flag geometry, in a 300×200 viewBox (vector, scales cleanly).
 const FLAG_VB_W = 300;
 const FLAG_VB_H = 200;
 const FLAG_STRIPE_H = FLAG_VB_H / 13;
+const FLAG_CANTON_W = FLAG_VB_W * 0.4;     // hoist = 40% of the fly
+const FLAG_CANTON_H = FLAG_STRIPE_H * 7;   // canton is 7 stripes tall
 
 /** Lighten (amt>0) / darken (amt<0) a #hex colour. */
 function shade(hex: string, amt: number): string {
@@ -171,13 +170,51 @@ function shade(hex: string, amt: number): string {
   return `rgb(${f(r)},${f(g)},${f(b)})`;
 }
 
+/** SVG path for a 5-point star centred at (cx,cy), outer radius r. */
+function starPath(cx: number, cy: number, r: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const ang = (Math.PI / 5) * i - Math.PI / 2;
+    const rad = i % 2 === 0 ? r : r * 0.42;
+    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(2)},${(cy + rad * Math.sin(ang)).toFixed(2)}`);
+  }
+  return `M${pts.join(' L')} Z`;
+}
+
+// 50-star canton layout (viewBox coords): 9 rows alternating 6 / 5 stars.
+const FLAG_STAR_R = 4.4;
+const FLAG_STAR_POS: { cx: number; cy: number }[] = (() => {
+  const pts: { cx: number; cy: number }[] = [];
+  const padX = 13, padY = 9;
+  const colGap = (FLAG_CANTON_W - 2 * padX) / 5;
+  const usableH = FLAG_CANTON_H - 2 * padY;
+  for (let row = 0; row < 9; row++) {
+    const six = row % 2 === 0;
+    const count = six ? 6 : 5;
+    const cy = padY + (usableH * row) / 8;
+    for (let c = 0; c < count; c++) {
+      pts.push({ cx: six ? padX + c * colGap : padX + colGap / 2 + c * colGap, cy });
+    }
+  }
+  return pts;
+})();
+
+/** Shared travelling cloth wave — the SAME offset drives the stripes AND the
+ *  canton, so the whole flag moves as one sheet. Amplitude grows toward the fly. */
+function flagWaveOffset(x: number, t: number): number {
+  'worklet';
+  const fx = x / FLAG_VB_W;
+  const amp = (0.25 + 0.75 * fx) * 17;
+  return amp * (0.72 * Math.sin(fx * Math.PI * 2 * 1.3 - t) + 0.28 * Math.sin(fx * Math.PI * 2 * 2.7 - t * 1.7));
+}
+
 /**
- * Stars & Stripes, drawn as art that genuinely waves. The 13 stripes are SVG
- * paths whose edges ride a travelling two-harmonic wave (amplitude growing
- * toward the fly), so the cloth physically ripples. Each stripe is filled with a
- * vertical gradient for a rounded, lit ridge, and soft light/shadow fold bands
- * drift across on top for 3-D depth — together they read as fabric in the wind,
- * not flat geometry. Stars are crisp native ★ glyphs over a calm hoist.
+ * Stars & Stripes, drawn as art that genuinely waves. Stripes, canton and stars
+ * all live in ONE SVG and ride the SAME travelling wave (flagWaveOffset), so the
+ * whole flag moves as a single sheet of cloth — the blue canton curves and bobs
+ * with the stripes instead of sitting on top as a flat panel. Each stripe is
+ * gradient-filled for a rounded, lit ridge; soft light/shadow fold bands drift
+ * across on top for 3-D depth.
  */
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
@@ -195,11 +232,6 @@ function FlagBg({ v, style, children }: BgProps) {
     return () => { [wave, foldA, foldB].forEach(cancelAnimation); };
   }, [wave, foldA, foldB]);
 
-  // Canton rides the hoist, which whips least.
-  const cantonStyle = useAnimatedStyle(() => {
-    const a = wave.value * Math.PI * 2;
-    return { transform: [{ translateY: Math.sin(a) * 4 }, { skewY: `${Math.cos(a) * 1.6}deg` }] };
-  });
   // Soft fold light/shadow bands drift across (+ vertical bob) for 3-D depth.
   const shadow1 = useAnimatedStyle(() => ({
     transform: [
@@ -220,12 +252,9 @@ function FlagBg({ v, style, children }: BgProps) {
     ],
   }));
 
-  const [cantonW, setCantonW] = useState(0);
-  const starSize = cantonW > 0 ? cantonW * 0.12 : 9;
-
   return (
     <View style={[{ overflow: 'hidden', backgroundColor: shade(RED, -0.3) }, style]}>
-      {/* Waving stripes — vector paths, gradient-filled for rounded ridges */}
+      {/* One SVG: stripes + canton + stars all share flagWaveOffset */}
       <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
         <Defs>
           <SvgLinearGradient id="flagRed" x1="0" y1="0" x2="0" y2="1">
@@ -238,10 +267,19 @@ function FlagBg({ v, style, children }: BgProps) {
             <Stop offset="0.5" stopColor={WHITE} />
             <Stop offset="1" stopColor={shade(WHITE, -0.22)} />
           </SvgLinearGradient>
+          <SvgLinearGradient id="flagBlue" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={shade(CANTON, 0.12)} />
+            <Stop offset="0.55" stopColor={CANTON} />
+            <Stop offset="1" stopColor={shade(CANTON, -0.24)} />
+          </SvgLinearGradient>
         </Defs>
         {Array.from({ length: 13 }).map((_, i) => (
           <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? 'url(#flagRed)' : 'url(#flagWhite)'} wave={wave} />
         ))}
+        {/* Canton, riding the same wave as the stripes underneath it */}
+        <FlagCanton wave={wave} fill="url(#flagBlue)" />
+        {/* Stars bob with the canton's local wave so they stay attached to it */}
+        <FlagStars wave={wave} />
       </Svg>
 
       {/* Drifting fold shadows + a highlight for 3-D cloth depth */}
@@ -267,24 +305,6 @@ function FlagBg({ v, style, children }: BgProps) {
         />
       </Animated.View>
 
-      {/* Canton + 50 crisp native ★ stars, riding the calm hoist */}
-      <Animated.View
-        pointerEvents="none"
-        onLayout={(e) => setCantonW(e.nativeEvent.layout.width)}
-        style={[{ position: 'absolute', top: 0, left: 0, width: '40%', height: '53.8%', backgroundColor: CANTON, paddingVertical: '1.5%' }, cantonStyle]}
-      >
-        {FLAG_STAR_ROWS.map((count, r) => (
-          <View key={r} style={{
-            flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-evenly',
-            paddingHorizontal: count === 5 ? starSize * 0.55 : 0,
-          }}>
-            {Array.from({ length: count }).map((__, i) => (
-              <Text key={i} style={{ color: '#ffffff', fontSize: starSize, lineHeight: starSize * 1.05 }}>★</Text>
-            ))}
-          </View>
-        ))}
-      </Animated.View>
-
       {/* Vignette so the flag doesn't fight foreground text */}
       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.14)' }]} />
       {children}
@@ -292,8 +312,8 @@ function FlagBg({ v, style, children }: BgProps) {
   );
 }
 
-/** One stripe as a vector band whose top + bottom edges ride the same
- *  travelling two-harmonic wave, so all 13 ripple together as one sheet. */
+/** One stripe as a vector band whose top + bottom edges ride the shared wave,
+ *  so all 13 ripple together as one sheet. */
 function FlagWaveStripe({ index, fill, wave }: { index: number; fill: string; wave: SharedValue<number> }) {
   const animatedProps = useAnimatedProps(() => {
     const overscan = 24;
@@ -304,21 +324,55 @@ function FlagWaveStripe({ index, fill, wave }: { index: number; fill: string; wa
     let d = '';
     for (let s = 0; s <= steps; s++) {
       const x = (s / steps) * FLAG_VB_W;
-      const fx = x / FLAG_VB_W;
-      const amp = (0.25 + 0.75 * fx) * 17;
-      const off = amp * (0.72 * Math.sin(fx * Math.PI * 2 * 1.3 - t) + 0.28 * Math.sin(fx * Math.PI * 2 * 2.7 - t * 1.7));
-      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + off).toFixed(2)} `;
+      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + flagWaveOffset(x, t)).toFixed(2)} `;
     }
     for (let s = steps; s >= 0; s--) {
       const x = (s / steps) * FLAG_VB_W;
-      const fx = x / FLAG_VB_W;
-      const amp = (0.25 + 0.75 * fx) * 17;
-      const off = amp * (0.72 * Math.sin(fx * Math.PI * 2 * 1.3 - t) + 0.28 * Math.sin(fx * Math.PI * 2 * 2.7 - t * 1.7));
-      d += `L${x.toFixed(1)} ${(bot + off).toFixed(2)} `;
+      d += `L${x.toFixed(1)} ${(bot + flagWaveOffset(x, t)).toFixed(2)} `;
     }
     return { d: d + 'Z' };
   });
   return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
+}
+
+/** The blue canton as a band of the same waving sheet — its top/bottom edges
+ *  use flagWaveOffset, so it curves and bobs exactly like the stripes it sits on. */
+function FlagCanton({ wave, fill }: { wave: SharedValue<number>; fill: string }) {
+  const animatedProps = useAnimatedProps(() => {
+    const overscan = 24;
+    const x0 = -overscan, x1 = FLAG_CANTON_W;
+    const top = -overscan, bot = FLAG_CANTON_H;
+    const steps = 18;
+    const t = wave.value * Math.PI * 2;
+    let d = '';
+    for (let s = 0; s <= steps; s++) {
+      const x = x0 + (s / steps) * (x1 - x0);
+      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + flagWaveOffset(x, t)).toFixed(2)} `;
+    }
+    for (let s = steps; s >= 0; s--) {
+      const x = x0 + (s / steps) * (x1 - x0);
+      d += `L${x.toFixed(1)} ${(bot + flagWaveOffset(x, t)).toFixed(2)} `;
+    }
+    return { d: d + 'Z' };
+  });
+  return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
+}
+
+/** The 50 stars, translated as a group by the canton's local wave so they ride
+ *  with the blue field instead of floating over it. */
+function FlagStars({ wave }: { wave: SharedValue<number> }) {
+  const animatedProps = useAnimatedProps(() => {
+    const t = wave.value * Math.PI * 2;
+    const ty = flagWaveOffset(FLAG_CANTON_W / 2, t);
+    return { transform: `translate(0 ${ty.toFixed(2)})` } as any;
+  });
+  return (
+    <AnimatedG animatedProps={animatedProps}>
+      {FLAG_STAR_POS.map((s, i) => (
+        <Path key={i} d={starPath(s.cx, s.cy, FLAG_STAR_R)} fill="#ffffff" />
+      ))}
+    </AnimatedG>
+  );
 }
 
 // ── 3. Storm (lightning + flashes) ──────────────────────────────────────────
