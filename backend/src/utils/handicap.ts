@@ -16,16 +16,17 @@
  *                                18-hole rating. Slope stays the same.
  *   18-hole course, played 18  → use the stored rating + slope as-is.
  *
- * A course counts as 9-hole when its num_holes is 9 OR its rating/slope is
- * below 55 — a sub-55 rating/slope IS the marker of a 9-hole course in this
- * data model. Course RATING scales with the hole count (double for two loops,
- * half a front/back nine).
+ * A teebox is 9-hole or 18-hole purely by its `num_holes` — the authoritative
+ * field, never inferred from rating/slope magnitude. A 9-hole teebox stores
+ * HALF-SCALE data (rating ~35, slope ~40-55); an 18-hole teebox stores
+ * FULL-SCALE data (rating ~70, slope ~110-120). Course RATING scales with the
+ * hole count (double for two loops, half a front/back nine).
  *
- * The 113 in the differential is the STANDARD 18-hole slope. A sub-55 slope
- * is a half-scale 9-hole slope, so the reference is halved to 56.5 to match
- * (identical to doubling the slope) — otherwise dividing a 9-hole slope into
- * the full 113 doubles the differential. No clamp/guard: stored values are
- * used exactly as-is; only the reference scale is matched to the slope.
+ * The 113 in the differential is the STANDARD 18-hole slope. A 9-hole teebox's
+ * slope is on the half scale, so the reference is halved to 56.5 to match
+ * (identical to doubling the slope) — otherwise dividing a half-scale slope
+ * into the full 113 doubles the differential. This is keyed on num_holes, so a
+ * 9-hole tee with a slope of, say, 55 is still handled correctly.
  *
  * 9-hole rounds keep the per-round "strokes over rating" convention here
  * (NOT doubled to an 18-hole equivalent) — that is the figure shown in the
@@ -56,12 +57,10 @@ export interface HandicapRound {
 export function roundDifferential(r: HandicapRound): { rating: number; slope: number; diff: number } {
   const CR = r.course_rating ?? 0;
   const S = r.slope_rating ?? NEUTRAL_SLOPE;
-  // 9-hole course if num_holes says so, OR if the rating/slope is sub-55 —
-  // a low rating/slope is the tell-tale of a 9-hole course in this data model.
-  const teeNine =
-    (r.teebox_holes ?? 18) === 9 ||
-    (CR > 0 && CR < 55) ||
-    (r.slope_rating != null && r.slope_rating < 55);
+  // Authoritative 9-vs-18 discriminator: the teebox's own hole count. Never
+  // inferred from rating/slope magnitude (a 9-hole tee can legitimately have a
+  // slope in the 40-55 band, which a magnitude check would mishandle).
+  const teeNine = (r.teebox_holes ?? 18) === 9;
   const playedNine = r.holes_played === 9;
 
   let rating: number;
@@ -96,11 +95,13 @@ export function roundDifferential(r: HandicapRound): { rating: number; slope: nu
     }
   }
 
-  // Match the 113 reference to the slope's scale: a sub-55 (9-hole) slope
-  // uses 56.5, a full 18-hole slope uses 113.
-  const reference = slope < 55 ? 113 / 2 : 113;
-  const diff = (reference / slope) * (r.total_score - rating);
-  return { rating, slope, diff };
+  // Match the 113 reference to the slope's scale: a 9-hole teebox's slope is
+  // half-scale → 56.5; an 18-hole teebox's slope (incl. front/back-9 on an
+  // 18-hole tee) is full-scale → 113. Keyed on the teebox, not the value.
+  const reference = teeNine ? 113 / 2 : 113;
+  const safeSlope = slope > 0 ? slope : (teeNine ? NEUTRAL_SLOPE / 2 : NEUTRAL_SLOPE);
+  const diff = (reference / safeSlope) * (r.total_score - rating);
+  return { rating, slope: safeSlope, diff };
 }
 
 /** WHS lookup: how many of the lowest differentials to average + the

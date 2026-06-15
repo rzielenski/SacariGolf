@@ -73,20 +73,30 @@ function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
 }
 
 // Score differential scaled to an 18-hole equivalent so players on different
-// courses, different teeboxes, and different hole counts can be compared fairly.
+// courses, teeboxes, and hole counts compare fairly.
 //
-//   18-hole round on an 18-hole teebox       → standard formula
-//   9-hole round on a 9-hole teebox          → standard formula on 9-hole rating, then ×2
-//   9-hole round on an 18-hole teebox        → use the FRONT or BACK 9 rating
-//                                              (caller provides via overrideRating);
-//                                              falls back to half the 18-hole rating
-//                                              when no front/back rating is available.
-//   18-hole round on a 9-hole teebox         → two loops: DOUBLE the 9-hole rating.
+// Instead of special-casing every combination, we convert ALL THREE inputs to
+// one common 18-hole, full-slope scale, then apply the single WHS formula:
 //
-// Course RATING scales with the hole count (half a 9, double for two loops);
-// SLOPE does not — it's a ratio used unchanged. The final ×2 converts a 9-hole
-// "strokes over rating" into an 18-hole equivalent so a 5-over diff on 9 holes
-// is treated like a 10-over diff on 18.
+//     diff = (113 / slopeFull) × (gross18 − ratingFull)
+//
+// The conversions are independent, so every (holes played) × (teebox scale)
+// combination falls out automatically — including the weird ones:
+//
+//   teebox scale (by num_holes — authoritative, never guessed from magnitude):
+//     • 9-hole teebox  → half-scale data: ratingFull = CR×2, slopeFull = slope×2
+//     • 18-hole teebox → full-scale: ratingFull = CR, slopeFull = slope
+//        - if only a NINE of an 18-hole course was played and the course has a
+//          dedicated front/back-9 rating, use that ×2 (its slope is full-scale)
+//   gross → 18-hole equivalent: gross × (18 / holesPlayed)
+//     • 9 played  → ×2     • 18 played → ×1     • any partial N → ×(18/N)
+//
+// Worked combos:
+//   18 on 18-hole     → ×1, CR, slope                      (standard)
+//   9  on 9-hole      → gross×2, CR×2, slope×2
+//   18 on 9-hole      → gross×1, CR×2, slope×2             (two loops)
+//   9  on 18-hole     → gross×2, (front/back×2 ?? CR), slope (or front/back)
+//   18 on 9-hole RATING but card says 18, etc.            → all covered
 function diff18(
   gross: number,
   courseRating: number,
@@ -96,34 +106,41 @@ function diff18(
   overrideRating?: number | null,
   overrideSlope?: number | null,
 ) {
-  let r = courseRating;
-  let s = slopeRating;
+  // Authoritative 9-vs-18 by the teebox's hole count, never by value magnitude
+  // (a 9-hole tee can legitimately have a slope in the 40-55 band).
+  const teeNine = teeboxHoles === 9;
   const playedNine = holesPlayed === 9;
-  // A course counts as 9-hole if num_holes says so OR its rating/slope is
-  // sub-55 (the data-model marker of a 9-hole course). No clamp — values as-is.
-  const teeNine =
-    teeboxHoles === 9 ||
-    (courseRating > 0 && courseRating < 55) ||
-    (slopeRating > 0 && slopeRating < 55);
-  if (!teeNine && playedNine) {
-    // 9 holes on an 18-hole course: prefer the dedicated front/back-9 rating
-    // (+ its slope) the caller resolved, else fall back to half the 18 rating.
-    if (typeof overrideRating === 'number' && overrideRating > 0) {
-      r = overrideRating;
-      if (typeof overrideSlope === 'number' && overrideSlope > 0) s = overrideSlope;
-    } else {
-      r = courseRating / 2;
-    }
-  } else if (teeNine && !playedNine) {
-    // 18 holes (two loops) on a 9-hole course: double the 9-hole rating.
-    r = courseRating * 2;
+  // Guard a missing/garbage hole count so the gross extrapolation can't divide
+  // by zero — default to the teebox's own size.
+  const hp = holesPlayed && holesPlayed > 0 ? holesPlayed : (teeNine ? 9 : 18);
+
+  // Full-scale (18-hole-equivalent) slope.
+  let slopeFull: number;
+  if (teeNine) {
+    slopeFull = slopeRating * 2;                            // half-scale → full
+  } else if (playedNine && typeof overrideSlope === 'number' && overrideSlope > 0) {
+    slopeFull = overrideSlope;                              // front/back-9 slope (already full-scale)
+  } else {
+    slopeFull = slopeRating;
   }
-  // Match the 113 reference to the slope's scale: a sub-55 (9-hole) slope uses
-  // 56.5, a full 18-hole slope uses 113. The ×2 below puts a 9-hole round on
-  // an 18-hole scale.
-  const reference = s < 55 ? 113 / 2 : 113;
-  const raw = (gross - r) * (reference / s);
-  return playedNine ? raw * 2 : raw;
+  if (!(slopeFull > 0)) slopeFull = 113;                    // never divide by 0/NaN
+
+  // Full 18-hole-equivalent course rating.
+  let ratingFull: number;
+  if (teeNine) {
+    ratingFull = courseRating * 2;                          // 9-hole rating → 18
+  } else if (playedNine) {
+    ratingFull = (typeof overrideRating === 'number' && overrideRating > 0)
+      ? overrideRating * 2                                  // dedicated nine rating → 18
+      : courseRating;                                       // else the full 18 rating
+  } else {
+    ratingFull = courseRating;
+  }
+
+  // Gross extrapolated to an 18-hole equivalent.
+  const gross18 = gross * (18 / hp);
+
+  return (113 / slopeFull) * (gross18 - ratingFull);
 }
 
 // Kept for backwards compatibility / one place that still wants the un-doubled value

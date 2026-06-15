@@ -246,11 +246,13 @@ function normalize(input: any): ScannedScorecard {
     const name = String(tb?.name ?? '').trim().slice(0, 60) || `Tee ${ti + 1}`;
     const gender: 'male' | 'female' = tb?.gender === 'female' ? 'female' : 'male';
 
-    // Rating/slope only kept when inside the USGA-plausible window.
+    // Rating/slope only kept when inside the plausible window FOR THIS HOLE
+    // COUNT — a 9-hole card is half-scale (rating ~27-42, slope ~40-90).
     const ratingN = Number(tb?.courseRating);
-    const courseRating = Number.isFinite(ratingN) && ratingN >= 55 && ratingN <= 80
+    const rMin = numHoles === 9 ? 27 : 55, rMax = numHoles === 9 ? 42 : 80;
+    const courseRating = Number.isFinite(ratingN) && ratingN >= rMin && ratingN <= rMax
       ? Math.round(ratingN * 10) / 10 : null;
-    const slopeRating = clampInt(tb?.slopeRating, 55, 155);
+    const slopeRating = clampInt(tb?.slopeRating, numHoles === 9 ? 40 : 55, numHoles === 9 ? 90 : 155);
 
     const holesIn: any[] = Array.isArray(tb?.holes) ? tb.holes : [];
     const holes: ScannedHole[] = [];

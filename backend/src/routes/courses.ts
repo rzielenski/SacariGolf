@@ -162,8 +162,11 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     // Otherwise (blank, zero, garbage) estimate from par + computed yards.
     const userRating = tb.courseRating != null && tb.courseRating !== '' ? Number(tb.courseRating) : null;
     const userSlope  = tb.slopeRating  != null && tb.slopeRating  !== '' ? Number(tb.slopeRating)  : null;
-    const fullPlausible = looksPlausibleRating(userRating, userSlope)
+    const fullPlausible = looksPlausibleRating(userRating, userSlope, numHoles)
                           && userRating != null && userSlope != null;
+    // Plausible windows differ by hole count: 9-hole tees are half-scale.
+    const ratingMin = numHoles === 9 ? 27 : 55, ratingMax = numHoles === 9 ? 42 : 80;
+    const slopeMin  = numHoles === 9 ? 40 : 55, slopeMax  = numHoles === 9 ? 90 : 155;
 
     let rating: number;
     let slope: number;
@@ -172,10 +175,10 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       rating = userRating as number;
       slope  = userSlope as number;
     } else {
-      const est = estimateRatingSlope(computedPar || (numHoles === 9 ? 36 : 72), computedYards, gender);
+      const est = estimateRatingSlope(computedPar || (numHoles === 9 ? 36 : 72), computedYards, gender, numHoles);
       // If they gave one of the two, prefer the user's plausible value.
-      rating = (userRating != null && userRating >= 55 && userRating <= 80) ? userRating : est.rating;
-      slope  = (userSlope  != null && userSlope  >= 55 && userSlope  <= 155) ? userSlope  : est.slope;
+      rating = (userRating != null && userRating >= ratingMin && userRating <= ratingMax) ? userRating : est.rating;
+      slope  = (userSlope  != null && userSlope  >= slopeMin  && userSlope  <= slopeMax)  ? userSlope  : est.slope;
       estimated = !fullPlausible;
     }
 
