@@ -170,15 +170,17 @@ function shade(hex: string, amt: number): string {
   return `rgb(${f(r)},${f(g)},${f(b)})`;
 }
 
-/** SVG path for a 5-point star centred at (cx,cy), outer radius r. */
+/** SVG path for a 5-point star centred at (cx,cy), outer radius r. Worklet-safe
+ *  so it can be rebuilt per-frame inside the waving star group. */
 function starPath(cx: number, cy: number, r: number): string {
-  const pts: string[] = [];
+  'worklet';
+  let d = '';
   for (let i = 0; i < 10; i++) {
     const ang = (Math.PI / 5) * i - Math.PI / 2;
     const rad = i % 2 === 0 ? r : r * 0.42;
-    pts.push(`${(cx + rad * Math.cos(ang)).toFixed(2)},${(cy + rad * Math.sin(ang)).toFixed(2)}`);
+    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * Math.cos(ang)).toFixed(2)} ${(cy + rad * Math.sin(ang)).toFixed(2)} `;
   }
-  return `M${pts.join(' L')} Z`;
+  return d + 'Z ';
 }
 
 // 50-star canton layout (viewBox coords): 9 rows alternating 6 / 5 stars.
@@ -335,14 +337,16 @@ function FlagWaveStripe({ index, fill, wave }: { index: number; fill: string; wa
   return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
 }
 
-/** The blue canton as a band of the same waving sheet — its top/bottom edges
- *  use flagWaveOffset, so it curves and bobs exactly like the stripes it sits on. */
+/** The blue canton as a band of the same waving sheet — its edges use
+ *  flagWaveOffset (sampled on the SAME x-grid as the stripes), so it curves and
+ *  bobs exactly like them. The bottom dips slightly past the 7-stripe line so a
+ *  waving stripe can never poke up through the blue. */
 function FlagCanton({ wave, fill }: { wave: SharedValue<number>; fill: string }) {
   const animatedProps = useAnimatedProps(() => {
     const overscan = 24;
     const x0 = -overscan, x1 = FLAG_CANTON_W;
-    const top = -overscan, bot = FLAG_CANTON_H;
-    const steps = 18;
+    const top = -overscan, bot = FLAG_CANTON_H + 3; // overlap hides any seam
+    const steps = 30;
     const t = wave.value * Math.PI * 2;
     let d = '';
     for (let s = 0; s <= steps; s++) {
@@ -358,21 +362,20 @@ function FlagCanton({ wave, fill }: { wave: SharedValue<number>; fill: string })
   return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
 }
 
-/** The 50 stars, translated as a group by the canton's local wave so they ride
- *  with the blue field instead of floating over it. */
+/** The 50 stars as one path, each star displaced by the wave at its OWN x, so
+ *  the grid curves with the cloth (the blue field visibly ripples) instead of
+ *  bobbing as a flat block. */
 function FlagStars({ wave }: { wave: SharedValue<number> }) {
   const animatedProps = useAnimatedProps(() => {
     const t = wave.value * Math.PI * 2;
-    const ty = flagWaveOffset(FLAG_CANTON_W / 2, t);
-    return { transform: `translate(0 ${ty.toFixed(2)})` } as any;
+    let d = '';
+    for (let i = 0; i < FLAG_STAR_POS.length; i++) {
+      const s = FLAG_STAR_POS[i];
+      d += starPath(s.cx, s.cy + flagWaveOffset(s.cx, t), FLAG_STAR_R);
+    }
+    return { d } as any;
   });
-  return (
-    <AnimatedG animatedProps={animatedProps}>
-      {FLAG_STAR_POS.map((s, i) => (
-        <Path key={i} d={starPath(s.cx, s.cy, FLAG_STAR_R)} fill="#ffffff" />
-      ))}
-    </AnimatedG>
-  );
+  return <AnimatedPath animatedProps={animatedProps} fill="#ffffff" />;
 }
 
 // ── 3. Storm (lightning + flashes) ──────────────────────────────────────────

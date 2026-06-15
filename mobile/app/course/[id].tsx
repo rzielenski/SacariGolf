@@ -119,6 +119,21 @@ export default function CourseInfoScreen() {
         </View>
       )}
 
+      {/* Course Preview — walk the course hole-by-hole (tee→green, distances,
+          your shot heatmaps) without playing a round. */}
+      <TouchableOpacity
+        style={styles.previewBtn}
+        onPress={() => router.push(`/course/preview/${id}` as any)}
+        activeOpacity={0.85}
+      >
+        <Text style={styles.previewBtnIcon}>⛳</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.previewBtnTitle}>Course Preview</Text>
+          <Text style={styles.previewBtnSub}>Walk every hole · distances · your heatmaps</Text>
+        </View>
+        <Text style={styles.previewBtnChev}>›</Text>
+      </TouchableOpacity>
+
       {/* Tee boxes — tap any to see its full hole-by-hole scorecard */}
       <Text style={styles.sectionHeader}>TEE BOXES</Text>
       {(course.teeboxes ?? []).map((t: any) => (
@@ -227,6 +242,16 @@ export default function CourseInfoScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.adminBtnText}>📍 Place / Correct Pins</Text>
+      </TouchableOpacity>
+
+      {/* Mark tee boxes — powers the Course Preview's tee→green lines. Per
+          teebox (tees differ by set), crowd-sourced like pins. */}
+      <TouchableOpacity
+        style={styles.adminBtn}
+        onPress={() => router.push(`/course/admin-tees/${id}` as any)}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.adminBtnText}>⛳ Mark Tee Boxes</Text>
       </TouchableOpacity>
 
       <ScorecardModal
@@ -529,6 +554,16 @@ const styles = StyleSheet.create({
     backgroundColor: C.gold + '11',
   },
   adminBtnText: { color: C.gold, fontSize: 12, fontWeight: '800', letterSpacing: 0.8 },
+
+  previewBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginHorizontal: 20, marginTop: 16, padding: 16, borderRadius: 10,
+    backgroundColor: C.gold + '14', borderWidth: 1, borderColor: C.gold + '66',
+  },
+  previewBtnIcon: { fontSize: 26 },
+  previewBtnTitle: { color: C.gold, fontWeight: '900', fontSize: 16 },
+  previewBtnSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  previewBtnChev: { color: C.gold, fontSize: 24, fontWeight: '300' },
 
   reportLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: 16, marginBottom: 8 },
   reportFieldRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },

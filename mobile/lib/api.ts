@@ -739,6 +739,26 @@ export const api = {
       );
     },
 
+    /** Batch-set tee-box coordinates for ONE teebox's holes (tees differ per
+     *  teebox, unlike the shared green/pin). Used by the course-preview tee
+     *  marker. Crowd-sourced, last-write-wins. */
+    setTeeboxes: (
+      teeboxId: string,
+      tees: { holeNum: number; lat: number; lng: number }[],
+    ) =>
+      request<{ updated: number; missing_hole_nums: number[] }>(
+        'POST', '/courses/admin/set-teeboxes', { teeboxId, tees },
+      ),
+
+    /** The current user's tracked shots on this course, for the per-hole
+     *  preview heatmap. Flat list; the client groups by hole_num. */
+    myShots: (id: string) =>
+      request<{ shots: Array<{
+        hole_num: number; club: string | null; shot_index: number;
+        start_lat: number; start_lng: number; end_lat: number; end_lng: number;
+        total_yds: number | null;
+      }> }>('GET', `/courses/${id}/my-shots`),
+
     // ── Relative-elevation crowdsourcing ──────────────────────────────────
     // Establish per-round offset so the device's barometer-grade RELATIVE
     // accuracy can be projected onto the course's shared origin = 0 frame.

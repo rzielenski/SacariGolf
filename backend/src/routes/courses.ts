@@ -358,7 +358,7 @@ router.get('/:id', requireAuth, wrap(async (req: Request, res: Response) => {
   if (teeboxIds.length > 0) {
     const { rows: holeRows } = await pool.query(
       `SELECT hole_id, teebox_id, hole_num, par, yardage, handicap,
-              pin_lat, pin_lng, pin_elevation_m
+              pin_lat, pin_lng, pin_elevation_m, tee_lat, tee_lng
        FROM holes WHERE teebox_id = ANY($1) ORDER BY teebox_id, hole_num`,
       [teeboxIds]
     );
@@ -758,6 +758,75 @@ router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response)
     else updated += n;
   }
   return res.json({ updated, missing_hole_nums: missing });
+}));
+
+/**
+ * POST /courses/admin/set-teeboxes
+ *   body: { teeboxId, tees: [{ holeNum, lat, lng }] }
+ *
+ * Tee markers for the course-preview feature. Unlike pins, a tee box is
+ * specific to ONE teebox set (the Black tee and Red tee start in different
+ * places), so this writes only to the given teebox's holes. Crowd-sourced,
+ * last-write-wins, stamped with the contributor like pins.
+ *
+ * Response: { updated: N, missing_hole_nums: [...] }
+ */
+router.post('/admin/set-teeboxes', requireAuth, wrap(async (req: any, res: Response) => {
+  const { teeboxId, tees } = req.body ?? {};
+  if (typeof teeboxId !== 'string' || !teeboxId) {
+    return res.status(400).json({ error: 'teeboxId required' });
+  }
+  if (!Array.isArray(tees) || tees.length === 0) {
+    return res.status(400).json({ error: 'tees array required' });
+  }
+  const { rows: tRows } = await pool.query(
+    `SELECT teebox_id FROM teeboxes WHERE teebox_id = $1`, [teeboxId]
+  );
+  if (!tRows.length) return res.status(404).json({ error: 'Teebox not found' });
+
+  let updated = 0;
+  const missing: number[] = [];
+  for (const tee of tees) {
+    const holeNum = Number(tee?.holeNum);
+    const lat = Number(tee?.lat);
+    const lng = Number(tee?.lng);
+    if (!Number.isInteger(holeNum) || holeNum < 1 || holeNum > 18) { missing.push(tee?.holeNum); continue; }
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) { missing.push(holeNum); continue; }
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) { missing.push(holeNum); continue; }
+    const { rowCount } = await pool.query(
+      `UPDATE holes
+          SET tee_lat = $3, tee_lng = $4, tee_set_by = $5, tee_set_at = NOW()
+        WHERE teebox_id = $1 AND hole_num = $2`,
+      [teeboxId, holeNum, lat, lng, req.userId]
+    );
+    const n = rowCount ?? 0;
+    if (n === 0) missing.push(holeNum);
+    else updated += n;
+  }
+  return res.json({ updated, missing_hole_nums: missing });
+}));
+
+/**
+ * GET /courses/:id/my-shots
+ *
+ * The requesting user's tracked shots across all rounds on this course,
+ * keyed for the course-preview per-hole heatmap. Returns a flat list the
+ * client groups by hole_num — each row is one shot's start→end segment.
+ */
+router.get('/:id/my-shots', requireAuth, wrap(async (req: any, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT s.hole_num, s.club, s.shot_index,
+            s.start_lat, s.start_lng, s.end_lat, s.end_lng, s.total_yds
+       FROM shots s
+       JOIN holes h ON h.hole_id = s.hole_id
+       JOIN teeboxes t ON t.teebox_id = h.teebox_id
+      WHERE t.course_id = $1 AND s.user_id = $2
+        AND s.start_lat IS NOT NULL AND s.end_lat IS NOT NULL
+      ORDER BY s.hole_num, s.shot_index
+      LIMIT 3000`,
+    [req.params.id, req.userId]
+  );
+  return res.json({ shots: rows });
 }));
 
 /**

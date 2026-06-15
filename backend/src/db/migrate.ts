@@ -1999,6 +1999,21 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS live_scores_optin BOOLEAN NOT NULL DEFAULT FALSE;
     `,
   },
+  {
+    // Per-hole tee-box GPS for the course-preview feature. Unlike pins (the
+    // green is shared across every teebox), the tee marker is PER teebox —
+    // the Black tees and Red tees start at different spots — so these columns
+    // live on the per-teebox holes rows and are set by the teebox-specific
+    // tee-marking screen. Crowd-sourced, last-write-wins, audited like pins.
+    name: 'holes.tee_coords',
+    sql: `
+      ALTER TABLE holes
+        ADD COLUMN IF NOT EXISTS tee_lat REAL,
+        ADD COLUMN IF NOT EXISTS tee_lng REAL,
+        ADD COLUMN IF NOT EXISTS tee_set_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS tee_set_by UUID REFERENCES users(user_id);
+    `,
+  },
 ];
 
 export async function runMigrations() {
