@@ -88,6 +88,12 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
   const loadingMoreRef = useRef(false);   // guards against double onEndReached
   const postsRef = useRef<any[]>(posts);
   postsRef.current = posts;               // latest list for the cursor
+  // Hold onRefreshExtra in a ref so it does NOT feed `load`'s deps. The parent
+  // (home tab) passes a fresh function each render; if `load` depended on it,
+  // every parent re-render would re-fire the initial load and wipe the pages
+  // the user already scrolled in — exactly the "new posts vanish + loop" bug.
+  const onRefreshExtraRef = useRef(onRefreshExtra);
+  onRefreshExtraRef.current = onRefreshExtra;
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -97,7 +103,7 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       // updates everything in one round-trip wait.
       const [res] = await Promise.all([
         api.posts.feed({ limit: PAGE_SIZE, scope }),
-        isRefresh && onRefreshExtra ? Promise.resolve(onRefreshExtra()) : Promise.resolve(),
+        isRefresh && onRefreshExtraRef.current ? Promise.resolve(onRefreshExtraRef.current()) : Promise.resolve(),
       ]);
       const list = res.posts ?? [];
       setPosts(list);
@@ -112,7 +118,7 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
       setError(friendlyError(e));
     }
     finally { setLoading(false); setRefreshing(false); }
-  }, [onRefreshExtra, scope]);
+  }, [scope]);
 
   /** Fetch the next page (older posts) using a keyset cursor built from the
    *  last loaded post: "createdAt|postId". Appended, de-duped by post_id. */
