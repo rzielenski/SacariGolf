@@ -222,7 +222,6 @@ router.get('/search', requireAuth, wrap(async (req: AuthRequest, res: Response) 
     `SELECT user_id, username, elo, avatar_url FROM users
      WHERE username ILIKE $1
        AND user_id != $2
-       AND is_bot = false
        AND user_id NOT IN (
          SELECT blocked_id FROM blocked_users WHERE blocker_id = $2
        )
@@ -1621,7 +1620,6 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
              ${equippedVisualSql('u')} AS equipped_visual
         FROM users u
        WHERE ${scopeFilter}
-         AND u.is_bot = false
          AND EXISTS (
            SELECT 1 FROM match_players mp
            JOIN matches m ON m.match_id = mp.match_id
@@ -1644,7 +1642,6 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
               ${equippedVisualSql('u')} AS equipped_visual
        FROM users u
        WHERE u.user_id IN (SELECT user_id FROM scope)
-         AND u.is_bot = false
        ORDER BY u.elo DESC
        LIMIT 100`,
       [req.userId]
@@ -1660,7 +1657,6 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
      WHERE u.user_id NOT IN (
        SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
      )
-       AND u.is_bot = false
      ORDER BY u.elo DESC LIMIT 100`,
     [req.userId]
   );

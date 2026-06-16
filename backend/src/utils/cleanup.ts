@@ -814,8 +814,9 @@ export function startCleanupSchedule() {
     await reopenOrCancelStaleMatches();  // merged + waiting matches (3-day rule)
   });
   const botTick     = () => withCronLock(LOCK_BOTS, async () => {
-    const { runBotMatchPass } = await import('./bots');
-    await runBotMatchPass();
+    const { runBotMatchPass, runBotTeamMatchPass } = await import('./bots');
+    await runBotMatchPass();      // solo (1v1)
+    await runBotTeamMatchPass();  // duo (2 bots) + squad (4 bots)
   });
   const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
@@ -830,9 +831,10 @@ export function startCleanupSchedule() {
   unpairTick();
   unpairHandle = setInterval(unpairTick, 60 * 60 * 1000);
 
-  // CPU opponents: ensure the bot accounts exist, then fill any solo match
-  // that's gone a few hours without a human. Seeding is fire-and-forget and
-  // idempotent; the fill pass runs every 10 min (the wait window is in hours).
+  // CPU opponents: ensure the bot accounts exist, then fill any solo OR team
+  // (duo/squad) match that's gone a few hours without a human opponent. Seeding
+  // is fire-and-forget and idempotent; the fill pass runs every 10 min (the
+  // wait window is in hours).
   import('./bots').then(({ seedBots }) => seedBots()).catch((e) => console.error('[bots] seed error', e));
   botTick();
   botHandle = setInterval(botTick, 10 * 60 * 1000);

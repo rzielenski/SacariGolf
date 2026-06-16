@@ -173,7 +173,6 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
             ${equippedVisualSql('u')} AS equipped_visual
        FROM best b
        JOIN users u ON u.user_id = b.user_id
-      WHERE u.is_bot = false
       ORDER BY b.best_to_par ASC, b.first_at ASC
       LIMIT 100`,
     [weekStartsAt, weekEnd],
