@@ -340,7 +340,16 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        -- shares a side so winner_side would mark the whole field a winner.
        -- Gained ELO → win, lost → loss. Null for legacy rows (card falls back
        -- to winner_side vs author_side).
-       (mr.details -> 'playerDeltas' ->> p.user_id)::float AS author_elo_delta,
+       -- p.user_id is a uuid; the jsonb ->>/-> operators only accept a text
+       -- (or int) key, and Postgres won't implicitly cast uuid->text, so the
+       -- key MUST be ::text or the whole query fails to compile with
+       -- "operator does not exist: jsonb ->> uuid" (a 500 on every feed load).
+       -- The jsonb_typeof guard then makes the ::float cast bulletproof: a
+       -- missing or non-numeric playerDeltas entry yields NULL instead of
+       -- "invalid input syntax for type double precision".
+       CASE WHEN jsonb_typeof(mr.details -> 'playerDeltas' -> p.user_id::text) = 'number'
+            THEN (mr.details -> 'playerDeltas' ->> p.user_id::text)::float
+       END AS author_elo_delta,
        mp_me.side  AS author_side,
        mp_me.strokes AS author_strokes,
        t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,
