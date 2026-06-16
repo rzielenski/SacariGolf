@@ -1,28 +1,34 @@
 import React, { useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal, FlatList,
-  ActivityIndicator, Alert,
+  ActivityIndicator, Alert, TextInput,
 } from 'react-native';
 import { api } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import { C } from '../lib/colors';
 import { UserAvatar } from './UserAvatar';
 import { useCensor } from '../lib/censor';
 
 /**
- * Reusable "invite friends to a match" modal. Same UX as the match lobby's
- * invite list — fetches the user's friends, lets them tap Invite per friend.
- * Used from:
- *   • Match lobby (`match/[id].tsx`) — invite into a pending Arena/duo/squad
+ * Reusable "invite players to a match" modal. Used from:
+ *   • Match lobby (`match/[id].tsx`) — invite into a pending Arena/duo/squad/solo
  *   • Scoring screen (`match/scoring/[id].tsx`) — invite into a practice round
  *
- * Pass `excludeUserIds` to hide friends already in the match. `onInvited` is
- * called after each successful invite so the parent can optimistically bump a
- * local count (e.g. dim already-invited friends without a refetch).
+ * Two ways to find someone:
+ *   1. Your friends list (shown by default — the fast path).
+ *   2. Search ANY player by username. The server only requires the inviter to
+ *      be in the match (no friends-only guard), so you can pull in someone you
+ *      haven't friended yet — the #1 reason invites used to be impossible to
+ *      send. Type 2+ characters to switch the list to live search results.
+ *
+ * Pass `excludeUserIds` to render friends/results already in the match as
+ * "In match". `onInvited` fires after each successful invite so the parent can
+ * optimistically bump a local count.
  */
-interface Friend {
+interface Person {
   user_id: string;
   username: string;
-  elo: number;
+  elo?: number;
   avatar_url?: string | null;
 }
 
@@ -30,11 +36,10 @@ interface Props {
   visible: boolean;
   matchId: string;
   onClose: () => void;
-  /** Friends already in the match — rendered as "In match" instead of Invite. */
+  /** Friends/results already in the match — rendered as "In match". */
   excludeUserIds?: string[];
-  /** Optional cap — once N already-invited friends have been added in this
-   *  session, the remaining rows go disabled. Used by practice to enforce
-   *  the 8-friends-max rule from the host's side. */
+  /** Optional cap — once N friends have been invited this session, the
+   *  remaining rows go disabled. Used by practice to enforce the 8-max rule. */
   maxAdditional?: number;
   /** Called after each successful invite — parent can update local count. */
   onInvited?: (friendId: string) => void;
@@ -44,56 +49,109 @@ interface Props {
 
 export function InviteFriendsModal({
   visible, matchId, onClose, excludeUserIds, maxAdditional, onInvited,
-  title = 'Invite Friends', subtitle,
+  title = 'Invite Players', subtitle,
 }: Props) {
   const c = useCensor();
-  const [friends, setFriends] = useState<Friend[]>([]);
+  const { user } = useAuth();
+  const [friends, setFriends] = useState<Person[]>([]);
   const [loading, setLoading] = useState(false);
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [invitedThisSession, setInvitedThisSession] = useState<Set<string>>(new Set());
+
+  // Username search — lets you invite anyone, not just existing friends.
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Person[]>([]);
+  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     if (!visible || friends.length > 0) return;
     setLoading(true);
     api.users.friends()
-      .then((rows) => setFriends(rows as Friend[]))
+      .then((rows) => setFriends(rows as Person[]))
       .catch(() => { /* show empty list */ })
       .finally(() => setLoading(false));
     // We deliberately don't refetch every time `visible` flips — friends
     // change rarely enough that the in-modal cached list is fine.
   }, [visible]);
 
-  // Reset the per-session "invited" memo when the modal is reopened on a
-  // different match. Otherwise re-using the modal for a second match shows
-  // friends as already-invited from the previous one.
+  // Reset per-session state when the modal is reopened on a different match.
   useEffect(() => {
-    if (visible) setInvitedThisSession(new Set());
+    if (visible) { setInvitedThisSession(new Set()); setQuery(''); setResults([]); }
   }, [matchId]);
+
+  // Debounced username search. Below 2 chars we fall back to the friends list.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) { setResults([]); setSearching(false); return; }
+    setSearching(true);
+    const t = setTimeout(() => {
+      api.users.search(q)
+        .then((rows) => setResults((rows as Person[]) ?? []))
+        .catch(() => setResults([]))
+        .finally(() => setSearching(false));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [query]);
 
   const excludeSet = new Set(excludeUserIds ?? []);
   const additionalCount = invitedThisSession.size;
   const capReached = typeof maxAdditional === 'number' && additionalCount >= maxAdditional;
 
-  const sendInvite = async (friend: Friend) => {
+  const sendInvite = async (person: Person) => {
     if (sendingId) return;
     if (capReached) {
-      Alert.alert('Cap reached', `You can only invite ${maxAdditional} more friend${maxAdditional === 1 ? '' : 's'} to this match.`);
+      Alert.alert('Cap reached', `You can only invite ${maxAdditional} more player${maxAdditional === 1 ? '' : 's'} to this match.`);
       return;
     }
-    setSendingId(friend.user_id);
+    setSendingId(person.user_id);
     try {
-      await api.invites.send(matchId, friend.user_id);
+      await api.invites.send(matchId, person.user_id);
       setInvitedThisSession((prev) => {
         const next = new Set(prev);
-        next.add(friend.user_id);
+        next.add(person.user_id);
         return next;
       });
-      onInvited?.(friend.user_id);
+      onInvited?.(person.user_id);
     } catch (e: any) {
       Alert.alert('Could not invite', e?.message ?? 'Try again.');
     } finally {
       setSendingId(null);
     }
+  };
+
+  const searchMode = query.trim().length >= 2;
+  // Search mode shows live results (minus yourself); otherwise the friends list.
+  const data = searchMode
+    ? results.filter((r) => r.user_id !== user?.user_id)
+    : friends;
+
+  const renderRow = ({ item }: { item: Person }) => {
+    const inMatch = excludeSet.has(item.user_id);
+    const invited = invitedThisSession.has(item.user_id);
+    const disabled = inMatch || invited || sendingId === item.user_id || (capReached && !invited);
+    return (
+      <View style={s.row}>
+        <UserAvatar username={item.username} avatarUrl={item.avatar_url} size={40} borderRadius={4} />
+        <View style={{ flex: 1 }}>
+          <Text style={s.name} numberOfLines={1}>{c(item.username)}</Text>
+          {item.elo != null && <Text style={s.meta}>{item.elo} ELO</Text>}
+        </View>
+        <TouchableOpacity
+          style={[s.btn, disabled && s.btnDisabled, invited && s.btnSent]}
+          onPress={() => sendInvite(item)}
+          disabled={disabled}
+          activeOpacity={0.7}
+        >
+          {sendingId === item.user_id ? (
+            <ActivityIndicator color={C.gold} size="small" />
+          ) : (
+            <Text style={[s.btnText, invited && s.btnSentText]}>
+              {inMatch ? 'In Match' : invited ? 'Invited' : 'Invite'}
+            </Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    );
   };
 
   return (
@@ -110,49 +168,48 @@ export function InviteFriendsModal({
             <Text style={s.close}>Done</Text>
           </TouchableOpacity>
         </View>
-        {subtitle && <Text style={s.subtitle}>{subtitle}</Text>}
+        <Text style={s.subtitle}>
+          {subtitle ?? 'Invited players get a notification and can also Join from the Chats tab, then play their own round.'}
+        </Text>
 
-        {loading ? (
+        {/* Search ANY player by username — not just friends. */}
+        <TextInput
+          style={s.search}
+          value={query}
+          onChangeText={setQuery}
+          placeholder="Search any player by username…"
+          placeholderTextColor={C.textMuted}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+
+        {(searchMode ? searching : loading) ? (
           <View style={s.center}><ActivityIndicator color={C.gold} /></View>
-        ) : friends.length === 0 ? (
+        ) : data.length === 0 ? (
           <View style={s.center}>
-            <Text style={s.empty}>No friends yet</Text>
-            <Text style={s.emptySub}>Add friends from the Social tab to invite them to matches.</Text>
+            {searchMode ? (
+              <>
+                <Text style={s.empty}>No players found</Text>
+                <Text style={s.emptySub}>Check the spelling, or have them search for you.</Text>
+              </>
+            ) : (
+              <>
+                <Text style={s.empty}>No friends yet</Text>
+                <Text style={s.emptySub}>Use the search above to invite any player by username.</Text>
+              </>
+            )}
           </View>
         ) : (
-          <FlatList
-            data={friends}
-            keyExtractor={(f) => f.user_id}
-            contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
-            renderItem={({ item }) => {
-              const inMatch = excludeSet.has(item.user_id);
-              const invitedThisVisit = invitedThisSession.has(item.user_id);
-              const disabled = inMatch || invitedThisVisit || sendingId === item.user_id || (capReached && !invitedThisVisit);
-              return (
-                <View style={s.row}>
-                  <UserAvatar username={item.username} avatarUrl={item.avatar_url} size={40} borderRadius={4} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.name}>{c(item.username)}</Text>
-                    <Text style={s.meta}>{item.elo} ELO</Text>
-                  </View>
-                  <TouchableOpacity
-                    style={[s.btn, disabled && s.btnDisabled, invitedThisVisit && s.btnSent]}
-                    onPress={() => sendInvite(item)}
-                    disabled={disabled}
-                    activeOpacity={0.7}
-                  >
-                    {sendingId === item.user_id ? (
-                      <ActivityIndicator color={C.gold} size="small" />
-                    ) : (
-                      <Text style={[s.btnText, invitedThisVisit && s.btnSentText]}>
-                        {inMatch ? 'In Match' : invitedThisVisit ? 'Invited' : 'Invite'}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              );
-            }}
-          />
+          <>
+            <Text style={s.listLabel}>{searchMode ? 'Search results' : 'Your friends'}</Text>
+            <FlatList
+              data={data}
+              keyExtractor={(f) => f.user_id}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
+              renderItem={renderRow}
+            />
+          </>
         )}
       </View>
     </Modal>
@@ -163,11 +220,21 @@ const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg, paddingTop: 18 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 20, paddingBottom: 12,
+    paddingHorizontal: 20, paddingBottom: 8,
   },
   title: { color: C.text, fontSize: 20, fontWeight: '900' },
   close: { color: C.gold, fontSize: 15, fontWeight: '700' },
-  subtitle: { color: C.textMuted, fontSize: 12, paddingHorizontal: 20, paddingBottom: 12 },
+  subtitle: { color: C.textMuted, fontSize: 12, paddingHorizontal: 20, paddingBottom: 12, lineHeight: 17 },
+  search: {
+    marginHorizontal: 20, marginBottom: 12,
+    backgroundColor: C.card, color: C.text, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 11, fontSize: 15,
+    borderWidth: 1, borderColor: C.border,
+  },
+  listLabel: {
+    color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 1.2,
+    paddingHorizontal: 20, marginBottom: 8,
+  },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 30 },
   empty: { color: C.text, fontSize: 16, fontWeight: '700' },
   emptySub: { color: C.textMuted, fontSize: 12, marginTop: 8, textAlign: 'center' },
@@ -178,12 +245,6 @@ const s = StyleSheet.create({
     backgroundColor: C.card, borderRadius: 8,
     borderWidth: 1, borderColor: C.border, marginBottom: 8,
   },
-  avatar: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  avatarText: { color: C.gold, fontWeight: '900', fontSize: 16 },
   name: { color: C.text, fontSize: 15, fontWeight: '700' },
   meta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
 

@@ -201,6 +201,7 @@ export default function SocialScreen() {
         {matchInvites.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Match Invites</Text>
+            <Text style={styles.inviteHint}>Tap Join to enter the match, then Start Scoring to play your round.</Text>
             {matchInvites.map((inv) => (
               <View key={inv.invite_id} style={styles.inviteRow}>
                 <UserAvatar username={inv.from_username} avatarUrl={inv.from_avatar_url} size={36} borderRadius={4} />
@@ -399,6 +400,9 @@ const styles = StyleSheet.create({
   emptySubText: {
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     paddingHorizontal: 4, paddingBottom: 4, lineHeight: 17,
+  },
+  inviteHint: {
+    color: C.textMuted, fontSize: 11, paddingHorizontal: 4, marginBottom: 8, lineHeight: 15,
   },
   // Tap-target empty state — used when there are zero team chats so the
   // user has a one-tap path to Browse Teams instead of staring at an

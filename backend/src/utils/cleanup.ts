@@ -116,7 +116,7 @@ export async function runPairingPass() {
     // Find all currently-unpaired open matches, oldest first so we pair the
     // longest-waiting matches before fresh ones.
     const { rows: candidates } = await pool.query(
-      `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.created_at
+      `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.holes_subset, m.created_at
          FROM matches m
         WHERE m.completed = false
           AND m.cancelled = false
@@ -196,6 +196,10 @@ export async function runPairingPass() {
             AND m2.match_type = $2
             AND m2.format = $3
             AND m2.num_holes = $4
+            -- Same nine: a front-9 must never pair with a back-9 (they're
+            -- different holes, scored against different ratings). $6 is the
+            -- candidate's holes_subset; 18-hole matches are both 'full'.
+            AND m2.holes_subset IS NOT DISTINCT FROM $6
             AND m2.created_at > NOW() - INTERVAL '30 days'
             AND (
               m2.created_at > NOW() - INTERVAL '24 hours'
@@ -262,7 +266,7 @@ export async function runPairingPass() {
                       WHERE mp_y.match_id = m2.match_id), 100)
           )
           LIMIT 1`,
-        [m.match_id, m.match_type, m.format, m.num_holes, candidateFinished]
+        [m.match_id, m.match_type, m.format, m.num_holes, candidateFinished, m.holes_subset]
       );
 
       if (!opps.length || paired.has(opps[0].match_id)) continue;
@@ -334,7 +338,7 @@ export async function runPairingPass() {
  */
 async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
   const { rows: candidates } = await pool.query(
-    `SELECT m.match_id, m.match_type, m.format, m.num_holes
+    `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.holes_subset
        FROM matches m
       WHERE m.completed = false
         AND m.cancelled = false
@@ -365,6 +369,7 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
           AND m2.match_type = $2
           AND m2.format = $3
           AND m2.num_holes = $4
+          AND m2.holes_subset IS NOT DISTINCT FROM $5   -- same nine (front/back/full)
           AND m2.created_at > NOW() - INTERVAL '30 days'
           AND NOT EXISTS (
             SELECT 1 FROM match_players mp WHERE mp.match_id = m2.match_id AND mp.side != 1
@@ -398,7 +403,7 @@ async function runLinkedPairingPass(alreadyPaired: Set<string>): Promise<void> {
                     WHERE mpy.match_id = m2.match_id), 100)
         )
         LIMIT 1`,
-      [m.match_id, m.match_type, m.format, m.num_holes]
+      [m.match_id, m.match_type, m.format, m.num_holes, m.holes_subset]
     );
 
     if (!opps.length) continue;

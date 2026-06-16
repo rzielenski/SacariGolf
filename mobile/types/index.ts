@@ -118,7 +118,9 @@ export interface Hole {
 
 export interface Match {
   match_id: string;
-  match_type: 'solo' | 'duo' | 'squad' | 'practice';
+  // 'ffa' is Arena (a ranked free-for-all). Stored as 'ffa' everywhere on the
+  // backend; presented as "Arena" in the UI.
+  match_type: 'solo' | 'duo' | 'squad' | 'ffa' | 'practice';
   format: 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
   num_holes: number;
   name: string | null;

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Alert, Share, Modal, FlatList, TextInput,
+  ActivityIndicator, Alert, Share, Modal, TextInput,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
@@ -14,6 +14,7 @@ import { Match, MatchPlayer } from '../../types';
 import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { IdentityAvatar, IdentityName } from '../../components/UserIdentity';
+import { InviteFriendsModal } from '../../components/InviteFriendsModal';
 
 export default function MatchLobbyScreen() {
   const insets = useSafeAreaInsets();
@@ -27,8 +28,6 @@ export default function MatchLobbyScreen() {
   const [match, setMatch] = useState<Match | null>(null);
   const [loading, setLoading] = useState(true);
   const [inviteVisible, setInviteVisible] = useState(false);
-  const [friends, setFriends] = useState<any[]>([]);
-  const [invitingSending, setInvitingSending] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [liveBusy, setLiveBusy] = useState(false);
   const [hasSavedProgress, setHasSavedProgress] = useState(false);
@@ -213,6 +212,21 @@ export default function MatchLobbyScreen() {
   const matchTypeRaw = match.match_type ?? 'match';
   const typeLabel = matchTypeRaw.charAt(0).toUpperCase() + matchTypeRaw.slice(1);
   const isPractice = match.is_practice;
+  // Arena is stored as match_type 'ffa' but presented as "Arena" everywhere.
+  const isArena = matchTypeRaw === 'ffa';
+
+  // Player-count caps mirror the server's SIDE_CAPS in invites.ts so the lobby
+  // hides the invite CTA exactly when an accept would be rejected as "full".
+  const SIDE_CAPS: Record<string, number> = { solo: 2, duo: 4, squad: 8, ffa: 16, practice: 9 };
+  const playerCount = match.players?.length ?? 0;
+  const cap = SIDE_CAPS[matchTypeRaw] ?? 2;
+  // Who can pull more people in: anyone in an open, non-full match that isn't a
+  // pure solo (solo fills its one open slot via random matchmaking, though you
+  // can still challenge a specific friend). Arena/duo/squad/practice all invite.
+  const canInviteMore = !isCompleted && playerCount < cap;
+  // Arena needs at least 2 players to score as a free-for-all; flag the "you're
+  // here alone" state so we can nudge the host to invite before they play.
+  const arenaNeedsPlayers = isArena && playerCount < 2;
 
   const handleStartScoring = () => {
     const holeCount = match.num_holes ?? 18;
@@ -221,16 +235,6 @@ export default function MatchLobbyScreen() {
 
   const handleShare = async () => {
     await Share.share({ message: `Join my Sacari Golf match! Match ID: ${id}` });
-  };
-
-  const openInvite = async () => {
-    setInviteVisible(true);
-    if (!friends.length) {
-      try {
-        const f = await api.users.friends();
-        setFriends(f);
-      } catch { /* silent */ }
-    }
   };
 
   /** Direct forfeit — counts as a loss, full ELO penalty. Used when the
@@ -300,18 +304,6 @@ export default function MatchLobbyScreen() {
         },
       ]
     );
-  };
-
-  const sendInvite = async (friendId: string) => {
-    setInvitingSending(friendId);
-    try {
-      await api.invites.send(id, friendId);
-      Alert.alert('Invited!', 'They\'ll get a notification.');
-    } catch (e: any) {
-      Alert.alert('Error', e.message);
-    } finally {
-      setInvitingSending(null);
-    }
   };
 
   return (
@@ -463,8 +455,9 @@ export default function MatchLobbyScreen() {
         </View>
       )}
 
-      {/* Solo: finding opponent via matchmaking pool */}
-      {!isCompleted && myPlayer?.completed && match.match_type !== 'practice' && (
+      {/* Solo/team: finding opponent via matchmaking pool. Arena is NOT
+          matchmade — it's invite-based — so it gets its own waiting copy below. */}
+      {!isCompleted && myPlayer?.completed && match.match_type !== 'practice' && !isArena && (
         <View style={styles.waitingCard}>
           <ActivityIndicator color={C.gold} size="small" style={{ marginBottom: 8 }} />
           <Text style={styles.waitingText}>Finding your opponent...</Text>
@@ -472,19 +465,62 @@ export default function MatchLobbyScreen() {
         </View>
       )}
 
+      {/* Arena: round submitted, now waiting on the other invited players. */}
+      {!isCompleted && myPlayer?.completed && isArena && (
+        <View style={styles.waitingCard}>
+          <ActivityIndicator color={C.gold} size="small" style={{ marginBottom: 8 }} />
+          <Text style={styles.waitingText}>Waiting on the rest of the Arena</Text>
+          <Text style={styles.waitingSubText}>
+            ELO settles once every invited player finishes their round. Invite more players any time before then.
+          </Text>
+        </View>
+      )}
+
       {/* Start scoring (or continue if there's saved progress) */}
       {!isCompleted && myPlayer && !myPlayer.completed && (
-        <TouchableOpacity style={styles.startBtn} onPress={handleStartScoring}>
-          <Text style={styles.startBtnText}>
-            {hasSavedProgress ? 'Continue Match' : 'Start Scoring'}
+        <>
+          <TouchableOpacity style={styles.startBtn} onPress={handleStartScoring}>
+            <Text style={styles.startBtnText}>
+              {hasSavedProgress ? 'Continue Match' : 'Start Scoring'}
+            </Text>
+          </TouchableOpacity>
+          {(isArena || isPractice) && (
+            <Text style={styles.startHint}>
+              {isArena
+                ? 'You can start whenever. Others join and play their own round; ELO settles once everyone finishes.'
+                : 'Invite friends below to play this round together.'}
+            </Text>
+          )}
+        </>
+      )}
+
+      {/* Invite players — PRIMARY for Arena/duo/squad/practice (matches that
+          need other people), SECONDARY (a challenge) for solo. The modal's
+          username search means you can invite anyone, not just existing
+          friends — the old #1 reason an invite couldn't be sent. */}
+      {!isCompleted && canInviteMore && matchTypeRaw !== 'solo' && (
+        <TouchableOpacity
+          style={[styles.invitePrimary, arenaNeedsPlayers && styles.invitePrimaryUrgent]}
+          onPress={() => setInviteVisible(true)}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.invitePrimaryTitle}>
+            {isArena
+              ? (arenaNeedsPlayers ? '＋ Invite players to start' : '＋ Invite more players')
+              : '＋ Invite friends'}
+          </Text>
+          <Text style={styles.invitePrimarySub}>
+            {isArena
+              ? `Arena is a free-for-all (${playerCount}/${cap} in). Search any player or tap a friend. They get a notification and can also Join from the Chats tab.`
+              : 'Search any player or tap a friend. They get a notification and can also Join from the Chats tab.'}
           </Text>
         </TouchableOpacity>
       )}
 
-      {/* Invite Friends */}
-      {!isCompleted && (
-        <TouchableOpacity style={styles.inviteBtn} onPress={openInvite}>
-          <Text style={styles.inviteBtnText}>Invite Friends</Text>
+      {/* Solo: optional direct challenge instead of waiting on random matchmaking. */}
+      {!isCompleted && matchTypeRaw === 'solo' && canInviteMore && !myPlayer?.completed && (
+        <TouchableOpacity style={styles.inviteBtn} onPress={() => setInviteVisible(true)}>
+          <Text style={styles.inviteBtnText}>Challenge a specific friend instead</Text>
         </TouchableOpacity>
       )}
 
@@ -723,54 +759,15 @@ export default function MatchLobbyScreen() {
         </ScrollView>
       </Modal>
 
-      {/* Invite Modal */}
-      <Modal
+      {/* Invite players — shared modal with a friends list AND a username
+          search so the host can pull in anyone, not just existing friends. */}
+      <InviteFriendsModal
         visible={inviteVisible}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setInviteVisible(false)}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Invite Friends</Text>
-            <TouchableOpacity onPress={() => setInviteVisible(false)}>
-              <Text style={styles.modalClose}>Done</Text>
-            </TouchableOpacity>
-          </View>
-          {friends.length === 0 ? (
-            <View style={styles.centered}>
-              <ActivityIndicator color={C.gold} />
-              <Text style={[styles.sectionTitle, { marginTop: 16 }]}>No friends yet</Text>
-            </View>
-          ) : (
-            <FlatList
-              data={friends}
-              keyExtractor={(f) => f.user_id}
-              contentContainerStyle={{ padding: 20 }}
-              renderItem={({ item }) => (
-                <View style={styles.friendRow}>
-                  <View style={styles.friendAvatar}>
-                    <Text style={styles.friendAvatarText}>{c(item.username)[0]?.toUpperCase() ?? '?'}</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.friendName}>{c(item.username)}</Text>
-                    <Text style={styles.friendElo}>{item.elo} ELO</Text>
-                  </View>
-                  <TouchableOpacity
-                    style={styles.inviteSendBtn}
-                    onPress={() => sendInvite(item.user_id)}
-                    disabled={invitingSending === item.user_id}
-                  >
-                    {invitingSending === item.user_id
-                      ? <ActivityIndicator color={C.gold} size="small" />
-                      : <Text style={styles.inviteSendBtnText}>Invite</Text>}
-                  </TouchableOpacity>
-                </View>
-              )}
-            />
-          )}
-        </View>
-      </Modal>
+        matchId={id}
+        onClose={() => setInviteVisible(false)}
+        excludeUserIds={match.players?.map((p) => p.user_id) ?? []}
+        title={isArena ? 'Invite to Arena' : matchTypeRaw === 'solo' ? 'Challenge a Friend' : 'Invite Players'}
+      />
 
       {/* Per-player scorecard modal — also lists tracked shot maps for this match */}
       <ScorecardModal
@@ -927,6 +924,18 @@ const styles = StyleSheet.create({
 
   startBtn: { backgroundColor: C.gold, borderRadius: 16, paddingVertical: 18, alignItems: 'center', marginTop: 16 },
   startBtnText: { color: '#000', fontWeight: '900', fontSize: 17 },
+  startHint: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 8, lineHeight: 17, paddingHorizontal: 8 },
+
+  // Prominent invite CTA — the primary action for matches that need other
+  // people (Arena/duo/squad/practice). Urgent variant when an Arena has nobody
+  // else yet, so "invite first" reads louder than "start scoring".
+  invitePrimary: {
+    marginTop: 16, borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: C.gold, backgroundColor: C.gold + '18',
+  },
+  invitePrimaryUrgent: { borderWidth: 2, backgroundColor: C.gold + '24' },
+  invitePrimaryTitle: { color: C.gold, fontWeight: '900', fontSize: 16, letterSpacing: 0.3 },
+  invitePrimarySub: { color: C.textMuted, fontSize: 12, marginTop: 5, lineHeight: 17 },
 
   chatBtn: {
     marginTop: 12, borderRadius: 6, paddingVertical: 14, alignItems: 'center',
@@ -959,25 +968,4 @@ const styles = StyleSheet.create({
     marginTop: 6, marginBottom: 4, paddingHorizontal: 20,
   },
 
-  modalContainer: { flex: 1, backgroundColor: C.bg },
-  modalHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingTop: 20, paddingHorizontal: 20, paddingBottom: 16,
-    borderBottomWidth: 1, borderBottomColor: C.border,
-  },
-  modalTitle: { color: C.text, fontSize: 18, fontWeight: '900' },
-  modalSub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  modalClose: { color: C.gold, fontSize: 15, fontWeight: '700' },
-
-  friendRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: C.card, borderRadius: 6, padding: 14, marginBottom: 8,
-    borderWidth: 1, borderColor: C.border,
-  },
-  friendAvatar: { width: 40, height: 40, borderRadius: 4, backgroundColor: C.gold + '33', justifyContent: 'center', alignItems: 'center' },
-  friendAvatarText: { color: C.gold, fontWeight: '800', fontSize: 16 },
-  friendName: { color: C.text, fontWeight: '700', fontSize: 15 },
-  friendElo: { color: C.textMuted, fontSize: 12 },
-  inviteSendBtn: { borderRadius: 4, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: C.gold + '22', borderWidth: 1, borderColor: C.gold },
-  inviteSendBtnText: { color: C.gold, fontWeight: '700', fontSize: 13 },
 });
