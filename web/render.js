@@ -57,7 +57,9 @@ function nav(active, authed) {
     : link('/login', 'login', 'Log in');
   const cta = APP_STORE_URL ? `<a class="nav-cta" href="${esc(APP_STORE_URL)}">Get the app</a>` : '';
   return `<header class="topbar">
-    <a class="brand" href="/">SACARI<span>GOLF</span></a>
+    <a class="brand" href="/" aria-label="Sacari Golf home">
+      <img class="brand-logo" src="/logo.jpg" alt="Sacari Golf" />
+    </a>
     <nav class="nav">
       ${link('/how-to-play', 'howto', 'How to Play')}
       ${link('/leaderboard', 'leaderboard', 'Rankings')}
@@ -70,6 +72,7 @@ function nav(active, authed) {
 
 function foot() {
   return `<footer class="foot">
+    <a class="foot-brand" href="/"><img src="/logo.jpg" alt="Sacari Golf" /></a>
     <div class="foot-links">
       <a href="/how-to-play">How to Play</a>
       <a href="/leaderboard">Rankings</a>
@@ -142,13 +145,14 @@ function crestLadder() {
 function renderHome() {
   const body = `
   <section class="hero">
+    <img class="hero-crest" src="/logo.jpg" alt="Sacari Golf logo" />
+    <div class="hero-eyebrow">Free · iOS · Ranked</div>
     <h1>Competitive golf, ranked.</h1>
     <p class="hero-sub">Climb from Wood to Obsidian, battle clans, and track every shot. The free, competitive way to play the game you already love.</p>
     <div class="hero-cta">
       ${appStoreButton('Download on the App Store')}
       <a class="cta-ghost" href="/how-to-play">How it works</a>
     </div>
-    <img class="hero-crest" src="/logo.jpg" alt="Sacari Golf logo" />
   </section>
 
   <section class="feature">
