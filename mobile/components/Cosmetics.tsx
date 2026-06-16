@@ -693,19 +693,49 @@ function CyberBg({ v, style, children }: BgProps) {
   );
 }
 
-// ── 9. Solar (radial sun + rotating rays) ───────────────────────────────────
+// ── 9. Solar Flare (pulsing sun core + counter-rotating rays + prominences) ──
 
 function SolarBg({ v, style, children }: BgProps) {
-  const rot = useSharedValue(0);
+  const rot   = useSharedValue(0);   // outer long rays
+  const rot2  = useSharedValue(0);   // inner rays (counter-rotating)
+  const pulse = useSharedValue(0);   // sun core flare / breathe
+  const flare = useSharedValue(0);   // prominence flicker
   useEffect(() => {
-    rot.value = withRepeat(withTiming(1, { duration: 20000, easing: Easing.linear }), -1, false);
-    return () => cancelAnimation(rot);
-  }, [rot]);
-  const rotStyle = useAnimatedStyle(() => ({
+    rot.value   = withRepeat(withTiming(1, { duration: 26000, easing: Easing.linear }), -1, false);
+    rot2.value  = withRepeat(withTiming(1, { duration: 17000, easing: Easing.linear }), -1, false);
+    pulse.value = withRepeat(withTiming(1, { duration: 3000, easing: Easing.inOut(Easing.sin) }), -1, true);
+    flare.value = withRepeat(withTiming(1, { duration: 1900, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(rot); cancelAnimation(rot2); cancelAnimation(pulse); cancelAnimation(flare); };
+  }, [rot, rot2, pulse, flare]);
+
+  const raysOutStyle = useAnimatedStyle(() => ({ transform: [{ rotate: `${interpolate(rot.value,  [0, 1], [0, 360])}deg` }] }));
+  const raysInStyle  = useAnimatedStyle(() => ({ transform: [{ rotate: `${interpolate(rot2.value, [0, 1], [360, 0])}deg` }] }));
+  // The sun itself now lives — it breathes (scale) and brightens (opacity).
+  const coreStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: interpolate(pulse.value, [0, 1], [1, 1.09]) }],
+    opacity: interpolate(pulse.value, [0, 1], [0.88, 1]),
+  }));
+  // Prominences flicker and slowly rotate with the sun.
+  const promStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(flare.value, [0, 1], [0.3, 0.85]),
     transform: [{ rotate: `${interpolate(rot.value, [0, 1], [0, 360])}deg` }],
   }));
+
   const accent = v.accent ?? '#ffb14a';
   const core   = v.core   ?? '#fff3a8';
+
+  // Solar prominences — bright loops erupting off the rim. Static geometry,
+  // memoised; animated via promStyle so it never re-rolls on render.
+  const proms = useMemo(() => {
+    const rad = (d: number) => (d * Math.PI) / 180;
+    return [25, 120, 205, 300].map((a) => {
+      const w = 13, r0 = 17, r1 = 31;
+      const p1x = Math.cos(rad(a - w)) * r0, p1y = Math.sin(rad(a - w)) * r0;
+      const p2x = Math.cos(rad(a + w)) * r0, p2y = Math.sin(rad(a + w)) * r0;
+      const cx  = Math.cos(rad(a)) * r1,     cy  = Math.sin(rad(a)) * r1;
+      return `M ${p1x.toFixed(2)} ${p1y.toFixed(2)} Q ${cx.toFixed(2)} ${cy.toFixed(2)} ${p2x.toFixed(2)} ${p2y.toFixed(2)}`;
+    });
+  }, []);
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
@@ -714,34 +744,59 @@ function SolarBg({ v, style, children }: BgProps) {
         start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {/* Solar core — static gradient sphere */}
-      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
-        <Defs>
-          {/* userSpaceOnUse: coords are viewBox units. The default
-              objectBoundingBox mode treats these numbers as multiples
-              of the bounding box and washes the gradient out. */}
-          <RadialGradient id="solarCore" cx="0" cy="0" r="35" fx="0" fy="0" gradientUnits="userSpaceOnUse">
-            <Stop offset="0%" stopColor={core} stopOpacity="0.95" />
-            <Stop offset="40%" stopColor={accent} stopOpacity="0.55" />
-            <Stop offset="100%" stopColor={accent} stopOpacity="0" />
-          </RadialGradient>
-        </Defs>
-        <Circle cx={0} cy={0} r={50} fill="url(#solarCore)" />
-      </Svg>
-      {/* Rotating ray layer — SVG G doesn't accept a `style` prop, so
-          rotate by wrapping the entire Svg in an Animated.View instead. */}
-      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, rotStyle]}>
+
+      {/* Outer long rays — slow rotation */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, raysOutStyle]}>
         <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
-          {Array.from({ length: 18 }).map((_, i) => {
-            const ang = (i * (360 / 18)) * (Math.PI / 180);
-            const x1 = Math.cos(ang) * 14;
-            const y1 = Math.sin(ang) * 14;
-            const x2 = Math.cos(ang) * 50;
-            const y2 = Math.sin(ang) * 50;
-            return <Line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={accent} strokeOpacity="0.35" strokeWidth="0.7" />;
+          {Array.from({ length: 24 }).map((_, i) => {
+            const ang = (i * (360 / 24)) * (Math.PI / 180);
+            return <Line key={i}
+              x1={Math.cos(ang) * 16} y1={Math.sin(ang) * 16}
+              x2={Math.cos(ang) * 60} y2={Math.sin(ang) * 60}
+              stroke={accent} strokeOpacity="0.3" strokeWidth="0.8" strokeLinecap="round" />;
           })}
         </Svg>
       </Animated.View>
+
+      {/* Inner short rays — faster counter-rotation, brighter */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, raysInStyle]}>
+        <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
+          {Array.from({ length: 16 }).map((_, i) => {
+            const ang = ((i + 0.5) * (360 / 16)) * (Math.PI / 180);
+            return <Line key={i}
+              x1={Math.cos(ang) * 14} y1={Math.sin(ang) * 14}
+              x2={Math.cos(ang) * 34} y2={Math.sin(ang) * 34}
+              stroke={core} strokeOpacity="0.45" strokeWidth="1.1" strokeLinecap="round" />;
+          })}
+        </Svg>
+      </Animated.View>
+
+      {/* Pulsing sun core — hot white center flaring out to the accent */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, coreStyle]}>
+        <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
+          <Defs>
+            {/* userSpaceOnUse: coords are viewBox units (objectBoundingBox
+                would wash the gradient out). */}
+            <RadialGradient id="solarCore" cx="0" cy="0" r="34" fx="0" fy="0" gradientUnits="userSpaceOnUse">
+              <Stop offset="0%"   stopColor="#ffffff" stopOpacity="1" />
+              <Stop offset="20%"  stopColor={core}    stopOpacity="0.95" />
+              <Stop offset="52%"  stopColor={accent}  stopOpacity="0.6" />
+              <Stop offset="100%" stopColor={accent}  stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <Circle cx={0} cy={0} r={50} fill="url(#solarCore)" />
+        </Svg>
+      </Animated.View>
+
+      {/* Solar prominences — flickering loops off the rim */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, promStyle]}>
+        <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
+          {proms.map((d, i) => (
+            <Path key={i} d={d} fill="none" stroke={core} strokeOpacity="0.8" strokeWidth="1.4" strokeLinecap="round" />
+          ))}
+        </Svg>
+      </Animated.View>
+
       {children}
     </View>
   );
@@ -950,28 +1005,30 @@ function SynthwaveBg({ v, style, children }: BgProps) {
   );
 }
 
-// ── 14. Eclipse (corona + moon disc) ────────────────────────────────────────
+// ── 14. Total Eclipse (corona streamers + moon disc + diamond-ring glint) ────
 
 function EclipseBg({ v, style, children }: BgProps) {
   const breathe = useSharedValue(0);
-  const rot = useSharedValue(0);
-  const rim = useSharedValue(0);
+  const rot     = useSharedValue(0);
+  const rim     = useSharedValue(0);
+  const diamond = useSharedValue(0);   // the diamond-ring shimmer
   useEffect(() => {
     breathe.value = withRepeat(withTiming(1, { duration: 4200, easing: Easing.inOut(Easing.sin) }), -1, true);
-    rot.value = withRepeat(withTiming(1, { duration: 40000, easing: Easing.linear }), -1, false);
-    rim.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.sin) }), -1, true);
-    return () => { cancelAnimation(breathe); cancelAnimation(rot); cancelAnimation(rim); };
-  }, [breathe, rot, rim]);
+    rot.value     = withRepeat(withTiming(1, { duration: 44000, easing: Easing.linear }), -1, false);
+    rim.value     = withRepeat(withTiming(1, { duration: 2200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    diamond.value = withRepeat(withTiming(1, { duration: 1700, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(breathe); cancelAnimation(rot); cancelAnimation(rim); cancelAnimation(diamond); };
+  }, [breathe, rot, rim, diamond]);
 
   const coronaStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: interpolate(breathe.value, [0, 1], [1, 1.07]) }],
-    opacity: interpolate(breathe.value, [0, 1], [0.8, 1]),
+    transform: [{ scale: interpolate(breathe.value, [0, 1], [1, 1.08]) }],
+    opacity: interpolate(breathe.value, [0, 1], [0.78, 1]),
   }));
-  const rayStyle = useAnimatedStyle(() => ({
-    transform: [{ rotate: `${interpolate(rot.value, [0, 1], [0, 360])}deg` }],
-  }));
-  const rimStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(rim.value, [0, 1], [0.55, 1]),
+  const rayStyle = useAnimatedStyle(() => ({ transform: [{ rotate: `${interpolate(rot.value, [0, 1], [0, 360])}deg` }] }));
+  const rimStyle = useAnimatedStyle(() => ({ opacity: interpolate(rim.value, [0, 1], [0.5, 1]) }));
+  const diamondStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(diamond.value, [0, 1], [0.55, 1]),
+    transform: [{ scale: interpolate(diamond.value, [0, 1], [0.78, 1.2]) }],
   }));
 
   const corona = v.accent ?? '#ffdf8a';
@@ -983,7 +1040,22 @@ function EclipseBg({ v, style, children }: BgProps) {
     duration: TIMING.star + Math.random() * 1500,
   })), []);
 
-  const DISC = 86;
+  // Corona streamers — long, irregular spokes of varied length/opacity, like a
+  // real eclipse corona rather than an even sunburst. Memoised geometry.
+  const streamers = useMemo(() => Array.from({ length: 22 }, (_, i) => ({
+    a: i * (360 / 22) + (Math.random() * 6 - 3),
+    len: 50 + Math.random() * 16,
+    op: 0.1 + Math.random() * 0.18,
+    w: 0.8 + Math.random() * 1.0,
+  })), []);
+
+  // Geometry for the disc + the diamond-ring glint that sits on its rim.
+  const DISC_R = 43;
+  const dAng = (-52 * Math.PI) / 180;   // upper-right rim
+  const dx = 50 + Math.cos(dAng) * DISC_R;
+  const dy = 50 + Math.sin(dAng) * DISC_R;
+  const box: ViewStyle = { position: 'absolute', top: '22%', alignSelf: 'center', width: 190, height: 190 };
+
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
@@ -994,49 +1066,74 @@ function EclipseBg({ v, style, children }: BgProps) {
       <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
         {stars.map((s, i) => <TwinklingStar key={i} {...s} />)}
       </Svg>
+
       {/* Corona bloom behind the disc */}
-      <Animated.View pointerEvents="none" style={[
-        { position: 'absolute', top: '22%', alignSelf: 'center', width: 190, height: 190 },
-        coronaStyle,
-      ]}>
+      <Animated.View pointerEvents="none" style={[box, coronaStyle]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Defs>
             <RadialGradient id="eclipseCorona" cx="50" cy="50" r="50" gradientUnits="userSpaceOnUse">
-              <Stop offset="0%"  stopColor="#fff8e0" stopOpacity="0.9" />
-              <Stop offset="38%" stopColor={corona} stopOpacity="0.5" />
+              <Stop offset="0%"  stopColor="#fff8e0" stopOpacity="0.95" />
+              <Stop offset="34%" stopColor={corona} stopOpacity="0.5" />
               <Stop offset="100%" stopColor={corona} stopOpacity="0" />
             </RadialGradient>
           </Defs>
           <Circle cx="50" cy="50" r="50" fill="url(#eclipseCorona)" />
         </Svg>
       </Animated.View>
-      {/* Slow-rotating faint rays */}
-      <Animated.View pointerEvents="none" style={[
-        { position: 'absolute', top: '22%', alignSelf: 'center', width: 190, height: 190 },
-        rayStyle,
-      ]}>
+
+      {/* Slow-rotating corona streamers */}
+      <Animated.View pointerEvents="none" style={[box, rayStyle]}>
         <Svg width="100%" height="100%" viewBox="-50 -50 100 100">
-          {Array.from({ length: 12 }).map((_, i) => {
-            const ang = (i * 30) * (Math.PI / 180);
-            return (
-              <Line key={i}
-                x1={Math.cos(ang) * 24} y1={Math.sin(ang) * 24}
-                x2={Math.cos(ang) * 50} y2={Math.sin(ang) * 50}
-                stroke={corona} strokeOpacity="0.16" strokeWidth="1.6" strokeLinecap="round" />
-            );
+          {streamers.map((s, i) => {
+            const ang = (s.a * Math.PI) / 180;
+            return <Line key={i}
+              x1={Math.cos(ang) * 24} y1={Math.sin(ang) * 24}
+              x2={Math.cos(ang) * s.len} y2={Math.sin(ang) * s.len}
+              stroke={corona} strokeOpacity={s.op} strokeWidth={s.w} strokeLinecap="round" />;
           })}
         </Svg>
       </Animated.View>
-      {/* The moon disc with a glowing rim */}
-      <Animated.View pointerEvents="none" style={[
-        {
-          position: 'absolute', top: '22%', alignSelf: 'center',
-          marginTop: (190 - DISC) / 2, width: DISC, height: DISC, borderRadius: DISC / 2,
-          backgroundColor: '#04050c', borderWidth: 1.5, borderColor: '#fff8e0',
-          shadowColor: '#fff8e0', shadowOpacity: 0.9, shadowRadius: 12,
-        },
-        rimStyle,
-      ]} />
+
+      {/* Moon disc + glowing rim + Bailey's beads (rim opacity breathes) */}
+      <Animated.View pointerEvents="none" style={[box, rimStyle]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100">
+          <Defs>
+            <RadialGradient id="eclipseRim" cx="50" cy="50" r="46" gradientUnits="userSpaceOnUse">
+              <Stop offset="88%"  stopColor="#fff8e0" stopOpacity="0" />
+              <Stop offset="95%"  stopColor="#fff8e0" stopOpacity="0.5" />
+              <Stop offset="100%" stopColor="#fff8e0" stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <Circle cx="50" cy="50" r="46" fill="url(#eclipseRim)" />
+          <Circle cx="50" cy="50" r={DISC_R} fill="#04050c" />
+          <Circle cx="50" cy="50" r={DISC_R} fill="none" stroke="#fff8e0" strokeOpacity="0.85" strokeWidth="0.9" />
+          {/* Bailey's beads — bright spots along the rim near the diamond */}
+          {[-34, -68, -16].map((deg, i) => {
+            const a = (deg * Math.PI) / 180;
+            return <Circle key={i}
+              cx={50 + Math.cos(a) * DISC_R} cy={50 + Math.sin(a) * DISC_R}
+              r={i === 0 ? 1.0 : 0.7} fill="#fff8e0" fillOpacity="0.85" />;
+          })}
+        </Svg>
+      </Animated.View>
+
+      {/* Diamond ring — the brilliant glint on the rim, shimmering */}
+      <Animated.View pointerEvents="none" style={[box, diamondStyle]}>
+        <Svg width="100%" height="100%" viewBox="0 0 100 100">
+          <Defs>
+            <RadialGradient id="diamondGlow" cx={dx} cy={dy} r="13" gradientUnits="userSpaceOnUse">
+              <Stop offset="0%"   stopColor="#ffffff" stopOpacity="1" />
+              <Stop offset="30%"  stopColor="#fff8e0" stopOpacity="0.7" />
+              <Stop offset="100%" stopColor="#fff8e0" stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <Circle cx={dx} cy={dy} r="12" fill="url(#diamondGlow)" />
+          <Line x1={dx - 11} y1={dy} x2={dx + 11} y2={dy} stroke="#ffffff" strokeOpacity="0.9" strokeWidth="0.8" strokeLinecap="round" />
+          <Line x1={dx} y1={dy - 11} x2={dx} y2={dy + 11} stroke="#ffffff" strokeOpacity="0.9" strokeWidth="0.8" strokeLinecap="round" />
+          <Circle cx={dx} cy={dy} r="2.6" fill="#ffffff" />
+        </Svg>
+      </Animated.View>
+
       {children}
     </View>
   );

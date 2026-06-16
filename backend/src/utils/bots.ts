@@ -12,8 +12,9 @@
  *     every ~37.5 ELO below Diamond's floor (1300) is +1 stroke of handicap,
  *     so Wood is a ~32-handicap and Obsidian plays a couple under.
  *   • Bots NEVER gain or lose ELO — their rating only marks their skill band.
- *     But they DO accumulate a win/loss record and post their rounds, so their
- *     profiles read like real players.
+ *     They accumulate a win/loss record and round history so their profiles
+ *     read like real players, but they do NOT author posts in the global feed
+ *     (that just spams it) — they only appear there as a human's opponent.
  *   • Bots fill SOLO matches (1v1) AND team matches (duo = 2 bots, squad = 4),
  *     drawing a team from the nearest-ELO bots in the one-per-bracket pool.
  *     Arena (ffa) is invite-only, so it's never bot-filled.
@@ -68,7 +69,31 @@ function handicapForElo(elo: number): number {
   return Math.max(-3, Math.min(36, Math.round(h * 10) / 10));
 }
 
-interface BotRank { key: string; username: string; email: string; elo: number; handicap: number; avatarUrl: string }
+// Equipped cosmetics each bot shows off, so they look like real players who've
+// kitted out their locker room. A realistic spread: low ranks run the plain
+// defaults like a newer player; higher ranks flex rank-unlocked / premium items
+// (never cup-winner items — bots can't win the cup). Keyed by bot `key`; any
+// slot left unset falls back to the same defaults a real account gets.
+interface Loadout { background?: string; border?: string; username?: string; ball_trail?: string }
+const DEFAULT_LOADOUT = {
+  background: 'bg_default', border: 'border_classic',
+  username: 'uname_default', ball_trail: 'trail_default',
+};
+const BOT_COSMETICS: Record<string, Loadout> = {
+  'obsidian':     { background: 'bg_liquid_gold',  border: 'border_plasma',  username: 'uname_holographic' },
+  'diamond-140':  { background: 'bg_cyber_grid',   border: 'border_comet',   username: 'uname_ocean' },
+  'diamond-60':   { background: 'bg_cyber_grid',   ball_trail: 'trail_galaxy' },
+  'ruby-140':     { background: 'bg_volcanic',     border: 'border_frost',   username: 'uname_fire' },
+  'ruby-60':      { background: 'bg_volcanic',     ball_trail: 'trail_fire' },
+  'platinum-140': { background: 'bg_phoenix_rise', username: 'uname_sunset' },
+  'platinum-60':  { border: 'border_inferno',      ball_trail: 'trail_phoenix' },
+  'gold-140':     { background: 'bg_deep_ocean' },
+  'gold-60':      { background: 'bg_sakura_fall' },
+  'silver-140':   { ball_trail: 'trail_comet' },
+  // silver-60, bronze-*, wood-* → plain defaults, like casual/newer players.
+};
+
+interface BotRank { key: string; username: string; email: string; elo: number; handicap: number; avatarUrl: string; cosmetics: Loadout }
 
 const BOT_RANKS: BotRank[] = (() => {
   const out: BotRank[] = [];
@@ -80,14 +105,17 @@ const BOT_RANKS: BotRank[] = (() => {
     for (const offset of [60, 140]) {
       const elo = floor + offset;
       const idx = n;
-      out.push({ key: `${key}-${offset}`, username: BOT_NAMES[n++],
+      const k = `${key}-${offset}`;
+      out.push({ key: k, username: BOT_NAMES[n++],
                  email: `bot+${key}${offset}@sacarigolf.bot`, elo, handicap: handicapForElo(elo),
-                 avatarUrl: `/avatars/bot/${idx}` });   // distinct real-face portrait per bot
+                 avatarUrl: `/avatars/bot/${idx}`,        // distinct real-face portrait per bot
+                 cosmetics: BOT_COSMETICS[k] ?? {} });
     }
   }
   const oIdx = n;
   out.push({ key: 'obsidian', username: BOT_NAMES[n++], email: 'bot+obsidian@sacarigolf.bot',
-             elo: 1550, handicap: handicapForElo(1550), avatarUrl: `/avatars/bot/${oIdx}` });
+             elo: 1550, handicap: handicapForElo(1550), avatarUrl: `/avatars/bot/${oIdx}`,
+             cosmetics: BOT_COSMETICS['obsidian'] ?? {} });
   return out;
 })();
 
@@ -97,11 +125,19 @@ const BOT_RANKS: BotRank[] = (() => {
 export async function seedBots(): Promise<void> {
   for (const b of BOT_RANKS) {
     try {
+      const cos = {
+        background: b.cosmetics.background ?? DEFAULT_LOADOUT.background,
+        border:     b.cosmetics.border     ?? DEFAULT_LOADOUT.border,
+        username:   b.cosmetics.username   ?? DEFAULT_LOADOUT.username,
+        ball_trail: b.cosmetics.ball_trail ?? DEFAULT_LOADOUT.ball_trail,
+      };
       await pool.query(
-        `INSERT INTO users (username, email, elo, handicap_index, is_bot, email_verified, avatar_url)
-         SELECT $1, $2, $3, $4, TRUE, TRUE, $5
+        `INSERT INTO users (username, email, elo, handicap_index, is_bot, email_verified, avatar_url,
+                            equipped_background, equipped_border, equipped_username, equipped_ball_trail)
+         SELECT $1, $2, $3, $4, TRUE, TRUE, $5, $6, $7, $8, $9
           WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = $2 OR username = $1)`,
-        [b.username, b.email, b.elo, b.handicap, b.avatarUrl],
+        [b.username, b.email, b.elo, b.handicap, b.avatarUrl,
+         cos.background, cos.border, cos.username, cos.ball_trail],
       );
       // Keep ELO/handicap in sync AND migrate the username to the curated
       // real-looking name — but only if no OTHER account already holds it
@@ -109,13 +145,16 @@ export async function seedBots(): Promise<void> {
       await pool.query(
         `UPDATE users u
             SET elo = $2, handicap_index = $3, is_bot = TRUE, avatar_url = $5,
+                equipped_background = $6, equipped_border = $7,
+                equipped_username = $8, equipped_ball_trail = $9,
                 username = CASE
                   WHEN EXISTS (
                     SELECT 1 FROM users o
                      WHERE lower(o.username) = lower($4) AND o.user_id <> u.user_id
                   ) THEN u.username ELSE $4 END
           WHERE u.email = $1`,
-        [b.email, b.elo, b.handicap, b.username, b.avatarUrl],
+        [b.email, b.elo, b.handicap, b.username, b.avatarUrl,
+         cos.background, cos.border, cos.username, cos.ball_trail],
       );
     } catch (err) {
       console.error('[bots] seed failed for', b.username, err);
@@ -337,12 +376,14 @@ export async function runBotMatchPass(): Promise<void> {
         ],
       );
       await client.query(`UPDATE matches SET completed = TRUE WHERE match_id = $1`, [c.match_id]);
-      // Round post for BOTH the human and the bot, so bots show up in the feed.
+      // Round post for the HUMAN only. Bots do NOT post into the global feed
+      // (it floods it); they still show as the opponent on this card and in
+      // their own profile's round history.
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT r.user_id, 'round', $1, r.caption
-           FROM rounds r WHERE r.match_id = $1 AND r.user_id = ANY($2)`,
-        [c.match_id, [c.human_id, botId]],
+           FROM rounds r WHERE r.match_id = $1 AND r.user_id = $2`,
+        [c.match_id, c.human_id],
       );
 
       await client.query('COMMIT');
@@ -620,12 +661,13 @@ export async function runBotTeamMatchPass(): Promise<void> {
         ],
       );
       await client.query(`UPDATE matches SET completed = TRUE WHERE match_id = $1`, [c.match_id]);
-      // Round post for every player (humans + bots) so the team shows in feeds.
+      // Round post for the HUMAN players only — bots don't post into the global
+      // feed. They still appear as opponents here and on their own profiles.
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT r.user_id, 'round', $1, r.caption
            FROM rounds r WHERE r.match_id = $1 AND r.user_id = ANY($2)`,
-        [c.match_id, [...humanIds, ...side2.map((p) => p.user_id)]],
+        [c.match_id, humanIds],
       );
 
       await client.query('COMMIT');
