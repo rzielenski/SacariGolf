@@ -197,7 +197,7 @@ export async function runBotMatchPass(): Promise<void> {
 
       // Teebox + the human's round.
       const { rows: tRows } = await client.query(
-        `SELECT course_rating, slope_rating, num_holes,
+        `SELECT course_rating, slope_rating, num_holes, course_id,
                 front_course_rating, front_slope_rating, back_course_rating, back_slope_rating
            FROM teeboxes WHERE teebox_id = $1`, [c.teebox_id],
       );
@@ -230,8 +230,9 @@ export async function runBotMatchPass(): Promise<void> {
            FROM teeboxes
           WHERE course_rating IS NOT NULL AND slope_rating IS NOT NULL
             AND num_holes >= $1
+            AND ($2::uuid IS NULL OR course_id <> $2)
           ORDER BY random() LIMIT 1`,
-        [holesPlayed],
+        [holesPlayed, t.course_id ?? null],
       );
       const bt = btRows[0] ?? {
         teebox_id: c.teebox_id, course_rating: t.course_rating,
@@ -363,66 +364,15 @@ async function pickBotTeam(client: any, targetElo: number, count: number) {
   return team;
 }
 
-/** Best-per-hole format performance for a team match (lower = better), ported
- *  from routes/matches.computeFormatPerf so bot team matches score identically
- *  to human ones. Returns null for stroke/scramble (caller falls back to the
- *  stroke differential) or when pars are unavailable. */
-function teamFormatPerf(
-  format: string,
-  side1HoleScores: (number[] | null)[],
-  side2HoleScores: (number[] | null)[],
-  parByHoleIdx: number[],
-): { side1Perf: number; side2Perf: number; details: any } | null {
-  const N = parByHoleIdx.length;
-  if (!N) return null;
-  const bestHole = (arrs: (number[] | null)[], i: number): number | null => {
-    let best: number | null = null;
-    for (const a of arrs) { const s = a?.[i]; if (typeof s !== 'number') continue; if (best == null || s < best) best = s; }
-    return best;
-  };
-  const stab = (score: number, par: number): number => {
-    const d = score - par;
-    if (d <= -2) return 5; if (d === -1) return 2; if (d === 0) return 0; if (d === 1) return -1; return -3;
-  };
-  if (format === 'stableford') {
-    let s1 = 0, s2 = 0;
-    for (let i = 0; i < N; i++) {
-      const a = bestHole(side1HoleScores, i), b = bestHole(side2HoleScores, i);
-      if (a != null) s1 += stab(a, parByHoleIdx[i]);
-      if (b != null) s2 += stab(b, parByHoleIdx[i]);
-    }
-    return { side1Perf: -s1, side2Perf: -s2, details: { s1Points: s1, s2Points: s2 } };
-  }
-  if (format === 'match_play') {
-    let s1 = 0, s2 = 0, halved = 0;
-    for (let i = 0; i < N; i++) {
-      const a = bestHole(side1HoleScores, i), b = bestHole(side2HoleScores, i);
-      if (a == null || b == null) continue;
-      if (a < b) s1++; else if (b < a) s2++; else halved++;
-    }
-    return { side1Perf: -s1, side2Perf: -s2, details: { s1Holes: s1, s2Holes: s2, halved } };
-  }
-  if (format === 'skins') {
-    let s1 = 0, s2 = 0, carry = 1;
-    for (let i = 0; i < N; i++) {
-      const a = bestHole(side1HoleScores, i), b = bestHole(side2HoleScores, i);
-      if (a == null || b == null) continue;
-      if (a < b) { s1 += carry; carry = 1; }
-      else if (b < a) { s2 += carry; carry = 1; }
-      else { carry += 1; }
-    }
-    return { side1Perf: -s1, side2Perf: -s2, details: { s1Skins: s1, s2Skins: s2 } };
-  }
-  return null;
-}
-
 /**
  * Fill stale DUO / SQUAD matches with an ELO-matched bot TEAM. A match
  * qualifies when every human on side 1 finished, no opponent team ever showed,
  * and the last finish was more than BOT_MATCH_AFTER_HOURS ago. The bot team
- * (one bot per human, nearest ELO) plays the humans' teebox so every format
- * compares hole-for-hole, and the match resolves under the same team ELO math
- * as a human one — except the bots' ratings stay frozen.
+ * (one bot per human, nearest ELO) plays RANDOM courses at its skill band — an
+ * opponent that always plays your exact course reads as fake — so the match
+ * resolves by team score DIFFERENTIAL (the cross-course-fair comparison). The
+ * hole-by-hole formats can't compare across courses, so they fall back to that
+ * same differential. The bots' ratings stay frozen.
  */
 export async function runBotTeamMatchPass(): Promise<void> {
   let candidates: any[];
@@ -473,7 +423,7 @@ export async function runBotTeamMatchPass(): Promise<void> {
                 t.course_rating, t.slope_rating,
                 t.front_course_rating, t.front_slope_rating,
                 t.back_course_rating, t.back_slope_rating,
-                t.num_holes AS teebox_num_holes, t.teebox_id,
+                t.num_holes AS teebox_num_holes, t.teebox_id, t.course_id,
                 r.hole_scores,
                 COALESCE(array_length(r.hole_scores, 1), $2) AS holes_played,
                 u.elo, u.total_matches
@@ -487,59 +437,80 @@ export async function runBotTeamMatchPass(): Promise<void> {
       const teamSize = side1.length;
       if (!teamSize || side1.some((p: any) => p.strokes == null)) { await client.query('ROLLBACK'); continue; }
 
-      // Representative teebox the bots will play (so every format compares
-      // hole-for-hole). Prefer one that actually has a rating.
+      // Fallback teebox (a human's) only used if the random-course pick comes
+      // up empty for some bot.
       const rep = side1.find((p: any) => p.course_rating != null && p.slope_rating != null) ?? side1[0];
-      if (!rep.teebox_id) { await client.query('ROLLBACK'); continue; }
       const holesPlayed = Number(rep.holes_played) || c.num_holes || 18;
+      // Courses the humans played — bots avoid these so they never read as
+      // "playing your exact course".
+      const humanCourseIds: string[] = side1.map((p: any) => p.course_id).filter(Boolean);
 
       const botTeam = await pickBotTeam(client, Number(c.avg_elo) || 100, teamSize);
       if (botTeam.length !== teamSize) { await client.query('ROLLBACK'); continue; }
 
-      // Per-hole pars for the rep teebox, sliced to the played nine/eighteen.
-      const { rows: holeRows } = await client.query(
-        `SELECT par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`, [rep.teebox_id],
-      );
-      const offset = c.holes_subset === 'back' ? 9 : 0;
-      const parByHoleIdx = holeRows.slice(offset, offset + (c.num_holes ?? holesPlayed)).map((r: any) => r.par);
-
-      // Generate bot rounds. Scramble teams play one shared (low) team card;
-      // every other format gives each bot its own round at its own skill.
+      // Bots play RANDOM courses (never the humans'), exactly like the solo
+      // pass. Because the sides are on different courses we resolve by score
+      // DIFFERENTIAL (the hole-by-hole formats can't compare across courses, so
+      // they fall back to the same differential). Scramble is one shared team
+      // card on one random course; every other format gives each bot its own.
       const isScramble = c.format === 'scramble';
-      const side2: TeamPlayer[] = [];
-      let scrambleRound: { holeScores: number[]; total: number } | null = null;
-      if (isScramble) {
-        const bestHcp = Math.min(...botTeam.map((b) => b.handicap));
-        const teamHcp = Math.max(-5, bestHcp - teamSize);   // a scramble team scores well under any one member
-        scrambleRound = generateBotRound(rep.course_rating, rep.teebox_num_holes, holesPlayed, teamHcp);
-      }
-      for (const b of botTeam) {
-        const round = isScramble && scrambleRound
-          ? scrambleRound
-          : generateBotRound(rep.course_rating, rep.teebox_num_holes, holesPlayed, b.handicap);
-        side2.push({
-          user_id: b.user_id, strokes: round.total, hole_scores: round.holeScores,
-          course_rating: rep.course_rating, slope_rating: rep.slope_rating,
+      const pickRandomTee = async () => {
+        const { rows } = await client.query(
+          `SELECT teebox_id, course_rating, slope_rating, num_holes,
+                  front_course_rating, front_slope_rating, back_course_rating, back_slope_rating
+             FROM teeboxes
+            WHERE course_rating IS NOT NULL AND slope_rating IS NOT NULL AND num_holes >= $1
+              AND course_id <> ALL($2::uuid[])
+            ORDER BY random() LIMIT 1`,
+          [holesPlayed, humanCourseIds],
+        );
+        return rows[0] ?? (rep.teebox_id ? {
+          teebox_id: rep.teebox_id, course_rating: rep.course_rating, slope_rating: rep.slope_rating,
+          num_holes: rep.teebox_num_holes,
           front_course_rating: rep.front_course_rating, front_slope_rating: rep.front_slope_rating,
           back_course_rating: rep.back_course_rating, back_slope_rating: rep.back_slope_rating,
-          teebox_num_holes: rep.teebox_num_holes, holes_played: holesPlayed,
+        } : null);
+      };
+
+      const side2: TeamPlayer[] = [];
+      const sharedTee = isScramble ? await pickRandomTee() : null;
+      const teamHcp = isScramble
+        ? Math.max(-5, Math.min(...botTeam.map((b) => b.handicap)) - teamSize)   // a scramble team scores well under any member
+        : 0;
+      const scrambleRound = isScramble && sharedTee
+        ? generateBotRound(sharedTee.course_rating, sharedTee.num_holes, holesPlayed, teamHcp)
+        : null;
+      let teamOk = true;
+      for (const b of botTeam) {
+        const tee = isScramble ? sharedTee : await pickRandomTee();
+        if (!tee) { teamOk = false; break; }
+        const round = isScramble && scrambleRound
+          ? scrambleRound
+          : generateBotRound(tee.course_rating, tee.num_holes, holesPlayed, b.handicap);
+        side2.push({
+          user_id: b.user_id, strokes: round.total, hole_scores: round.holeScores,
+          course_rating: tee.course_rating, slope_rating: tee.slope_rating,
+          front_course_rating: tee.front_course_rating, front_slope_rating: tee.front_slope_rating,
+          back_course_rating: tee.back_course_rating, back_slope_rating: tee.back_slope_rating,
+          teebox_num_holes: tee.num_holes, holes_played: holesPlayed,
           elo: b.elo, total_matches: 0,
         });
         await client.query(
           `INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed)
            VALUES ($1, $2, $3, 2, $4, TRUE)
            ON CONFLICT (match_id, user_id) DO NOTHING`,
-          [c.match_id, b.user_id, rep.teebox_id, round.total],
+          [c.match_id, b.user_id, tee.teebox_id, round.total],
         );
         await client.query(
           `INSERT INTO rounds (match_id, user_id, teebox_id, hole_scores, total_score, round_type)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (match_id, user_id) DO NOTHING`,
-          [c.match_id, b.user_id, rep.teebox_id, round.holeScores, round.total, c.match_type],
+          [c.match_id, b.user_id, tee.teebox_id, round.holeScores, round.total, c.match_type],
         );
       }
+      if (!teamOk || side2.length !== teamSize) { await client.query('ROLLBACK'); continue; }
 
-      // ── Resolve (team vs team), mirroring routes/matches.resolveElo ──────
+      // ── Resolve (team vs team) by score differential, mirroring resolveElo ──
       const subset = c.holes_subset as ('front' | 'back' | 'full' | null);
       const diffOf = (p: TeamPlayer): number => {
         if (!p.course_rating || !p.slope_rating) return p.strokes;
@@ -552,13 +523,8 @@ export async function runBotTeamMatchPass(): Promise<void> {
         return ds.reduce((a, b) => a + b, 0) / ds.length;
       };
       const compareCount = Math.min(side1.length, side2.length);
-      const strokeSide1 = teamDiff(side1 as TeamPlayer[], compareCount);
-      const strokeSide2 = teamDiff(side2, compareCount);
-      const perf = teamFormatPerf(
-        c.format, side1.map((p: any) => p.hole_scores), side2.map((p) => p.hole_scores), parByHoleIdx,
-      );
-      const side1Diff = perf ? perf.side1Perf : strokeSide1;
-      const side2Diff = perf ? perf.side2Perf : strokeSide2;
+      const side1Diff = teamDiff(side1 as TeamPlayer[], compareCount);
+      const side2Diff = teamDiff(side2, compareCount);
 
       const isTie = Math.abs(side1Diff - side2Diff) < 0.05;
       const side1Wins = !isTie && side1Diff < side2Diff;
@@ -619,7 +585,9 @@ export async function runBotTeamMatchPass(): Promise<void> {
             side2DeltaSignedElo: side2Delta,
             playerDeltas,
             format: c.format,
-            formatDetails: perf?.details ?? null,
+            // Resolved by differential (bots are on different courses), so the
+            // hole-by-hole format breakdown isn't computed for bot team matches.
+            formatDetails: null,
           }),
         ],
       );
