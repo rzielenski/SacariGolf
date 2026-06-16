@@ -2038,6 +2038,18 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS users_is_bot_idx ON users(is_bot) WHERE is_bot = TRUE;
     `,
   },
+  {
+    // When a player FINISHED their round. The bot fill-in waits a few hours
+    // after THIS (not after match creation) before subbing in a CPU opponent.
+    // Backfill existing finished rows to NOW() so the clock starts at deploy
+    // rather than instantly bot-matching the whole waiting backlog.
+    name: 'match_players.completed_at',
+    sql: `
+      ALTER TABLE match_players ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+      UPDATE match_players SET completed_at = NOW()
+       WHERE completed = TRUE AND completed_at IS NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {

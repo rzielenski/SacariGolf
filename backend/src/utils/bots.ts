@@ -155,7 +155,9 @@ export async function runBotMatchPass(): Promise<void> {
           AND m.match_type = 'solo'
           AND m.paired_match_id IS NULL
           AND m.superseded_by_match_id IS NULL
-          AND m.created_at < NOW() - INTERVAL '${BOT_MATCH_AFTER_HOURS} hours'
+          -- Wait a few hours after the human FINISHED their round (not after
+          -- the match was created) before subbing a bot in.
+          AND COALESCE(mp.completed_at, m.created_at) < NOW() - INTERVAL '${BOT_MATCH_AFTER_HOURS} hours'
           AND u.is_bot = false
           AND mp.completed = true
           AND NOT EXISTS (SELECT 1 FROM match_players x WHERE x.match_id = m.match_id AND x.side <> 1)`,
@@ -211,32 +213,49 @@ export async function runBotMatchPass(): Promise<void> {
       const botId = botRows[0].user_id as string;
       const botElo = Number(botRows[0].elo) || bot.elo;
 
-      // Bot plays the human's teebox at its skill band.
+      // Bot plays a RANDOM course (not the human's) at its skill band — an
+      // opponent that always plays your exact course reads as fake. The 1v1
+      // result compares score DIFFERENTIALS, so different courses still match
+      // up fairly. Falls back to the human's teebox if no other is available.
+      const { rows: btRows } = await client.query(
+        `SELECT teebox_id, course_rating, slope_rating, num_holes
+           FROM teeboxes
+          WHERE course_rating IS NOT NULL AND slope_rating IS NOT NULL
+            AND num_holes >= $1
+          ORDER BY random() LIMIT 1`,
+        [holesPlayed],
+      );
+      const bt = btRows[0] ?? {
+        teebox_id: c.teebox_id, course_rating: t.course_rating,
+        slope_rating: t.slope_rating, num_holes: t.num_holes,
+      };
+
       const { holeScores, total: botGross } = generateBotRound(
-        t.course_rating, t.num_holes, holesPlayed, bot.handicap,
+        bt.course_rating, bt.num_holes, holesPlayed, bot.handicap,
       );
 
-      // Insert the bot as side 2 + its round.
+      // Insert the bot as side 2 + its round, on the bot's own (random) teebox.
       await client.query(
         `INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed)
          VALUES ($1, $2, $3, 2, $4, TRUE)
          ON CONFLICT (match_id, user_id) DO NOTHING`,
-        [c.match_id, botId, c.teebox_id, botGross],
+        [c.match_id, botId, bt.teebox_id, botGross],
       );
       await client.query(
         `INSERT INTO rounds (match_id, user_id, teebox_id, hole_scores, total_score, round_type)
          VALUES ($1, $2, $3, $4, $5, 'solo')
          ON CONFLICT (match_id, user_id) DO NOTHING`,
-        [c.match_id, botId, c.teebox_id, holeScores, botGross],
+        [c.match_id, botId, bt.teebox_id, holeScores, botGross],
       );
 
       // ── Resolve (1v1, human vs bot) reusing the standard ELO math ──────
+      // Each side's differential is computed on its OWN course/teebox.
       const subset = c.holes_subset as ('front' | 'back' | 'full' | null);
       const overrideRating = subset === 'front' ? t.front_course_rating : subset === 'back' ? t.back_course_rating : null;
       const overrideSlope  = subset === 'front' ? t.front_slope_rating  : subset === 'back' ? t.back_slope_rating  : null;
 
       const humanDiff = diff18(Number(hr.total_score), t.course_rating, t.slope_rating, holesPlayed, t.num_holes ?? holesPlayed, overrideRating, overrideSlope);
-      const botDiff   = diff18(botGross,               t.course_rating, t.slope_rating, holesPlayed, t.num_holes ?? holesPlayed, overrideRating, overrideSlope);
+      const botDiff   = diff18(botGross, bt.course_rating, bt.slope_rating, holesPlayed, bt.num_holes ?? holesPlayed, null, null);
 
       const isTie = Math.abs(humanDiff - botDiff) < 0.05;
       const humanWins = !isTie && humanDiff < botDiff;          // lower differential wins

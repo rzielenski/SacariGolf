@@ -1133,7 +1133,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
     // Update match_players for the submitting player
     await client.query(
-      `UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+      `UPDATE match_players SET strokes = $1, completed = true, completed_at = NOW(), teebox_id = COALESCE($2, teebox_id)
        WHERE match_id = $3 AND user_id = $4`,
       [totalScore, resolvedTeeboxId, req.params.id, req.userId]
     );
@@ -1221,7 +1221,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     // hole_scores.length doesn't fall back to 18 for their teammates.
     if (matchFormat === 'scramble') {
       await client.query(
-        `UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+        `UPDATE match_players SET strokes = $1, completed = true, completed_at = NOW(), teebox_id = COALESCE($2, teebox_id)
          WHERE match_id = $3 AND side = $4 AND user_id != $5`,
         [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]
       );
@@ -1647,10 +1647,19 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
 
       for (const e of entries) {
         const baseRaw = (deltaByUser.get(e.p.user_id) ?? 0) / divisor;
-        const baseChange = Math.round(baseRaw);
-        // Placement multiplier + min-win floor. A net-positive field result
-        // counts as a "win" for the floor.
-        let eloChange = shapeDelta(baseChange, baseChange > 0, placementSet.has(e.p.user_id));
+        // Arena ELO is the RAW round-robin result: a clean, symmetric spread by
+        // finishing position — top gains, bottom loses, the middle ≈ 0 — already
+        // tilted by rank differences via the pairwise expected scores (a low-ELO
+        // player who places high gains more, a favourite who flops loses more).
+        // e.g. a 5-player field at even ELO is +30 / +15 / 0 / −15 / −30.
+        //
+        // We deliberately do NOT apply the solo win-gain multiplier or min-win
+        // floor here — those are 1v1 mechanics that break the zero-sum and let
+        // the whole field gain ELO. The placement multiplier still applies (a
+        // new player's first matches swing 3x), symmetrically, so it keeps the
+        // shape and only scales the magnitude.
+        const isPlacement = placementSet.has(e.p.user_id);
+        let eloChange = Math.round(baseRaw * (isPlacement ? PLACEMENT_MULTIPLIER : 1));
         const perkId = perkByUser.get(e.p.user_id);
         if (perkId && eloChange !== 0) {
           const before = eloChange;

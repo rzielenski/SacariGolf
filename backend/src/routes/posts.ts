@@ -335,6 +335,12 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        m.num_holes AS match_num_holes,
        m.holes_subset AS match_holes_subset,
        mr.winner_side, mr.delta_elo,
+       -- The post AUTHOR's own signed ELO change for this match. Drives the
+       -- win/loss label per person — essential for Arena (FFA), where everyone
+       -- shares a side so winner_side would mark the whole field a winner.
+       -- Gained ELO → win, lost → loss. Null for legacy rows (card falls back
+       -- to winner_side vs author_side).
+       (mr.details -> 'playerDeltas' ->> p.user_id)::float AS author_elo_delta,
        mp_me.side  AS author_side,
        mp_me.strokes AS author_strokes,
        t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,

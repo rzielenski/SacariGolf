@@ -6,7 +6,11 @@ everything below is Android-only and additive. You build/ship them separately:
 
 ## Already done (in code/config)
 - `app.json` → `android` block: package `com.sacari.app`, `versionCode`, adaptive icon,
-  permissions (deduped), and a **placeholder Google Maps key slot**.
+  permissions (deduped). No secrets in here.
+- `app.config.js`: injects the Android Google Maps key at build time from the
+  `GOOGLE_MAPS_ANDROID_KEY` env var, so the raw key never lives in tracked source.
+- `.env.local` (gitignored): holds the real key for local builds. `.env.example` is the
+  tracked placeholder.
 - `eas.json`: Android build types — `apk` for `development`/`preview` (easy sideload on a
   Samsung), `app-bundle` (AAB) for `production` (store upload).
 - iOS keeps using **Apple Maps** (free, no key). The Google key below only affects Android.
@@ -19,15 +23,19 @@ everything below is Android-only and additive. You build/ship them separately:
 3. Restrict it: Application restriction = **Android apps**, add package `com.sacari.app`
    + your app's SHA-1 (get it after the first build: `eas credentials` → Android →
    keystore → it lists the SHA-1).
-4. Paste the key into `app.json` here:
-   ```
-   "android": { "config": { "googleMaps": { "apiKey": "REPLACE_WITH_ANDROID_GOOGLE_MAPS_API_KEY" } } }
-   ```
+4. Provide the key (NOT in app.json — it's injected from an env var):
+   - **Local builds:** it's already in `mobile/.env.local` as `GOOGLE_MAPS_ANDROID_KEY`.
+   - **EAS cloud builds:** set it as an EAS env var (do this once per environment you build):
+     ```
+     eas env:create --name GOOGLE_MAPS_ANDROID_KEY --value "AIza..." --visibility sensitive --environment production
+     eas env:create --name GOOGLE_MAPS_ANDROID_KEY --value "AIza..." --visibility sensitive --environment preview
+     ```
+     (or set it in the Expo dashboard → your project → Environment Variables)
 5. Attach a billing account to the Cloud project (required even though map display is
    free/unlimited). Set a **budget alert** + a **quota cap** as a safety net.
 
-> Until the real key is in, an Android build runs fine but the satellite map renders
-> blank. iOS is unaffected either way.
+> If the env var isn't set at build time, the Android build still runs but the satellite
+> map renders blank. iOS is unaffected either way.
 
 ### 2. Google Play developer account
 - One-time $25 at https://play.google.com/console. Then: app listing, content rating,

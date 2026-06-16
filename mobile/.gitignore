@@ -31,7 +31,14 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
+
+# secrets — NEVER commit (contain API keys / credentials)
+google-services.json
+GoogleService-Info.plist
+*-service-account*.json
+google-service-account*.json
 
 # typescript
 *.tsbuildinfo

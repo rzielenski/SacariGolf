@@ -778,11 +778,24 @@ function RoundCardBody({ post }: { post: any }) {
   // 18-hole one.
   const holesSuffix = matchNumHoles ? ` · ${matchNumHoles} holes` : '';
 
-  const wonByMe =
-    typeof post.winner_side === 'number'
-      && typeof post.author_side === 'number'
-      && post.winner_side === post.author_side;
-  const tied = post.match_completed && post.winner_side == null;
+  // Win/loss is PER PERSON: this author gained ELO → win, lost → loss, 0 → tie.
+  // Essential for Arena (FFA), where everyone shares a side so winner_side
+  // would otherwise mark the whole field a winner. Legacy posts without a
+  // per-player delta fall back to the winner_side vs author_side comparison.
+  const myDelta: number | null =
+    typeof post.author_elo_delta === 'number' ? post.author_elo_delta : null;
+  const wonByMe = myDelta != null
+    ? myDelta > 0
+    : (typeof post.winner_side === 'number'
+        && typeof post.author_side === 'number'
+        && post.winner_side === post.author_side);
+  const tied = myDelta != null
+    ? (!!post.match_completed && myDelta === 0)
+    : (post.match_completed && post.winner_side == null);
+  // Show the author's own ELO swing when known, else the match headline delta.
+  const shownDelta = myDelta != null
+    ? Math.abs(Math.round(myDelta))
+    : (typeof post.delta_elo === 'number' ? post.delta_elo : null);
 
   return (
     <TouchableOpacity
@@ -818,8 +831,8 @@ function RoundCardBody({ post }: { post: any }) {
       <Text style={s.roundMeta}>
         {post.match_type ? post.match_type.toUpperCase() : 'MATCH'}
         {post.format && post.format !== 'stroke' ? ` · ${post.format}` : ''}
-        {typeof post.delta_elo === 'number' && post.match_completed
-          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${post.delta_elo} ELO`
+        {shownDelta != null && post.match_completed
+          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${shownDelta} ELO`
           : ''}
       </Text>
     </TouchableOpacity>

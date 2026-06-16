@@ -1,4 +1,20 @@
 .env
+.env.*
+!.env.example
+!.env.*.example
 *.env.local
 node_modules/
 .claude/settings.local.json
+
+# Credentials / secrets — never commit (applies repo-wide, any folder)
+google-services.json
+GoogleService-Info.plist
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccount*.json
+*-key.json
+*.jks
+*.keystore
+*.p12
+*.p8
+*.pem

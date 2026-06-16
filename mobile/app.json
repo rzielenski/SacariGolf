@@ -34,11 +34,6 @@
       },
       "package": "com.sacari.app",
       "versionCode": 4,
-      "config": {
-        "googleMaps": {
-          "apiKey": "REPLACE_WITH_ANDROID_GOOGLE_MAPS_API_KEY"
-        }
-      },
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
