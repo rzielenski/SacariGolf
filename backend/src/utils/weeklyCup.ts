@@ -94,6 +94,7 @@ async function resolveOne(cupId: string, weekStartsAt: Date): Promise<boolean> {
      SELECT b.user_id, b.best_to_par, u.username, u.push_token
        FROM best b
        JOIN users u ON u.user_id = b.user_id
+      WHERE u.is_bot = false
       ORDER BY b.best_to_par ASC
       LIMIT 3`,
     [weekStartsAt, weekEnd],

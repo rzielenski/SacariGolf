@@ -62,7 +62,7 @@ const DIVISIONS: Division[] = [
 // just gives a new season a satisfying on-ramp.
 const PLACEMENT_MATCHES = 5;
 
-function divisionForElo(elo: number): Division {
+export function divisionForElo(elo: number): Division {
   return DIVISIONS.find((d) => elo >= d.min && elo < d.max) ?? DIVISIONS[0];
 }
 
@@ -252,6 +252,7 @@ router.get('/current/standings', requireAuth, wrap(async (req: AuthRequest, res:
        JOIN users u ON u.user_id = s.user_id
        LEFT JOIN streaks st ON st.user_id = s.user_id
       WHERE u.elo >= $3 AND u.elo < $4
+        AND u.is_bot = false
         ${friendClause}
       ORDER BY u.elo DESC, s.wins DESC, s.matches ASC
       LIMIT 100`,

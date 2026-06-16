@@ -2027,6 +2027,17 @@ const MIGRATIONS: { name: string; sql: string }[] = [
        WHERE paired_match_id IS NOT NULL AND paired_at IS NULL;
     `,
   },
+  {
+    // CPU opponents. A pool of bot accounts (one per rank) fills a player's
+    // match when no human turns up for a few hours, so nobody is stranded
+    // waiting. Bots are hidden from leaderboards / feed / search and never
+    // gain or lose ELO themselves (their rating just marks their skill band).
+    name: 'users.is_bot',
+    sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;
+      CREATE INDEX IF NOT EXISTS users_is_bot_idx ON users(is_bot) WHERE is_bot = TRUE;
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -334,6 +334,7 @@ router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Respo
      JOIN teeboxes t ON t.teebox_id = r.teebox_id
      JOIN matches m ON m.match_id = r.match_id
      WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND m.is_practice = false
+       AND u.is_bot = false
      ORDER BY r.total_score ASC
      LIMIT 50`,
     [req.params.id]

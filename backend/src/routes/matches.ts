@@ -5,16 +5,16 @@ import { sendPush } from '../utils/notify';
 import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
-import { currentSeason } from './seasons';
+import { currentSeason, divisionForElo } from './seasons';
 
 const router = Router();
 
 // ELO helpers
-function expectedScore(rA: number, rB: number) {
+export function expectedScore(rA: number, rB: number) {
   return 1 / (1 + Math.pow(10, (rB - rA) / 400));
 }
 
-function kFactor(totalMatches: number, elo: number) {
+export function kFactor(totalMatches: number, elo: number) {
   if (totalMatches < 30) return 32;
   if (elo >= 2400) return 16;
   return 24;
@@ -35,11 +35,16 @@ const PLACEMENT_MATCHES = 5;          // mirrors seasons.ts
 const PLACEMENT_MULTIPLIER = 3;       // placement results swing 3x
 const PLACEMENT_MIN_WIN_DELTA = 50;   // a placement WIN is at least this
 const MIN_WIN_DELTA = 12;             // any other win is at least this
+// Asymmetric climb: a win gains more than the matching loss costs, so players
+// trend upward and the ladder feels good to climb. The seasonal partial reset
+// (utils/cleanup.ts) compresses the resulting mild inflation each season, so
+// it stays self-correcting. Applied to the WIN side only.
+const WIN_GAIN_MULTIPLIER = 1.35;
 
 /** Set of user_ids still in their season placements — fewer than
  *  PLACEMENT_MATCHES completed ranked matches THIS season (excluding the
  *  match currently resolving). Those players get the big placement swing. */
-async function placementUserSet(
+export async function placementUserSet(
   client: any, userIds: string[], excludeMatchId: string,
 ): Promise<Set<string>> {
   if (!userIds.length) return new Set();
@@ -62,8 +67,10 @@ async function placementUserSet(
 /** Shape a base signed ELO delta: apply the placement multiplier, then
  *  floor a win to its minimum. Placement losses scale 3x too (you fall to
  *  your true rank fast); losses are otherwise left as computed. */
-function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
+export function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
   let d = isPlacement ? base * PLACEMENT_MULTIPLIER : base;
+  // Wins climb faster than losses fall (asymmetric, win side only).
+  if (won && d > 0) d *= WIN_GAIN_MULTIPLIER;
   d = Math.round(d);
   if (won) {
     const floor = isPlacement ? PLACEMENT_MIN_WIN_DELTA : MIN_WIN_DELTA;
@@ -97,7 +104,7 @@ function shapeDelta(base: number, won: boolean, isPlacement: boolean): number {
 //   18 on 9-hole      → gross×1, CR×2, slope×2             (two loops)
 //   9  on 18-hole     → gross×2, (front/back×2 ?? CR), slope (or front/back)
 //   18 on 9-hole RATING but card says 18, etc.            → all covered
-function diff18(
+export function diff18(
   gross: number,
   courseRating: number,
   slopeRating: number,
@@ -1941,7 +1948,7 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     if (result && (result.winnerSide != null || result.tied)) {
       try {
         const { rows: pushRows } = await pool.query(
-          `SELECT mp.user_id, mp.side, u.push_token, u.username,
+          `SELECT mp.user_id, mp.side, u.push_token, u.username, u.elo,
                   m.match_type, m.format
            FROM match_players mp
            JOIN users u ON u.user_id = mp.user_id
@@ -1969,11 +1976,21 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
           }
           const sign = delta > 0 ? '+' : '';
           const title = tied ? 'Match drawn' : won ? 'You won!' : 'Match decided';
-          const body = tied
+          let body = tied
             ? `Even round. ELO ${sign}${delta}.`
             : won
               ? `Nice round. ELO ${sign}${delta}.`
               : `Better luck next time. ELO ${sign}${delta}.`;
+          // FOMO hook: call out a tier promotion / demotion from this result.
+          const afterElo = Number(row.elo);
+          const beforeElo = afterElo - delta;
+          const beforeTier = divisionForElo(beforeElo);
+          const afterTier = divisionForElo(afterElo);
+          if (afterTier.key !== beforeTier.key) {
+            body += afterElo > beforeElo
+              ? `  You climbed to ${afterTier.name}! 📈`
+              : `  You dropped to ${afterTier.name}.`;
+          }
           // Fire-and-forget — sendPush already swallows network errors.
           sendPush(
             [row.push_token],

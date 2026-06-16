@@ -42,6 +42,7 @@ const LOCK_FEED_BACKFILL = 42103;
 const LOCK_WEEKLY_CUP    = 42104;
 const LOCK_ELO_RESET     = 42105;
 const LOCK_UNPAIR        = 42106;
+const LOCK_BOTS          = 42107;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -675,6 +676,7 @@ export async function backfillRoundPosts() {
               COALESCE(mr.created_at, m.created_at)
        FROM matches m
        JOIN match_players mp ON mp.match_id = m.match_id
+       JOIN users u ON u.user_id = mp.user_id AND u.is_bot = FALSE
        LEFT JOIN match_results mr ON mr.match_id = m.match_id
        WHERE m.completed = TRUE
          AND m.is_practice = FALSE
@@ -705,6 +707,7 @@ export async function backfillRoundPosts() {
 // drift that takes hours to track down once it surfaces.
 let cleanupHandle: ReturnType<typeof setInterval> | null = null;
 let unpairHandle: ReturnType<typeof setInterval> | null = null;
+let botHandle: ReturnType<typeof setInterval> | null = null;
 let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
@@ -805,6 +808,10 @@ export function startCleanupSchedule() {
     await unpairStaleLinkedMatches();    // linked pairs (paired_match_id)
     await reopenOrCancelStaleMatches();  // merged + waiting matches (3-day rule)
   });
+  const botTick     = () => withCronLock(LOCK_BOTS, async () => {
+    const { runBotMatchPass } = await import('./bots');
+    await runBotMatchPass();
+  });
   const pairingTick = () => withCronLock(LOCK_PAIRING, runPairingPass);
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
   const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
@@ -817,6 +824,13 @@ export function startCleanupSchedule() {
   // measured in days. Runs once on boot to clear any current backlog.
   unpairTick();
   unpairHandle = setInterval(unpairTick, 60 * 60 * 1000);
+
+  // CPU opponents: ensure the bot accounts exist, then fill any solo match
+  // that's gone a few hours without a human. Seeding is fire-and-forget and
+  // idempotent; the fill pass runs every 10 min (the wait window is in hours).
+  import('./bots').then(({ seedBots }) => seedBots()).catch((e) => console.error('[bots] seed error', e));
+  botTick();
+  botHandle = setInterval(botTick, 10 * 60 * 1000);
 
   // Partial ELO reset at season rollover. Checked hourly — the boundary is
   // a 6-month one, so hourly is plenty to catch it within an hour of the
@@ -848,6 +862,9 @@ async function weeklyCupTick(): Promise<void> {
     const { ensureCurrentCup, resolveFinishedCups } = await import('./weeklyCup');
     await ensureCurrentCup();
     await resolveFinishedCups();
+    // FOMO: once per week, nudge active players a few hours before it closes.
+    const { notifyCupEndingSoon } = await import('./notifyFomo');
+    await notifyCupEndingSoon();
   } catch (err) {
     console.error('[weekly-cup] tick failed:', err);
   }
@@ -865,6 +882,7 @@ async function weeklyCupTick(): Promise<void> {
 export function stopCleanupSchedule() {
   if (cleanupHandle) { clearInterval(cleanupHandle); cleanupHandle = null; }
   if (unpairHandle) { clearInterval(unpairHandle); unpairHandle = null; }
+  if (botHandle) { clearInterval(botHandle); botHandle = null; }
   if (pairingHandle) { clearInterval(pairingHandle); pairingHandle = null; }
   if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
   if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }
