@@ -27,11 +27,25 @@ const DIAMOND_FLOOR = 1300;          // ELO at which a bot plays scratch
 const ELO_PER_STROKE = 37.5;         // ELO below Diamond per +1 handicap stroke
 const BOT_MATCH_AFTER_HOURS = 3;     // only sub in a bot after this much waiting
 
-const ROMAN = ['', 'I', 'II', 'III', 'IV'];
 const TIERS: [string, string, number][] = [
   ['wood', 'Wood', 100], ['bronze', 'Bronze', 300], ['silver', 'Silver', 500],
   ['gold', 'Gold', 700], ['platinum', 'Platinum', 900], ['ruby', 'Ruby', 1100],
   ['diamond', 'Diamond', 1300],
+];
+
+// Real-looking player names, ordered weakest → strongest: one per division
+// (Wood IV … Diamond I) then Obsidian last. Assigned positionally so the pool
+// is stable across seeds; the email/key — not the name — is the idempotency
+// key, so a bot can be renamed here without orphaning its account.
+const BOT_NAMES = [
+  'Pete Hargrove', 'Marcus Webb', 'Tyler Boone', 'Greg Almeida',        // Wood IV..I
+  'Sam Whitfield', 'Andre Coleman', 'Nico Park', 'Russ Dalton',         // Bronze IV..I
+  'Cole Bishop', 'Javier Mendez', 'Brett Sandoval', 'Owen Fletcher',    // Silver IV..I
+  'Damon Reyes', 'Will Castellano', 'Theo Brandt', 'Hank Mercer',       // Gold IV..I
+  'Elliot Vance', 'Jonah Pruitt', 'Caleb Ostrander', 'Reid Calloway',   // Platinum IV..I
+  'Victor Salas', 'Dominic Hale', 'Asher Quinn', 'Lucas Behrens',       // Ruby IV..I
+  'Spencer Wolfe', 'Adrian Cross', 'Roman Sato', 'Julian Frost',        // Diamond IV..I
+  'Maxwell Sterling',                                                    // Obsidian
 ];
 
 /** Strokes over a scratch 18-hole round for a bot at this ELO. Diamond floor
@@ -45,14 +59,15 @@ interface BotRank { key: string; username: string; email: string; elo: number; h
 
 const BOT_RANKS: BotRank[] = (() => {
   const out: BotRank[] = [];
-  for (const [key, label, floor] of TIERS) {
+  let n = 0;
+  for (const [key, , floor] of TIERS) {
     for (let div = 4; div >= 1; div--) {
       const elo = floor + (4 - div) * 50 + 25;   // division midpoint
-      out.push({ key: `${key}${div}`, username: `CPU ${label} ${ROMAN[div]}`,
+      out.push({ key: `${key}${div}`, username: BOT_NAMES[n++],
                  email: `bot+${key}${div}@sacarigolf.bot`, elo, handicap: handicapForElo(elo) });
     }
   }
-  out.push({ key: 'obsidian', username: 'CPU Obsidian', email: 'bot+obsidian@sacarigolf.bot',
+  out.push({ key: 'obsidian', username: BOT_NAMES[n++], email: 'bot+obsidian@sacarigolf.bot',
              elo: 1550, handicap: handicapForElo(1550) });
   return out;
 })();
@@ -69,9 +84,19 @@ export async function seedBots(): Promise<void> {
           WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = $2 OR username = $1)`,
         [b.username, b.email, b.elo, b.handicap],
       );
+      // Keep ELO/handicap in sync AND migrate the username to the curated
+      // real-looking name — but only if no OTHER account already holds it
+      // (case-insensitive), so we never collide with a real user.
       await pool.query(
-        `UPDATE users SET elo = $2, handicap_index = $3, is_bot = TRUE WHERE email = $1`,
-        [b.email, b.elo, b.handicap],
+        `UPDATE users u
+            SET elo = $2, handicap_index = $3, is_bot = TRUE,
+                username = CASE
+                  WHEN EXISTS (
+                    SELECT 1 FROM users o
+                     WHERE lower(o.username) = lower($4) AND o.user_id <> u.user_id
+                  ) THEN u.username ELSE $4 END
+          WHERE u.email = $1`,
+        [b.email, b.elo, b.handicap, b.username],
       );
     } catch (err) {
       console.error('[bots] seed failed for', b.username, err);

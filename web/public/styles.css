@@ -164,6 +164,33 @@ main { flex: 1; width: 100%; }
 .recent-title { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px; }
 .card .cta, .card .recent { }
 
+/* Match recap */
+.rc-head { text-align: center; }
+.rc-kicker { color: var(--gold); font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; margin-bottom: 6px; }
+.rc { max-width: 920px; margin: 8px auto 0; padding: 16px 20px 0; display: flex; align-items: stretch; justify-content: center; gap: 14px; flex-wrap: wrap; }
+.rc-side { flex: 1 1 280px; max-width: 380px; background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 22px 18px 20px; position: relative; }
+.rc-side.win { border-color: var(--gold); box-shadow: 0 0 0 1px rgba(212,169,63,0.25), 0 14px 40px -22px rgba(212,169,63,0.6); }
+.rc-side.loss { opacity: 0.9; }
+.rc-badge { position: absolute; top: -11px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+  background: linear-gradient(180deg, var(--gold-light), var(--gold)); color: #1a1206; font-weight: 900;
+  font-size: 0.64rem; letter-spacing: 1px; text-transform: uppercase; padding: 4px 12px; border-radius: 999px; }
+.rc-player { display: flex; align-items: center; gap: 11px; padding: 8px 0; }
+.rc-player + .rc-player { border-top: 1px solid var(--border); }
+.rc-crest { width: 44px; height: 44px; object-fit: contain; flex: none; filter: drop-shadow(0 3px 8px rgba(0,0,0,0.6)); }
+.rc-pmeta { flex: 1; min-width: 0; text-align: left; }
+.rc-name { font-weight: 800; font-size: 1.05rem; }
+.rc-name a { color: var(--text); }
+.rc-name a:hover { color: var(--gold); }
+.rc-rank { font-size: 0.8rem; font-weight: 700; }
+.rc-elo { font-weight: 900; font-size: 0.82rem; white-space: nowrap; }
+.rc-elo.up { color: var(--good); } .rc-elo.down { color: var(--bad); }
+.rc-score { text-align: center; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); }
+.rc-gross { font-size: 2.6rem; font-weight: 900; line-height: 1; color: var(--text); }
+.rc-score .round-topar { display: inline-block; min-width: 0; margin-top: 6px; font-size: 1rem; }
+.rc-course, .rc-difflabel { color: var(--muted); font-size: 0.78rem; margin-top: 6px; }
+.rc-vs { align-self: center; color: var(--muted); font-weight: 900; letter-spacing: 1px; font-size: 0.9rem; flex: none; }
+@media (max-width: 620px) { .rc { flex-direction: column; align-items: stretch; } .rc-vs { padding: 2px 0; } }
+
 /* How to play */
 .guide { max-width: 860px; margin: 0 auto; padding: 8px 20px 36px; }
 .guide-h { font-size: 1.5rem; font-weight: 900; margin: 34px 0 14px; position: relative; display: inline-block; }
@@ -217,6 +244,35 @@ main { flex: 1; width: 100%; }
 .pin-bar .cta { border: 0; cursor: pointer; font-family: inherit; }
 .pin-bar .cta:disabled { opacity: 0.45; cursor: default; }
 .pin-msg { color: var(--gold); font-size: 0.88rem; margin-top: 10px; min-height: 1.2em; }
+
+/* Course scorecard + hole-by-hole viewer */
+.course-card-sec { max-width: 920px; margin: 0 auto; padding: 18px 20px 0; }
+.course-card-sec h2 { font-size: 1.3rem; font-weight: 900; margin: 0 0 12px; }
+.sc-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--card); -webkit-overflow-scrolling: touch; }
+.scorecard { border-collapse: collapse; width: 100%; font-size: 0.84rem; white-space: nowrap; }
+.scorecard th, .scorecard td { padding: 8px 10px; text-align: center; border-bottom: 1px solid var(--border); }
+.scorecard thead th { color: var(--muted); font-size: 0.72rem; font-weight: 700; background: var(--card-alt); }
+.scorecard tbody tr:last-child th, .scorecard tbody tr:last-child td { border-bottom: 0; }
+.scorecard .sc-rl { text-align: left; color: var(--text); font-weight: 800; position: sticky; left: 0; background: var(--card); z-index: 1; }
+.scorecard thead .sc-rl { background: var(--card-alt); }
+.scorecard .sc-tot { color: var(--gold); font-weight: 900; background: rgba(212,169,63,0.06); }
+.scorecard .sc-par td, .scorecard .sc-par th { color: var(--text); font-weight: 900; }
+.scorecard .sc-si td { color: var(--muted); font-size: 0.78rem; }
+.scorecard .sc-si th { color: var(--muted); }
+
+.course-holes .ch-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.course-holes .ch-head h2 { margin: 0; }
+.ch-tee { color: var(--muted); font-size: 0.8rem; font-weight: 700; }
+.ch-tee select { background: var(--card-alt); color: var(--text); border: 1px solid var(--border); border-radius: 7px;
+  padding: 6px 10px; font-family: inherit; font-size: 0.85rem; margin-left: 6px; }
+.course-holes .hole-grid { margin-top: 12px; }
+.course-map { height: 56vh; min-height: 320px; width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); margin-top: 4px; }
+.hv-pin-icon { font-size: 18px; line-height: 1; background: none; border: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+.hv-bar { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.hv-info { flex: 1; color: var(--text); font-size: 0.95rem; font-weight: 700; text-align: center; }
+.hv-nav { flex: none; width: 44px; height: 40px; cursor: pointer; font-family: inherit; font-size: 1.3rem; line-height: 1;
+  background: var(--card); border: 1px solid var(--border); border-radius: 9px; color: var(--text); }
+.hv-nav:hover { border-color: var(--gold); color: var(--gold); }
 
 /* Auth + dashboard */
 .auth { max-width: 420px; }

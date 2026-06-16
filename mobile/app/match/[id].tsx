@@ -172,9 +172,12 @@ export default function MatchLobbyScreen() {
       } catch { /* skip best-moment if course fetch fails */ }
     }
     lines.push('');
-    lines.push('Track your rounds, ELO, and shot dispersion at sacarigolf.com');
-    await Share.share({ message: lines.join('\n') });
-  }, [match, user]);
+    // A no-install recap link: opens a rich preview (crests, scores, ELO swing)
+    // and a download CTA. Falls back to the bare domain line if id is missing.
+    const recapUrl = id ? `https://sacarigolf.com/r/${id}` : 'https://sacarigolf.com';
+    lines.push(`See the full recap: ${recapUrl}`);
+    await Share.share({ message: lines.join('\n'), url: recapUrl });
+  }, [match, user, id]);
 
   if (loading) {
     return (

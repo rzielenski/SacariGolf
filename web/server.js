@@ -7,6 +7,7 @@
  *   /leaderboard      global rankings
  *   /courses          course directory + search (?q=)
  *   /course/:id       course detail (tees + best rounds)
+ *   /r/:matchId       shareable match recap (no-install link preview)
  *   /u/:username      public player profile
  *   /privacy /terms /support   legal + support
  *   /sitemap.xml /robots.txt   SEO
@@ -252,7 +253,8 @@ app.get('/course/:id', async (req, res) => {
   if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('course')); return; }
   try {
     const { rows: cRows } = await pool.query(
-      `SELECT course_id, course_name, club_name, city, state, country FROM courses WHERE course_id = $1`,
+      `SELECT course_id, course_name, club_name, city, state, country, latitude, longitude
+         FROM courses WHERE course_id = $1`,
       [id]
     );
     if (!cRows.length) { res.status(404).send(R.renderNotFound('course')); return; }
@@ -262,21 +264,118 @@ app.get('/course/:id', async (req, res) => {
          FROM teeboxes WHERE course_id = $1 ORDER BY total_yards DESC NULLS LAST`,
       [id]
     );
+    // Per-tee hole detail for the scorecard + hole-by-hole map viewer. Ordered
+    // longest tee first so render.js's first yardage column is the back tees.
+    const { rows: holeRows } = await pool.query(
+      `SELECT t.teebox_id, t.name AS tee_name, t.total_yards,
+              h.hole_num, h.par, h.yardage, h.handicap,
+              h.pin_lat, h.pin_lng, h.tee_lat, h.tee_lng
+         FROM teeboxes t
+         JOIN holes h ON h.teebox_id = t.teebox_id
+        WHERE t.course_id = $1
+        ORDER BY t.total_yards DESC NULLS LAST, t.teebox_id, h.hole_num`,
+      [id]
+    );
+    // Each player's single best round here (lowest to-par; ties → most recent),
+    // not every round they've ever posted. Bots are excluded — they play real
+    // teeboxes when filling matches, so they'd otherwise leak onto the board.
     const { rows: topRounds } = await pool.query(
-      `SELECT u.username, r.total_score, t.par AS teebox_par, t.name AS teebox_name, r.created_at
-         FROM rounds r
-         JOIN matches m ON m.match_id = r.match_id AND m.completed = true
-         JOIN teeboxes t ON t.teebox_id = r.teebox_id
-         JOIN users u ON u.user_id = r.user_id
-        WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND t.par IS NOT NULL
-        ORDER BY (r.total_score - t.par) ASC, r.created_at DESC LIMIT 15`,
+      `SELECT username, total_score, teebox_par, teebox_name, created_at
+         FROM (
+           SELECT DISTINCT ON (r.user_id)
+                  u.username, r.total_score, t.par AS teebox_par,
+                  t.name AS teebox_name, r.created_at
+             FROM rounds r
+             JOIN matches m ON m.match_id = r.match_id AND m.completed = true
+             JOIN teeboxes t ON t.teebox_id = r.teebox_id
+             JOIN users u ON u.user_id = r.user_id
+            WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND t.par IS NOT NULL
+              AND u.is_bot = false
+            ORDER BY r.user_id, (r.total_score - t.par) ASC, r.created_at DESC
+         ) best
+        ORDER BY (total_score - teebox_par) ASC, created_at DESC
+        LIMIT 15`,
       [id]
     );
     res.set('Cache-Control', 'public, max-age=300');
-    res.send(R.renderCourse({ course: cRows[0], teeboxes, topRounds }));
+    res.send(R.renderCourse({ course: cRows[0], teeboxes, topRounds, holeRows }));
   } catch (err) {
     console.error('course error:', err);
     res.status(500).send(R.renderNotFound('course'));
+  }
+});
+
+// ----- Match recap (shareable, no-install) ----------------------------------
+// A resolved match's result rendered for link previews + a no-download CTA.
+// Linked from the app's share sheet as /r/<matchId>. 404 unless the match has
+// a result row (i.e. it actually resolved).
+app.get('/r/:id', async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('match')); return; }
+  try {
+    const { rows: mRows } = await pool.query(
+      `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.is_practice,
+              mr.winner_side, mr.side1_score_differential, mr.side2_score_differential,
+              mr.details, mr.created_at AS resolved_at
+         FROM matches m
+         JOIN match_results mr ON mr.match_id = m.match_id
+        WHERE m.match_id = $1`,
+      [id]
+    );
+    if (!mRows.length || mRows[0].is_practice) { res.status(404).send(R.renderNotFound('match')); return; }
+    const m = mRows[0];
+
+    const { rows: pRows } = await pool.query(
+      `SELECT mp.user_id, mp.side, u.username, u.elo, u.is_bot,
+              r.total_score, t.par AS teebox_par, t.name AS teebox_name, c.course_name
+         FROM match_players mp
+         JOIN users u ON u.user_id = mp.user_id
+         LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+         LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+         LEFT JOIN courses c ON c.course_id = t.course_id
+        WHERE mp.match_id = $1
+        ORDER BY mp.side, u.username`,
+      [id]
+    );
+    if (pRows.length < 2) { res.status(404).send(R.renderNotFound('match')); return; }
+
+    const deltas = (m.details && m.details.playerDeltas) || {};
+    const bySide = new Map();
+    for (const p of pRows) {
+      const entry = {
+        username: p.username,
+        isBot: p.is_bot,
+        rank: rankForElo(p.elo),
+        gross: p.total_score,
+        toPar: p.total_score != null && p.teebox_par != null ? p.total_score - p.teebox_par : null,
+        delta: Math.round(Number(deltas[p.user_id] ?? 0)),
+        courseName: p.course_name,
+        teeName: p.teebox_name,
+      };
+      if (!bySide.has(p.side)) bySide.set(p.side, []);
+      bySide.get(p.side).push(entry);
+    }
+    const tied = m.winner_side == null;
+    const sides = [...bySide.entries()].sort((a, b) => a[0] - b[0]).map(([side, players]) => ({
+      side,
+      players,
+      isWinner: !tied && side === m.winner_side,
+      diff: side === 1 ? m.side1_score_differential : side === 2 ? m.side2_score_differential : null,
+    }));
+
+    res.set('Cache-Control', 'public, max-age=600');
+    res.send(R.renderRecap({
+      sides,
+      tied,
+      numHoles: m.num_holes,
+      format: m.format,
+      date: m.resolved_at,
+      siteUrl: SITE_URL,
+      recapUrl: SITE_URL ? `${SITE_URL}/r/${m.match_id}` : '',
+    }));
+  } catch (err) {
+    console.error('recap error:', err);
+    res.status(500).send(R.renderNotFound('match'));
   }
 });
 

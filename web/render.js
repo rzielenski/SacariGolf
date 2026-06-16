@@ -313,7 +313,121 @@ function renderCoursesIndex({ popular, results, q }) {
 }
 
 // ----- Course detail --------------------------------------------------------
-function renderCourse({ course, teeboxes, topRounds }) {
+/** Collapse the per-tee hole rows into (a) one tee per yardage column and
+ *  (b) one aggregate row per hole (par, stroke index, and the first known
+ *  tee/pin coordinates) for the scorecard + map viewer. */
+function courseHoleData(holeRows) {
+  const teeMap = new Map();   // teebox_id -> { name, total_yards, yards: {holeNum: yd} }
+  const holeMap = new Map();  // hole_num  -> { n, par, si, plat, plng, tlat, tlng }
+  for (const r of holeRows || []) {
+    let tee = teeMap.get(r.teebox_id);
+    if (!tee) {
+      tee = { name: r.tee_name || 'Tees', total_yards: r.total_yards != null ? Number(r.total_yards) : null, yards: {} };
+      teeMap.set(r.teebox_id, tee);
+    }
+    if (r.yardage != null) tee.yards[r.hole_num] = Number(r.yardage);
+
+    let h = holeMap.get(r.hole_num);
+    if (!h) { h = { n: r.hole_num, par: null, si: null, plat: null, plng: null, tlat: null, tlng: null }; holeMap.set(r.hole_num, h); }
+    if (h.par == null && r.par != null) h.par = Number(r.par);
+    if (h.si == null && r.handicap != null) h.si = Number(r.handicap);
+    if (h.plat == null && r.pin_lat != null) { h.plat = Number(r.pin_lat); h.plng = Number(r.pin_lng); }
+    if (h.tlat == null && r.tee_lat != null) { h.tlat = Number(r.tee_lat); h.tlng = Number(r.tee_lng); }
+  }
+  const tees = [...teeMap.values()];                          // longest first (query order)
+  const holes = [...holeMap.values()].sort((a, b) => a.n - b.n);
+  return { tees, holes };
+}
+
+/** Classic golf scorecard: a Par row, a yardage row per tee, and a stroke-index
+ *  row, with Out / In / Total summary columns when the course has a back nine. */
+function courseScorecard(tees, holes) {
+  if (!holes.length) return '';
+  const front = holes.filter((h) => h.n <= 9);
+  const back = holes.filter((h) => h.n > 9);
+  const has18 = back.length > 0;
+  const sum = (arr, fn) => arr.reduce((a, h) => { const v = fn(h); return a + (v != null && !isNaN(v) ? v : 0); }, 0);
+  const cell = (v) => `<td>${v != null && v !== '' ? esc(v) : '-'}</td>`;
+  const tot = (v) => `<td class="sc-tot">${v ? esc(v) : ''}</td>`;
+
+  const headCells = (arr) => arr.map((h) => `<th>${esc(h.n)}</th>`).join('');
+  let header = `<th class="sc-rl">Hole</th>${headCells(front)}`;
+  if (has18) header += `<th class="sc-tot">Out</th>${headCells(back)}<th class="sc-tot">In</th>`;
+  header += `<th class="sc-tot">Total</th>`;
+
+  const dataRow = (label, fn, cls) => {
+    const f = sum(front, fn), b = sum(back, fn);
+    let cells = `<th class="sc-rl">${esc(label)}</th>` + front.map((h) => cell(fn(h))).join('');
+    if (has18) cells += tot(f) + back.map((h) => cell(fn(h))).join('') + tot(b);
+    cells += tot(f + b);
+    return `<tr class="${cls || ''}">${cells}</tr>`;
+  };
+
+  const parRow = dataRow('Par', (h) => h.par, 'sc-par');
+  const teeRows = tees.map((t) => {
+    const yd = (h) => (t.yards[h.n] != null ? t.yards[h.n] : null);
+    const f = sum(front, yd), b = sum(back, yd);
+    let cells = `<th class="sc-rl">${esc(t.name)}</th>` + front.map((h) => cell(yd(h))).join('');
+    if (has18) cells += tot(f) + back.map((h) => cell(yd(h))).join('') + tot(b);
+    cells += tot(t.total_yards != null ? t.total_yards : (f + b));
+    return `<tr>${cells}</tr>`;
+  }).join('');
+
+  // Stroke index row only if at least one hole carries it.
+  let siRow = '';
+  if (holes.some((h) => h.si != null)) {
+    let cells = `<th class="sc-rl">Hcp</th>` + front.map((h) => cell(h.si)).join('');
+    if (has18) cells += tot('') + back.map((h) => cell(h.si)).join('') + tot('');
+    cells += tot('');
+    siRow = `<tr class="sc-si">${cells}</tr>`;
+  }
+
+  return `<section class="course-card-sec">
+    <h2>Scorecard</h2>
+    <div class="sc-wrap"><table class="scorecard">
+      <thead><tr>${header}</tr></thead>
+      <tbody>${parRow}${teeRows}${siRow}</tbody>
+    </table></div>
+  </section>`;
+}
+
+/** Interactive, read-only hole-by-hole viewer: a satellite map (tee → green)
+ *  plus par / yardage / stroke index, driven client-side by /course.js. Mirrors
+ *  the in-app course preview without GPS. */
+function courseHoleViewer(tees, holes, center) {
+  if (!holes.length) return '';
+  const showMap = !!center || holes.some((h) => h.plat != null || h.tlat != null);
+  const holeBtns = holes.map((h) =>
+    `<button type="button" class="hole-btn${h.plat != null ? ' has-pin' : ''}" data-n="${esc(h.n)}">
+      <span class="hole-n">${esc(h.n)}</span><span class="hole-par">${h.par != null ? 'Par ' + esc(h.par) : '·'}</span>
+    </button>`).join('');
+  const teeSel = tees.length > 1
+    ? `<label class="ch-tee">Tees <select id="hv-tee">${tees.map((t, i) => `<option value="${i}">${esc(t.name)}</option>`).join('')}</select></label>`
+    : '';
+  const data = {
+    center: center || null,
+    holes: holes.map((h) => ({ n: h.n, par: h.par, si: h.si, plat: h.plat, plng: h.plng, tlat: h.tlat, tlng: h.tlng })),
+    tees: tees.map((t) => ({ name: t.name, yards: t.yards })),
+  };
+  const json = JSON.stringify(data).replace(/</g, '\\u003c');
+
+  return `<section class="course-holes course-card-sec">
+    <div class="ch-head"><h2>Hole by hole</h2>${teeSel}</div>
+    <div class="hole-grid">${holeBtns}</div>
+    ${showMap ? `<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <div id="hv-map" class="course-map"></div>` : ''}
+    <div class="hv-bar">
+      <button type="button" id="hv-prev" class="hv-nav">‹</button>
+      <div id="hv-info" class="hv-info">Select a hole.</div>
+      <button type="button" id="hv-next" class="hv-nav">›</button>
+    </div>
+    <script>window.COURSE_DATA = ${json};</script>
+    ${showMap ? `<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>` : ''}
+    <script src="/course.js?v=${ASSET_V}" defer></script>
+  </section>`;
+}
+
+function renderCourse({ course, teeboxes, topRounds, holeRows }) {
   const loc = [course.city, course.state, course.country].filter(Boolean).join(', ');
   const tees = (teeboxes || []).map((t) => `<tr>
     <td>${esc(t.name || '')}</td>
@@ -323,6 +437,16 @@ function renderCourse({ course, teeboxes, topRounds }) {
     <td>${t.course_rating != null ? esc(t.course_rating) : ''}</td>
     <td>${t.slope_rating != null ? esc(t.slope_rating) : ''}</td>
   </tr>`).join('');
+
+  const { tees: scTees, holes } = courseHoleData(holeRows);
+  let center = (course.latitude != null && course.longitude != null)
+    ? [Number(course.latitude), Number(course.longitude)] : null;
+  if (!center) {
+    const wp = holes.find((h) => h.plat != null) || holes.find((h) => h.tlat != null);
+    if (wp) center = wp.plat != null ? [wp.plat, wp.plng] : [wp.tlat, wp.tlng];
+  }
+  const scorecard = courseScorecard(scTees, holes);
+  const viewer = courseHoleViewer(scTees, holes, center);
 
   const rounds = (topRounds || []).map((r, i) => {
     const tp = r.total_score != null && r.teebox_par != null ? r.total_score - r.teebox_par : null;
@@ -341,12 +465,14 @@ function renderCourse({ course, teeboxes, topRounds }) {
     ${loc ? `<p>${esc(loc)}</p>` : ''}
     <a class="cta-ghost" href="/course/${esc(course.course_id)}/pins">Add or correct pin locations</a>
   </section>
-  ${tees ? `<section class="tees">
+  ${tees ? `<section class="tees course-card-sec">
     <h2>Tees</h2>
     <table class="tee-table"><thead><tr><th>Tee</th><th>Par</th><th>Holes</th><th>Yards</th><th>Rating</th><th>Slope</th></tr></thead>
     <tbody>${tees}</tbody></table>
   </section>` : ''}
-  <section class="course-board">
+  ${scorecard}
+  ${viewer}
+  <section class="course-board course-card-sec">
     <h2>Best rounds here</h2>
     <ul class="rounds">${rounds || '<div class="empty">No rounds posted at this course yet.</div>'}</ul>
   </section>
@@ -357,9 +483,98 @@ function renderCourse({ course, teeboxes, topRounds }) {
 
   return page({
     title: `${course.course_name}${loc ? ', ' + loc : ''}. Sacari Golf`,
-    description: `${course.course_name} on Sacari Golf. Tee info, ratings, and the best rounds posted here.`,
+    description: `${course.course_name} on Sacari Golf. Full scorecard, hole-by-hole satellite views, tee ratings, and the best rounds posted here.`,
     ogUrl: SITE_URL ? `${SITE_URL}/course/${course.course_id}` : '',
     active: 'courses',
+    body,
+  });
+}
+
+// ----- Match recap ----------------------------------------------------------
+function fmtFormat(format) {
+  switch (format) {
+    case 'stableford': return 'Stableford';
+    case 'match_play': return 'Match Play';
+    case 'skins': return 'Skins';
+    case 'scramble': return 'Scramble';
+    default: return 'Stroke Play';
+  }
+}
+function recapPlayerLink(p) {
+  // Bots get their (now real-looking) name shown but no profile link — a bot
+  // profile page isn't meaningful and we keep them off the rest of the site.
+  return p.isBot ? esc(p.username) : `<a href="/u/${encodeURIComponent(p.username)}">${esc(p.username)}</a>`;
+}
+function recapSide(side, tied) {
+  const stateClass = tied ? 'tie' : side.isWinner ? 'win' : 'loss';
+  const players = side.players.map((p) => {
+    const r = p.rank;
+    const rankLine = r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
+    const dlChip = p.delta
+      ? `<span class="rc-elo ${p.delta > 0 ? 'up' : 'down'}">${p.delta > 0 ? '+' : ''}${p.delta} ELO</span>`
+      : '';
+    return `<div class="rc-player">
+      <img class="rc-crest" src="/crests/${esc(r.tier.key)}.png" alt="${esc(r.tier.name)} crest" loading="lazy" />
+      <div class="rc-pmeta">
+        <div class="rc-name">${recapPlayerLink(p)}</div>
+        <div class="rc-rank" style="color:${esc(r.color)}">${esc(rankLine)}</div>
+      </div>
+      ${dlChip}
+    </div>`;
+  }).join('');
+
+  // Single-player side (the common solo 1v1 / bot case): show the gross score
+  // and to-par. Team sides: show the side's score differential instead.
+  const rep = side.players[0];
+  let scoreBlock = '';
+  if (side.players.length === 1 && rep && rep.gross != null) {
+    const tp = rep.toPar;
+    scoreBlock = `<div class="rc-score">
+      <div class="rc-gross">${esc(rep.gross)}</div>
+      ${tp != null ? `<div class="round-topar ${toParClass(tp)}">${esc(fmtToPar(tp))}</div>` : ''}
+      ${rep.courseName ? `<div class="rc-course">${esc(rep.courseName)}${rep.teeName ? ` · ${esc(rep.teeName)}` : ''}</div>` : ''}
+    </div>`;
+  } else if (side.diff != null) {
+    scoreBlock = `<div class="rc-score">
+      <div class="rc-gross">${esc(Math.round(side.diff * 10) / 10)}</div>
+      <div class="rc-difflabel">differential</div>
+    </div>`;
+  }
+
+  const badge = !tied && side.isWinner ? `<div class="rc-badge">Winner</div>` : '';
+  return `<div class="rc-side ${stateClass}">${badge}${players}${scoreBlock}</div>`;
+}
+function renderRecap(data) {
+  const { sides, tied, numHoles, format, date } = data;
+  const fmtLabel = fmtFormat(format);
+  const sideName = (s) => s.players.map((p) => p.username).join(' & ');
+  const winner = sides.find((s) => s.isWinner);
+  const loser = sides.find((s) => !s.isWinner);
+  const headline = (tied || !winner || !loser)
+    ? sides.map(sideName).join(' tied ')
+    : `${sideName(winner)} beat ${sideName(loser)}`;
+
+  const arena = sides.map((s) => recapSide(s, tied)).join('<div class="rc-vs">VS</div>');
+
+  const body = `
+  <section class="page-head rc-head">
+    <div class="rc-kicker">Match Recap</div>
+    <h1>${esc(headline)}</h1>
+    <p>${esc(fmtLabel)} · ${esc(numHoles)} holes · ${esc(fmtDate(date))}</p>
+  </section>
+  <section class="rc">${arena}</section>
+  <section class="cta-band">
+    <h2>Think you can take them?</h2>
+    ${appStoreButton('Play on Sacari Golf')}
+  </section>`;
+
+  const ogCrest = winner ? winner.players[0].rank.tier.key : 'diamond';
+  return page({
+    title: `${headline} · Sacari Golf`,
+    description: `${headline} in a ${numHoles}-hole ${fmtLabel} match on Sacari Golf. See the full recap, then climb the ranked ladder yourself.`,
+    ogImage: data.siteUrl ? `${data.siteUrl}/crests/${ogCrest}.png` : '',
+    ogUrl: data.recapUrl,
+    active: '',
     body,
   });
 }
@@ -770,7 +985,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 
 module.exports = {
   renderHome, renderHowTo, renderLeaderboard, renderCoursesIndex, renderCourse,
-  renderProfile, renderStatic, renderNotFound, esc,
+  renderRecap, renderProfile, renderStatic, renderNotFound, esc,
   renderLogin, renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
 };
