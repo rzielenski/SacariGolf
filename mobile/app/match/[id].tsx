@@ -486,15 +486,33 @@ export default function MatchLobbyScreen() {
         </View>
       )}
 
-      {/* Solo/team: finding opponent via matchmaking pool. Arena is NOT
-          matchmade — it's invite-based — so it gets its own waiting copy below. */}
-      {!isCompleted && myPlayer?.completed && match.match_type !== 'practice' && !isArena && (
-        <View style={styles.waitingCard}>
-          <ActivityIndicator color={C.gold} size="small" style={{ marginBottom: 8 }} />
-          <Text style={styles.waitingText}>Finding your opponent...</Text>
-          <Text style={styles.waitingSubText}>You'll be matched to the closest ELO player in the queue</Text>
-        </View>
-      )}
+      {/* You've posted your round and the match isn't resolved yet. Two cases:
+          you already HAVE an opponent who just hasn't finished (name who we're
+          waiting on), or you're still in the matchmaking queue (no opponent row
+          yet). Without this split it wrongly said "Finding your opponent" even
+          when the opponent was sitting right there mid-round. Arena has its own
+          waiting copy below. */}
+      {!isCompleted && myPlayer?.completed && match.match_type !== 'practice' && !isArena && (() => {
+        const oppSide = (match.players ?? []).filter((p) => p.side !== myPlayer?.side);
+        const hasOpp = oppSide.length > 0;
+        const pending = oppSide.some((p) => !p.completed);
+        const who = oppSide.length === 1 ? c(oppSide[0].username) : 'the other side';
+        return (
+          <View style={styles.waitingCard}>
+            <ActivityIndicator color={C.gold} size="small" style={{ marginBottom: 8 }} />
+            <Text style={styles.waitingText}>
+              {!hasOpp ? 'Finding your opponent…' : pending ? `Waiting for ${who} to finish` : 'Finalizing result…'}
+            </Text>
+            <Text style={styles.waitingSubText}>
+              {!hasOpp
+                ? "You'll be matched to the closest ELO player in the queue."
+                : pending
+                ? 'Your round is locked in. The match resolves the moment they post their score.'
+                : 'Tallying it up — this only takes a moment.'}
+            </Text>
+          </View>
+        );
+      })()}
 
       {/* Arena: round submitted, now waiting on the other invited players. */}
       {!isCompleted && myPlayer?.completed && isArena && (
