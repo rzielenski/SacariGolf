@@ -13,6 +13,20 @@ const BACKEND_URL = (process.env.BACKEND_URL || '').replace(/\/+$/, '');
 // gives a new value so browsers fetch fresh CSS/JS instead of a stale cached
 // copy (static files are served with a 1h cache).
 const ASSET_V = Date.now();
+const SITE_NAME = 'Sacari Golf';
+// Numeric App Store id (e.g. id6480000000 → 6480000000), used for the Safari
+// Smart App Banner. Empty if APP_STORE_URL isn't an apps.apple.com/...id link.
+const APP_ID = (String(APP_STORE_URL).match(/id(\d+)/) || [])[1] || '';
+// Fallback social-share image so every page unfurls with something.
+const DEFAULT_OG = SITE_URL ? `${SITE_URL}/crests/diamond.png` : '';
+
+/** Render one or more schema.org objects as JSON-LD <script> tags. */
+function jsonLdTag(objs) {
+  const arr = Array.isArray(objs) ? objs : (objs ? [objs] : []);
+  return arr.filter(Boolean)
+    .map((o) => `<script type="application/ld+json">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>`)
+    .join('\n');
+}
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -68,7 +82,9 @@ function foot() {
   </footer>`;
 }
 
-function page({ title, description, ogImage, ogUrl, body, active, bodyClass, authed, bare }) {
+function page({ title, description, ogImage, ogUrl, canonical, noindex, jsonLd, body, active, bodyClass, authed, bare }) {
+  const img = ogImage || DEFAULT_OG;
+  const canon = canonical || ogUrl || '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -76,17 +92,26 @@ function page({ title, description, ogImage, ogUrl, body, active, bodyClass, aut
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${esc(title)}</title>
 <meta name="description" content="${esc(description)}" />
+<meta name="robots" content="${noindex ? 'noindex, follow' : 'index, follow'}" />
+${canon ? `<link rel="canonical" href="${esc(canon)}" />` : ''}
 <link rel="icon" href="/crests/gold.png" />
+<link rel="apple-touch-icon" href="/crests/gold.png" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta name="theme-color" content="#000000" />
+${APP_ID ? `<meta name="apple-itunes-app" content="app-id=${esc(APP_ID)}" />` : ''}
 <meta property="og:type" content="website" />
+<meta property="og:site_name" content="${esc(SITE_NAME)}" />
+<meta property="og:locale" content="en_US" />
 <meta property="og:title" content="${esc(title)}" />
 <meta property="og:description" content="${esc(description)}" />
-${ogImage ? `<meta property="og:image" content="${esc(ogImage)}" />` : ''}
-${ogUrl ? `<meta property="og:url" content="${esc(ogUrl)}" />` : ''}
+${img ? `<meta property="og:image" content="${esc(img)}" />` : ''}
+${canon ? `<meta property="og:url" content="${esc(canon)}" />` : ''}
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="${esc(title)}" />
 <meta name="twitter:description" content="${esc(description)}" />
-${ogImage ? `<meta name="twitter:image" content="${esc(ogImage)}" />` : ''}
+${img ? `<meta name="twitter:image" content="${esc(img)}" />` : ''}
 <link rel="stylesheet" href="/styles.css?v=${ASSET_V}" />
+${jsonLdTag(jsonLd)}
 </head>
 <body class="${bodyClass || ''}">
 ${bare ? '' : nav(active, authed)}
@@ -161,6 +186,24 @@ function renderHome() {
     </div>
   </section>`;
 
+  const jsonLd = SITE_URL ? [
+    { '@context': 'https://schema.org', '@type': 'Organization', name: SITE_NAME, url: SITE_URL, logo: `${SITE_URL}/crests/gold.png` },
+    {
+      '@context': 'https://schema.org', '@type': 'WebSite', name: SITE_NAME, url: SITE_URL,
+      potentialAction: {
+        '@type': 'SearchAction',
+        target: `${SITE_URL}/courses?q={search_term_string}`,
+        'query-input': 'required name=search_term_string',
+      },
+    },
+    {
+      '@context': 'https://schema.org', '@type': 'MobileApplication', name: SITE_NAME,
+      operatingSystem: 'iOS', applicationCategory: 'SportsApplication',
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      ...(APP_STORE_URL ? { downloadUrl: APP_STORE_URL, installUrl: APP_STORE_URL } : {}),
+    },
+  ] : [];
+
   return page({
     title: 'Sacari Golf. Competitive golf with ranked divisions and shot tracking.',
     description: 'Climb a ranked ladder from Wood to Obsidian, battle clans, and track every shot. The free, competitive golf app.',
@@ -168,6 +211,7 @@ function renderHome() {
     ogUrl: SITE_URL || '',
     active: 'home',
     bodyClass: 'home',
+    jsonLd,
     body,
   });
 }
@@ -224,6 +268,7 @@ function renderHowTo() {
   return page({
     title: 'How to play. Sacari Golf',
     description: 'Learn how to play Sacari Golf: ranked matches, divisions, placements, clans, cosmetics, and the live scoreboard.',
+    canonical: SITE_URL ? `${SITE_URL}/how-to-play` : '',
     active: 'howto',
     body,
   });
@@ -306,7 +351,11 @@ function renderCoursesIndex({ popular, results, q }) {
   return page({
     title: q ? `Courses matching "${q}". Sacari Golf` : 'Golf Courses. Sacari Golf',
     description: 'Browse golf courses on Sacari Golf, with tee info and the best rounds posted at each.',
+    // Search-result pages are thin/duplicative: canonicalize to /courses and
+    // keep them out of the index (links still followed).
     ogUrl: SITE_URL ? `${SITE_URL}/courses` : '',
+    canonical: SITE_URL ? `${SITE_URL}/courses` : '',
+    noindex: !!q,
     active: 'courses',
     body,
   });
@@ -481,10 +530,24 @@ function renderCourse({ course, teeboxes, topRounds, holeRows }) {
     ${appStoreButton('Download on the App Store')}
   </section>`;
 
+  let courseLd = null;
+  if (SITE_URL) {
+    courseLd = { '@context': 'https://schema.org', '@type': 'GolfCourse', name: course.course_name, url: `${SITE_URL}/course/${course.course_id}` };
+    const addr = {};
+    if (course.city) addr.addressLocality = course.city;
+    if (course.state) addr.addressRegion = course.state;
+    if (course.country) addr.addressCountry = course.country;
+    if (Object.keys(addr).length) courseLd.address = { '@type': 'PostalAddress', ...addr };
+    if (course.latitude != null && course.longitude != null) {
+      courseLd.geo = { '@type': 'GeoCoordinates', latitude: Number(course.latitude), longitude: Number(course.longitude) };
+    }
+  }
+
   return page({
     title: `${course.course_name}${loc ? ', ' + loc : ''}. Sacari Golf`,
     description: `${course.course_name} on Sacari Golf. Full scorecard, hole-by-hole satellite views, tee ratings, and the best rounds posted here.`,
     ogUrl: SITE_URL ? `${SITE_URL}/course/${course.course_id}` : '',
+    jsonLd: courseLd,
     active: 'courses',
     body,
   });
@@ -574,6 +637,9 @@ function renderRecap(data) {
     description: `${headline} in a ${numHoles}-hole ${fmtLabel} match on Sacari Golf. See the full recap, then climb the ranked ladder yourself.`,
     ogImage: data.siteUrl ? `${data.siteUrl}/crests/${ogCrest}.png` : '',
     ogUrl: data.recapUrl,
+    // Per-match share targets: rich link previews, but too many + too thin to
+    // belong in the search index.
+    noindex: true,
     active: '',
     body,
   });
@@ -634,20 +700,33 @@ function renderProfile(data) {
     ${appStoreButton('Get Sacari Golf')}
   </section>`;
 
+  const profileLd = data.profileUrl ? {
+    '@context': 'https://schema.org', '@type': 'ProfilePage',
+    mainEntity: {
+      '@type': 'Person', name: data.username, url: data.profileUrl,
+      description: `${rankLine} on Sacari Golf`,
+    },
+  } : null;
+
   return page({
     title: `${data.username} · ${rankLine} on Sacari Golf`,
     description: `${data.username} is ${rankLine} on Sacari Golf with a ${data.totalWins}-${losses}-${data.totalTies} record. Track your rounds, climb the ranked ladder, and battle clans.`,
     ogImage: `${data.siteUrl}/crests/${r.tier.key}.png`,
     ogUrl: data.profileUrl,
+    jsonLd: profileLd,
     active: '',
     body,
   });
 }
 
 // ----- Static + 404 ---------------------------------------------------------
-function renderStatic({ title, description, heading, html }) {
+function renderStatic({ title, description, heading, html, path }) {
   const body = `<section class="doc"><h1>${esc(heading || title)}</h1>${html}</section>`;
-  return page({ title: `${title}. Sacari Golf`, description, active: '', body });
+  return page({
+    title: `${title}. Sacari Golf`, description,
+    canonical: (SITE_URL && path) ? `${SITE_URL}${path}` : '',
+    active: '', body,
+  });
 }
 
 function renderNotFound(what) {
@@ -656,7 +735,7 @@ function renderNotFound(what) {
     <p class="lead">${what ? `We couldn't find "${esc(what)}".` : 'That page does not exist.'}</p>
     <a class="cta-link" href="/">Back home</a>
   </section>`;
-  return page({ title: 'Not found. Sacari Golf', description: 'Page not found.', active: '', body });
+  return page({ title: 'Not found. Sacari Golf', description: 'Page not found.', active: '', noindex: true, body });
 }
 
 // ----- Authenticated pages --------------------------------------------------
@@ -707,7 +786,7 @@ function renderLogin({ error }) {
       </div>
     </section>
   </div>`;
-  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, bodyClass: 'login-body', body });
+  return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, bodyClass: 'login-body', noindex: true, body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
@@ -792,7 +871,7 @@ function renderDashboard({ me, rank, season, stats, ball }) {
     ${ballCard}
   </section>`;
 
-  return page({ title: `${me.username} · My Account. Sacari Golf`, description: 'Your Sacari Golf stats.', active: 'account', authed: true, body });
+  return page({ title: `${me.username} · My Account. Sacari Golf`, description: 'Your Sacari Golf stats.', active: 'account', authed: true, noindex: true, body });
 }
 
 function renderClubs({ sg, clubs }) {
@@ -837,7 +916,7 @@ function renderClubs({ sg, clubs }) {
       : '<div class="empty">No tracked shots yet. Track shots in the app to build your club profile.</div>'}
   </section>`;
 
-  return page({ title: 'Club stats. Sacari Golf', description: 'Your club distances and dispersion.', active: 'account', authed: true, body });
+  return page({ title: 'Club stats. Sacari Golf', description: 'Your club distances and dispersion.', active: 'account', authed: true, noindex: true, body });
 }
 
 function renderCoursePins({ course, holes }) {
@@ -891,7 +970,7 @@ function renderCoursePins({ course, holes }) {
     ` : '<div class="empty">This course has no hole data yet.</div>'}
   </section>`;
 
-  return page({ title: `Place pins · ${course.course_name}. Sacari Golf`, description: 'Add crowd-sourced pin locations on Sacari Golf.', active: 'courses', authed: true, body });
+  return page({ title: `Place pins · ${course.course_name}. Sacari Golf`, description: 'Add crowd-sourced pin locations on Sacari Golf.', active: 'courses', authed: true, noindex: true, body });
 }
 
 // ----- Invite landing -------------------------------------------------------
@@ -978,6 +1057,9 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
     title: `${safeName} invited you. Sacari Golf`,
     description: `Join Sacari Golf with invite code ${safeCode}. ${safeName} earns a Lucky Round perk when you sign up.`,
     ogUrl: shareUrl,
+    // Personalized share landing, one per referral code: great link preview,
+    // not search-index material.
+    noindex: true,
     active: '',
     body,
   });

@@ -501,43 +501,65 @@ app.get('/invite/:code', async (req, res) => {
 });
 
 app.get('/privacy', (_req, res) => res.send(R.renderStatic({
-  title: 'Privacy Policy', heading: 'Privacy Policy',
+  title: 'Privacy Policy', heading: 'Privacy Policy', path: '/privacy',
   description: 'How Sacari Golf collects and uses your data.', html: PRIVACY_HTML,
 })));
 app.get('/terms', (_req, res) => res.send(R.renderStatic({
-  title: 'Terms of Service', heading: 'Terms of Service',
+  title: 'Terms of Service', heading: 'Terms of Service', path: '/terms',
   description: 'The terms for using Sacari Golf.', html: TERMS_HTML,
 })));
 app.get('/support', (_req, res) => res.send(R.renderStatic({
-  title: 'Support', heading: 'Support',
+  title: 'Support', heading: 'Support', path: '/support',
   description: 'Get help with Sacari Golf.', html: SUPPORT_HTML,
 })));
 
 // ----- SEO ------------------------------------------------------------------
 app.get('/robots.txt', (_req, res) => {
-  res.type('text/plain').send(`User-agent: *\nAllow: /\n${SITE_URL ? `Sitemap: ${SITE_URL}/sitemap.xml` : ''}`);
+  // Block only the private surfaces + thin search-query pages from crawl.
+  // Recap (/r/) and invite (/invite/) pages stay crawlable so social + search
+  // card bots can read their OG tags; they carry a noindex meta instead, which
+  // keeps them out of the index without blocking link-preview scrapers.
+  res.type('text/plain').send(
+    `User-agent: *\n` +
+    `Disallow: /account\n` +
+    `Disallow: /login\n` +
+    `Disallow: /courses?\n` +
+    `Allow: /\n` +
+    `${SITE_URL ? `Sitemap: ${SITE_URL}/sitemap.xml` : ''}`
+  );
 });
 
 app.get('/sitemap.xml', async (_req, res) => {
   const base = SITE_URL || '';
-  const urls = ['/', '/how-to-play', '/leaderboard', '/courses', '/privacy', '/terms', '/support'];
+  const today = new Date().toISOString().slice(0, 10);
+  const entries = [
+    { loc: '/', priority: '1.0', lastmod: today },
+    { loc: '/how-to-play', priority: '0.8', lastmod: today },
+    { loc: '/leaderboard', priority: '0.8' },
+    { loc: '/courses', priority: '0.8' },
+    { loc: '/privacy', priority: '0.3', lastmod: today },
+    { loc: '/terms', priority: '0.3', lastmod: today },
+    { loc: '/support', priority: '0.3', lastmod: today },
+  ];
   try {
-    const [{ rows: players }, { rows: courses }] = await Promise.all([
-      pool.query(`SELECT username FROM users WHERE total_matches > 0 ORDER BY elo DESC LIMIT 500`),
+    const [{ rows: courses }, { rows: players }] = await Promise.all([
       pool.query(
         `SELECT c.course_id FROM courses c
            JOIN teeboxes t ON t.course_id = c.course_id
            JOIN rounds r ON r.teebox_id = t.teebox_id
-          GROUP BY c.course_id ORDER BY COUNT(r.round_id) DESC LIMIT 500`
+          GROUP BY c.course_id ORDER BY COUNT(r.round_id) DESC LIMIT 1000`
       ),
+      pool.query(`SELECT username FROM users WHERE total_matches > 0 AND is_bot = false ORDER BY elo DESC LIMIT 1000`),
     ]);
-    for (const p of players) urls.push(`/u/${encodeURIComponent(p.username)}`);
-    for (const c of courses) urls.push(`/course/${c.course_id}`);
+    for (const c of courses) entries.push({ loc: `/course/${c.course_id}`, priority: '0.6' });
+    for (const p of players) entries.push({ loc: `/u/${encodeURIComponent(p.username)}`, priority: '0.5' });
   } catch (err) {
     console.error('sitemap error:', err);
   }
   const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-    urls.map((u) => `<url><loc>${R.esc(base + u)}</loc></url>`).join('\n') + `\n</urlset>`;
+    entries.map((e) =>
+      `<url><loc>${R.esc(base + e.loc)}</loc>${e.lastmod ? `<lastmod>${e.lastmod}</lastmod>` : ''}<priority>${e.priority}</priority></url>`
+    ).join('\n') + `\n</urlset>`;
   res.type('application/xml').set('Cache-Control', 'public, max-age=3600').send(body);
 });
 

@@ -1,0 +1,14 @@
+{
+  "name": "Sacari Golf",
+  "short_name": "Sacari",
+  "description": "Competitive golf with ranked divisions, clans, and shot tracking.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "/crests/gold.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/crests/diamond.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
