@@ -700,6 +700,50 @@ function recapSide(side, tied) {
   const badge = !tied && side.isWinner ? `<div class="rc-badge">Winner</div>` : '';
   return `<div class="rc-side ${stateClass}">${badge}${players}${scoreBlock}</div>`;
 }
+/** Golf score-vs-par class for a scorecard cell (eagle/birdie/bogey/double+). */
+function scoreClass(d) {
+  if (d == null) return '';
+  if (d <= -2) return 'sc-eagle';
+  if (d === -1) return 'sc-birdie';
+  if (d === 1) return 'sc-bogey';
+  if (d >= 2) return 'sc-dbl';
+  return '';
+}
+/** One player's hole-by-hole scorecard: a Par row and a Score row (colored by
+ *  score vs par), with Out / In / Total when the round is more than 9 holes. */
+function recapScorecard(p) {
+  const holes = p.holes || [];
+  if (!holes.length) return '';
+  const split = holes.length > 9;
+  const front = split ? holes.slice(0, 9) : holes;
+  const back = split ? holes.slice(9) : [];
+  const sum = (arr, k) => arr.reduce((a, h) => a + (h[k] != null ? Number(h[k]) : 0), 0);
+  const headNums = (arr) => arr.map((h) => `<th>${esc(h.hole_num)}</th>`).join('');
+  const scoreCell = (h) => {
+    if (h.score == null) return `<td>-</td>`;
+    const cls = h.par != null ? scoreClass(h.score - h.par) : '';
+    return `<td class="${cls}">${esc(h.score)}</td>`;
+  };
+  let header = `<th class="sc-rl">Hole</th>${headNums(front)}`;
+  if (split) header += `<th class="sc-tot">Out</th>${headNums(back)}<th class="sc-tot">In</th>`;
+  header += `<th class="sc-tot">Tot</th>`;
+  const pf = sum(front, 'par'), pb = sum(back, 'par');
+  let parR = `<th class="sc-rl">Par</th>${front.map((h) => `<td>${h.par != null ? esc(h.par) : '-'}</td>`).join('')}`;
+  if (split) parR += `<td class="sc-tot">${pf || ''}</td>${back.map((h) => `<td>${h.par != null ? esc(h.par) : '-'}</td>`).join('')}<td class="sc-tot">${pb || ''}</td>`;
+  parR += `<td class="sc-tot">${(pf + pb) || ''}</td>`;
+  const sf = sum(front, 'score'), sb = sum(back, 'score');
+  let scR = `<th class="sc-rl">Score</th>${front.map(scoreCell).join('')}`;
+  if (split) scR += `<td class="sc-tot">${sf || ''}</td>${back.map(scoreCell).join('')}<td class="sc-tot">${sb || ''}</td>`;
+  scR += `<td class="sc-tot">${(sf + sb) || ''}</td>`;
+  const sub = [p.courseName, p.teeName].filter(Boolean).join(' · ');
+  return `<div class="rc-sc-card">
+    <div class="rc-sc-title">${recapPlayerLink(p)}${sub ? ` <span class="rc-sc-sub">${esc(sub)}</span>` : ''}</div>
+    <div class="sc-wrap"><table class="scorecard">
+      <thead><tr>${header}</tr></thead>
+      <tbody><tr class="sc-par">${parR}</tr><tr>${scR}</tr></tbody>
+    </table></div>
+  </div>`;
+}
 function renderRecap(data) {
   const { sides, tied, numHoles, format, date } = data;
   const fmtLabel = fmtFormat(format);
@@ -711,6 +755,7 @@ function renderRecap(data) {
     : `${sideName(winner)} beat ${sideName(loser)}`;
 
   const arena = sides.map((s) => recapSide(s, tied)).join('<div class="rc-vs">VS</div>');
+  const scorecards = sides.flatMap((s) => s.players).map(recapScorecard).filter(Boolean).join('');
 
   const body = `
   <section class="page-head rc-head">
@@ -719,6 +764,10 @@ function renderRecap(data) {
     <p>${esc(fmtLabel)} · ${esc(numHoles)} holes · ${esc(fmtDate(date))}</p>
   </section>
   <section class="rc">${arena}</section>
+  ${scorecards ? `<section class="rc-scorecards course-card-sec">
+    <h2>Scorecards</h2>
+    <div class="rc-sc-list">${scorecards}</div>
+  </section>` : ''}
   <section class="cta-band">
     <h2>Think you can take them?</h2>
     ${appStoreButton('Play on Sacari Golf')}

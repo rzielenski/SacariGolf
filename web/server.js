@@ -356,6 +356,22 @@ app.get('/course/:id', async (req, res) => {
   }
 });
 
+// Zip a round's hole_scores array against its teebox pars into
+// [{hole_num, par, score}], honoring a front/back subset. Scores of 0 (an
+// unentered hole) become null so the scorecard shows a dash, not a 0.
+function alignHoleScores(allHoles, holeScores, subset) {
+  if (!Array.isArray(holeScores) || !holeScores.length || !allHoles.length) return [];
+  const n = holeScores.length;
+  let slice;
+  if (allHoles.length === n) slice = allHoles;
+  else if (subset === 'back') slice = allHoles.slice(allHoles.length - n);
+  else slice = allHoles.slice(0, n);
+  return slice.map((h, i) => {
+    const s = Number(holeScores[i]);
+    return { hole_num: h.hole_num, par: h.par, score: Number.isFinite(s) && s > 0 ? s : null };
+  });
+}
+
 // ----- Match recap (shareable, no-install) ----------------------------------
 // A resolved match's result rendered for link previews + a no-download CTA.
 // Linked from the app's share sheet as /r/<matchId>. 404 unless the match has
@@ -365,7 +381,7 @@ app.get('/r/:id', async (req, res) => {
   if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('match')); return; }
   try {
     const { rows: mRows } = await pool.query(
-      `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.is_practice,
+      `SELECT m.match_id, m.match_type, m.format, m.num_holes, m.is_practice, m.holes_subset,
               mr.winner_side, mr.side1_score_differential, mr.side2_score_differential,
               mr.details, mr.created_at AS resolved_at
          FROM matches m
@@ -378,7 +394,7 @@ app.get('/r/:id', async (req, res) => {
 
     const { rows: pRows } = await pool.query(
       `SELECT mp.user_id, mp.side, u.username, u.elo, u.is_bot,
-              r.total_score, t.par AS teebox_par, t.name AS teebox_name, c.course_name
+              r.total_score, r.hole_scores, r.teebox_id, t.par AS teebox_par, t.name AS teebox_name, c.course_name
          FROM match_players mp
          JOIN users u ON u.user_id = mp.user_id
          LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
@@ -389,6 +405,20 @@ app.get('/r/:id', async (req, res) => {
       [id]
     );
     if (pRows.length < 2) { res.status(404).send(R.renderNotFound('match')); return; }
+
+    // Per-hole pars for every teebox in the match, to zip against hole_scores.
+    const teeboxIds = [...new Set(pRows.map((p) => p.teebox_id).filter(Boolean))];
+    const parByTeebox = new Map();
+    if (teeboxIds.length) {
+      const { rows: hRows } = await pool.query(
+        `SELECT teebox_id, hole_num, par FROM holes WHERE teebox_id = ANY($1) ORDER BY teebox_id, hole_num`,
+        [teeboxIds]
+      );
+      for (const h of hRows) {
+        if (!parByTeebox.has(h.teebox_id)) parByTeebox.set(h.teebox_id, []);
+        parByTeebox.get(h.teebox_id).push({ hole_num: h.hole_num, par: h.par });
+      }
+    }
 
     const deltas = (m.details && m.details.playerDeltas) || {};
     const bySide = new Map();
@@ -402,6 +432,7 @@ app.get('/r/:id', async (req, res) => {
         delta: Math.round(Number(deltas[p.user_id] ?? 0)),
         courseName: p.course_name,
         teeName: p.teebox_name,
+        holes: alignHoleScores(parByTeebox.get(p.teebox_id) || [], p.hole_scores, m.holes_subset),
       };
       if (!bySide.has(p.side)) bySide.set(p.side, []);
       bySide.get(p.side).push(entry);
