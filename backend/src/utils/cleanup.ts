@@ -835,7 +835,10 @@ export function startCleanupSchedule() {
   // (duo/squad) match that's gone a few hours without a human opponent. Seeding
   // is fire-and-forget and idempotent; the fill pass runs every 10 min (the
   // wait window is in hours).
-  import('./bots').then(({ seedBots }) => seedBots()).catch((e) => console.error('[bots] seed error', e));
+  import('./bots').then(async ({ seedBots, backfillBotVsBotMatches }) => {
+    await seedBots();
+    await backfillBotVsBotMatches();   // one-time bot-vs-bot history (self-guards, never re-runs)
+  }).catch((e) => console.error('[bots] seed error', e));
   botTick();
   botHandle = setInterval(botTick, 10 * 60 * 1000);
 

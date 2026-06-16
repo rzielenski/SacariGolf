@@ -16,10 +16,13 @@
  *   • Bots fill SOLO matches (1v1) AND team matches (duo = 2 bots, squad = 4),
  *     drawing a team from the nearest-ELO bots in the one-per-bracket pool.
  *     Arena (ffa) is invite-only, so it's never bot-filled.
- *   • Bots now appear everywhere a real player does (search, leaderboards,
- *     feed, profiles, course records, the Sacari Cup) to make the app feel
- *     populated. The only places they're skipped are correct internal logic:
- *     push notifications (no token) and stale-match cleanup.
+ *   • Bots appear everywhere a real player does (search, leaderboards, feed,
+ *     profiles, course records) to make the app feel populated — EXCEPT they
+ *     can't win tournaments or the weekly Sacari Cup, which stay human-only.
+ *     They're also skipped for push notifications (no token) and stale-match
+ *     cleanup, which is correct internal logic.
+ *   • backfillBotVsBotMatches seeds a one-time history of bots playing each
+ *     other so the leaderboard + bot profiles look lived-in from day one.
  *
  * Resolution reuses the exact ELO helpers from routes/matches (diff18,
  * expectedScore, kFactor, shapeDelta, placementUserSet) so a bot match scores
@@ -609,5 +612,114 @@ export async function runBotTeamMatchPass(): Promise<void> {
     } finally {
       client.release();
     }
+  }
+}
+
+/**
+ * One-time history backfill: generate a batch of completed SOLO matches of bots
+ * playing EACH OTHER, so the ELO leaderboard and bot profiles look lived-in
+ * instead of every bot sitting at 0-0. Each match is two random bots on two
+ * random courses, resolved by score differential (skill-anchored, so stronger
+ * bots win more — a realistic ladder). Backdated over the past ~60 days. Bot
+ * ELO stays frozen; only their win/loss/match record moves. No feed posts (we
+ * don't want to backfill the global timeline) and these never touch the cup
+ * (bots are excluded there). Idempotent: tagged `botVsBot` so it never re-runs.
+ *
+ * @param perBot ~how many matches each bot should end up with.
+ */
+export async function backfillBotVsBotMatches(perBot = 25): Promise<void> {
+  try {
+    const { rows: done } = await pool.query(
+      `SELECT EXISTS(SELECT 1 FROM match_results WHERE details->>'botVsBot' = 'true') AS done`,
+    );
+    if (done[0]?.done) return;   // already backfilled
+
+    const { rows: botRows } = await pool.query(`SELECT user_id, elo FROM users WHERE is_bot = TRUE`);
+    if (botRows.length < 2) return;
+    const bots = botRows.map((b: any) => ({
+      user_id: b.user_id as string, elo: Number(b.elo), handicap: handicapForElo(Number(b.elo)),
+    }));
+
+    // A pool of real 18-hole courses to spread the bots across.
+    const { rows: tees } = await pool.query(
+      `SELECT teebox_id, course_rating, slope_rating, num_holes
+         FROM teeboxes
+        WHERE course_rating IS NOT NULL AND slope_rating IS NOT NULL AND num_holes >= 18
+        ORDER BY random() LIMIT 250`,
+    );
+    if (!tees.length) { console.warn('[bots] bot-vs-bot backfill skipped — no rated teeboxes'); return; }
+    const randOf = <T,>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+
+    const target = Math.round((bots.length * perBot) / 2);
+    let made = 0;
+    const client = await pool.connect();
+    try {
+      for (let i = 0; i < target; i++) {
+        const a = randOf(bots);
+        let b = randOf(bots);
+        for (let g = 0; g < 6 && b.user_id === a.user_id; g++) b = randOf(bots);
+        if (b.user_id === a.user_id) continue;
+
+        const ta = randOf(tees), tb = randOf(tees);
+        const ra = generateBotRound(ta.course_rating, ta.num_holes, 18, a.handicap);
+        const rb = generateBotRound(tb.course_rating, tb.num_holes, 18, b.handicap);
+        const da = diff18(ra.total, ta.course_rating, ta.slope_rating, 18, ta.num_holes, null, null);
+        const db = diff18(rb.total, tb.course_rating, tb.slope_rating, 18, tb.num_holes, null, null);
+        const tie = Math.abs(da - db) < 0.05;
+        const aWins = !tie && da < db;
+        const daysAgo = Math.floor(Math.random() * 60) + 1;
+
+        try {
+          await client.query('BEGIN');
+          const { rows: mrow } = await client.query(
+            `INSERT INTO matches (match_type, format, num_holes, completed, is_practice, created_at)
+             VALUES ('solo','stroke',18,TRUE,FALSE, NOW() - make_interval(days => $1::int))
+             RETURNING match_id`,
+            [daysAgo],
+          );
+          const matchId = mrow[0].match_id as string;
+          await client.query(
+            `INSERT INTO match_players (match_id, user_id, teebox_id, side, strokes, completed, completed_at)
+             VALUES ($1,$2,$3,1,$4,TRUE, NOW() - make_interval(days => $8::int)),
+                    ($1,$5,$6,2,$7,TRUE, NOW() - make_interval(days => $8::int))`,
+            [matchId, a.user_id, ta.teebox_id, ra.total, b.user_id, tb.teebox_id, rb.total, daysAgo],
+          );
+          await client.query(
+            `INSERT INTO rounds (match_id, user_id, teebox_id, hole_scores, total_score, round_type, created_at)
+             VALUES ($1,$2,$3,$4,$5,'solo', NOW() - make_interval(days => $10::int)),
+                    ($1,$6,$7,$8,$9,'solo', NOW() - make_interval(days => $10::int))`,
+            [matchId, a.user_id, ta.teebox_id, ra.holeScores, ra.total, b.user_id, tb.teebox_id, rb.holeScores, rb.total, daysAgo],
+          );
+          await client.query(
+            `INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+                                        side2_score_differential, delta_elo, details)
+             VALUES ($1,'solo',$2,$3,$4,0,$5)`,
+            [matchId, tie ? null : (aWins ? 1 : 2), da, db,
+             JSON.stringify({ bot: true, botVsBot: true, tied: tie, playerDeltas: {} })],
+          );
+          // Win/loss record only — bot ELO is frozen.
+          await client.query(
+            `UPDATE users SET total_matches = total_matches + 1, total_wins = total_wins + $2,
+                              total_ties = total_ties + $3 WHERE user_id = $1`,
+            [a.user_id, aWins ? 1 : 0, tie ? 1 : 0],
+          );
+          await client.query(
+            `UPDATE users SET total_matches = total_matches + 1, total_wins = total_wins + $2,
+                              total_ties = total_ties + $3 WHERE user_id = $1`,
+            [b.user_id, (!aWins && !tie) ? 1 : 0, tie ? 1 : 0],
+          );
+          await client.query('COMMIT');
+          made++;
+        } catch (err) {
+          await client.query('ROLLBACK');
+          console.error('[bots] bot-vs-bot row failed:', err);
+        }
+      }
+    } finally {
+      client.release();
+    }
+    console.log(`[bots] bot-vs-bot backfill created ${made} matches across ${bots.length} bots`);
+  } catch (err) {
+    console.error('[bots] bot-vs-bot backfill failed:', err);
   }
 }
