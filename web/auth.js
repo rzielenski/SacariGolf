@@ -20,6 +20,17 @@ async function backendLogin(email, password) {
   return data; // { token, user }
 }
 
+async function backendRegister(username, email, password) {
+  const r = await fetch(`${BACKEND_URL}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, email, password }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || 'Could not create your account');
+  return data; // { token, user }
+}
+
 async function apiGet(path, token) {
   const r = await fetch(`${BACKEND_URL}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -77,4 +88,4 @@ function requireAuth(req, res, next) {
   next();
 }
 
-module.exports = { backendLogin, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth, COOKIE };
+module.exports = { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth, COOKIE };

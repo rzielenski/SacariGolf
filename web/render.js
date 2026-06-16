@@ -64,22 +64,26 @@ function fmtAgo(d) {
 function nav(active, authed) {
   const link = (href, key, label) =>
     `<a class="${active === key ? 'on' : ''}" href="${href}">${label}</a>`;
-  const account = authed
-    ? `${link('/account', 'account', 'My Account')}<a href="/logout">Log out</a>`
-    : link('/login', 'login', 'Log in');
-  const cta = APP_STORE_URL ? `<a class="nav-cta" href="${esc(APP_STORE_URL)}">Get the app</a>` : '';
+  // Logged out: marketing + install. Logged in: the web app opens up, with a
+  // prominent Play action.
+  const items = authed
+    ? `${link('/app', 'apphome', 'Home')}
+       ${link('/leaderboard', 'leaderboard', 'Rankings')}
+       ${link('/courses', 'courses', 'Courses')}
+       ${link('/account', 'account', 'Profile')}
+       <a href="/logout">Log out</a>
+       <a class="nav-cta ${active === 'play' ? 'on' : ''}" href="/app/play">Play</a>`
+    : `${link('/how-to-play', 'howto', 'How to Play')}
+       ${link('/leaderboard', 'leaderboard', 'Rankings')}
+       ${link('/matches', 'matches', 'Matches')}
+       ${link('/courses', 'courses', 'Courses')}
+       ${link('/login', 'login', 'Log in')}
+       ${APP_STORE_URL ? `<a class="nav-cta" href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}`;
   return `<header class="topbar">
-    <a class="brand" href="/" aria-label="Sacari Golf home">
+    <a class="brand" href="${authed ? '/app' : '/'}" aria-label="Sacari Golf home">
       <img class="brand-logo" src="/logo.jpg" alt="Sacari Golf" />
     </a>
-    <nav class="nav">
-      ${link('/how-to-play', 'howto', 'How to Play')}
-      ${link('/leaderboard', 'leaderboard', 'Rankings')}
-      ${link('/matches', 'matches', 'Matches')}
-      ${link('/courses', 'courses', 'Courses')}
-      ${account}
-      ${cta}
-    </nav>
+    <nav class="nav">${items}</nav>
   </header>`;
 }
 
@@ -971,12 +975,230 @@ function renderLogin({ error }) {
           </label>
           <button class="login-btn" type="submit">Log in</button>
         </form>
-        <p class="muted-note">New here? Create your account in the app, then log in.${APP_STORE_URL ? ` <a href="${esc(APP_STORE_URL)}">Get the app</a>` : ''}</p>
+        <p class="muted-note">New here? <a href="/signup">Create an account</a> and play right in your browser.</p>
         <a class="login-home" href="/">&larr; Back to sacarigolf.com</a>
       </div>
     </section>
   </div>`;
   return page({ title: 'Log in. Sacari Golf', description: 'Log in to Sacari Golf to view your stats.', active: 'login', authed: false, bare: true, bodyClass: 'login-body', noindex: true, body });
+}
+
+function renderSignup({ error, values }) {
+  const v = values || {};
+  const body = `
+  <div class="login-wrap">
+    <aside class="login-brand">
+      <a href="/" class="login-logo-link"><img class="login-logo" src="/logo.jpg?v=${ASSET_V}" alt="Sacari Golf" /></a>
+      <h2 class="login-tag">Play golf, ranked.</h2>
+      <p class="login-sub">Create an account and play right here in your browser. Climb from Wood to Obsidian, no install needed.</p>
+    </aside>
+    <section class="login-panel">
+      <div class="login-card">
+        <h1>Create your account</h1>
+        <p class="login-card-sub">Free, and you can start a ranked round in seconds.</p>
+        ${error ? `<div class="form-error">${esc(error)}</div>` : ''}
+        <form method="post" action="/signup" class="form">
+          <label class="field">
+            <span class="field-label">Username</span>
+            <span class="input-wrap"><span class="input-icon">#</span><input type="text" name="username" value="${esc(v.username || '')}" placeholder="yourname" autocomplete="username" maxlength="24" required /></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Email</span>
+            <span class="input-wrap"><span class="input-icon">@</span><input type="email" name="email" value="${esc(v.email || '')}" placeholder="you@email.com" autocomplete="email" required /></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Password</span>
+            <span class="input-wrap"><span class="input-icon">&#9679;</span><input type="password" name="password" placeholder="At least 8 characters" autocomplete="new-password" minlength="8" required /></span>
+          </label>
+          <button class="login-btn" type="submit">Create account</button>
+        </form>
+        <p class="muted-note">Already have an account? <a href="/login">Log in</a></p>
+        <a class="login-home" href="/">&larr; Back to sacarigolf.com</a>
+      </div>
+    </section>
+  </div>`;
+  return page({ title: 'Sign up. Sacari Golf', description: 'Create a free Sacari Golf account and play ranked golf in your browser.', active: '', authed: false, bare: true, bodyClass: 'login-body', noindex: true, body });
+}
+
+function renderVerifyEmail({ error, email }) {
+  const body = `
+  <div class="login-wrap">
+    <aside class="login-brand">
+      <a href="/" class="login-logo-link"><img class="login-logo" src="/logo.jpg?v=${ASSET_V}" alt="Sacari Golf" /></a>
+      <h2 class="login-tag">One quick step.</h2>
+      <p class="login-sub">We emailed you a 6-digit code${email ? ` at ${esc(email)}` : ''}. Enter it to confirm your account.</p>
+    </aside>
+    <section class="login-panel">
+      <div class="login-card">
+        <h1>Verify your email</h1>
+        <p class="login-card-sub">Check your inbox for the code.</p>
+        ${error ? `<div class="form-error">${esc(error)}</div>` : ''}
+        <form method="post" action="/verify-email" class="form">
+          <label class="field">
+            <span class="field-label">6-digit code</span>
+            <span class="input-wrap"><span class="input-icon">#</span><input type="text" name="code" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code" required /></span>
+          </label>
+          <button class="login-btn" type="submit">Verify &amp; continue</button>
+        </form>
+        <form method="post" action="/resend-verification"><button class="link-btn" type="submit">Resend code</button></form>
+        <a class="login-home" href="/app">Skip for now &rarr;</a>
+      </div>
+    </section>
+  </div>`;
+  return page({ title: 'Verify email. Sacari Golf', description: 'Verify your Sacari Golf account.', active: '', authed: true, bare: true, bodyClass: 'login-body', noindex: true, body });
+}
+
+// ----- Web app: play loop ---------------------------------------------------
+function appMatchRow(m, meId) {
+  const opp = (m.players || []).find((p) => p.user_id !== meId);
+  const mine = (m.players || []).find((p) => p.user_id === meId);
+  const fmt = fmtFormat(m.format);
+  let status, cls;
+  if (m.completed) {
+    const tied = !m.result || m.result.winner_side == null;
+    const won = !tied && mine && m.result && Number(mine.side) === Number(m.result.winner_side);
+    cls = tied ? 'tie' : won ? 'win' : 'loss';
+    status = tied ? 'Tied' : won ? 'Won' : 'Lost';
+    const dl = m.my_delta_elo;
+    if (typeof dl === 'number' && dl !== 0) status += ` ${dl > 0 ? '+' : ''}${dl}`;
+  } else if (mine && mine.completed) {
+    cls = 'pending'; status = 'Waiting';
+  } else {
+    cls = 'active'; status = 'Play now';
+  }
+  const title = m.is_practice ? 'Practice round' : (opp ? `vs ${esc(opp.username)}` : 'Ranked round');
+  return `<a class="app-row" href="/app/match/${esc(m.match_id)}">
+    <span class="app-row-main">
+      <span class="app-row-title">${title}</span>
+      <span class="app-row-sub">${esc(fmt)} · ${esc(m.num_holes || 18)} holes · ${esc(fmtAgo(m.created_at))}</span>
+    </span>
+    <span class="app-status ${cls}">${esc(status)}</span>
+  </a>`;
+}
+function renderAppHome({ me, rank, matches }) {
+  const rankLine = rank.isObsidian ? `Obsidian ${rank.displayElo}` : rank.label;
+  const meId = me.user_id;
+  const active = (matches || []).filter((m) => !m.completed);
+  const done = (matches || []).filter((m) => m.completed);
+  const verifyBanner = me.email_verified === false
+    ? `<a class="app-banner" href="/verify-email">Verify your email to secure your account. Enter your code &rarr;</a>` : '';
+  const list = (arr) => arr.map((m) => appMatchRow(m, meId)).join('');
+  const body = `
+  ${verifyBanner}
+  <section class="app-hero">
+    <div class="app-hero-id">
+      <img class="app-hero-crest" src="/crests/${esc(rank.tier.key)}.png" alt="" />
+      <div>
+        <div class="app-hello">Hey, ${esc(me.username)}</div>
+        <div class="app-rank" style="color:${esc(rank.color)}">${esc(rankLine)} · ${esc(me.elo)} ELO</div>
+      </div>
+    </div>
+    <a class="cta app-play-cta" href="/app/play">Play a round</a>
+  </section>
+  ${active.length
+    ? `<section class="app-sec"><h2>Your matches</h2><div class="app-list">${list(active)}</div></section>`
+    : `<section class="app-sec"><div class="empty">No active rounds. Start one above.</div></section>`}
+  ${done.length ? `<section class="app-sec"><h2>Recent results</h2><div class="app-list">${list(done.slice(0, 12))}</div></section>` : ''}`;
+  return page({ title: 'Home · Sacari Golf', description: 'Your Sacari Golf web app.', active: 'apphome', authed: true, noindex: true, body });
+}
+function renderAppPlay() {
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/app">&larr; Home</a>
+    <h1>Play a round</h1>
+    <p>Start a ranked round (or practice). Pick your course and tees, then score it hole by hole.</p>
+  </section>
+  <section class="app-form" data-page="play">
+    <div class="af-group">
+      <span class="af-label">Mode</span>
+      <div class="af-seg" id="play-mode">
+        <button type="button" data-val="solo" class="on">Ranked</button>
+        <button type="button" data-val="practice">Practice</button>
+      </div>
+    </div>
+    <div class="af-group">
+      <span class="af-label">Holes</span>
+      <div class="af-seg" id="play-holes">
+        <button type="button" data-val="18" class="on">18</button>
+        <button type="button" data-val="front9">Front 9</button>
+        <button type="button" data-val="back9">Back 9</button>
+      </div>
+    </div>
+    <div class="af-group">
+      <span class="af-label">Course</span>
+      <div class="course-search-wrap">
+        <input type="text" id="play-course-q" placeholder="Search course or city..." autocomplete="off" />
+        <div class="ac-list" id="play-course-ac" hidden></div>
+      </div>
+      <div id="play-course-picked" class="af-picked" hidden></div>
+    </div>
+    <div class="af-group" id="play-tee-group" hidden>
+      <span class="af-label">Tees</span>
+      <select id="play-tee" class="af-select"></select>
+    </div>
+    <div id="play-msg" class="app-msg"></div>
+    <button id="play-create" class="cta" type="button" disabled>Create round</button>
+  </section>
+  <script src="/app.js?v=${ASSET_V}" defer></script>`;
+  return page({ title: 'Play · Sacari Golf', description: 'Start a ranked round on Sacari Golf.', active: 'play', authed: true, noindex: true, body });
+}
+function renderAppMatch({ me, match }) {
+  const meId = me.user_id;
+  const mine = (match.players || []).find((p) => p.user_id === meId);
+  const opp = (match.players || []).find((p) => p.user_id !== meId);
+  const fmt = fmtFormat(match.format);
+  let panel;
+  if (match.completed) {
+    const tied = !match.result || match.result.winner_side == null;
+    const won = !tied && mine && match.result && Number(mine.side) === Number(match.result.winner_side);
+    const dl = match.my_delta_elo;
+    const cls = tied ? 'tie' : won ? 'win' : 'loss';
+    panel = `<div class="app-result ${cls}">
+      <div class="app-result-big">${tied ? 'Tied' : won ? 'You won' : 'You lost'}</div>
+      ${typeof dl === 'number' && dl !== 0 ? `<div class="app-result-elo ${dl > 0 ? 'up' : 'down'}">${dl > 0 ? '+' : ''}${dl} ELO</div>` : ''}
+      <a class="cta" href="/r/${esc(match.match_id)}">View full recap</a>
+    </div>`;
+  } else if (mine && mine.completed) {
+    panel = `<div class="app-result pending">
+      <div class="app-result-big">Round submitted</div>
+      <p class="muted-note">Waiting for your opponent to finish. We settle the ELO once they are in.</p>
+    </div>`;
+  } else {
+    panel = `<div class="app-result active">
+      <div class="app-result-big">Ready to play</div>
+      <p class="muted-note">${match.is_practice ? 'Practice rounds do not affect your rank.' : 'This is a ranked round.'} Enter your scores hole by hole.</p>
+      <a class="cta" href="/app/score/${esc(match.match_id)}">Score round</a>
+    </div>`;
+  }
+  const players = (match.players || []).map((p) => {
+    const isMe = p.user_id === meId;
+    return `<div class="app-player">
+      <span class="app-player-name">${isMe ? 'You' : esc(p.username || 'Opponent')}</span>
+      ${p.strokes != null ? `<span class="app-player-score">${esc(p.strokes)}</span>` : `<span class="app-player-score muted">${p.completed ? 'in' : '—'}</span>`}
+    </div>`;
+  }).join('');
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/app">&larr; Home</a>
+    <h1>${match.is_practice ? 'Practice round' : (opp ? `vs ${esc(opp.username)}` : 'Ranked round')}</h1>
+    <p>${esc(fmt)} · ${esc(match.num_holes || 18)} holes</p>
+  </section>
+  <section class="app-sec">${panel}</section>
+  ${players ? `<section class="app-sec"><h2>Players</h2><div class="app-players">${players}</div></section>` : ''}`;
+  return page({ title: 'Match · Sacari Golf', description: 'Match detail.', active: 'apphome', authed: true, noindex: true, body });
+}
+function renderAppScore({ matchId }) {
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/app/match/${esc(matchId)}">&larr; Match</a>
+    <h1>Scorecard</h1>
+    <p>Enter your score for each hole, then submit.</p>
+  </section>
+  <section class="app-score" data-page="score" data-match="${esc(matchId)}">
+    <div id="score-body"><div class="empty">Loading your round...</div></div>
+  </section>
+  <script src="/app.js?v=${ASSET_V}" defer></script>`;
+  return page({ title: 'Scorecard · Sacari Golf', description: 'Enter your scores.', active: 'play', authed: true, noindex: true, body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
@@ -1258,6 +1480,8 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 module.exports = {
   renderHome, renderHowTo, renderLeaderboard, renderMatchesFeed, renderCoursesIndex, renderCourse,
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
-  renderLogin, renderDashboard, renderClubs, renderCoursePins,
+  renderLogin, renderSignup, renderVerifyEmail,
+  renderAppHome, renderAppPlay, renderAppMatch, renderAppScore,
+  renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
 };

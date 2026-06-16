@@ -21,7 +21,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const { rankForElo, medallionFor } = require('./rank');
-const { backendLogin, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth } = require('./auth');
+const { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth } = require('./auth');
 const R = require('./render');
 
 /** CSRF guard for state-changing requests: when the browser sends an Origin,
@@ -55,9 +55,9 @@ app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-// ----- Auth: login / logout -------------------------------------------------
+// ----- Auth: login / signup / logout ----------------------------------------
 app.get('/login', (req, res) => {
-  if (req.cookies && req.cookies.sg_token) { res.redirect('/account'); return; }
+  if (req.cookies && req.cookies.sg_token) { res.redirect('/app'); return; }
   res.send(R.renderLogin({}));
 });
 
@@ -70,13 +70,88 @@ app.post('/login', async (req, res) => {
   try {
     const { token } = await backendLogin(String(email), String(password));
     setSession(req, res, token);
-    res.redirect('/account');
+    res.redirect('/app');
   } catch (err) {
     res.status(401).send(R.renderLogin({ error: err.message || 'Invalid email or password.' }));
   }
 });
 
+// New Android users sign up here (the app handles signup on iOS).
+app.get('/signup', (req, res) => {
+  if (req.cookies && req.cookies.sg_token) { res.redirect('/app'); return; }
+  res.send(R.renderSignup({}));
+});
+
+app.post('/signup', async (req, res) => {
+  const { username, email, password } = req.body || {};
+  if (!username || !email || !password) {
+    res.status(400).send(R.renderSignup({ error: 'Fill in every field.', values: { username, email } }));
+    return;
+  }
+  try {
+    const { token } = await backendRegister(String(username), String(email), String(password));
+    setSession(req, res, token);
+    res.redirect('/verify-email');
+  } catch (err) {
+    res.status(400).send(R.renderSignup({ error: err.message || 'Could not create your account.', values: { username, email } }));
+  }
+});
+
+// Email verification (new signups get a 6-digit code by email).
+app.get('/verify-email', requireAuth, async (req, res) => {
+  const me = await apiGetSafe('/users/me', req.token);
+  if (me && me.email_verified) { res.redirect('/app'); return; }
+  res.send(R.renderVerifyEmail({ email: me && me.email }));
+});
+
+app.post('/verify-email', requireAuth, async (req, res) => {
+  if (!sameOrigin(req)) { res.status(403).send(R.renderVerifyEmail({ error: 'Bad origin.' })); return; }
+  const code = String((req.body && req.body.code) || '').trim();
+  try {
+    await apiPost('/auth/verify-email', req.token, { code });
+    res.redirect('/app');
+  } catch (err) {
+    res.status(400).send(R.renderVerifyEmail({ error: err.message || 'That code did not work.' }));
+  }
+});
+
+app.post('/resend-verification', requireAuth, async (req, res) => {
+  try { await apiPost('/auth/resend-verification', req.token, {}); } catch { /* best effort */ }
+  res.redirect('/verify-email');
+});
+
 app.get('/logout', (_req, res) => { clearSession(res); res.redirect('/'); });
+
+// ----- Secure same-origin API proxy -----------------------------------------
+// The browser never sees the JWT (it lives in an httpOnly cookie). Authed
+// client pages call /app/api/<backend-path>; we attach the bearer token and
+// forward to the backend, returning its response verbatim. This is what lets
+// the web app use every backend endpoint the iOS app uses.
+app.all(/^\/app\/api\/.+/, requireAuth, async (req, res) => {
+  if (req.method !== 'GET' && !sameOrigin(req)) { res.status(403).json({ error: 'bad origin' }); return; }
+  // Everything after '/app/api', including the query string. Block protocol-
+  // relative paths so this can't be pointed at another host.
+  let backendPath = req.originalUrl.slice('/app/api'.length);
+  if (!backendPath.startsWith('/') || backendPath.startsWith('//')) {
+    res.status(400).json({ error: 'bad path' }); return;
+  }
+  const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE';
+  try {
+    const upstream = await fetch(`${BACKEND_URL}${backendPath}`, {
+      method: req.method,
+      headers: {
+        Authorization: `Bearer ${req.token}`,
+        ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: hasBody ? JSON.stringify(req.body || {}) : undefined,
+    });
+    const text = await upstream.text();
+    res.status(upstream.status).set('Content-Type', upstream.headers.get('content-type') || 'application/json').send(text);
+  } catch (err) {
+    console.error('app proxy error:', err);
+    res.status(502).json({ error: 'upstream unavailable' });
+  }
+});
 
 // ----- Authenticated account dashboard --------------------------------------
 app.get('/account', requireAuth, async (req, res) => {
@@ -94,6 +169,54 @@ app.get('/account', requireAuth, async (req, res) => {
     console.error('account error:', err);
     res.status(500).send(R.renderNotFound());
   }
+});
+
+// ----- Web app: the play loop -----------------------------------------------
+// Hub: greeting, rank, quick actions, and the player's matches.
+app.get('/app', requireAuth, async (req, res) => {
+  try {
+    const me = await apiGet('/users/me', req.token);
+    const matches = (await apiGetSafe('/matches', req.token)) || [];
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderAppHome({ me, rank: rankForElo(me.elo), matches }));
+  } catch (err) {
+    if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
+    console.error('app home error:', err);
+    res.status(500).send(R.renderNotFound());
+  }
+});
+
+// Create / find a match (interactive; client JS drives it via the proxy).
+app.get('/app/play', requireAuth, (_req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.send(R.renderAppPlay({}));
+});
+
+// Match detail / lobby (SSR result + a "score round" link).
+app.get('/app/match/:id', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('match')); return; }
+  try {
+    const [me, match] = await Promise.all([
+      apiGet('/users/me', req.token),
+      apiGet(`/matches/${id}`, req.token),
+    ]);
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderAppMatch({ me, match }));
+  } catch (err) {
+    if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
+    if (err.code === 404) { res.status(404).send(R.renderNotFound('match')); return; }
+    console.error('app match error:', err);
+    res.status(500).send(R.renderNotFound('match'));
+  }
+});
+
+// Scorecard entry (interactive; client JS loads holes + submits via the proxy).
+app.get('/app/score/:id', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('match')); return; }
+  res.set('Cache-Control', 'private, no-store');
+  res.send(R.renderAppScore({ matchId: id }));
 });
 
 app.get('/account/clubs', requireAuth, async (req, res) => {
