@@ -148,7 +148,7 @@ function renderHome() {
       ${appStoreButton('Download on the App Store')}
       <a class="cta-ghost" href="/how-to-play">How it works</a>
     </div>
-    <img class="hero-crest" src="/crests/diamond.png" alt="Diamond rank crest" />
+    <img class="hero-crest" src="/logo.jpg" alt="Sacari Golf logo" />
   </section>
 
   <section class="feature">
