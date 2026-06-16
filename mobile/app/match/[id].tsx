@@ -15,6 +15,7 @@ import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { IdentityAvatar, IdentityName } from '../../components/UserIdentity';
 import { InviteFriendsModal } from '../../components/InviteFriendsModal';
+import { rankForElo } from '../../lib/rank';
 
 export default function MatchLobbyScreen() {
   const insets = useSafeAreaInsets();
@@ -36,6 +37,9 @@ export default function MatchLobbyScreen() {
   const [guestModalOpen, setGuestModalOpen] = useState(false);
   const [guestDraft, setGuestDraft] = useState<{ name: string; scores: string[] }[]>([]);
   const [savingGuests, setSavingGuests] = useState(false);
+  // Share-loop prompt: when a finished match is a win or a promotion, we nudge
+  // the player to share the recap at the dopamine moment (once per match).
+  const [sharePrompt, setSharePrompt] = useState<{ won: boolean; rankUp: boolean; delta: number; rankLabel: string } | null>(null);
   // The VS intro is triggered globally by MatchFoundWatcher (registered in
   // app/_layout.tsx) so it fires from any screen — including the scoring
   // screen mid-round and the moment the app foregrounds. No screen-local
@@ -74,6 +78,33 @@ export default function MatchLobbyScreen() {
   }, [id, user?.user_id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Share-loop trigger. When a completed match the viewer played is a WIN or a
+  // promotion, prompt them to share the recap — once per match. Promotion is
+  // derived from the current ELO and this match's signed swing, so no pre-match
+  // ELO needs to be stashed. Practice rounds and spectators never prompt.
+  useEffect(() => {
+    if (!match || !match.completed || match.is_practice) return;
+    const me = match.players?.find((p) => p.user_id === user?.user_id);
+    if (!me) return;
+    const myDelta = match.my_delta_elo ?? 0;
+    const won = match.result?.winner_side != null && match.result.winner_side === me.side;
+    const postElo = me.elo ?? 0;
+    const preRank = rankForElo(postElo - myDelta);
+    const postRank = rankForElo(postElo);
+    const rankUp = myDelta > 0 && postRank.label !== preRank.label;
+    if (!won && !rankUp) return;
+    const key = `share_prompt_${user?.user_id ?? 'anon'}_${id}`;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (await AsyncStorage.getItem(key)) return;     // already nudged for this match
+        await AsyncStorage.setItem(key, '1');
+        if (!cancelled) setSharePrompt({ won, rankUp, delta: myDelta, rankLabel: postRank.label });
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [match, user?.user_id, id]);
 
   // ── ALL HOOKS MUST BE DECLARED BEFORE THE EARLY RETURNS BELOW. ───────────
   // React hooks count must stay identical across renders. The three
@@ -174,7 +205,7 @@ export default function MatchLobbyScreen() {
     // A no-install recap link: opens a rich preview (crests, scores, ELO swing)
     // and a download CTA. Falls back to the bare domain line if id is missing.
     const recapUrl = id ? `https://sacarigolf.com/r/${id}` : 'https://sacarigolf.com';
-    lines.push(`See the full recap: ${recapUrl}`);
+    lines.push(won ? `Think you can beat me? ${recapUrl}` : `Full recap + rematch me → ${recapUrl}`);
     await Share.share({ message: lines.join('\n'), url: recapUrl });
   }, [match, user, id]);
 
@@ -780,6 +811,40 @@ export default function MatchLobbyScreen() {
           if (userId) router.push(`/user/${userId}` as any);
         }}
       />
+
+      {/* Share-loop prompt — celebratory nudge to share the recap right at the
+          win / rank-up moment. One tap shares; the recap link renders a rich
+          card in iMessage / socials and carries a "play on Sacari" hook. */}
+      <Modal
+        visible={!!sharePrompt}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSharePrompt(null)}
+      >
+        <View style={styles.sharePromptBackdrop}>
+          <View style={styles.sharePromptCard}>
+            <Text style={styles.sharePromptEmoji}>{sharePrompt?.rankUp ? '🎖️' : '🏆'}</Text>
+            <Text style={styles.sharePromptTitle}>
+              {sharePrompt?.rankUp ? `Promoted to ${sharePrompt.rankLabel}!` : 'Victory!'}
+            </Text>
+            <Text style={styles.sharePromptSub}>
+              {sharePrompt?.rankUp
+                ? `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} ELO. ` : ''}New rank unlocked — show it off.`
+                : `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} ELO. ` : ''}Brag a little and call out your next challenger.`}
+            </Text>
+            <TouchableOpacity
+              style={styles.sharePromptShareBtn}
+              onPress={() => { setSharePrompt(null); shareRoundSummary(); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.sharePromptShareText}>Share it</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setSharePrompt(null)} style={styles.sharePromptLater} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.sharePromptLaterText}>Maybe later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
     </View>
   );
@@ -936,6 +1001,25 @@ const styles = StyleSheet.create({
   invitePrimaryUrgent: { borderWidth: 2, backgroundColor: C.gold + '24' },
   invitePrimaryTitle: { color: C.gold, fontWeight: '900', fontSize: 16, letterSpacing: 0.3 },
   invitePrimarySub: { color: C.textMuted, fontSize: 12, marginTop: 5, lineHeight: 17 },
+
+  sharePromptBackdrop: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center', alignItems: 'center', padding: 28,
+  },
+  sharePromptCard: {
+    width: '100%', maxWidth: 340, backgroundColor: C.card, borderRadius: 20,
+    padding: 24, alignItems: 'center', borderWidth: 1, borderColor: C.gold + '55',
+  },
+  sharePromptEmoji: { fontSize: 44, marginBottom: 6 },
+  sharePromptTitle: { color: C.text, fontSize: 22, fontWeight: '900', textAlign: 'center' },
+  sharePromptSub: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 8, lineHeight: 19 },
+  sharePromptShareBtn: {
+    marginTop: 18, alignSelf: 'stretch', backgroundColor: C.gold,
+    borderRadius: 14, paddingVertical: 15, alignItems: 'center',
+  },
+  sharePromptShareText: { color: '#000', fontWeight: '900', fontSize: 16 },
+  sharePromptLater: { marginTop: 12, paddingVertical: 4 },
+  sharePromptLaterText: { color: C.textMuted, fontSize: 13, fontWeight: '600' },
 
   chatBtn: {
     marginTop: 12, borderRadius: 6, paddingVertical: 14, alignItems: 'center',

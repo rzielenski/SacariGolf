@@ -401,9 +401,14 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      LEFT JOIN rounds r_me         ON r_me.match_id = p.match_id AND r_me.user_id = p.user_id
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
+     -- Bots never appear in the feed. They play and rank like real players but
+     -- don't author posts; this read-layer filter is the hard guarantee, so a
+     -- stray bot post from ANY code path can never surface here (no more
+     -- deleting them by hand after every deploy).
      -- Owner @everyone announcements bypass the scope filter so they reach
      -- every user's feed; everything else honors friends / local scope.
-     WHERE (TRUE${scopeClause} OR p.is_announcement = TRUE)${beforeClause}
+     WHERE u.is_bot = false
+       AND (TRUE${scopeClause} OR p.is_announcement = TRUE)${beforeClause}
      ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`,
     params

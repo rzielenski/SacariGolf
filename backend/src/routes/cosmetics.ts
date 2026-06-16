@@ -258,6 +258,7 @@ router.get('/weekly-cup/last-champion', requireAuth, wrap(async (_req: AuthReque
        FROM weekly_cup_winners w
        JOIN weekly_cups wc ON wc.cup_id = w.cup_id
        JOIN users u        ON u.user_id = w.user_id
+      WHERE u.is_bot = false   -- never surface a (stale) bot champion
       ORDER BY w.decided_at DESC
       LIMIT 1`,
   );

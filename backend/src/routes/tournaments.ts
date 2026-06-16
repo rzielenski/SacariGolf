@@ -164,6 +164,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
        LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY MIN(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`,
@@ -180,6 +181,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
        LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY SUM(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`,
@@ -198,6 +200,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
        LEFT JOIN match_players mp ON mp.match_id = m.match_id AND mp.user_id = tp.user_id
        LEFT JOIN match_results mr ON mr.match_id = m.match_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY COUNT(*) FILTER (WHERE mr.winner_side = mp.side) DESC NULLS LAST, COUNT(mr.match_id) DESC`,

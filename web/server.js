@@ -359,6 +359,9 @@ app.get('/matches', async (_req, res) => {
          LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
          LEFT JOIN courses c ON c.course_id = t.course_id
         GROUP BY m.match_id, mr.created_at, mr.winner_side, m.num_holes, m.format
+        -- Drop any match involving a bot (bot-vs-bot or human-vs-bot) so the
+        -- public feed only shows real head-to-heads.
+        HAVING bool_or(u.is_bot) = false
         ORDER BY mr.created_at DESC
         LIMIT 40`
     );

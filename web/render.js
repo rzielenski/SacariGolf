@@ -773,8 +773,10 @@ function renderRecap(data) {
     <div class="rc-sc-list">${scorecards}</div>
   </section>` : ''}
   <section class="cta-band">
-    <h2>Think you can take them?</h2>
-    ${appStoreButton('Play on Sacari Golf')}
+    <div class="rc-kicker">Free · ranked golf</div>
+    <h2>${winner ? `Think you can beat ${esc(winner.players[0].username)}?` : 'Think you can take them?'}</h2>
+    <p>Track every round, get a live handicap, and climb the ranked ladder. Free to play, instant matches.</p>
+    ${appStoreButton('Get Sacari Golf — free')}
   </section>`;
 
   const ogCrest = winner ? winner.players[0].rank.tier.key : 'diamond';
