@@ -35,6 +35,18 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
+// Bot profile photos. Bots store a RELATIVE avatar_url (/avatars/bot/N) so it
+// renders through the exact same API_BASE-prefixed path as a real uploaded
+// avatar — no client change needed, and it resolves on every screen. We
+// redirect to a real-face portrait CDN so a bot is indistinguishable from a
+// human at a glance. Public on purpose: <Image> loads avatars without an auth
+// header, same as /uploads. Swapping the portrait source later is a one-liner.
+app.get('/avatars/bot/:n', (req, res) => {
+  const n = Math.max(0, Math.min(99, parseInt(req.params.n, 10) || 0));
+  res.set('Cache-Control', 'public, max-age=2592000'); // 30 days
+  res.redirect(302, `https://randomuser.me/api/portraits/men/${n}.jpg`);
+});
+
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/courses', coursesRouter);

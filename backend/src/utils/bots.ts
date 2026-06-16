@@ -5,8 +5,9 @@
  * opponent within a few hours still gets a match resolved instead of waiting
  * forever. Design rules:
  *
- *   • One bot per individual rank (Wood IV … Diamond I, plus Obsidian). Each
- *     bot sits at the MIDPOINT ELO of its division.
+ *   • Two bots per rank (a low + high sub-band of the tier), plus an Obsidian
+ *     capstone — ~15 total, not one per division. Names are a mix of real-
+ *     sounding players and goofy golf handles, like an actual player base.
  *   • Skill is anchored so DIAMOND ≈ SCRATCH (handicap 0) and scales linearly:
  *     every ~37.5 ELO below Diamond's floor (1300) is +1 stroke of handicap,
  *     so Wood is a ~32-handicap and Obsidian plays a couple under.
@@ -44,19 +45,20 @@ const TIERS: [string, string, number][] = [
   ['diamond', 'Diamond', 1300],
 ];
 
-// Real-looking player names, ordered weakest → strongest: one per division
-// (Wood IV … Diamond I) then Obsidian last. Assigned positionally so the pool
-// is stable across seeds; the email/key — not the name — is the idempotency
-// key, so a bot can be renamed here without orphaning its account.
+// A mix of real-sounding names and goofy golf handles — like an actual player
+// base, not a roster of obvious NPCs. Ordered weakest → strongest (low/high per
+// rank); the goofier handles skew low-rank, the serious names high-rank.
+// Assigned positionally; the email key (not the name) is the idempotency key,
+// so a bot can be renamed here without orphaning its account.
 const BOT_NAMES = [
-  'Pete Hargrove', 'Marcus Webb', 'Tyler Boone', 'Greg Almeida',        // Wood IV..I
-  'Sam Whitfield', 'Andre Coleman', 'Nico Park', 'Russ Dalton',         // Bronze IV..I
-  'Cole Bishop', 'Javier Mendez', 'Brett Sandoval', 'Owen Fletcher',    // Silver IV..I
-  'Damon Reyes', 'Will Castellano', 'Theo Brandt', 'Hank Mercer',       // Gold IV..I
-  'Elliot Vance', 'Jonah Pruitt', 'Caleb Ostrander', 'Reid Calloway',   // Platinum IV..I
-  'Victor Salas', 'Dominic Hale', 'Asher Quinn', 'Lucas Behrens',       // Ruby IV..I
-  'Spencer Wolfe', 'Adrian Cross', 'Roman Sato', 'Julian Frost',        // Diamond IV..I
-  'Maxwell Sterling',                                                    // Obsidian
+  'Shankapotamus', 'Mulligan Mike',     // Wood   (low / high)
+  'Bogey Bandit', 'Greg Almeida',       // Bronze
+  'Chip Shot Chad', 'Marcus Webb',      // Silver
+  'Sandy Bunker', 'Cole Bishop',        // Gold
+  'Putt Pirate', 'Elliot Vance',        // Platinum
+  'Shooter McGavin', 'Victor Salas',    // Ruby
+  'Adrian Cross', 'Roman Sato',         // Diamond
+  'Maxwell Sterling',                   // Obsidian
 ];
 
 /** Strokes over a scratch 18-hole round for a bot at this ELO. Diamond floor
@@ -66,20 +68,26 @@ function handicapForElo(elo: number): number {
   return Math.max(-3, Math.min(36, Math.round(h * 10) / 10));
 }
 
-interface BotRank { key: string; username: string; email: string; elo: number; handicap: number }
+interface BotRank { key: string; username: string; email: string; elo: number; handicap: number; avatarUrl: string }
 
 const BOT_RANKS: BotRank[] = (() => {
   const out: BotRank[] = [];
   let n = 0;
+  // Two bots per rank — a low and high sub-band within the tier's ~200-ELO
+  // width — so matchmaking always finds a nearby-skill opponent without one
+  // bot per division flooding the leaderboard.
   for (const [key, , floor] of TIERS) {
-    for (let div = 4; div >= 1; div--) {
-      const elo = floor + (4 - div) * 50 + 25;   // division midpoint
-      out.push({ key: `${key}${div}`, username: BOT_NAMES[n++],
-                 email: `bot+${key}${div}@sacarigolf.bot`, elo, handicap: handicapForElo(elo) });
+    for (const offset of [60, 140]) {
+      const elo = floor + offset;
+      const idx = n;
+      out.push({ key: `${key}-${offset}`, username: BOT_NAMES[n++],
+                 email: `bot+${key}${offset}@sacarigolf.bot`, elo, handicap: handicapForElo(elo),
+                 avatarUrl: `/avatars/bot/${idx}` });   // distinct real-face portrait per bot
     }
   }
+  const oIdx = n;
   out.push({ key: 'obsidian', username: BOT_NAMES[n++], email: 'bot+obsidian@sacarigolf.bot',
-             elo: 1550, handicap: handicapForElo(1550) });
+             elo: 1550, handicap: handicapForElo(1550), avatarUrl: `/avatars/bot/${oIdx}` });
   return out;
 })();
 
@@ -90,28 +98,45 @@ export async function seedBots(): Promise<void> {
   for (const b of BOT_RANKS) {
     try {
       await pool.query(
-        `INSERT INTO users (username, email, elo, handicap_index, is_bot, email_verified)
-         SELECT $1, $2, $3, $4, TRUE, TRUE
+        `INSERT INTO users (username, email, elo, handicap_index, is_bot, email_verified, avatar_url)
+         SELECT $1, $2, $3, $4, TRUE, TRUE, $5
           WHERE NOT EXISTS (SELECT 1 FROM users WHERE email = $2 OR username = $1)`,
-        [b.username, b.email, b.elo, b.handicap],
+        [b.username, b.email, b.elo, b.handicap, b.avatarUrl],
       );
       // Keep ELO/handicap in sync AND migrate the username to the curated
       // real-looking name — but only if no OTHER account already holds it
       // (case-insensitive), so we never collide with a real user.
       await pool.query(
         `UPDATE users u
-            SET elo = $2, handicap_index = $3, is_bot = TRUE,
+            SET elo = $2, handicap_index = $3, is_bot = TRUE, avatar_url = $5,
                 username = CASE
                   WHEN EXISTS (
                     SELECT 1 FROM users o
                      WHERE lower(o.username) = lower($4) AND o.user_id <> u.user_id
                   ) THEN u.username ELSE $4 END
           WHERE u.email = $1`,
-        [b.email, b.elo, b.handicap, b.username],
+        [b.email, b.elo, b.handicap, b.username, b.avatarUrl],
       );
     } catch (err) {
       console.error('[bots] seed failed for', b.username, err);
     }
+  }
+
+  // Prune any seeded bots no longer in the roster (e.g. after shrinking from
+  // one-per-division to a couple per rank, or renaming the pool). Only ever
+  // touches our own bot accounts (guarded on the bot email pattern); their
+  // match_players/rounds cascade away. Idempotent — a no-op once the DB
+  // matches the roster.
+  try {
+    await pool.query(
+      `DELETE FROM users
+        WHERE is_bot = TRUE
+          AND email LIKE 'bot+%@sacarigolf.bot'
+          AND email <> ALL($1::text[])`,
+      [BOT_RANKS.map((b) => b.email)],
+    );
+  } catch (err) {
+    console.error('[bots] prune failed', err);
   }
 }
 
@@ -629,10 +654,13 @@ export async function runBotTeamMatchPass(): Promise<void> {
  */
 export async function backfillBotVsBotMatches(perBot = 25): Promise<void> {
   try {
-    const { rows: done } = await pool.query(
-      `SELECT EXISTS(SELECT 1 FROM match_results WHERE details->>'botVsBot' = 'true') AS done`,
+    // Skip if the current bots already carry a match history, so this never
+    // re-runs on later boots. Robust to roster changes: freshly-seeded bots
+    // sit near 0 matches, so a shrunk/renamed pool gets re-backfilled.
+    const { rows: chk } = await pool.query(
+      `SELECT COALESCE(AVG(total_matches), 0)::float AS avg_m FROM users WHERE is_bot = TRUE`,
     );
-    if (done[0]?.done) return;   // already backfilled
+    if ((chk[0]?.avg_m ?? 0) >= 12) return;   // already populated
 
     const { rows: botRows } = await pool.query(`SELECT user_id, elo FROM users WHERE is_bot = TRUE`);
     if (botRows.length < 2) return;
