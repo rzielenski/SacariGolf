@@ -2002,7 +2002,12 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
 router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: rounds } = await pool.query(
     `SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
-            COALESCE(array_length(r.hole_scores, 1), t.num_holes) AS holes_played,
+            -- Holes actually played: the per-hole array length if present, else
+            -- the MATCH's recorded hole count, and only then the teebox's. A
+            -- 9-hole round entered as a total-only (no array) on an 18-hole
+            -- teebox must NOT fall through to 18 — that was treating 9-hole
+            -- rounds as 18 and wrecking the differential.
+            COALESCE(array_length(r.hole_scores, 1), m.num_holes, t.num_holes) AS holes_played,
             t.course_rating, t.slope_rating, t.num_holes AS teebox_holes,
             t.front_course_rating, t.front_slope_rating,
             t.back_course_rating, t.back_slope_rating,
@@ -2042,7 +2047,14 @@ router.get('/:id/handicap', requireAuth, wrap(async (req: AuthRequest, res: Resp
     };
   });
 
-  const { handicapIndex, useCount } = whsHandicapIndex(differentials.map((d) => d.differential));
+  // 9-hole rounds are scaled to their 18-hole EQUIVALENT (×2) for the index so
+  // they pool fairly with 18-hole rounds. Without this, a 9-hole differential is
+  // half-scale, so a bad 9 (e.g. 49 on a front nine) lands among a player's
+  // *best* rounds and lowers the handicap instead of raising it. The per-round
+  // `differential` shown in the list above stays the intuitive 9-hole figure.
+  const { handicapIndex, useCount } = whsHandicapIndex(
+    differentials.map((d) => (d.is_nine_hole ? d.differential * 2 : d.differential)),
+  );
 
   return res.json({
     handicap_index: handicapIndex,

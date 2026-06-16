@@ -141,7 +141,10 @@ export async function backfillHandicaps(): Promise<{ usersUpdated: number }> {
   const { rows } = await pool.query(`
     WITH ranked AS (
       SELECT r.user_id, r.total_score,
-             COALESCE(array_length(r.hole_scores, 1), t.num_holes) AS holes_played,
+             -- per-hole array length → else the MATCH's hole count → else the
+             -- teebox's (a 9-hole total-only round on an 18-hole tee must not
+             -- read as 18). Mirrors the live /handicap query.
+             COALESCE(array_length(r.hole_scores, 1), m.num_holes, t.num_holes) AS holes_played,
              t.num_holes AS teebox_holes,
              m.holes_subset,
              t.course_rating, t.slope_rating,
@@ -168,7 +171,12 @@ export async function backfillHandicaps(): Promise<{ usersUpdated: number }> {
 
   let usersUpdated = 0;
   for (const [userId, rs] of byUser) {
-    const diffs = rs.map((r) => roundDifferential(r).diff);
+    // 18-hole equivalent for the index: a 9-hole differential is half-scale,
+    // so double it before pooling (mirrors the live /handicap endpoint).
+    const diffs = rs.map((r) => {
+      const d = roundDifferential(r).diff;
+      return r.holes_played === 9 ? d * 2 : d;
+    });
     const { handicapIndex } = whsHandicapIndex(diffs);
     if (handicapIndex == null) continue;
     await pool.query(`UPDATE users SET handicap_index = $1 WHERE user_id = $2`, [handicapIndex, userId]);
