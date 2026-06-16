@@ -668,6 +668,26 @@ function avatarLayer(data) {
 function statCell(label, value) {
   return `<div class="stat"><div class="stat-val">${esc(value)}</div><div class="stat-label">${esc(label)}</div></div>`;
 }
+/** One recap row: a link to /r/<matchId> showing W/L/T, opponent, course/date,
+ *  to-par, and the ELO swing. Shared by the profile + the per-user recaps page. */
+function recapRow(rec) {
+  const cls = rec.result; // win | loss | tie
+  const letter = rec.result === 'win' ? 'W' : rec.result === 'loss' ? 'L' : 'T';
+  const tp = fmtToPar(rec.toPar);
+  const dl = rec.delta;
+  const elo = dl
+    ? `<span class="recap-elo ${dl > 0 ? 'up' : 'down'}">${dl > 0 ? '+' : ''}${dl}</span>`
+    : `<span class="recap-elo"></span>`;
+  return `<a class="recap-row ${cls}" href="/r/${esc(rec.matchId)}">
+    <span class="recap-result ${cls}">${letter}</span>
+    <span class="recap-main">
+      <span class="recap-vs">vs ${esc(rec.oppName || 'opponent')}</span>
+      <span class="recap-meta">${esc(rec.courseName || 'Round')}${rec.date ? ' · ' + esc(fmtDate(rec.date)) : ''}</span>
+    </span>
+    <span class="round-topar ${tp ? toParClass(rec.toPar) : ''}">${tp ? esc(tp) : ''}</span>
+    ${elo}
+  </a>`;
+}
 function renderProfile(data) {
   const r = data.rank;
   const losses = Math.max(0, data.totalMatches - data.totalWins - data.totalTies);
@@ -675,14 +695,8 @@ function renderProfile(data) {
   const rankLine = r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
   const sub = r.isObsidian ? `${r.displayElo} ELO` : `${r.lp} LP`;
 
-  const recent = (data.recentRounds || []).map((round) => {
-    const tp = fmtToPar(round.toPar);
-    return `<li class="round">
-      <span class="round-course">${esc(round.courseName || 'Round')}</span>
-      <span class="round-meta">${esc(fmtDate(round.date))}</span>
-      ${tp ? `<span class="round-topar ${toParClass(round.toPar)}">${esc(tp)}</span>` : ''}
-    </li>`;
-  }).join('');
+  const recapRows = (data.recaps || []).map(recapRow).join('');
+  const recapsPath = `/u/${encodeURIComponent(data.username)}/recaps`;
 
   const body = `
   <section class="card">
@@ -700,7 +714,11 @@ function renderProfile(data) {
       ${statCell('Handicap', fmtHandicap(data.handicap))}
       ${statCell('Since', fmtDate(data.createdAt))}
     </div>
-    ${recent ? `<div class="recent"><div class="recent-title">Recent rounds</div><ul class="rounds">${recent}</ul></div>` : ''}
+    ${recapRows ? `<div class="recent">
+      <div class="recent-title">Recent recaps</div>
+      <div class="recaps">${recapRows}</div>
+      ${data.hasMoreRecaps ? `<a class="recaps-all" href="${esc(recapsPath)}">See all recaps →</a>` : ''}
+    </div>` : ''}
     ${appStoreButton('Get Sacari Golf')}
   </section>`;
 
@@ -718,6 +736,36 @@ function renderProfile(data) {
     ogImage: `${data.siteUrl}/crests/${r.tier.key}.png`,
     ogUrl: data.profileUrl,
     jsonLd: profileLd,
+    active: '',
+    body,
+  });
+}
+
+// ----- Per-user recaps page -------------------------------------------------
+function renderUserRecaps(data) {
+  const r = data.rank;
+  const rankLine = r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
+  const rows = (data.recaps || []).map(recapRow).join('');
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/u/${encodeURIComponent(data.username)}">&larr; ${esc(data.username)}</a>
+    <h1>${esc(data.username)} · Recaps</h1>
+    <p>Round and match recaps for ${esc(data.username)}, ${esc(rankLine)} on Sacari Golf.</p>
+  </section>
+  <section class="recaps-page">
+    <div class="recaps">${rows || '<div class="empty">No recaps yet. Play a ranked round in the app.</div>'}</div>
+  </section>
+  <section class="cta-band">
+    <h2>Play your own ranked rounds.</h2>
+    ${appStoreButton('Get Sacari Golf')}
+  </section>`;
+
+  return page({
+    title: `${data.username} recaps · Sacari Golf`,
+    description: `Every round and match recap for ${data.username} on Sacari Golf, with results, scores, and ELO swings.`,
+    ogImage: data.siteUrl ? `${data.siteUrl}/crests/${r.tier.key}.png` : '',
+    ogUrl: data.recapsUrl,
+    canonical: data.recapsUrl,
     active: '',
     body,
   });
@@ -1071,7 +1119,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 
 module.exports = {
   renderHome, renderHowTo, renderLeaderboard, renderCoursesIndex, renderCourse,
-  renderRecap, renderProfile, renderStatic, renderNotFound, esc,
+  renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
 };

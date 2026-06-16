@@ -192,6 +192,28 @@ main { flex: 1; width: 100%; }
 .recent-title { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 8px; }
 .card .cta, .card .recent { }
 
+/* Recaps (profile + per-user recaps page) */
+.recaps { display: flex; flex-direction: column; gap: 7px; }
+.recap-row { display: grid; grid-template-columns: 28px 1fr auto auto; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; text-align: left;
+  transition: border-color .12s ease, transform .12s ease; }
+.recap-row:hover { border-color: var(--gold); transform: translateY(-1px); }
+.recap-result { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
+  font-weight: 900; font-size: 0.82rem; flex: none; }
+.recap-result.win { background: rgba(122,171,120,0.18); color: var(--good); }
+.recap-result.loss { background: rgba(176,52,52,0.20); color: #d98686; }
+.recap-result.tie { background: rgba(154,151,138,0.18); color: var(--muted); }
+.recap-main { min-width: 0; }
+.recap-vs { display: block; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recap-meta { display: block; color: var(--muted); font-size: 0.74rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recap-row .round-topar { min-width: 30px; font-size: 0.9rem; }
+.recap-elo { font-weight: 900; font-size: 0.82rem; min-width: 36px; text-align: right; }
+.recap-elo.up { color: var(--good); } .recap-elo.down { color: #d98686; }
+.recaps-all { display: inline-block; margin-top: 12px; font-weight: 700; font-size: 0.9rem; }
+.recaps-page { max-width: 640px; margin: 14px auto 0; padding: 0 16px; }
+.recaps-back { display: inline-block; margin-bottom: 6px; color: var(--muted); font-weight: 700; font-size: 0.85rem; }
+.recaps-back:hover { color: var(--gold); }
+
 /* Match recap */
 .rc-head { text-align: center; }
 .rc-kicker { color: var(--gold); font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; margin-bottom: 6px; }

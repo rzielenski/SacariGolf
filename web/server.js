@@ -379,6 +379,70 @@ app.get('/r/:id', async (req, res) => {
   }
 });
 
+// Pull a user's recent resolved (non-practice) matches as recap rows: result,
+// opponent, score, ELO swing, course, date. Shared by the profile + recaps page.
+async function fetchUserRecaps(userId, limit) {
+  const { rows } = await pool.query(
+    `SELECT m.match_id, mr.created_at AS resolved_at, mr.winner_side, mr.details,
+            mp.side AS my_side, r.total_score, t.par AS teebox_par, c.course_name,
+            opp.username AS opp_username, opp.is_bot AS opp_is_bot
+       FROM match_players mp
+       JOIN matches m ON m.match_id = mp.match_id AND m.is_practice = false
+       JOIN match_results mr ON mr.match_id = m.match_id
+       LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = mp.user_id
+       LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+       LEFT JOIN courses c ON c.course_id = t.course_id
+       LEFT JOIN LATERAL (
+         SELECT u2.username, u2.is_bot
+           FROM match_players mp2 JOIN users u2 ON u2.user_id = mp2.user_id
+          WHERE mp2.match_id = m.match_id AND mp2.side <> mp.side
+          ORDER BY mp2.side LIMIT 1
+       ) opp ON true
+      WHERE mp.user_id = $1
+      ORDER BY mr.created_at DESC
+      LIMIT $2`,
+    [userId, limit]
+  );
+  return rows.map((row) => {
+    const deltas = (row.details && row.details.playerDeltas) || {};
+    const tied = row.winner_side == null;
+    return {
+      matchId: row.match_id,
+      date: row.resolved_at,
+      result: tied ? 'tie' : (Number(row.my_side) === Number(row.winner_side) ? 'win' : 'loss'),
+      oppName: row.opp_username,
+      oppIsBot: row.opp_is_bot,
+      toPar: row.total_score != null && row.teebox_par != null ? row.total_score - row.teebox_par : null,
+      courseName: row.course_name,
+      delta: Math.round(Number(deltas[userId] ?? 0)),
+    };
+  });
+}
+
+// ----- Player recaps (browse all of a player's round + match recaps) --------
+app.get('/u/:username/recaps', async (req, res) => {
+  const username = String(req.params.username || '').slice(0, 40);
+  try {
+    const { rows } = await pool.query(
+      `SELECT user_id, username, elo FROM users WHERE lower(username) = lower($1) LIMIT 1`,
+      [username]
+    );
+    if (!rows.length) { res.status(404).send(R.renderNotFound(username)); return; }
+    const u = rows[0];
+    const recaps = await fetchUserRecaps(u.user_id, 60);
+    const rank = rankForElo(u.elo);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.send(R.renderUserRecaps({
+      username: u.username, rank, recaps,
+      siteUrl: SITE_URL,
+      recapsUrl: SITE_URL ? `${SITE_URL}/u/${encodeURIComponent(u.username)}/recaps` : '',
+    }));
+  } catch (err) {
+    console.error('user recaps error:', err);
+    res.status(500).send(R.renderNotFound(username));
+  }
+});
+
 // ----- Player profile -------------------------------------------------------
 app.get('/u/:username', async (req, res) => {
   const username = String(req.params.username || '').slice(0, 40);
@@ -392,16 +456,9 @@ app.get('/u/:username', async (req, res) => {
     if (!rows.length) { res.status(404).send(R.renderNotFound(username)); return; }
     const u = rows[0];
 
-    const { rows: roundRows } = await pool.query(
-      `SELECT r.total_score, r.created_at, t.par AS teebox_par, c.course_name
-         FROM rounds r
-         JOIN matches m ON m.match_id = r.match_id AND m.completed = true
-         LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
-         LEFT JOIN courses c ON c.course_id = t.course_id
-        WHERE r.user_id = $1 AND r.total_score IS NOT NULL
-        ORDER BY r.created_at DESC LIMIT 5`,
-      [u.user_id]
-    );
+    const PROFILE_RECAPS = 6;
+    const recaps = await fetchUserRecaps(u.user_id, PROFILE_RECAPS + 1);
+    const hasMoreRecaps = recaps.length > PROFILE_RECAPS;
 
     const rank = rankForElo(u.elo);
     res.set('Cache-Control', 'public, max-age=300');
@@ -410,11 +467,8 @@ app.get('/u/:username', async (req, res) => {
       avatarUrl: u.avatar_url ? BACKEND_URL + u.avatar_url : null,
       elo: u.elo, totalMatches: u.total_matches, totalWins: u.total_wins, totalTies: u.total_ties,
       handicap: u.handicap_index, bio: u.bio, createdAt: u.created_at,
-      recentRounds: roundRows.map((rr) => ({
-        courseName: rr.course_name,
-        toPar: rr.total_score != null && rr.teebox_par != null ? rr.total_score - rr.teebox_par : null,
-        date: rr.created_at,
-      })),
+      recaps: recaps.slice(0, PROFILE_RECAPS),
+      hasMoreRecaps,
       rank, medallion: medallionFor(rank.tier.key),
       siteUrl: SITE_URL, appStoreUrl: APP_STORE_URL,
       profileUrl: SITE_URL ? `${SITE_URL}/u/${encodeURIComponent(u.username)}` : '',
