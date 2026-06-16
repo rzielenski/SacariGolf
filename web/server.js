@@ -196,6 +196,57 @@ app.get('/leaderboard', async (_req, res) => {
   }
 });
 
+// JSON autocomplete for the player search box (type-ahead by username).
+app.get('/api/players/search', async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 40).replace(/[%_]/g, '') : '';
+  if (q.length < 2) { res.json([]); return; }
+  try {
+    const { rows } = await pool.query(
+      `SELECT username, elo FROM users
+        WHERE is_bot = false AND username ILIKE $1
+        ORDER BY (lower(username) = lower($2)) DESC, elo DESC
+        LIMIT 8`,
+      [`${q}%`, q]
+    );
+    res.set('Cache-Control', 'public, max-age=30');
+    res.json(rows.map((r) => {
+      const rk = rankForElo(r.elo);
+      return { username: r.username, rankLabel: rk.isObsidian ? `Obsidian ${rk.displayElo}` : rk.label, color: rk.color };
+    }));
+  } catch (err) {
+    console.error('player search error:', err);
+    res.status(500).json([]);
+  }
+});
+
+// ----- Recent matches feed --------------------------------------------------
+app.get('/matches', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.match_id, mr.created_at AS resolved_at, mr.winner_side, m.num_holes, m.format,
+              json_agg(json_build_object(
+                'side', mp.side, 'username', u.username, 'elo', u.elo, 'is_bot', u.is_bot,
+                'total_score', r.total_score, 'teebox_par', t.par, 'course_name', c.course_name
+              ) ORDER BY mp.side) AS players
+         FROM match_results mr
+         JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
+         JOIN match_players mp ON mp.match_id = m.match_id
+         JOIN users u ON u.user_id = mp.user_id
+         LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = mp.user_id
+         LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+         LEFT JOIN courses c ON c.course_id = t.course_id
+        GROUP BY m.match_id, mr.created_at, mr.winner_side, m.num_holes, m.format
+        ORDER BY mr.created_at DESC
+        LIMIT 40`
+    );
+    res.set('Cache-Control', 'public, max-age=60');
+    res.send(R.renderMatchesFeed({ matches: rows }));
+  } catch (err) {
+    console.error('matches feed error:', err);
+    res.status(500).send(R.renderNotFound());
+  }
+});
+
 // ----- Courses index + search ----------------------------------------------
 app.get('/courses', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 60).replace(/[%_]/g, '') : '';
@@ -590,6 +641,7 @@ app.get('/sitemap.xml', async (_req, res) => {
     { loc: '/', priority: '1.0', lastmod: today },
     { loc: '/how-to-play', priority: '0.8', lastmod: today },
     { loc: '/leaderboard', priority: '0.8' },
+    { loc: '/matches', priority: '0.7' },
     { loc: '/courses', priority: '0.8' },
     { loc: '/privacy', priority: '0.3', lastmod: today },
     { loc: '/terms', priority: '0.3', lastmod: today },

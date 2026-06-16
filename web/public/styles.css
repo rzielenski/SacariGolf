@@ -124,6 +124,27 @@ main { flex: 1; width: 100%; }
 .lb-rank { font-weight: 800; font-size: 0.85rem; }
 .lb-rec { color: var(--muted); font-size: 0.85rem; min-width: 60px; text-align: right; }
 
+/* Recent matches feed */
+.feed { max-width: 640px; margin: 10px auto 0; padding: 0 16px 30px; display: flex; flex-direction: column; gap: 12px; }
+.feed-item { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px;
+  transition: border-color .12s ease; }
+.feed-item:hover { border-color: rgba(212,169,63,0.35); }
+.feed-side { display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 10px; padding: 6px 0; }
+.feed-side + .feed-side { border-top: 1px solid var(--border); }
+.feed-crest { width: 30px; height: 30px; object-fit: contain; flex: none; }
+.feed-id { min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+.feed-names { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
+.feed-name { color: var(--text); }
+.feed-name:hover { color: var(--gold); }
+.feed-side.win .feed-name { color: var(--gold); }
+.feed-rank { flex: none; font-size: 0.74rem; font-weight: 700; white-space: nowrap; }
+.feed-sc { font-weight: 900; font-size: 1.05rem; text-align: right; white-space: nowrap; color: var(--text); }
+.feed-sc small { font-weight: 700; font-size: 0.72rem; color: var(--muted); }
+.feed-side.win .feed-sc { color: var(--gold); }
+.feed-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.feed-meta { color: var(--muted); font-size: 0.76rem; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-recap-link { font-weight: 700; font-size: 0.82rem; white-space: nowrap; flex: none; }
+
 /* Courses */
 .course-search-wrap { position: relative; max-width: 460px; margin-top: 16px; }
 .course-search-wrap .course-search { margin-top: 0; }

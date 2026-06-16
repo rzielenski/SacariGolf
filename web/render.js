@@ -4,7 +4,7 @@
  */
 'use strict';
 
-const { TIERS, medallionFor } = require('./rank');
+const { TIERS, medallionFor, rankForElo } = require('./rank');
 
 const APP_STORE_URL = process.env.APP_STORE_URL || '';
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
@@ -48,6 +48,18 @@ function fmtHandicap(h) {
   return h < 0 ? '+' + Math.abs(h).toFixed(1) : h.toFixed(1);
 }
 function toParClass(n) { return n == null ? '' : n <= 0 ? 'good' : 'bad'; }
+function fmtAgo(d) {
+  if (!d) return '';
+  const then = new Date(d).getTime();
+  if (isNaN(then)) return '';
+  const s = Math.max(0, (Date.now() - then) / 1000);
+  if (s < 60) return 'just now';
+  const m = s / 60; if (m < 60) return `${Math.floor(m)}m ago`;
+  const h = m / 60; if (h < 24) return `${Math.floor(h)}h ago`;
+  const days = h / 24; if (days < 30) return `${Math.floor(days)}d ago`;
+  const mo = days / 30; if (mo < 12) return `${Math.floor(mo)}mo ago`;
+  return `${Math.floor(mo / 12)}y ago`;
+}
 
 function nav(active, authed) {
   const link = (href, key, label) =>
@@ -63,6 +75,7 @@ function nav(active, authed) {
     <nav class="nav">
       ${link('/how-to-play', 'howto', 'How to Play')}
       ${link('/leaderboard', 'leaderboard', 'Rankings')}
+      ${link('/matches', 'matches', 'Matches')}
       ${link('/courses', 'courses', 'Courses')}
       ${account}
       ${cta}
@@ -76,6 +89,7 @@ function foot() {
     <div class="foot-links">
       <a href="/how-to-play">How to Play</a>
       <a href="/leaderboard">Rankings</a>
+      <a href="/matches">Matches</a>
       <a href="/courses">Courses</a>
       <a href="/support">Support</a>
       <a href="/privacy">Privacy</a>
@@ -296,7 +310,14 @@ function renderLeaderboard({ players }) {
   const body = `
   <section class="page-head">
     <h1>Global Rankings</h1>
-    <p>The top players climbing the Sacari ladder. Tap any player for their full profile.</p>
+    <p>The top players climbing the Sacari ladder. Search any player, or tap a row for their full profile.</p>
+    <div class="course-search-wrap">
+      <form class="course-search" method="get" action="/leaderboard" autocomplete="off">
+        <input type="text" name="q" id="player-q" placeholder="Search players by username..." autocomplete="off" />
+        <button type="submit">Search</button>
+      </form>
+      <div class="ac-list" id="player-ac" hidden></div>
+    </div>
   </section>
   <section class="lb">
     <div class="lb-head">
@@ -304,7 +325,8 @@ function renderLeaderboard({ players }) {
       <span class="lb-name">Player</span><span class="lb-rank">Rank</span><span class="lb-rec">W-L-T</span>
     </div>
     ${rows || '<div class="empty">No ranked players yet.</div>'}
-  </section>`;
+  </section>
+  <script src="/players.js?v=${ASSET_V}" defer></script>`;
 
   return page({
     title: 'Global Rankings. Sacari Golf',
@@ -312,6 +334,73 @@ function renderLeaderboard({ players }) {
     ogImage: SITE_URL ? `${SITE_URL}/crests/obsidian.png` : '',
     ogUrl: SITE_URL ? `${SITE_URL}/leaderboard` : '',
     active: 'leaderboard',
+    body,
+  });
+}
+
+// ----- Recent matches feed --------------------------------------------------
+function feedSide(side) {
+  const rep = side.players[0];
+  const rk = rankForElo(rep.elo);
+  const names = side.players.map((p) => p.is_bot
+    ? `<span class="feed-name">${esc(p.username)}</span>`
+    : `<a class="feed-name" href="/u/${encodeURIComponent(p.username)}">${esc(p.username)}</a>`).join(' &amp; ');
+  const rankLabel = rk.isObsidian ? `Obsidian ${rk.displayElo}` : rk.label;
+  let score = '';
+  if (side.players.length === 1 && rep.total_score != null) {
+    const tp = rep.teebox_par != null ? fmtToPar(rep.total_score - rep.teebox_par) : '';
+    score = `${esc(rep.total_score)}${tp ? ` <small>${esc(tp)}</small>` : ''}`;
+  }
+  return `<div class="feed-side ${side.isWinner ? 'win' : ''}">
+    <img class="feed-crest" src="/crests/${esc(rk.tier.key)}.png" alt="" loading="lazy" />
+    <span class="feed-id">
+      <span class="feed-names">${names}</span>
+      <span class="feed-rank" style="color:${esc(rk.color)}">${esc(rankLabel)}</span>
+    </span>
+    <span class="feed-sc">${score}</span>
+  </div>`;
+}
+function feedItem(match) {
+  const bySide = new Map();
+  for (const p of (match.players || [])) {
+    if (!bySide.has(p.side)) bySide.set(p.side, []);
+    bySide.get(p.side).push(p);
+  }
+  const tied = match.winner_side == null;
+  const sides = [...bySide.entries()].sort((a, b) => a[0] - b[0]).map(([side, players]) => ({
+    side, players, isWinner: !tied && side === match.winner_side,
+  }));
+  if (sides.length < 2) return '';
+  const course = (match.players.find((p) => p.course_name) || {}).course_name;
+  const meta = [tied ? 'Tied' : null, course, fmtAgo(match.resolved_at)].filter(Boolean).map(esc).join(' · ');
+  return `<div class="feed-item">
+    ${sides.map(feedSide).join('')}
+    <div class="feed-foot">
+      <span class="feed-meta">${meta}</span>
+      <a class="feed-recap-link" href="/r/${esc(match.match_id)}">Recap →</a>
+    </div>
+  </div>`;
+}
+function renderMatchesFeed(data) {
+  const items = (data.matches || []).map(feedItem).join('');
+  const body = `
+  <section class="page-head">
+    <h1>Recent matches</h1>
+    <p>The latest resolved ranked matches on Sacari Golf. Tap a player for their profile, or open the full recap.</p>
+  </section>
+  <section class="feed">${items || '<div class="empty">No matches resolved yet.</div>'}</section>
+  <section class="cta-band">
+    <h2>Get in the mix.</h2>
+    ${appStoreButton('Download on the App Store')}
+  </section>`;
+
+  return page({
+    title: 'Recent Matches. Sacari Golf',
+    description: 'A live feed of the latest resolved ranked golf matches on Sacari Golf, with scores, results, and ELO swings.',
+    ogImage: SITE_URL ? `${SITE_URL}/crests/diamond.png` : '',
+    ogUrl: SITE_URL ? `${SITE_URL}/matches` : '',
+    canonical: SITE_URL ? `${SITE_URL}/matches` : '',
+    active: 'matches',
     body,
   });
 }
@@ -1118,7 +1207,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 }
 
 module.exports = {
-  renderHome, renderHowTo, renderLeaderboard, renderCoursesIndex, renderCourse,
+  renderHome, renderHowTo, renderLeaderboard, renderMatchesFeed, renderCoursesIndex, renderCourse,
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
