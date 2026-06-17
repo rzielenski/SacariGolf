@@ -9,6 +9,7 @@ import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
+import { ALLOWED_CLUBS } from '../utils/clubs';
 import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -25,7 +26,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
-            u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
+            u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter, u.partial_swing_mode,
             u.equipped_border, u.equipped_background, u.equipped_username,
             u.equipped_ball_trail, u.equipped_fx,
             (SELECT jsonb_build_object(
@@ -62,7 +63,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -90,6 +91,14 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     const flag = !!censorOffensiveLanguage;
     values.push(flag);
     updates.push(`censor_offensive_language = $${values.length}`);
+  }
+
+  // Partial-swing entry mode: how the user dials a less-than-full swing —
+  // 'percentage' (75%, 80%) or 'clock' (9:00, 10:30). Anything else → percentage.
+  if (partialSwingMode !== undefined) {
+    const mode = partialSwingMode === 'clock' ? 'clock' : 'percentage';
+    values.push(mode);
+    updates.push(`partial_swing_mode = $${values.length}`);
   }
 
   if (pushToken !== undefined) { values.push(pushToken); updates.push(`push_token = $${values.length}`); }
@@ -165,11 +174,6 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     if (clubsInBag === null) {
       updates.push(`clubs_in_bag = NULL`);
     } else if (Array.isArray(clubsInBag)) {
-      const ALLOWED = new Set([
-        'driver', '3w', '5w', '7w', 'hybrid',
-        '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
-        'pw', 'gw', 'sw', 'lw', 'putter',
-      ]);
       const cleaned: { code: string; label?: string }[] = [];
       for (const raw of clubsInBag) {
         let code: string | null = null;
@@ -183,7 +187,7 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
             if (trimmed) label = trimmed;
           }
         }
-        if (!code || !ALLOWED.has(code)) continue;
+        if (!code || !ALLOWED_CLUBS.has(code)) continue;
         cleaned.push(label ? { code, label } : { code });
       }
       // USGA cap is 14 clubs — enforce so a malicious client can't store
@@ -663,7 +667,7 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     // matches (match_id NULL) drop out of the inner join, which is fine:
     // we can't confirm they were solo.
     `SELECT s.shot_id, s.club, s.start_lat, s.start_lng, s.end_lat, s.end_lng,
-            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds
+            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds, s.partial_value
        FROM shots s
        JOIN matches m ON m.match_id = s.match_id
       WHERE s.user_id = $1
@@ -804,6 +808,21 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   const ydsFor = (v: ShotVec) =>
     v.plays_like_yds != null ? v.plays_like_yds : v.dist_m * M_TO_YDS;
 
+  // Per-club partial-swing distances (e.g. a 75% or 9:00 7-iron). Computed
+  // straight from the raw rows, independent of the full-swing dispersion math
+  // below so it can never perturb it. Distance is plays-like or frozen total.
+  const partialByClub = new Map<string, Map<string, number[]>>();
+  for (const r of shotRows as any[]) {
+    if (!r.partial_value) continue;
+    const yds = r.plays_like_yds != null ? Number(r.plays_like_yds)
+              : r.total_yds != null ? Number(r.total_yds) : null;
+    if (yds == null || !Number.isFinite(yds)) continue;
+    if (!partialByClub.has(r.club)) partialByClub.set(r.club, new Map());
+    const pmap = partialByClub.get(r.club)!;
+    if (!pmap.has(r.partial_value)) pmap.set(r.partial_value, []);
+    pmap.get(r.partial_value)!.push(yds);
+  }
+
   const clubs: any[] = [];
   for (const [club, vecs] of byClub.entries()) {
     const statYds = vecs.map(ydsFor);
@@ -846,11 +865,19 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       dist_yds:    Math.round(geom[i].distAbs),
     }));
 
+    const pm = partialByClub.get(club);
+    const partials = pm
+      ? [...pm.entries()]
+          .map(([label, arr]) => ({ label, shots: arr.length, median_yds: Math.round(median(arr)) }))
+          .sort((a, b) => b.median_yds - a.median_yds)
+      : [];
+
     clubs.push({
       club,
       shots: vecs.length,
       avg_yds:    Math.round(statYds.reduce((a, b) => a + b, 0) / statYds.length),
       median_yds: Math.round(medYds),
+      partials,
       dispersion,
     });
   }

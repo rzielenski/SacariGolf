@@ -15,6 +15,7 @@ import { ScorecardCard, ScorecardModal, ScorecardEntry } from '../../components/
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { IdentityAvatar, IdentityName } from '../../components/UserIdentity';
 import { InviteFriendsModal } from '../../components/InviteFriendsModal';
+import { LiveLeaderboard } from '../../components/LiveLeaderboard';
 import { rankForElo } from '../../lib/rank';
 
 export default function MatchLobbyScreen() {
@@ -462,6 +463,20 @@ export default function MatchLobbyScreen() {
           </View>
         );
       })()}
+
+      {/* Live leaderboard — ranked standings that update on their own while the
+          round is in play. Shows once both sides opt into live scores, or when
+          the match is final. Tapping a row jumps to that player. */}
+      {(liveActive || isCompleted) && (match.players?.length ?? 0) >= 2 && (
+        <>
+          <OrnamentTitle title="Leaderboard" />
+          <LiveLeaderboard
+            matchId={id}
+            completed={isCompleted}
+            onPressPlayer={(uid) => router.push(`/user/${uid}` as any)}
+          />
+        </>
+      )}
 
       {/* Players */}
       <OrnamentTitle title="Players" />

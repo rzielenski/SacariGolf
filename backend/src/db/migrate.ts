@@ -2050,6 +2050,36 @@ const MIGRATIONS: { name: string; sql: string }[] = [
        WHERE completed = TRUE AND completed_at IS NULL;
     `,
   },
+  {
+    // Phase 3 tournaments: a winner pin + a dedicated champion cosmetic prize.
+    // The cosmetics CHECK only allowed free/premium/cup_winner/rank — widen it
+    // for a 'tournament_winner' kind so the prize is NOT auto-granted to weekly
+    // Sacari Cup winners (which key on unlock_kind='cup_winner').
+    name: 'tournaments.phase3_prize',
+    sql: `
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS winner_id UUID REFERENCES users(user_id) ON DELETE SET NULL;
+      ALTER TABLE cosmetics DROP CONSTRAINT IF EXISTS cosmetics_unlock_kind_check;
+      ALTER TABLE cosmetics ADD CONSTRAINT cosmetics_unlock_kind_check
+        CHECK (unlock_kind IN ('free','premium','cup_winner','rank','tournament_winner'));
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        ('border_tournament_champ', 'border', 'Tournament Champion', 'legendary', 'tournament_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"glow","color":"#d4a93f","width":3,"animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind = EXCLUDED.kind, name = EXCLUDED.name, rarity = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind, unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+    `,
+  },
+  {
+    // Bag + partial-swing overhaul: a per-shot partial-swing tag (e.g. '75%' or
+    // '9:00'; NULL = a full swing) and the user's preferred entry mode for it.
+    name: 'shots.partial_value_and_user_mode',
+    sql: `
+      ALTER TABLE shots ADD COLUMN IF NOT EXISTS partial_value TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS partial_swing_mode TEXT NOT NULL DEFAULT 'percentage';
+    `,
+  },
 ];
 
 export async function runMigrations() {

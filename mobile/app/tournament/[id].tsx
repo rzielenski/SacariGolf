@@ -38,6 +38,10 @@ export default function TournamentDetailScreen() {
 
   const isOwner = t.owner_id === user?.user_id;
   const isMember = (t.players ?? []).some((p: any) => p.user_id === user?.user_id);
+  const isActive = t.status === 'active';
+  const isFinished = t.status === 'finished';
+  const winnerName = (t.players ?? []).find((p: any) => p.user_id === t.winner_id)?.username
+    ?? (t.leaderboard ?? [])[0]?.username ?? null;
 
   const shareCode = async () => {
     if (!t.join_code) return;
@@ -68,6 +72,24 @@ export default function TournamentDetailScreen() {
       }},
     ]);
   };
+  const handleFinalize = () => {
+    Alert.alert(
+      'Finalize tournament?',
+      'This locks the standings, crowns the leaderboard winner, and awards the Champion border. Cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Finalize', style: 'destructive', onPress: async () => {
+          try {
+            const r = await api.tournaments.finalize(t.tournament_id);
+            await load();
+            Alert.alert('Tournament finished', r.winner_id
+              ? 'Champion crowned and the prize awarded.'
+              : 'No rounds were played, so no winner was crowned.');
+          } catch (e: any) { Alert.alert('Could not finalize', e.message); }
+        }},
+      ],
+    );
+  };
 
   return (
     <ScrollView
@@ -87,6 +109,13 @@ export default function TournamentDetailScreen() {
       <Text style={s.meta}>Hosted by {c(t.owner_username)}</Text>
       <Divider style={{ marginTop: 14, marginBottom: 14 }} />
 
+      {isFinished && (
+        <View style={s.winnerBanner}>
+          <Text style={s.winnerLabel}>🏆 CHAMPION</Text>
+          <Text style={s.winnerName}>{winnerName ? c(winnerName) : 'No winner'}</Text>
+        </View>
+      )}
+
       {t.join_code && (isOwner || isMember) && (
         <TouchableOpacity style={s.codeBox} onPress={shareCode} activeOpacity={0.8}>
           <Text style={s.codeLabel}>JOIN CODE</Text>
@@ -98,6 +127,17 @@ export default function TournamentDetailScreen() {
       {!isMember && !isOwner && (
         <TouchableOpacity style={s.joinBtn} onPress={handleJoin}>
           <Text style={s.joinBtnText}>Join Tournament</Text>
+        </TouchableOpacity>
+      )}
+
+      {(isOwner || isMember) && isActive && (
+        <TouchableOpacity
+          style={s.runBtn}
+          onPress={() => router.push(`/play?type=group&tournament=${t.tournament_id}` as any)}
+          activeOpacity={0.85}
+        >
+          <Text style={s.runBtnText}>＋ Run a group round</Text>
+          <Text style={s.runBtnSub}>Score your group on one phone. Every player's round counts toward this leaderboard.</Text>
         </TouchableOpacity>
       )}
 
@@ -152,7 +192,12 @@ export default function TournamentDetailScreen() {
         </TouchableOpacity>
       ))}
 
-      <View style={{ marginTop: 30 }}>
+      <View style={{ marginTop: 30, gap: 10 }}>
+        {isOwner && isActive && (
+          <TouchableOpacity style={s.finalizeBtn} onPress={handleFinalize}>
+            <Text style={s.finalizeBtnText}>Finalize &amp; crown the champion</Text>
+          </TouchableOpacity>
+        )}
         {isOwner ? (
           <TouchableOpacity style={s.dangerBtn} onPress={handleDelete}>
             <Text style={s.dangerBtnText}>Delete Tournament</Text>
@@ -216,4 +261,13 @@ const s = StyleSheet.create({
 
   dangerBtn: { paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: C.red, borderRadius: 8 },
   dangerBtnText: { color: C.red, fontWeight: '700' },
+
+  runBtn: { backgroundColor: C.gold + '18', borderRadius: 12, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: C.gold },
+  runBtnText: { color: C.gold, fontWeight: '900', fontSize: 15 },
+  runBtnSub: { color: C.textMuted, fontSize: 12, marginTop: 4, lineHeight: 17 },
+  winnerBanner: { backgroundColor: C.gold + '14', borderColor: C.gold, borderWidth: 1, borderRadius: 12, padding: 16, alignItems: 'center', marginBottom: 16 },
+  winnerLabel: { color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 2 },
+  winnerName: { color: C.text, fontSize: 22, fontWeight: '900', marginTop: 4 },
+  finalizeBtn: { backgroundColor: C.gold, paddingVertical: 14, borderRadius: 8, alignItems: 'center' },
+  finalizeBtnText: { color: '#000', fontWeight: '900', fontSize: 15 },
 });

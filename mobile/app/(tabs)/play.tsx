@@ -32,7 +32,7 @@ function teeColor(name: string | null | undefined): string {
 
 const ON_SITE_M = 1500; // ~1 mile — generous so a player parked nearby still gets the hero card
 
-type MatchType = 'solo' | 'duo' | 'squad' | 'ffa' | 'practice';
+type MatchType = 'solo' | 'duo' | 'squad' | 'ffa' | 'group' | 'practice';
 type Format = 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
 
 // Display config for the format picker. Adding a new format means: extend
@@ -47,7 +47,7 @@ const FORMAT_CARDS: { id: Format; name: string; mark: string; desc: string; team
 ];
 type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
-const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'ffa', 'practice'];
+const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'ffa', 'group', 'practice'];
 
 export default function PlayScreen() {
   const { user } = useAuth();
@@ -63,9 +63,11 @@ export default function PlayScreen() {
     type?: string;
     challenge?: string;
     challengeName?: string;
+    tournament?: string;
   }>();
   const challengeUserId = typeof params.challenge === 'string' ? params.challenge : null;
   const challengeUsername = typeof params.challengeName === 'string' ? params.challengeName : null;
+  const tournamentId = typeof params.tournament === 'string' ? params.tournament : null;
   const [step, setStep] = useState<Step>('type');
   const [joinId, setJoinId] = useState('');
   const [joining, setJoining] = useState(false);
@@ -266,13 +268,15 @@ export default function PlayScreen() {
       const subsetForReq: 'front' | 'back' | 'full' =
         numHoles === 9 && (teebox.num_holes ?? 18) >= 18 ? holesSubset : 'full';
       const match = await api.matches.create({
-        matchType,
-        isPractice: matchType === 'practice',
+        // A "group" round is just a casual practice match scored by one
+        // organizer, so the backend only ever sees 'practice'.
+        matchType: matchType === 'group' ? 'practice' : matchType,
+        isPractice: matchType === 'practice' || matchType === 'group',
         teeboxId: teebox.teebox_id,
         clanId: selectedClanId ?? undefined,
-        // Practice ignores format (no ELO), team modes get their picked format,
-        // solo can pick stableford / match_play / skins for non-stroke ranked play.
-        format: matchType === 'practice' ? 'stroke' : format,
+        // Practice/group ignore format (no ELO), team modes get their picked
+        // format, solo can pick stableford / match_play / skins for ranked play.
+        format: matchType === 'practice' || matchType === 'group' ? 'stroke' : format,
         numHoles,
         holesSubset: subsetForReq,
         // Friendly default name for challenge matches so the recipient
@@ -285,6 +289,9 @@ export default function PlayScreen() {
         // transaction and skips auto-pairing, so the match waits for this
         // friend (3-day window) instead of grabbing a random opponent.
         challengeUserId: challengeUserId ?? undefined,
+        // Tournament context (when launched from a tournament screen). The
+        // server only honors it if you're a registered, active player.
+        tournamentId: tournamentId ?? undefined,
       });
       // Single, consistent post-creation destination for every flow:
       // the match lobby. From there the player can tap "Start Scoring",
@@ -295,7 +302,8 @@ export default function PlayScreen() {
       // Use push (not replace) because we're crossing from the (tabs)
       // group into a sibling root-stack screen — replace would pop the
       // entire tabs subtree off the stack, leaving nothing to go back to.
-      router.push(`/match/${match.match_id}` as any);
+      if (matchType === 'group') router.push(`/match/group/${match.match_id}` as any);
+      else router.push(`/match/${match.match_id}` as any);
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setCreating(false); }
@@ -304,8 +312,8 @@ export default function PlayScreen() {
   const goToNextStep = () => {
     if (matchType === 'duo' || matchType === 'squad') {
       setStep('clan');
-    } else if (matchType === 'practice') {
-      // Practice doesn't track ELO, no point picking a fancy format
+    } else if (matchType === 'practice' || matchType === 'group') {
+      // Practice + group are casual (no ELO), so skip the format picker.
       setStep('course');
     } else {
       // Solo + Arena: pick a format (Arena restricts to stroke/stableford —
@@ -317,7 +325,7 @@ export default function PlayScreen() {
   // Button label for next step
   const nextStepLabel =
     matchType === 'duo' || matchType === 'squad' ? 'Select Team →' :
-    matchType === 'practice' ? 'Select Course →' :
+    matchType === 'practice' || matchType === 'group' ? 'Select Course →' :
     'Choose Format →';
 
   // ── Type selection ────────────────────────────────────────────────────────────
@@ -366,7 +374,7 @@ export default function PlayScreen() {
 
         {/* Type cards are hidden in challenge mode — the type is locked to
             solo and there's no value in showing the other options. */}
-        {!challengeUserId && (['solo', 'duo', 'squad', 'ffa', 'practice'] as MatchType[]).map((t) => (
+        {!challengeUserId && (['solo', 'duo', 'squad', 'ffa', 'group', 'practice'] as MatchType[]).map((t) => (
           <TouchableOpacity
             key={t}
             style={[styles.typeCard, matchType === t && styles.typeCardActive]}
@@ -374,18 +382,19 @@ export default function PlayScreen() {
           >
             <View style={styles.typeMark}>
               <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'ffa' ? 'ARN' : 'PRC'}
+                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'ffa' ? 'ARN' : t === 'group' ? 'GRP' : 'PRC'}
               </Text>
             </View>
             <View style={{ flex: 1 }}>
               <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'ffa' ? 'Arena' : 'Practice'}
+                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'ffa' ? 'Arena' : t === 'group' ? 'Group' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
                 {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
                   : t === 'duo' ? 'Ranked 2v2 — stroke play or scramble'
                   : t === 'squad' ? 'Ranked 4v4 — stroke play or scramble'
                   : t === 'ffa' ? 'Ranked free-for-all — invite up to 15 friends, lowest score wins'
+                  : t === 'group' ? 'You keep score for the whole group on one phone. Casual, with a live leaderboard.'
                   : 'No ELO — just get the reps in'}
               </Text>
             </View>

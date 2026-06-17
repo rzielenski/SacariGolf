@@ -31,6 +31,7 @@ type ClubsData = {
   clubs: {
     club: string; shots: number; avg_yds: number; median_yds: number;
     dispersion: DispersionEntry[];
+    partials?: { label: string; shots: number; median_yds: number }[];
   }[];
 };
 
@@ -154,6 +155,23 @@ export default function ClubHeatmapScreen() {
                 <SumCell label="AVG"    value={`${club.avg_yds} yds`} />
                 <SumCell label="SHOTS"  value={`${club.shots}`} />
               </View>
+
+              {/* Partial-swing medians — only shown when the player has tagged
+                  at least one less-than-full shot for this club. */}
+              {club.partials && club.partials.length > 0 && (
+                <View style={s.partialsWrap}>
+                  <Text style={s.partialsTitle}>PARTIAL SWINGS</Text>
+                  <View style={s.partialsRow}>
+                    {club.partials.map((p) => (
+                      <View key={p.label} style={s.partialPill}>
+                        <Text style={s.partialPillLabel}>{p.label}</Text>
+                        <Text style={s.partialPillYds}>{p.median_yds} yds</Text>
+                        <Text style={s.partialPillShots}>{p.shots} shot{p.shots === 1 ? '' : 's'}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
 
               {/* Dispersion heatmap */}
               <OrnamentTitle title="Range Pattern" align="center" />
@@ -763,6 +781,18 @@ const s = StyleSheet.create({
   },
   sumLabel: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
   sumVal: { color: C.text, fontFamily: F.serif, fontSize: 18, fontWeight: '900', marginTop: 4 },
+
+  partialsWrap: { marginBottom: 16 },
+  partialsTitle: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 8 },
+  partialsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  partialPill: {
+    alignItems: 'center', paddingVertical: 8, paddingHorizontal: 12,
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.gold + '55',
+    minWidth: 78,
+  },
+  partialPillLabel: { color: C.gold, fontWeight: '900', fontSize: 13 },
+  partialPillYds: { color: C.text, fontWeight: '800', fontSize: 14, marginTop: 2 },
+  partialPillShots: { color: C.textMuted, fontSize: 10, marginTop: 1 },
 
   backBtn: { marginTop: 24, alignSelf: 'center', padding: 10 },
   backLabel: { color: C.gold, fontSize: 14 },

@@ -291,6 +291,7 @@ export default function RootLayout() {
         <Stack.Screen name="blocked-users" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/scoring/[id]" options={{ animation: 'slide_from_bottom' }} />
+        <Stack.Screen name="match/group/[id]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="chat/[type]/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="leaderboard" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="course/[id]" options={{ animation: 'slide_from_right' }} />

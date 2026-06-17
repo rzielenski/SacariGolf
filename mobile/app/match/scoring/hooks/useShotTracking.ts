@@ -109,6 +109,7 @@ export function useShotTracking({
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
   const [pendingClub, setPendingClubState] = useState<string | null>(null);
+  const [pendingPartial, setPendingPartial] = useState<string | null>(null);
   const [clubPickerVisible, setClubPickerVisible] = useState(false);
 
   /** True iff the current pendingClub was set by an explicit user tap.
@@ -185,6 +186,7 @@ export function useShotTracking({
           setPendingClubState(cached.club);
           manualPickRef.current = true;
         }
+        if (cached.partial_value) setPendingPartial(cached.partial_value);
       } catch { /* corrupt cache → ignore */ }
     });
     return () => { cancelled = true; };
@@ -236,7 +238,15 @@ export function useShotTracking({
   const pickClubManual = (club: string | null) => {
     manualPickRef.current = club !== null;
     setPendingClubState(club);
+    if (!club) setPendingPartial(null);   // clearing the club clears the partial
     if (activeShot && club) setActiveShot({ ...activeShot, club });
+  };
+
+  /** Set the partial-swing tag for the next/active shot ('75%', '9:00', or
+   *  null for a full swing). */
+  const pickPartial = (value: string | null) => {
+    setPendingPartial(value);
+    if (activeShot) setActiveShot({ ...activeShot, partial_value: value ?? undefined });
   };
 
   /** Auto-suggest sets the club WITHOUT marking it manual, so a subsequent
@@ -327,6 +337,7 @@ export function useShotTracking({
         ...(lateral_yds != null && lateral_ref
           ? { lateral_yds, lateral_ref }
           : {}),
+        ...(activeShot.partial_value ? { partial_value: activeShot.partial_value } : {}),
       };
       // Attribute the shot to the hole it was STARTED on, not whatever hole
       // is on screen now — guards against a mid-shot hole change misfiling
@@ -341,6 +352,7 @@ export function useShotTracking({
       });
       setActiveShot(null);
       setPendingClubState(null);
+      setPendingPartial(null);
       manualPickRef.current = false;
       return;
     }
@@ -355,7 +367,7 @@ export function useShotTracking({
     }
     const start = ptFromCoord();
     if (!start) return;
-    setActiveShot({ club: pendingClub, start, startedAt: new Date().toISOString(), holeNum: currentHoleNum });
+    setActiveShot({ club: pendingClub, partial_value: pendingPartial ?? undefined, start, startedAt: new Date().toISOString(), holeNum: currentHoleNum });
   };
 
   const cancelActiveShot = () => {
@@ -443,9 +455,11 @@ export function useShotTracking({
     currentShots,
     activeShot,
     pendingClub,
+    pendingPartial,
     clubPickerVisible,
     setClubPickerVisible,
     pickClubManual,
+    pickPartial,
     pickClubAuto,
     isManualPick,
     onTrackPress,

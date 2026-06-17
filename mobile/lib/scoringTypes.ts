@@ -56,6 +56,10 @@ export interface Shot {
   /** Which centerline `lateral_yds` was computed against. Lets downstream
    *  stats know whether the lateral is meaningful (aim/pin) or absent. */
   lateral_ref?: 'aim' | 'pin';
+  /** Partial-swing tag: a percentage ('75%') or clock ('9:00') label, absent
+   *  for a full swing. Drives the per-club partial-distance breakdown in
+   *  club-stats so a 75% wedge doesn't muddy the full-swing average. */
+  partial_value?: string;
 }
 
 /** A shot that's been started but not stopped yet (TRACK tapped once). */
@@ -64,6 +68,8 @@ export interface ActiveShot {
   lie?: string;
   start: Pt;
   startedAt: string;
+  /** Partial-swing tag carried from pendingPartial when the shot started. */
+  partial_value?: string;
   /** Hole the shot was STARTED on. The finalised shot is attributed to this
    *  hole — not whatever hole is on screen when STOP is tapped — so swiping
    *  to another hole mid-shot can't misfile it (or fabricate a cross-hole

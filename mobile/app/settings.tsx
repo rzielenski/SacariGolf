@@ -62,6 +62,23 @@ export default function SettingsScreen() {
     }
   }, [refreshUser]);
 
+  // Partial-swing entry mode (percentage vs clock). Drives which preset chips
+  // appear in the in-round club picker. Defaults to percentage.
+  const partialMode: 'percentage' | 'clock' =
+    (user as any)?.partial_swing_mode === 'clock' ? 'clock' : 'percentage';
+  const [savingPartial, setSavingPartial] = useState(false);
+  const onSetPartialMode = useCallback(async (next: 'percentage' | 'clock') => {
+    setSavingPartial(true);
+    try {
+      await api.users.update({ partialSwingMode: next });
+      await refreshUser();
+    } catch (e: any) {
+      Alert.alert('Could not save', e?.message ?? 'Try again.');
+    } finally {
+      setSavingPartial(false);
+    }
+  }, [refreshUser]);
+
   const onClearTheme = useCallback(() => {
     Alert.alert(
       'Clear theme song?',
@@ -154,6 +171,18 @@ export default function SettingsScreen() {
           value={censor}
           onChange={onToggleCensor}
           busy={savingCensor}
+        />
+
+        {/* ── Shot tracking ────────────────────────────────────────── */}
+        <SectionLabel>SHOT TRACKING</SectionLabel>
+
+        <SegmentRow
+          label="Partial swing entry"
+          hint="How the in-round club picker labels less-than-full shots. Percent shows 90% / 80% / 70%; Clock shows 10:30 / 9:00 / 7:30."
+          value={partialMode}
+          options={[{ value: 'percentage', label: 'Percent' }, { value: 'clock', label: 'Clock' }]}
+          onChange={(v) => onSetPartialMode(v as 'percentage' | 'clock')}
+          busy={savingPartial}
         />
 
         {/* ── Account ──────────────────────────────────────────────── */}
@@ -249,6 +278,43 @@ function ToggleRow({
   );
 }
 
+function SegmentRow({
+  label, hint, value, options, onChange, busy,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (next: string) => void;
+  busy?: boolean;
+}) {
+  return (
+    <View style={s.row}>
+      <View style={{ flex: 1, marginRight: 12 }}>
+        <Text style={s.rowLabel}>{label}</Text>
+        <Text style={s.rowHint}>{hint}</Text>
+      </View>
+      {busy
+        ? <ActivityIndicator color={C.gold} />
+        : <View style={s.segment}>
+            {options.map((o) => {
+              const active = o.value === value;
+              return (
+                <TouchableOpacity
+                  key={o.value}
+                  style={[s.segmentBtn, active && s.segmentBtnActive]}
+                  onPress={() => onChange(o.value)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[s.segmentText, active && { color: C.bg }]}>{o.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>}
+    </View>
+  );
+}
+
 function LinkRow({
   label, hint, onPress, destructive,
 }: {
@@ -285,6 +351,13 @@ const s = StyleSheet.create({
   rowLabel: { color: C.text, fontWeight: '700', fontSize: 14 },
   rowHint: { color: C.textMuted, fontSize: 12, marginTop: 3, lineHeight: 17 },
   chevron: { color: C.textMuted, fontSize: 22 },
+  segment: {
+    flexDirection: 'row', borderRadius: 8, borderWidth: 1,
+    borderColor: C.border, overflow: 'hidden',
+  },
+  segmentBtn: { paddingVertical: 8, paddingHorizontal: 14, backgroundColor: C.bg },
+  segmentBtnActive: { backgroundColor: C.gold },
+  segmentText: { color: C.text, fontWeight: '800', fontSize: 12 },
 
   card: {
     backgroundColor: C.card, borderRadius: 10,

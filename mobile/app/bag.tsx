@@ -27,31 +27,10 @@ import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { BagEntry } from '../types';
 import { C, F } from '../lib/colors';
-
-/** Canonical club catalogue. Server validates `code` against the same list.
- *  `defaultLabel` is what we display when an entry has no custom label. */
-const CATALOG: { code: string; defaultLabel: string; group: string }[] = [
-  { code: 'driver', defaultLabel: 'Driver',          group: 'Woods' },
-  { code: '3w',     defaultLabel: '3 Wood',          group: 'Woods' },
-  { code: '5w',     defaultLabel: '5 Wood',          group: 'Woods' },
-  { code: '7w',     defaultLabel: '7 Wood',          group: 'Woods' },
-  { code: 'hybrid', defaultLabel: 'Hybrid',          group: 'Woods' },
-  { code: '2i',     defaultLabel: '2 Iron',          group: 'Irons' },
-  { code: '3i',     defaultLabel: '3 Iron',          group: 'Irons' },
-  { code: '4i',     defaultLabel: '4 Iron',          group: 'Irons' },
-  { code: '5i',     defaultLabel: '5 Iron',          group: 'Irons' },
-  { code: '6i',     defaultLabel: '6 Iron',          group: 'Irons' },
-  { code: '7i',     defaultLabel: '7 Iron',          group: 'Irons' },
-  { code: '8i',     defaultLabel: '8 Iron',          group: 'Irons' },
-  { code: '9i',     defaultLabel: '9 Iron',          group: 'Irons' },
-  { code: 'pw',     defaultLabel: 'Pitching Wedge',  group: 'Wedges' },
-  { code: 'gw',     defaultLabel: 'Gap Wedge',       group: 'Wedges' },
-  { code: 'sw',     defaultLabel: 'Sand Wedge',      group: 'Wedges' },
-  { code: 'lw',     defaultLabel: 'Lob Wedge',       group: 'Wedges' },
-  { code: 'putter', defaultLabel: 'Putter',          group: 'Putter' },
-];
-const CATALOG_BY_CODE: Record<string, (typeof CATALOG)[number]> =
-  Object.fromEntries(CATALOG.map((c) => [c.code, c]));
+// Club catalogue + by-code lookup now live in lib/clubs.ts (single source
+// shared with the in-round picker and club-stats). Aliased to the local names
+// this screen already used so the rest of the file is unchanged.
+import { CLUBS_CATALOG as CATALOG, CLUBS_BY_CODE as CATALOG_BY_CODE } from '../lib/clubs';
 
 const MAX_BAG = 14;
 

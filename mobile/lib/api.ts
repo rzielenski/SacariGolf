@@ -277,6 +277,9 @@ export const api = {
        *  themes. iOS doesn't let third-party apps change system volume,
        *  so this is the loudest the app can produce. */
       themeSongMaxVolume?: boolean;
+      /** Preferred partial-swing entry mode for the in-round club picker:
+       *  'percentage' (90%/80%/70%) or 'clock' (10:30/9:00/7:30). */
+      partialSwingMode?: 'percentage' | 'clock';
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     /** Upload a personal voice memo and set it as the caller's theme song.
@@ -352,6 +355,10 @@ export const api = {
           long_yds: number;
           dist_yds: number;
         }[];
+        /** Partial-swing breakdown for this club: one entry per distinct
+         *  partial tag (e.g. '80%', '9:00') the player has tracked, each with
+         *  its own median. Absent / empty when the club has no partial shots. */
+        partials?: { label: string; shots: number; median_yds: number }[];
       }[];
     }>('GET', `/users/${id}/club-stats`),
     /** Premium-only. Putting make % and approach proximity bucketed by
@@ -802,6 +809,9 @@ export const api = {
       /** Direct challenge to one friend: the server attaches the invite
        *  atomically and skips auto-pairing, so it never grabs a stranger. */
       challengeUserId?: string;
+      /** Tag this round to a tournament you're registered in (active only);
+       *  ignored otherwise. The round then counts toward that leaderboard. */
+      tournamentId?: string;
     }) => request<any>('POST', '/matches', body),
     join: (id: string, body: object) => request<any>('POST', `/matches/${id}/join`, body),
     submitScores: (id: string, body: {
@@ -821,6 +831,18 @@ export const api = {
      *  opponent scores (refetch the match to see live_scores_active). */
     setLiveScores: (id: string, optIn: boolean) =>
       request<{ success: true; optIn: boolean }>('POST', `/matches/${id}/live-scores`, { optIn }),
+    /** Live ranked standings for a match. `active` is false (empty board) until
+     *  both sides opt into the live scoreboard, unless the match is completed. */
+    leaderboard: (id: string) =>
+      request<{
+        active: boolean; completed: boolean; format: string; num_holes: number;
+        leaderboard: {
+          user_id: string; username: string; side: number;
+          thru: number; total: number; toPar: number; points: number | null;
+          completed: boolean; position: number;
+          meta?: { avatar_url?: string | null; elo?: number; is_bot?: boolean; equipped_visual?: any };
+        }[];
+      }>('GET', `/matches/${id}/leaderboard`),
     saveShotTrack: (id: string, holeNum: number, shots: any[]) =>
       // Accepts either segment-format or legacy point-format. The server
       // sanitises both and stores them as JSONB, so callers can pass through
@@ -835,6 +857,14 @@ export const api = {
     started: (id: string) => request<any>('POST', `/matches/${id}/started`, {}),
     setGuests: (id: string, guests: { name: string; scores: number[]; teebox_id?: string | null }[]) =>
       request<{ success: true; count: number }>('PUT', `/matches/${id}/guests`, { guests }),
+    /** Organizer scoring for a casual group round: enter scores for the whole
+     *  group (accounts in the match + guests) on one device. Call repeatedly
+     *  with partial scores to drive the live leaderboard; finish:true locks it. */
+    organizerScores: (id: string, body: {
+      accounts?: { user_id: string; hole_scores: number[] }[];
+      guests?: { name: string; scores: number[]; teebox_id?: string | null }[];
+      finish?: boolean;
+    }) => request<{ success: true; finished: boolean }>('POST', `/matches/${id}/organizer-scores`, body),
     // Tells the server "the VS intro animation has been shown to me on this
     // match, don't ever fire it again." Server uses COALESCE so the call is
     // safely idempotent — duplicate calls are no-ops.
@@ -970,6 +1000,10 @@ export const api = {
     delete: (id: string) => request<{ success: true }>('DELETE', `/tournaments/${id}`),
     linkMatch: (tournamentId: string, matchId: string) =>
       request<{ success: true }>('POST', `/tournaments/${tournamentId}/link-match`, { matchId }),
+    /** Owner-only: lock the tournament, crown the leaderboard winner, and award
+     *  the Tournament Champion cosmetic. Returns the winner's user id. */
+    finalize: (id: string) =>
+      request<{ success: true; winner_id: string | null }>('POST', `/tournaments/${id}/finalize`, {}),
   },
 
   rounds: {

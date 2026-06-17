@@ -30,6 +30,10 @@ export interface User {
    *  analytics) with an optional free-text label (display only). Null /
    *  missing means "no bag set — all clubs eligible." */
   clubs_in_bag?: BagEntry[] | null;
+  /** Preferred partial-swing entry mode: 'percentage' (75%/80%) or 'clock'
+   *  (9:00/10:30). Defaults to 'percentage' server-side; drives which preset
+   *  chips show in the in-round club picker. */
+  partial_swing_mode?: 'percentage' | 'clock' | null;
   // Premium tier — populated by /users/me. Mirrors the columns on `users`.
   is_premium?: boolean;
   premium_since?: string | null;

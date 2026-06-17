@@ -5,6 +5,8 @@ import { sendPush } from '../utils/notify';
 import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
+import { computeLeaderboard } from '../utils/leaderboard';
+import { ALLOWED_CLUBS_SHOT as ALLOWED_CLUBS } from '../utils/clubs';
 import { currentSeason, divisionForElo } from './seasons';
 
 const router = Router();
@@ -166,7 +168,7 @@ function scoreDifferential(gross: number, courseRating: number, slopeRating: num
 //   • scramble     — Existing team format (one final team score per side)
 const VALID_FORMATS = new Set(['stroke', 'stableford', 'match_play', 'skins', 'scramble']);
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId } = req.body;
+  const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId, tournamentId } = req.body;
   // A direct challenge to one friend. When set, the match is earmarked for
   // them (invite created in the same transaction) and auto-pairing is skipped,
   // so it can never grab a stranger before/while the friend is invited.
@@ -209,10 +211,25 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Tournament tagging: a round counts toward a tournament only if the creator
+    // is a registered player of an ACTIVE tournament. Otherwise it's silently
+    // dropped (the round still plays, just untagged) so a bad id can't 500 a
+    // legitimate match create.
+    let resolvedTournamentId: string | null = null;
+    if (typeof tournamentId === 'string' && tournamentId) {
+      const { rows: tg } = await client.query(
+        `SELECT 1 FROM tournaments t
+           JOIN tournament_players tp ON tp.tournament_id = t.tournament_id AND tp.user_id = $2
+          WHERE t.tournament_id = $1 AND t.status = 'active'`,
+        [tournamentId, req.userId],
+      );
+      if (tg.length) resolvedTournamentId = tournamentId;
+    }
+
     const { rows } = await client.query(
-      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset]
+      `INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset, tournament_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset, resolvedTournamentId]
     );
     const match = rows[0];
 
@@ -999,6 +1016,193 @@ router.post('/:id/live-scores', requireAuth, wrap(async (req: AuthRequest, res: 
   );
   if (!rowCount) return res.status(404).json({ error: 'Not in this match' });
   return res.json({ success: true, optIn });
+}));
+
+// Live leaderboard for a match: ranked standings (position, thru, to-par /
+// points) computed from each player's posted holes. Same consent rule as the
+// live scoreboard — we only expose in-progress standings when both sides have
+// opted in (or the match is final), so this is never a scouting vector. Open
+// to non-participants too once live, which is what lets friends spectate.
+router.get('/:id/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const id = req.params.id;
+  const { rows: mRows } = await pool.query(
+    `SELECT match_id, format, num_holes, holes_subset, completed, is_practice, guest_players
+       FROM matches WHERE match_id = $1`,
+    [id],
+  );
+  if (!mRows.length) return res.status(404).json({ error: 'Match not found' });
+  const m = mRows[0];
+
+  const { rows: players } = await pool.query(
+    `SELECT mp.user_id, mp.side, mp.completed, mp.teebox_id, mp.live_scores_optin,
+            u.username, u.avatar_url, u.elo, u.is_bot,
+            ${equippedVisualSql('u')} AS equipped_visual,
+            r.hole_scores
+       FROM match_players mp
+       JOIN users u ON u.user_id = mp.user_id
+       LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+      WHERE mp.match_id = $1`,
+    [id],
+  );
+  if (!players.length) return res.status(404).json({ error: 'Match not found' });
+
+  // Casual group rounds (is_practice) are organizer-scored on one device with
+  // nothing to hide, so their board is always live. Ranked matches still need
+  // both sides to opt in (or be final) so it can't be used to scout.
+  const side1Optin = players.some((p: any) => p.side === 1 && p.live_scores_optin);
+  const side2Optin = players.some((p: any) => p.side !== 1 && p.live_scores_optin);
+  const liveActive = m.is_practice || (side1Optin && side2Optin);
+  if (!liveActive && !m.completed) {
+    return res.json({ active: false, completed: false, format: m.format, num_holes: m.num_holes, leaderboard: [] });
+  }
+
+  // Per-hole pars per teebox (cached), sliced to the nine/eighteen played.
+  const offset = m.holes_subset === 'back' ? 9 : 0;
+  const want = m.num_holes ?? 18;
+  const parCache = new Map<string, number[]>();
+  const parsFor = async (teeboxId: string | null): Promise<number[]> => {
+    if (!teeboxId) return [];
+    const hit = parCache.get(teeboxId);
+    if (hit) return hit;
+    const { rows } = await pool.query(
+      `SELECT par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`, [teeboxId],
+    );
+    const arr = rows.slice(offset, offset + want).map((h: any) => h.par);
+    parCache.set(teeboxId, arr);
+    return arr;
+  };
+
+  const entries = [];
+  for (const p of players) {
+    entries.push({
+      user_id: p.user_id, username: p.username, side: p.side,
+      hole_scores: p.hole_scores ?? [],
+      parByHole: await parsFor(p.teebox_id),
+      completed: p.completed,
+      meta: { avatar_url: p.avatar_url, elo: p.elo, is_bot: p.is_bot, equipped_visual: p.equipped_visual },
+    });
+  }
+
+  // Guests (organizer-scored non-account players) rank right alongside accounts.
+  // They use their own teebox's pars, falling back to the host's teebox.
+  const fallbackTee = players.find((p: any) => p.teebox_id)?.teebox_id ?? null;
+  const guests = Array.isArray(m.guest_players) ? m.guest_players : [];
+  for (let gi = 0; gi < guests.length; gi++) {
+    const g = guests[gi];
+    const scores = Array.isArray(g?.scores) ? g.scores : [];
+    if (!scores.some((s: any) => typeof s === 'number' && s > 0)) continue;   // not yet scored
+    entries.push({
+      user_id: `guest:${gi}`, username: (g?.name || `Guest ${gi + 1}`) as string, side: 0,
+      hole_scores: scores,
+      parByHole: await parsFor(g?.teebox_id ?? fallbackTee),
+      completed: !!m.completed,
+      meta: { is_guest: true },
+    });
+  }
+
+  const leaderboard = computeLeaderboard(entries, m.format);
+  return res.json({ active: liveActive, completed: m.completed, format: m.format, num_holes: want, leaderboard });
+}));
+
+// Organizer scoring: one person enters hole-by-hole scores for a whole group on
+// one device. CASUAL ONLY (is_practice) — these scores never touch ranked ELO,
+// and practice rounds are already excluded from handicap + best-round, so an
+// organizer typing scores for the table can't game anything. Account players
+// must already be in the match (they consented by joining); non-accounts are
+// stored as guests. Call repeatedly with partial scores to drive the live
+// leaderboard; pass finish:true to lock it in.
+//   body: { accounts?: [{ user_id, hole_scores:number[] }],
+//           guests?:   [{ name, scores:number[], teebox_id? }],
+//           finish?: boolean }
+router.post('/:id/organizer-scores', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const id = req.params.id;
+  const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+  const guests = Array.isArray(req.body?.guests) ? req.body.guests : [];
+  const finish = req.body?.finish === true;
+
+  const { rows: mRows } = await pool.query(
+    `SELECT match_id, is_practice, completed, num_holes, match_type FROM matches WHERE match_id = $1`,
+    [id],
+  );
+  if (!mRows.length) return res.status(404).json({ error: 'Match not found' });
+  const m = mRows[0];
+  if (m.completed) return res.status(409).json({ error: 'Match already completed' });
+  if (!m.is_practice) return res.status(403).json({ error: 'Organizer scoring is only for casual group rounds' });
+
+  const { rows: memberRows } = await pool.query(
+    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [id, req.userId],
+  );
+  if (!memberRows.length) return res.status(403).json({ error: 'Not in this match' });
+
+  const N = m.num_holes ?? 18;
+  const clampScores = (arr: any): number[] => {
+    const a = Array.isArray(arr) ? arr : [];
+    const out: number[] = [];
+    for (let i = 0; i < N; i++) {
+      const n = parseInt(a[i], 10);
+      out.push(Number.isFinite(n) && n > 0 && n < 30 ? n : 0);
+    }
+    return out;
+  };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    for (const acc of accounts) {
+      const uid = acc?.user_id;
+      if (!uid) continue;
+      // Only write rounds for players actually in this match (consent gate).
+      const { rows: chk } = await client.query(
+        `SELECT teebox_id FROM match_players WHERE match_id = $1 AND user_id = $2`, [id, uid],
+      );
+      if (!chk.length) continue;
+      const scores = clampScores(acc.hole_scores);
+      const total = scores.reduce((s, n) => s + n, 0);
+      const tee = chk[0].teebox_id ?? null;
+      await client.query(
+        `INSERT INTO rounds (match_id, user_id, teebox_id, hole_scores, total_score, round_type)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (match_id, user_id)
+         DO UPDATE SET hole_scores = $4, total_score = $5, teebox_id = COALESCE($3, rounds.teebox_id)`,
+        [id, uid, tee, scores, total, m.match_type],
+      );
+      await client.query(
+        `UPDATE match_players
+            SET strokes = $1,
+                completed = $2,
+                completed_at = CASE WHEN $2 THEN NOW() ELSE completed_at END
+          WHERE match_id = $3 AND user_id = $4`,
+        [total, finish, id, uid],
+      );
+    }
+
+    const cleanedGuests = guests
+      .filter((g: any) => (g?.name ?? '').toString().trim())
+      .slice(0, 16)
+      .map((g: any) => ({
+        name: g.name.toString().trim().slice(0, 30),
+        scores: clampScores(g.scores),
+        teebox_id: g.teebox_id ?? null,
+      }));
+    await client.query(
+      `UPDATE matches SET guest_players = $1::jsonb WHERE match_id = $2`,
+      [JSON.stringify(cleanedGuests), id],
+    );
+
+    if (finish) {
+      await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [id]);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return res.json({ success: true, finished: finish });
 }));
 
 // Sanitise a hole_stats array — same length as scores, each entry has
@@ -2671,22 +2875,9 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   const shots = req.body?.shots;
   if (!Array.isArray(shots)) return res.status(400).json({ error: 'shots array required' });
 
-  // Allowed clubs and lies — keep these short, lower-cased identifiers.
-  // Front-end labels can be richer; here we just whitelist values to avoid
-  // free-text growing organically.
-  //
-  // 'chip' is a SPECIAL non-attributing club: the player wants to track
-  // the shot on the map but NOT have it counted toward any specific
-  // club's per-club stats (since "chip" isn't a single physical club —
-  // could be a 56°, 60°, or even a hybrid bump). The /club-stats query
-  // explicitly skips it. Kept in the allowed-set here so the shot save
-  // still records the chip tag rather than coercing it to "unknown".
-  const ALLOWED_CLUBS = new Set([
-    'driver', '3w', '5w', '7w', 'hybrid',
-    '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
-    'pw', 'gw', 'sw', 'lw', 'putter',
-    'chip',
-  ]);
+  // ALLOWED_CLUBS comes from the shared whitelist (utils/clubs) so the bag
+  // editor and shot tracking can never drift. It includes 'chip', a special
+  // non-attributing tag (skipped by /club-stats) for tracking-only shots.
   const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
 
   // Validate one Pt (used for start/end of segments AND for legacy points).
@@ -2714,6 +2905,12 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
         out.club = s.club.toLowerCase();
       } else if (typeof s.club === 'string') {
         out.club = 'unknown';
+      }
+      // Partial-swing tag: a percentage ('75%') or clock ('9:00') label, or
+      // absent for a full swing. Validated to exactly one of those two shapes.
+      if (typeof s.partial_value === 'string') {
+        const pv = s.partial_value.trim().slice(0, 8);
+        if (/^\d{1,3}%$/.test(pv) || /^\d{1,2}:\d{2}$/.test(pv)) out.partial_value = pv;
       }
       if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
         out.lie = s.lie.toLowerCase();
@@ -2756,6 +2953,10 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
     if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
       out.club = s.club.toLowerCase();
     }
+    if (typeof s.partial_value === 'string') {
+      const pv = s.partial_value.trim().slice(0, 8);
+      if (/^\d{1,3}%$/.test(pv) || /^\d{1,2}:\d{2}$/.test(pv)) out.partial_value = pv;
+    }
     if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
       out.lie = s.lie.toLowerCase();
     }
@@ -2794,8 +2995,8 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
            end_lat,   end_lng,   end_elevation_m,
            recorded_at, source, plays_like_yds,
            aim_lat, aim_lng,
-           total_yds, lateral_yds, lateral_ref
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19)`,
+           total_yds, lateral_yds, lateral_ref, partial_value
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19,$20)`,
         [
           req.userId, req.params.id, holeNum, i,
           s.club ?? 'unknown', s.lie ?? null,
@@ -2804,7 +3005,7 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           s.recorded_at ?? new Date().toISOString(),
           s.plays_like_yds ?? null,
           s.aim?.lat ?? null, s.aim?.lng ?? null,
-          s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null,
+          s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null, s.partial_value ?? null,
         ]
       );
     }

@@ -19,6 +19,7 @@ import { useScorePanel } from './hooks/useScorePanel';
 import { useShotTracking } from './hooks/useShotTracking';
 import { useLocation } from './hooks/useLocation';
 import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
+import { CLUB_CODES, DEFAULT_CLUB_YDS, partialPresetsFor } from '../../../lib/clubs';
 import { Hole, Teebox, Course } from '../../../types';
 import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
 import { HoleScoreCelebration, CelebrationEvent, CelebrationKind } from '../../../components/HoleScoreCelebration';
@@ -1070,8 +1071,8 @@ export default function ScoringScreen() {
     getPinPoint: () => knownPinRef.current,
   });
   const {
-    shotsByHole, currentShots, activeShot, pendingClub, clubPickerVisible,
-    setClubPickerVisible, pickClubManual, pickClubAuto, isManualPick,
+    shotsByHole, currentShots, activeShot, pendingClub, pendingPartial, clubPickerVisible,
+    setClubPickerVisible, pickClubManual, pickClubAuto, pickPartial, isManualPick,
     onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt,
   } = tracking;
 
@@ -1605,12 +1606,8 @@ export default function ScoringScreen() {
   // still has to suggest *something* on shot 1 of round 1. Personal medians
   // override these the moment the user has tracked even a single shot per
   // club.
-  const DEFAULT_CLUB_YDS: Record<string, number> = useMemo(() => ({
-    driver: 220, '3w': 200, '5w': 185, '7w': 170, hybrid: 175,
-    '2i': 195, '3i': 185, '4i': 170, '5i': 160, '6i': 150,
-    '7i': 140, '8i': 130, '9i': 120,
-    pw: 110, gw: 90, sw: 70, lw: 55,
-  }), []);
+  // DEFAULT_CLUB_YDS now lives in lib/clubs.ts (single source shared with the
+  // bag editor) — imported above. Personal medians still override it below.
 
   const suggestedClub = useMemo<string | null>(() => {
     // Premium-gated "smart caddie" feature. Everyone is currently flagged
@@ -1655,7 +1652,7 @@ export default function ScoringScreen() {
       if (!best || diff < best.diff) best = { club, diff };
     }
     return best?.club ?? null;
-  }, [userIsPremium, clubStats, yardsToPin, DEFAULT_CLUB_YDS, user?.clubs_in_bag]);
+  }, [userIsPremium, clubStats, yardsToPin, user?.clubs_in_bag]);
 
   // Auto-suggest the most-likely club as the player walks. Takes effect
   // whenever the user hasn't manually picked one (pickClubAuto respects
@@ -2943,7 +2940,12 @@ export default function ScoringScreen() {
             CLUB{userIsPremium && pendingClub && !isManualPick() ? ' · AUTO' : ''}
           </Text>
           <Text style={styles.topChipValue}>
-            {(activeShot?.club ?? pendingClub)?.toUpperCase() ?? '—'}
+            {(() => {
+              const c = activeShot?.club ?? pendingClub;
+              if (!c) return '—';
+              const p = activeShot?.partial_value ?? pendingPartial;
+              return c.toUpperCase() + (p ? ` · ${p}` : '');
+            })()}
           </Text>
         </TouchableOpacity>
       </View>
@@ -2982,7 +2984,6 @@ export default function ScoringScreen() {
                   specific club's per-club stats. The backend skips
                   segments tagged 'chip' from /club-stats aggregation. */}
               {(() => {
-                const ALL = ['driver','3w','5w','7w','hybrid','2i','3i','4i','5i','6i','7i','8i','9i','pw','gw','sw','lw','putter'] as const;
                 const bag = user?.clubs_in_bag;
                 type Vis = { code: string; label?: string; key: string };
                 let visible: Vis[];
@@ -2996,7 +2997,7 @@ export default function ScoringScreen() {
                             : null))
                     .filter((v): v is Vis => v != null);
                 } else {
-                  visible = ALL.map((c, i) => ({ code: c, key: `${c}-${i}` }));
+                  visible = CLUB_CODES.map((c, i) => ({ code: c, key: `${c}-${i}` }));
                 }
                 return visible.map((v) => {
                   const active = (activeShot?.club ?? pendingClub) === v.code;
@@ -3027,6 +3028,35 @@ export default function ScoringScreen() {
                     <Text style={[styles.clubBtnChipText, active && { color: C.bg }]}>CHIP</Text>
                   </TouchableOpacity>
                 );
+              })()}
+            </View>
+            {/* Partial-swing row — a concise modifier for the next shot.
+                "Full" clears it; the preset chips follow the player's chosen
+                entry mode (percentage vs clock, set in Settings). Tapping a
+                swing chip does NOT close the sheet, so the player can then tap
+                a club; tapping the club applies the partial and closes. The
+                partial resets after every finalized shot, so it never silently
+                tags a later full swing. */}
+            <View style={styles.swingRow}>
+              <Text style={styles.swingRowLabel}>SWING</Text>
+              {(() => {
+                const curPartial = activeShot?.partial_value ?? pendingPartial ?? null;
+                const opts: { label: string; value: string | null }[] = [
+                  { label: 'Full', value: null },
+                  ...partialPresetsFor(user?.partial_swing_mode).map((p) => ({ label: p, value: p })),
+                ];
+                return opts.map((o) => {
+                  const active = curPartial === o.value;
+                  return (
+                    <TouchableOpacity
+                      key={o.label}
+                      style={[styles.swingChip, active && styles.swingChipActive]}
+                      onPress={() => pickPartial(o.value)}
+                    >
+                      <Text style={[styles.swingChipText, active && { color: C.bg }]}>{o.label}</Text>
+                    </TouchableOpacity>
+                  );
+                });
               })()}
             </View>
             <View style={styles.clubPickerFooter}>
@@ -3826,6 +3856,19 @@ const styles = StyleSheet.create({
   },
   clubBtnChipActive: { backgroundColor: C.gold, borderColor: C.gold, borderStyle: 'solid' },
   clubBtnChipText: { color: C.gold, fontWeight: '900', fontSize: 12, textAlign: 'center', letterSpacing: 0.6 },
+  // Partial-swing row under the club grid — same chip language, lighter weight
+  // so it reads as a modifier rather than a primary choice.
+  swingRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    flexWrap: 'wrap', gap: 6, marginTop: 12,
+  },
+  swingRowLabel: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1, marginRight: 2 },
+  swingChip: {
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.bg, minWidth: 48,
+  },
+  swingChipActive: { backgroundColor: C.gold, borderColor: C.gold },
+  swingChipText: { color: C.text, fontWeight: '800', fontSize: 12, textAlign: 'center', letterSpacing: 0.4 },
   clubClearBtn: { marginTop: 14, alignSelf: 'center', padding: 8 },
   clubClearText: { color: C.textMuted, fontSize: 12 },
   clubPickerFooter: {
