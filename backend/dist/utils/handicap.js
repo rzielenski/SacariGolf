@@ -1,0 +1,199 @@
+"use strict";
+/**
+ * WHS-style handicap math, shared by the live GET /users/:id/handicap
+ * endpoint and the one-off backfill so they can never disagree.
+ *
+ * A score differential is (113 / slope) x (gross - course rating). The whole
+ * trick is using the RIGHT rating + slope for how many holes were actually
+ * played versus how many holes the course has:
+ *
+ *   9-hole course,  played 9   → use the stored 9-hole rating + slope as-is.
+ *                                (A 9-hole course legitimately has a low
+ *                                 rating, e.g. ~34 for par 36.)
+ *   9-hole course,  played 18  → two loops: DOUBLE the rating. Slope is a
+ *                                difficulty ratio and stays the same.
+ *   18-hole course, played 9   → use the dedicated front/back-9 rating + slope
+ *                                if the course has them; otherwise HALVE the
+ *                                18-hole rating. Slope stays the same.
+ *   18-hole course, played 18  → use the stored rating + slope as-is.
+ *
+ * A teebox is 9-hole or 18-hole purely by its `num_holes` — the authoritative
+ * field, never inferred from rating/slope magnitude. A 9-hole teebox stores
+ * HALF-SCALE data (rating ~35, slope ~40-55); an 18-hole teebox stores
+ * FULL-SCALE data (rating ~70, slope ~110-120). Course RATING scales with the
+ * hole count (double for two loops, half a front/back nine).
+ *
+ * The 113 in the differential is the STANDARD 18-hole slope. A 9-hole teebox's
+ * slope is on the half scale, so the reference is halved to 56.5 to match
+ * (identical to doubling the slope) — otherwise dividing a half-scale slope
+ * into the full 113 doubles the differential. This is keyed on num_holes, so a
+ * 9-hole tee with a slope of, say, 55 is still handled correctly.
+ *
+ * 9-hole rounds keep the per-round "strokes over rating" convention here
+ * (NOT doubled to an 18-hole equivalent) — that is the figure shown in the
+ * handicap round list. Match scoring uses its own diff18 (which does double).
+ */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.roundDifferential = roundDifferential;
+exports.whsHandicapIndex = whsHandicapIndex;
+exports.backfillHandicaps = backfillHandicaps;
+const pool_1 = __importDefault(require("../db/pool"));
+const NEUTRAL_SLOPE = 113;
+/** Resolve the effective rating + slope for a round (handling 9 vs 18 holes
+ *  on 9 vs 18-hole courses) and return the resulting score differential. */
+function roundDifferential(r) {
+    const CR = r.course_rating ?? 0;
+    const S = r.slope_rating ?? NEUTRAL_SLOPE;
+    // Authoritative 9-vs-18 discriminator: the teebox's own hole count. Never
+    // inferred from rating/slope magnitude (a 9-hole tee can legitimately have a
+    // slope in the 40-55 band, which a magnitude check would mishandle).
+    const teeNine = (r.teebox_holes ?? 18) === 9;
+    const playedNine = r.holes_played === 9;
+    let rating;
+    let slope;
+    if (teeNine) {
+        // 9-hole course — stored rating/slope ARE the 9-hole values.
+        if (playedNine) {
+            rating = CR; // played the 9 → use as-is
+            slope = S;
+        }
+        else {
+            rating = CR * 2; // played 18 (two loops) → double the rating
+            slope = S;
+        }
+    }
+    else {
+        // 18-hole course.
+        if (playedNine) {
+            const useBack = r.holes_subset === 'back';
+            const sideRating = useBack ? r.back_course_rating : r.front_course_rating;
+            const sideSlope = useBack ? r.back_slope_rating : r.front_slope_rating;
+            if (typeof sideRating === 'number' && sideRating > 0) {
+                // Course publishes a dedicated 9-hole rating/slope for this nine.
+                rating = sideRating;
+                slope = typeof sideSlope === 'number' && sideSlope > 0 ? sideSlope : S;
+            }
+            else {
+                rating = CR / 2; // only an 18-hole rating exists → halve it
+                slope = S;
+            }
+        }
+        else {
+            rating = CR; // played 18 → use as-is
+            slope = S;
+        }
+    }
+    // Match the 113 reference to the slope's scale: a 9-hole teebox's slope is
+    // half-scale → 56.5; an 18-hole teebox's slope (incl. front/back-9 on an
+    // 18-hole tee) is full-scale → 113. Keyed on the teebox, not the value.
+    const reference = teeNine ? 113 / 2 : 113;
+    const safeSlope = slope > 0 ? slope : (teeNine ? NEUTRAL_SLOPE / 2 : NEUTRAL_SLOPE);
+    const diff = (reference / safeSlope) * (r.total_score - rating);
+    return { rating, slope: safeSlope, diff };
+}
+/** WHS lookup: how many of the lowest differentials to average + the
+ *  small-sample adjustment, then the resulting index (or null if too few
+ *  rounds). Input is the raw differential list (any order). */
+function whsHandicapIndex(differentials) {
+    const N = differentials.length;
+    let useCount = 0;
+    let adjustment = 0;
+    if (N >= 20) {
+        useCount = 8;
+    }
+    else if (N >= 19) {
+        useCount = 7;
+    }
+    else if (N >= 17) {
+        useCount = 6;
+    }
+    else if (N >= 15) {
+        useCount = 5;
+    }
+    else if (N >= 12) {
+        useCount = 4;
+    }
+    else if (N >= 9) {
+        useCount = 3;
+    }
+    else if (N >= 7) {
+        useCount = 2;
+    }
+    else if (N >= 6) {
+        useCount = 2;
+        adjustment = -1;
+    }
+    else if (N >= 5) {
+        useCount = 1;
+    }
+    else if (N >= 4) {
+        useCount = 1;
+        adjustment = -1;
+    }
+    else if (N >= 3) {
+        useCount = 1;
+        adjustment = -2;
+    }
+    if (useCount === 0)
+        return { handicapIndex: null, useCount };
+    const best = [...differentials].sort((a, b) => a - b).slice(0, useCount);
+    const avg = best.reduce((a, b) => a + b, 0) / best.length;
+    return { handicapIndex: Math.round((avg + adjustment) * 10) / 10, useCount };
+}
+/**
+ * One-off: recompute every player's stored handicap_index from their last
+ * 20 SOLO rated rounds using the formula above, so the stored value (used on
+ * the profile + strokes-gained baseline) matches the live handicap view.
+ * Only writes users with enough rated solo rounds for an index — fewer than 3
+ * keeps whatever they had. This DOES overwrite a manually-entered handicap
+ * for anyone with 3+ solo rated rounds.
+ */
+async function backfillHandicaps() {
+    const { rows } = await pool_1.default.query(`
+    WITH ranked AS (
+      SELECT r.user_id, r.total_score,
+             -- per-hole array length → else the MATCH's hole count → else the
+             -- teebox's (a 9-hole total-only round on an 18-hole tee must not
+             -- read as 18). Mirrors the live /handicap query.
+             COALESCE(array_length(r.hole_scores, 1), m.num_holes, t.num_holes) AS holes_played,
+             t.num_holes AS teebox_holes,
+             m.holes_subset,
+             t.course_rating, t.slope_rating,
+             t.front_course_rating, t.front_slope_rating,
+             t.back_course_rating, t.back_slope_rating,
+             row_number() OVER (PARTITION BY r.user_id ORDER BY r.created_at DESC) AS rn
+        FROM rounds r
+        JOIN matches m ON m.match_id = r.match_id
+        JOIN teeboxes t ON t.teebox_id = r.teebox_id
+       WHERE r.total_score IS NOT NULL
+         AND m.completed = true AND m.is_practice = false
+         AND m.match_type = 'solo'
+         AND t.course_rating IS NOT NULL AND t.slope_rating IS NOT NULL
+    )
+    SELECT * FROM ranked WHERE rn <= 20
+  `);
+    const byUser = new Map();
+    for (const r of rows) {
+        const list = byUser.get(r.user_id) ?? [];
+        list.push(r);
+        byUser.set(r.user_id, list);
+    }
+    let usersUpdated = 0;
+    for (const [userId, rs] of byUser) {
+        // 18-hole equivalent for the index: a 9-hole differential is half-scale,
+        // so double it before pooling (mirrors the live /handicap endpoint).
+        const diffs = rs.map((r) => {
+            const d = roundDifferential(r).diff;
+            return r.holes_played === 9 ? d * 2 : d;
+        });
+        const { handicapIndex } = whsHandicapIndex(diffs);
+        if (handicapIndex == null)
+            continue;
+        await pool_1.default.query(`UPDATE users SET handicap_index = $1 WHERE user_id = $2`, [handicapIndex, userId]);
+        usersUpdated++;
+    }
+    return { usersUpdated };
+}

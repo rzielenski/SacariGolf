@@ -27,6 +27,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.divisionForElo = divisionForElo;
+exports.currentSeason = currentSeason;
 const express_1 = require("express");
 const pool_1 = __importDefault(require("../db/pool"));
 const auth_1 = require("../middleware/auth");
@@ -99,7 +101,7 @@ const RECORD_SELECT = `
 router.get('/current', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const season = currentSeason();
     const { rows: uRows } = await pool_1.default.query(`SELECT elo FROM users WHERE user_id = $1`, [req.userId]);
-    const elo = uRows[0]?.elo ?? 1200;
+    const elo = uRows[0]?.elo ?? 100;
     const division = divisionForElo(elo);
     const next = nextDivision(division);
     const { rows: recRows } = await pool_1.default.query(`SELECT ${RECORD_SELECT}
@@ -182,7 +184,7 @@ router.get('/current/standings', auth_1.requireAuth, (0, asyncHandler_1.wrap)(as
     }
     else {
         const { rows } = await pool_1.default.query(`SELECT elo FROM users WHERE user_id = $1`, [req.userId]);
-        const d = divisionForElo(rows[0]?.elo ?? 1200);
+        const d = divisionForElo(rows[0]?.elo ?? 100);
         band = { min: d.min, max: d.max === Infinity ? Number.MAX_SAFE_INTEGER : d.max };
     }
     const friendsOnly = req.query.scope === 'friends';
@@ -230,7 +232,7 @@ router.get('/current/standings', auth_1.requireAuth, (0, asyncHandler_1.wrap)(as
        LEFT JOIN streaks st ON st.user_id = s.user_id
       WHERE u.elo >= $3 AND u.elo < $4
         ${friendClause}
-      ORDER BY s.points DESC, s.wins DESC, s.matches ASC, u.elo DESC
+      ORDER BY u.elo DESC, s.wins DESC, s.matches ASC
       LIMIT 100`, params);
     // Tag each row with its division key so the client can badge mixed lists.
     const standings = rows.map((r, i) => ({

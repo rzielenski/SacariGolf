@@ -29,7 +29,17 @@ exports.validateTeebox = validateTeebox;
  * rate exactly to par. Calibrated so a 6300-yd par-72 → ~70.3 / 124, which
  * lines up with typical mid-difficulty US public courses.
  */
-function estimateRatingSlope(par, totalYards, gender = 'male') {
+function estimateRatingSlope(par, totalYards, gender = 'male', numHoles = 18) {
+    // 9-hole data is stored on a HALF scale (rating ~35, slope ~40-55). Estimate
+    // the full-18 figures from doubled inputs, then halve to the 9-hole scale.
+    if (numHoles === 9) {
+        const full = estimateRatingSlope(par * 2, totalYards * 2, gender, 18);
+        return {
+            rating: Math.max(27, Math.min(42, Math.round((full.rating / 2) * 10) / 10)),
+            slope: Math.max(40, Math.min(90, Math.round(full.slope / 2))),
+            estimated: true,
+        };
+    }
     const neutralYards = (gender === 'female' ? 5200 : 5800) + (par - 72) * 90;
     const rawRating = par + (totalYards - neutralYards) / 220;
     const rating = Math.round(rawRating * 10) / 10;
@@ -47,12 +57,17 @@ function estimateRatingSlope(par, totalYards, gender = 'male') {
  * window wide so weird-but-real combinations (very forward tees, par-69
  * courses) don't get clobbered.
  */
-function looksPlausibleRating(rating, slope) {
+function looksPlausibleRating(rating, slope, numHoles = 18) {
     if (rating == null && slope == null)
         return false;
-    if (rating != null && (rating < 55 || rating > 80))
+    // 9-hole tees are half-scale: rating ~27-42, slope ~40-90 (a 9-hole slope of
+    // 40-55 is normal and must not be rejected as "implausible 18-hole" data).
+    const R = numHoles === 9
+        ? { ratingMin: 27, ratingMax: 42, slopeMin: 40, slopeMax: 90 }
+        : { ratingMin: 55, ratingMax: 80, slopeMin: 55, slopeMax: 155 };
+    if (rating != null && (rating < R.ratingMin || rating > R.ratingMax))
         return false;
-    if (slope != null && (slope < 55 || slope > 155))
+    if (slope != null && (slope < R.slopeMin || slope > R.slopeMax))
         return false;
     return true;
 }

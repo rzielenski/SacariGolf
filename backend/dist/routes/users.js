@@ -46,6 +46,9 @@ const notify_1 = require("../utils/notify");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const sg_1 = require("../utils/sg");
 const openBeta_1 = require("../utils/openBeta");
+const cosmeticSql_1 = require("../utils/cosmeticSql");
+const handicap_1 = require("../utils/handicap");
+const messages_1 = require("./messages");
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
 if (!fs.existsSync(AVATARS_DIR))
@@ -55,10 +58,19 @@ router.get('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) 
     const { rows } = await pool_1.default.query(`SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
-            u.is_premium, u.premium_since, u.premium_until, u.premium_plan,
+            u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
-            u.theme_track_artwork, u.theme_track_preview,
+            u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
             u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
+            u.equipped_border, u.equipped_background, u.equipped_username,
+            u.equipped_ball_trail, u.equipped_fx,
+            (SELECT jsonb_build_object(
+              'border',     (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_border),
+              'background', (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_background),
+              'username',   (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_username),
+              'ball_trail', (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_ball_trail),
+              'fx',         (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_fx)
+            )) AS equipped_visual,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state,
             c.latitude AS home_course_lat, c.longitude AS home_course_lng
      FROM users u
@@ -75,10 +87,16 @@ router.get('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) 
         row.premium_plan = row.premium_plan ?? 'open_beta';
         row.premium_until = null; // null = lifetime / no expiry for client purposes
     }
+    // Owners are always premium (it's one of the unlockables the owner group
+    // gets) and the app reads is_owner to surface the @everyone broadcast UI.
+    if (row.is_owner) {
+        row.is_premium = true;
+        row.premium_until = null;
+    }
     return res.json(row);
 }));
 router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter } = req.body;
+    const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume } = req.body;
     const updates = [];
     const values = [];
     // Opt-in for the automated @Sacari Twitter/X daily digest. Booleanish; the
@@ -87,6 +105,14 @@ router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
     if (shareToTwitter !== undefined) {
         values.push(!!shareToTwitter);
         updates.push(`share_to_twitter = $${values.length}`);
+    }
+    // "Force theme songs to play loud" toggle. When TRUE the mobile theme
+    // player sets playsInSilentModeIOS + max output volume; when FALSE it
+    // respects the silent switch. iOS doesn't expose programmatic system
+    // volume control to third-party apps, so this is the most we can do.
+    if (themeSongMaxVolume !== undefined) {
+        values.push(!!themeSongMaxVolume);
+        updates.push(`theme_song_max_volume = $${values.length}`);
     }
     // Content-safety toggle. Booleanish — accepts true/false, also 0/1 from
     // older clients. Defaults to TRUE in the DB so an explicit `false` is
@@ -242,9 +268,41 @@ router.get('/search', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, r
      LIMIT 20`, [`${q}%`, req.userId]);
     return res.json(rows);
 }));
+/**
+ * Theme song voice upload. Records a personal voice memo (recorded
+ * client-side via the existing useVoiceRecorder hook) and points the
+ * caller's theme song at the uploaded clip. Same file storage as DM voice
+ * messages — reuses persistVoiceClip from routes/messages.ts so the size
+ * cap (2 MB) + mime whitelist stay in one place.
+ *
+ *   body: { voiceBase64, voiceMime, voiceDurationMs }
+ *   → { success: true, previewUrl }
+ *
+ * The voice-as-theme is encoded with theme_track_id = '__voice__' so the
+ * mobile player can branch on it (e.g. label "Your voice memo" instead of
+ * an artist line). Title falls back to the caller's username; artwork
+ * stays null since there's nothing meaningful to render.
+ */
+router.post('/me/theme-voice', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { voiceBase64, voiceMime, voiceDurationMs } = req.body ?? {};
+    const result = (0, messages_1.persistVoiceClip)(String(voiceBase64 ?? ''), String(voiceMime ?? 'audio/m4a'), Number(voiceDurationMs) || 0);
+    if ('error' in result)
+        return res.status(400).json({ error: result.error });
+    const { rows: nameRows } = await pool_1.default.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
+    const username = nameRows[0]?.username ?? 'You';
+    await pool_1.default.query(`UPDATE users
+        SET theme_track_id      = '__voice__',
+            theme_track_title   = 'Your voice memo',
+            theme_track_artist  = $2,
+            theme_track_artwork = NULL,
+            theme_track_preview = $3
+      WHERE user_id = $1`, [req.userId, username, result.url]);
+    return res.json({ success: true, previewUrl: result.url, durationMs: result.durationMs });
+}));
 // Friends — must be before /:id
 router.get('/me/friends', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { rows } = await pool_1.default.query(`SELECT DISTINCT ON (u.user_id) u.user_id, u.username, u.elo, u.avatar_url, f.status
+    const { rows } = await pool_1.default.query(`SELECT DISTINCT ON (u.user_id) u.user_id, u.username, u.elo, u.avatar_url, f.status,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
      FROM friends f
      JOIN users u ON u.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
      WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
@@ -572,13 +630,22 @@ router.get('/:id/club-stats', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async
     // the new shots table this is O(rows), no JSONB iteration needed. Limit
     // to a generous cap so a power user with thousands of shots doesn't
     // blow up memory; the most recent 5000 are plenty for stats.
-    const { rows: shotRows } = await pool_1.default.query(`SELECT shot_id, club, start_lat, start_lng, end_lat, end_lng,
-            plays_like_yds, recorded_at, total_yds, lateral_yds
-       FROM shots
-      WHERE user_id = $1
-        AND club IS NOT NULL
-        AND club <> 'unknown'
-      ORDER BY recorded_at DESC
+    const { rows: shotRows } = await pool_1.default.query(
+    // Club distances/dispersion reflect SOLO play only — a scramble shot
+    // isn't necessarily the player's own ball, and team/arena play
+    // shouldn't skew an individual's club profile. Shots from deleted
+    // matches (match_id NULL) drop out of the inner join, which is fine:
+    // we can't confirm they were solo.
+    `SELECT s.shot_id, s.club, s.start_lat, s.start_lng, s.end_lat, s.end_lng,
+            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds
+       FROM shots s
+       JOIN matches m ON m.match_id = s.match_id
+      WHERE s.user_id = $1
+        AND m.match_type = 'solo'
+        AND m.is_practice = false
+        AND s.club IS NOT NULL
+        AND s.club <> 'unknown'
+      ORDER BY s.recorded_at DESC
       LIMIT 5000`, [req.params.id]);
     // Wrap in the shape the existing aggregator expects.
     const rows = [{
@@ -1362,27 +1429,57 @@ router.get('/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
         FROM friends f
        WHERE (f.user_id = $1 OR f.friend_id = $1) AND f.status = 'accepted'
     )`;
-    // ── Per-mode leaderboard (ranked by wins in that match type) ─────────
-    if (mode !== 'all') {
+    // ── Duo / Squad: TEAM leaderboard, ranked by ELO ────────────────────
+    // Teams are clans (clan_mode = duo | squad). clans.elo is never updated
+    // by match resolution (only users.elo is), so ranking by it would put
+    // every team at the 1200 default. Instead a team's rating is the average
+    // of its current members' individual ELO — meaningful from day one with
+    // no change to the resolution path. `is_mine` flags teams the caller is
+    // in so the app can highlight them. The friends toggle doesn't map onto
+    // teams, so it's ignored here; private teams still appear if the caller
+    // is a member.
+    if (mode === 'duo' || mode === 'squad') {
+        const { rows } = await pool_1.default.query(`SELECT c.clan_id, c.name, c.clan_mode, c.avatar_url,
+              ROUND(AVG(u.elo))::int AS team_elo,
+              COUNT(cm.user_id)::int AS member_count,
+              c.total_matches, c.total_wins,
+              bool_or(cm.user_id = $1) AS is_mine
+         FROM clans c
+         JOIN clan_members cm ON cm.clan_id = c.clan_id
+         JOIN users u ON u.user_id = cm.user_id
+        WHERE c.clan_mode = $2
+          AND (c.is_public = true OR EXISTS (
+            SELECT 1 FROM clan_members me
+            WHERE me.clan_id = c.clan_id AND me.user_id = $1
+          ))
+        GROUP BY c.clan_id
+        ORDER BY team_elo DESC, c.total_wins DESC, c.name ASC
+        LIMIT 100`, [req.userId, mode]);
+        return res.json(rows);
+    }
+    // ── Solo / FFA: individuals ranked by ELO ───────────────────────────
+    // All boards rank by ELO now (the old per-mode WINS ranking is gone).
+    // Restricted to players who've actually played that mode so the tab
+    // stays distinct from Overall, but ordered purely by global ELO.
+    if (mode === 'solo' || mode === 'ffa') {
         const scopeFilter = friendsOnly
-            ? 'mp.user_id IN (SELECT user_id FROM scope)'
+            ? 'u.user_id IN (SELECT user_id FROM scope)'
             : 'u.user_id NOT IN (SELECT blocked_id FROM blocked_users WHERE blocker_id = $1)';
         const sql = `
       ${friendsOnly ? friendScopeCte : ''}
-      SELECT u.user_id, u.username, u.elo, u.avatar_url,
-             COUNT(*) FILTER (WHERE mr.winner_side = mp.side)::int AS mode_wins,
-             COUNT(*)::int AS mode_matches
+      SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+             ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
         FROM users u
-        JOIN match_players mp ON mp.user_id = u.user_id
-        JOIN matches m ON m.match_id = mp.match_id
-                      AND m.match_type = $2
-                      AND m.completed = true
-                      AND m.is_practice = false
-        LEFT JOIN match_results mr ON mr.match_id = m.match_id
        WHERE ${scopeFilter}
-       GROUP BY u.user_id
-      HAVING COUNT(*) > 0
-       ORDER BY mode_wins DESC, mode_matches DESC, u.elo DESC
+         AND EXISTS (
+           SELECT 1 FROM match_players mp
+           JOIN matches m ON m.match_id = mp.match_id
+          WHERE mp.user_id = u.user_id
+            AND m.match_type = $2
+            AND m.completed = true
+            AND m.is_practice = false
+         )
+       ORDER BY u.elo DESC
        LIMIT 100`;
         const { rows } = await pool_1.default.query(sql, [req.userId, mode]);
         return res.json(rows);
@@ -1390,7 +1487,8 @@ router.get('/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
     // ── Overall ELO leaderboard (default) ───────────────────────────────
     if (friendsOnly) {
         const { rows } = await pool_1.default.query(`${friendScopeCte}
-       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url
+       SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+              ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
        FROM users u
        WHERE u.user_id IN (SELECT user_id FROM scope)
        ORDER BY u.elo DESC
@@ -1399,18 +1497,20 @@ router.get('/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
     }
     // Apple Guideline 1.2: hide blocked users everywhere, including the
     // global leaderboard. Blocker only — blocked users still see the blocker.
-    const { rows } = await pool_1.default.query(`SELECT user_id, username, elo, total_matches, total_wins, avatar_url
-     FROM users
-     WHERE user_id NOT IN (
+    const { rows } = await pool_1.default.query(`SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.avatar_url,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
+     FROM users u
+     WHERE u.user_id NOT IN (
        SELECT blocked_id FROM blocked_users WHERE blocker_id = $1
      )
-     ORDER BY elo DESC LIMIT 100`, [req.userId]);
+     ORDER BY u.elo DESC LIMIT 100`, [req.userId]);
     return res.json(rows);
 }));
 router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows } = await pool_1.default.query(`SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.bio, u.home_course_id, u.drinks,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u
      LEFT JOIN courses c ON c.course_id = u.home_course_id
@@ -1434,11 +1534,14 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
      WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true
      ORDER BY r.created_at DESC
      LIMIT 5`, [req.params.id]);
-    // Best round (lowest score-to-par across all completed rounds). Par is
-    // pro-rated to the holes the player actually completed — without this,
-    // a 9-hole 41 on a par-72 teebox looks like a -31 round and beats every
-    // legitimate 18-hole entry. The same expression is used in SELECT and
-    // ORDER BY so the lowest-differential round actually wins.
+    // Best round (lowest score-to-par across completed SOLO rounds). Scoped to
+    // solo — same as the handicap, Sacari Cup, and cup-standings queries —
+    // because team (duo/squad/scramble) scores are shared and Arena is multi-way,
+    // so they don't represent an individual's round. Par is pro-rated to the
+    // holes the player actually completed — without this, a 9-hole 41 on a par-72
+    // teebox looks like a -31 round and beats every legitimate 18-hole entry. The
+    // same expression is used in SELECT and ORDER BY so the lowest-differential
+    // round actually wins.
     const { rows: bestRows } = await pool_1.default.query(`SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores, r.hole_stats,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
@@ -1451,6 +1554,7 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
      LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
      LEFT JOIN courses c ON c.course_id = t.course_id
      WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND t.par IS NOT NULL
+       AND m.is_practice = false AND m.match_type = 'solo'
      ORDER BY (r.total_score
                 - ROUND(t.par::numeric
                         * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
@@ -1526,7 +1630,8 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
  */
 router.get('/:id/following', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows } = await pool_1.default.query(`SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
        FROM (
          SELECT friend_id AS other_id, created_at FROM friends WHERE user_id = $1
          UNION
@@ -1545,7 +1650,8 @@ router.get('/:id/following', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async 
  */
 router.get('/:id/followers', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows } = await pool_1.default.query(`SELECT DISTINCT ON (u.user_id)
-            u.user_id, u.username, u.elo, u.avatar_url, x.created_at
+            u.user_id, u.username, u.elo, u.avatar_url, x.created_at,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
        FROM (
          SELECT user_id  AS other_id, created_at FROM friends WHERE friend_id = $1
          UNION
@@ -1698,10 +1804,16 @@ router.get('/:id/active-round', auth_1.requireAuth, (0, asyncHandler_1.wrap)(asy
 // Returns { handicap_index, num_rounds_used, total_rounds, differentials }
 router.get('/:id/handicap', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows: rounds } = await pool_1.default.query(`SELECT r.round_id, r.total_score, r.created_at, r.hole_scores,
-            COALESCE(array_length(r.hole_scores, 1), t.num_holes) AS holes_played,
+            -- Holes actually played: the per-hole array length if present, else
+            -- the MATCH's recorded hole count, and only then the teebox's. A
+            -- 9-hole round entered as a total-only (no array) on an 18-hole
+            -- teebox must NOT fall through to 18 — that was treating 9-hole
+            -- rounds as 18 and wrecking the differential.
+            COALESCE(array_length(r.hole_scores, 1), m.num_holes, t.num_holes) AS holes_played,
             t.course_rating, t.slope_rating, t.num_holes AS teebox_holes,
             t.front_course_rating, t.front_slope_rating,
             t.back_course_rating, t.back_slope_rating,
+            m.holes_subset,
             t.name AS teebox_name, c.course_name
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
@@ -1709,31 +1821,17 @@ router.get('/:id/handicap', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (
      LEFT JOIN courses c ON c.course_id = t.course_id
      WHERE r.user_id = $1 AND r.total_score IS NOT NULL
        AND m.completed = true AND m.is_practice = false
+       -- Handicap reflects SOLO play only. Team (duo/squad) scores are
+       -- shared/scramble and Arena is multi-way, so they don't represent
+       -- an individual's score-to-rating.
+       AND m.match_type = 'solo'
        AND t.course_rating IS NOT NULL AND t.slope_rating IS NOT NULL
      ORDER BY r.created_at DESC
      LIMIT 20`, [req.params.id]);
-    // Score differential = (113 / slope) × (gross − rating)
-    // For 9-hole rounds, use the 9-hole slope and 9-hole rating as-is.
-    // The doubling of slope and (score − rating) cancel out, so no extra ×2 is needed.
-    //  - 18-hole round on 18-hole teebox: full 18 rating + slope
-    //  - 9-hole round on 9-hole teebox:    teebox.course_rating + slope_rating ARE the 9-hole values
-    //  - 9-hole round on 18-hole teebox:   use the front-9 rating/slope columns (assumes front 9)
+    // Per-round score differential, via the shared (slope-guarded) helper so
+    // the live view and the backfill always agree. See utils/handicap.ts.
     const differentials = rounds.map((r) => {
-        const isNineHoleRound = r.holes_played === 9;
-        const isNineHoleTeebox = r.teebox_holes === 9;
-        let rating;
-        let slope;
-        if (isNineHoleRound && !isNineHoleTeebox) {
-            // 9-hole round on an 18-hole teebox — prefer the dedicated front-9 ratings
-            rating = r.front_course_rating ?? (r.course_rating / 2);
-            slope = r.front_slope_rating ?? r.slope_rating;
-        }
-        else {
-            // 9-hole teebox OR full 18-hole round — the teebox's primary rating/slope already match
-            rating = r.course_rating;
-            slope = r.slope_rating;
-        }
-        const diff = (113 / slope) * (r.total_score - rating);
+        const d = (0, handicap_1.roundDifferential)(r);
         return {
             round_id: r.round_id,
             created_at: r.created_at,
@@ -1741,63 +1839,22 @@ router.get('/:id/handicap', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (
             course_name: r.course_name,
             teebox_name: r.teebox_name,
             holes_played: r.holes_played,
-            course_rating_used: Math.round(rating * 10) / 10,
-            slope_used: slope,
-            differential: Math.round(diff * 10) / 10,
-            is_nine_hole: isNineHoleRound,
+            course_rating_used: Math.round(d.rating * 10) / 10,
+            slope_used: d.slope,
+            differential: Math.round(d.diff * 10) / 10,
+            is_nine_hole: r.holes_played === 9,
         };
     });
-    // WHS lookup: how many of the lowest differentials to use, plus an adjustment
-    const N = differentials.length;
-    let useCount = 0;
-    let adjustment = 0;
-    if (N >= 20) {
-        useCount = 8;
-    }
-    else if (N >= 19) {
-        useCount = 7;
-    }
-    else if (N >= 17) {
-        useCount = 6;
-    }
-    else if (N >= 15) {
-        useCount = 5;
-    }
-    else if (N >= 12) {
-        useCount = 4;
-    }
-    else if (N >= 9) {
-        useCount = 3;
-    }
-    else if (N >= 7) {
-        useCount = 2;
-    }
-    else if (N >= 6) {
-        useCount = 2;
-        adjustment = -1;
-    }
-    else if (N >= 5) {
-        useCount = 1;
-    }
-    else if (N >= 4) {
-        useCount = 1;
-        adjustment = -1;
-    }
-    else if (N >= 3) {
-        useCount = 1;
-        adjustment = -2;
-    }
-    let handicapIndex = null;
-    if (useCount > 0) {
-        const sorted = [...differentials].map((d) => d.differential).sort((a, b) => a - b);
-        const best = sorted.slice(0, useCount);
-        const avg = best.reduce((a, b) => a + b, 0) / best.length;
-        handicapIndex = Math.round((avg + adjustment) * 10) / 10;
-    }
+    // 9-hole rounds are scaled to their 18-hole EQUIVALENT (×2) for the index so
+    // they pool fairly with 18-hole rounds. Without this, a 9-hole differential is
+    // half-scale, so a bad 9 (e.g. 49 on a front nine) lands among a player's
+    // *best* rounds and lowers the handicap instead of raising it. The per-round
+    // `differential` shown in the list above stays the intuitive 9-hole figure.
+    const { handicapIndex, useCount } = (0, handicap_1.whsHandicapIndex)(differentials.map((d) => (d.is_nine_hole ? d.differential * 2 : d.differential)));
     return res.json({
         handicap_index: handicapIndex,
         num_rounds_used: useCount,
-        total_rated_rounds: N,
+        total_rated_rounds: differentials.length,
         differentials,
     });
 }));

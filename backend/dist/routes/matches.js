@@ -1,14 +1,56 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.expectedScore = expectedScore;
+exports.kFactor = kFactor;
+exports.placementUserSet = placementUserSet;
+exports.shapeDelta = shapeDelta;
+exports.diff18 = diff18;
+exports.resolveLinkedPair = resolveLinkedPair;
 const express_1 = require("express");
 const pool_1 = __importDefault(require("../db/pool"));
 const auth_1 = require("../middleware/auth");
 const notify_1 = require("../utils/notify");
 const mentions_1 = require("../utils/mentions");
 const asyncHandler_1 = require("../utils/asyncHandler");
+const cosmeticSql_1 = require("../utils/cosmeticSql");
+const leaderboard_1 = require("../utils/leaderboard");
+const seasons_1 = require("./seasons");
 const router = (0, express_1.Router)();
 // ELO helpers
 function expectedScore(rA, rB) {
@@ -21,33 +63,122 @@ function kFactor(totalMatches, elo) {
         return 16;
     return 24;
 }
-// Score differential scaled to an 18-hole equivalent so players on different
-// courses, different teeboxes, and different hole counts can be compared fairly.
-//
-//   18-hole round on an 18-hole teebox       → standard formula
-//   9-hole round on a 9-hole teebox          → standard formula on 9-hole rating, then ×2
-//   9-hole round on an 18-hole teebox        → use the FRONT or BACK 9 rating
-//                                              (caller provides via overrideRating);
-//                                              falls back to half the 18-hole rating
-//                                              when no front/back rating is available.
-//
-// The doubling converts a 9-hole "strokes over rating" into an 18-hole equivalent
-// so a 5-stroke-over diff on 9 holes is treated like a 10-stroke-over diff on 18.
-function diff18(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18, overrideRating, overrideSlope) {
-    let r = courseRating;
-    let s = slopeRating;
-    if (holesPlayed === 9 && teeboxHoles === 18) {
-        if (typeof overrideRating === 'number' && overrideRating > 0) {
-            r = overrideRating;
-            if (typeof overrideSlope === 'number' && overrideSlope > 0)
-                s = overrideSlope;
-        }
-        else {
-            r = courseRating / 2; // legacy fallback: half the 18-hole rating
-        }
+// ── Ranked-climb shaping (League-style) ───────────────────────────────
+// Two levers make the ladder feel climbable instead of glacial:
+//   • PLACEMENTS — your first few ranked matches each SEASON swing much
+//     harder (both ways), so a new or returning player rockets to their
+//     true rank instead of grinding up from the floor. This is what lets
+//     you "skip divisions": a placement win can be worth a whole band.
+//   • MINIMUM WIN — every win moves you up by at least a floor amount, so
+//     beating a weaker opponent still progresses you (the classic "I won
+//     but gained +1" stall at the top of a band is gone).
+// The seasonal partial reset (utils/cleanup.ts) mops up the mild ELO
+// inflation the minimum-win floor introduces, so it stays self-correcting.
+const PLACEMENT_MATCHES = 5; // mirrors seasons.ts
+const PLACEMENT_MULTIPLIER = 3; // placement results swing 3x
+const PLACEMENT_MIN_WIN_DELTA = 50; // a placement WIN is at least this
+const MIN_WIN_DELTA = 12; // any other win is at least this
+// Asymmetric climb: a win gains more than the matching loss costs, so players
+// trend upward and the ladder feels good to climb. The seasonal partial reset
+// (utils/cleanup.ts) compresses the resulting mild inflation each season, so
+// it stays self-correcting. Applied to the WIN side only.
+const WIN_GAIN_MULTIPLIER = 1.35;
+/** Set of user_ids still in their season placements — fewer than
+ *  PLACEMENT_MATCHES completed ranked matches THIS season (excluding the
+ *  match currently resolving). Those players get the big placement swing. */
+async function placementUserSet(client, userIds, excludeMatchId) {
+    if (!userIds.length)
+        return new Set();
+    const season = (0, seasons_1.currentSeason)();
+    const { rows } = await client.query(`SELECT mp.user_id, COUNT(*)::int AS n
+       FROM match_results mr
+       JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
+       JOIN match_players mp ON mp.match_id = mr.match_id
+      WHERE mp.user_id = ANY($1)
+        AND mr.match_id <> $2
+        AND mr.created_at >= $3 AND mr.created_at < $4
+      GROUP BY mp.user_id`, [userIds, excludeMatchId, season.starts_at, season.ends_at]);
+    const counts = new Map(rows.map((r) => [r.user_id, r.n]));
+    return new Set(userIds.filter((id) => (counts.get(id) ?? 0) < PLACEMENT_MATCHES));
+}
+/** Shape a base signed ELO delta: apply the placement multiplier, then
+ *  floor a win to its minimum. Placement losses scale 3x too (you fall to
+ *  your true rank fast); losses are otherwise left as computed. */
+function shapeDelta(base, won, isPlacement) {
+    let d = isPlacement ? base * PLACEMENT_MULTIPLIER : base;
+    // Wins climb faster than losses fall (asymmetric, win side only).
+    if (won && d > 0)
+        d *= WIN_GAIN_MULTIPLIER;
+    d = Math.round(d);
+    if (won) {
+        const floor = isPlacement ? PLACEMENT_MIN_WIN_DELTA : MIN_WIN_DELTA;
+        if (d < floor)
+            d = floor;
     }
-    const raw = (gross - r) * (113 / s);
-    return holesPlayed === 9 ? raw * 2 : raw;
+    return d;
+}
+// Score differential scaled to an 18-hole equivalent so players on different
+// courses, teeboxes, and hole counts compare fairly.
+//
+// Instead of special-casing every combination, we convert ALL THREE inputs to
+// one common 18-hole, full-slope scale, then apply the single WHS formula:
+//
+//     diff = (113 / slopeFull) × (gross18 − ratingFull)
+//
+// The conversions are independent, so every (holes played) × (teebox scale)
+// combination falls out automatically — including the weird ones:
+//
+//   teebox scale (by num_holes — authoritative, never guessed from magnitude):
+//     • 9-hole teebox  → half-scale data: ratingFull = CR×2, slopeFull = slope×2
+//     • 18-hole teebox → full-scale: ratingFull = CR, slopeFull = slope
+//        - if only a NINE of an 18-hole course was played and the course has a
+//          dedicated front/back-9 rating, use that ×2 (its slope is full-scale)
+//   gross → 18-hole equivalent: gross × (18 / holesPlayed)
+//     • 9 played  → ×2     • 18 played → ×1     • any partial N → ×(18/N)
+//
+// Worked combos:
+//   18 on 18-hole     → ×1, CR, slope                      (standard)
+//   9  on 9-hole      → gross×2, CR×2, slope×2
+//   18 on 9-hole      → gross×1, CR×2, slope×2             (two loops)
+//   9  on 18-hole     → gross×2, (front/back×2 ?? CR), slope (or front/back)
+//   18 on 9-hole RATING but card says 18, etc.            → all covered
+function diff18(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18, overrideRating, overrideSlope) {
+    // Authoritative 9-vs-18 by the teebox's hole count, never by value magnitude
+    // (a 9-hole tee can legitimately have a slope in the 40-55 band).
+    const teeNine = teeboxHoles === 9;
+    const playedNine = holesPlayed === 9;
+    // Guard a missing/garbage hole count so the gross extrapolation can't divide
+    // by zero — default to the teebox's own size.
+    const hp = holesPlayed && holesPlayed > 0 ? holesPlayed : (teeNine ? 9 : 18);
+    // Full-scale (18-hole-equivalent) slope.
+    let slopeFull;
+    if (teeNine) {
+        slopeFull = slopeRating * 2; // half-scale → full
+    }
+    else if (playedNine && typeof overrideSlope === 'number' && overrideSlope > 0) {
+        slopeFull = overrideSlope; // front/back-9 slope (already full-scale)
+    }
+    else {
+        slopeFull = slopeRating;
+    }
+    if (!(slopeFull > 0))
+        slopeFull = 113; // never divide by 0/NaN
+    // Full 18-hole-equivalent course rating.
+    let ratingFull;
+    if (teeNine) {
+        ratingFull = courseRating * 2; // 9-hole rating → 18
+    }
+    else if (playedNine) {
+        ratingFull = (typeof overrideRating === 'number' && overrideRating > 0)
+            ? overrideRating * 2 // dedicated nine rating → 18
+            : courseRating; // else the full 18 rating
+    }
+    else {
+        ratingFull = courseRating;
+    }
+    // Gross extrapolated to an 18-hole equivalent.
+    const gross18 = gross * (18 / hp);
+    return (113 / slopeFull) * (gross18 - ratingFull);
 }
 // Kept for backwards compatibility / one place that still wants the un-doubled value
 function scoreDifferential(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18) {
@@ -64,7 +195,7 @@ function scoreDifferential(gross, courseRating, slopeRating, holesPlayed = 18, t
 //   • scramble     — Existing team format (one final team score per side)
 const VALID_FORMATS = new Set(['stroke', 'stableford', 'match_play', 'skins', 'scramble']);
 router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId } = req.body;
+    const { matchType, name, isPractice, teeboxId, clanId, format, numHoles, holesSubset, challengeUserId, tournamentId } = req.body;
     // A direct challenge to one friend. When set, the match is earmarked for
     // them (invite created in the same transaction) and auto-pairing is skipped,
     // so it can never grab a stranger before/while the friend is invited.
@@ -104,8 +235,20 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
                 return res.status(403).json({ error: 'Only the team leader can start a squad match' });
             }
         }
-        const { rows } = await client.query(`INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset]);
+        // Tournament tagging: a round counts toward a tournament only if the creator
+        // is a registered player of an ACTIVE tournament. Otherwise it's silently
+        // dropped (the round still plays, just untagged) so a bad id can't 500 a
+        // legitimate match create.
+        let resolvedTournamentId = null;
+        if (typeof tournamentId === 'string' && tournamentId) {
+            const { rows: tg } = await client.query(`SELECT 1 FROM tournaments t
+           JOIN tournament_players tp ON tp.tournament_id = t.tournament_id AND tp.user_id = $2
+          WHERE t.tournament_id = $1 AND t.status = 'active'`, [tournamentId, req.userId]);
+            if (tg.length)
+                resolvedTournamentId = tournamentId;
+        }
+        const { rows } = await client.query(`INSERT INTO matches (match_type, name, is_practice, format, num_holes, clan_id, holes_subset, tournament_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [matchType, name || null, isPractice || false, resolvedFormat, resolvedNumHoles, clanId || null, resolvedHolesSubset, resolvedTournamentId]);
         const match = rows[0];
         await client.query(`INSERT INTO match_players (match_id, user_id, teebox_id, side)
        VALUES ($1, $2, $3, 1)`, [match.match_id, req.userId, teeboxId || null]);
@@ -213,10 +356,10 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
          ORDER BY ABS(
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_a
                      JOIN users u ON u.user_id = mp_a.user_id
-                     WHERE mp_a.match_id = $1), 1200) -
+                     WHERE mp_a.match_id = $1), 100) -
            COALESCE((SELECT AVG(u.elo) FROM match_players mp_b
                      JOIN users u ON u.user_id = mp_b.user_id
-                     WHERE mp_b.match_id = m.match_id), 1200)
+                     WHERE mp_b.match_id = m.match_id), 100)
          )
          LIMIT 1
          FOR UPDATE SKIP LOCKED`, [match.match_id, matchType, resolvedFormat, resolvedNumHoles, req.userId, clanId || null]);
@@ -280,48 +423,330 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
         client.release();
     }
 }));
+// Full per-player projection for the match-detail screen. Shared between
+// the primary match and (for linked matches) the paired match, whose
+// players are presented as the opponent side. $1 = match_id.
+const MATCH_DETAIL_PLAYERS_SQL = `
+  SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
+         mp.live_scores_optin,
+         u.username, u.elo, u.avatar_url, u.handicap_index,
+         ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual,
+         t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
+         t.course_id, t.num_holes,
+         c.course_name,
+         r.round_id, r.hole_scores, r.hole_stats,
+         -- Personal theme song — falls back to this if no team theme.
+         u.theme_track_title   AS user_theme_title,
+         u.theme_track_artist  AS user_theme_artist,
+         u.theme_track_artwork AS user_theme_artwork,
+         u.theme_track_preview AS user_theme_preview,
+         -- Team attribution (for the match-found "VS" transition).
+         -- Picks the player's most-recently-joined team as their banner.
+         cl.clan_id,
+         cl.name              AS clan_name,
+         cl.elo               AS clan_elo,
+         cl.avatar_url        AS clan_avatar_url,
+         cl.theme_track_title AS clan_theme_title,
+         cl.theme_track_artist AS clan_theme_artist,
+         cl.theme_track_artwork AS clan_theme_artwork,
+         cl.theme_track_preview AS clan_theme_preview
+  FROM match_players mp
+  JOIN users u ON u.user_id = mp.user_id
+  LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+  LEFT JOIN courses c ON c.course_id = t.course_id
+  LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+  LEFT JOIN LATERAL (
+    SELECT cl.clan_id, cl.name, cl.elo, cl.avatar_url,
+           cl.theme_track_title, cl.theme_track_artist,
+           cl.theme_track_artwork, cl.theme_track_preview
+      FROM clan_members cm
+      JOIN clans cl ON cl.clan_id = cm.clan_id
+     WHERE cm.user_id = mp.user_id
+     ORDER BY cm.joined_at DESC
+     LIMIT 1
+  ) cl ON true
+  WHERE mp.match_id = $1`;
+// Per-player projection used by score resolution (ratings + holes played +
+// ELO). Shared between a match and, for linked matches, its paired match.
+// $1 = match_id.
+const MATCH_SCORING_PLAYERS_SQL = `
+  SELECT mp.user_id, mp.side, mp.strokes, mp.teebox_id,
+         t.course_rating, t.slope_rating, t.par,
+         t.front_course_rating, t.front_slope_rating,
+         t.back_course_rating,  t.back_slope_rating,
+         t.num_holes AS teebox_num_holes,
+         r.hole_scores,
+         COALESCE(array_length(r.hole_scores, 1), 18) AS holes_played,
+         u.elo, u.total_matches
+  FROM match_players mp
+  JOIN users u ON u.user_id = mp.user_id
+  LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
+  LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+  WHERE mp.match_id = $1`;
+/**
+ * Resolve a LINKED pair of matches (matchA's team vs matchB's team).
+ *
+ * Single source of truth for linked resolution — called from BOTH the
+ * score-submit handler (when the last player of the pair finishes) AND
+ * the cron link pass (to immediately resolve a pair that was ALREADY
+ * fully played before being linked, e.g. two finished-and-waiting matches
+ * the backfill just connected).
+ *
+ * Self-contained and idempotent: loads both matches' meta + players +
+ * par-by-hole itself, returns null (no-op) unless BOTH matches are fully
+ * played and neither is already completed. Applies ELO exactly once
+ * across both rosters, writes a perspective-correct match_results row to
+ * each match (its own players = side 1; winner_side + signed deltas flip),
+ * completes both, and posts a round card per player on their own match.
+ *
+ * A shared player appears in both rosters with two different rounds: they
+ * net ~0 ELO (win one side, lose the other) and both matches count toward
+ * their record, because they genuinely played two rounds.
+ *
+ * MUST be passed a client already inside a transaction.
+ */
+async function resolveLinkedPair(client, matchAId, matchBId) {
+    const { rows: meta } = await client.query(`SELECT match_id, match_type, format, holes_subset, num_holes, completed, is_practice
+       FROM matches WHERE match_id IN ($1, $2)`, [matchAId, matchBId]);
+    const a = meta.find((m) => m.match_id === matchAId);
+    const b = meta.find((m) => m.match_id === matchBId);
+    if (!a || !b)
+        return null;
+    if (a.completed || b.completed)
+        return null; // already resolved
+    if (a.is_practice || b.is_practice)
+        return null;
+    const { rows: curPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [matchAId]);
+    const { rows: parPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [matchBId]);
+    if (!curPlayers.length || !parPlayers.length)
+        return null;
+    if (!curPlayers.every((p) => p.strokes != null))
+        return null;
+    if (!parPlayers.every((p) => p.strokes != null))
+        return null;
+    const matchFormat = a.format ?? 'stroke';
+    const holesSubsetForCalc = a.holes_subset ?? 'full';
+    const matchType = a.match_type;
+    // Per-hole pars for the played slice (hole-by-hole formats only).
+    let parByHoleIdx = [];
+    const tbId = curPlayers.find((p) => p.teebox_id)?.teebox_id;
+    if (tbId) {
+        const { rows: holeRows } = await client.query(`SELECT hole_num, par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`, [tbId]);
+        const offset = holesSubsetForCalc === 'back' ? 9 : 0;
+        const want = a.num_holes ?? 18;
+        parByHoleIdx = holeRows.slice(offset, offset + want).map((r) => r.par);
+    }
+    // ── Format-perf helpers (lower = better), mirroring the 1v1/team path ──
+    const modifiedStablefordPoints = (score, par) => {
+        const d = score - par;
+        if (d <= -2)
+            return 5;
+        if (d === -1)
+            return 2;
+        if (d === 0)
+            return 0;
+        if (d === 1)
+            return -1;
+        return -3;
+    };
+    const bestHoleScore = (side, idx) => {
+        let best = null;
+        for (const p of side) {
+            const s = p.hole_scores?.[idx];
+            if (typeof s !== 'number')
+                continue;
+            if (best == null || s < best)
+                best = s;
+        }
+        return best;
+    };
+    const computeFormatPerf = (format, side1, side2) => {
+        const N = parByHoleIdx.length;
+        if (!N)
+            return null;
+        if (format === 'stableford') {
+            let s1 = 0, s2 = 0;
+            for (let i = 0; i < N; i++) {
+                const x = bestHoleScore(side1, i);
+                const y = bestHoleScore(side2, i);
+                if (x != null)
+                    s1 += modifiedStablefordPoints(x, parByHoleIdx[i]);
+                if (y != null)
+                    s2 += modifiedStablefordPoints(y, parByHoleIdx[i]);
+            }
+            return { side1Perf: -s1, side2Perf: -s2, details: { s1Points: s1, s2Points: s2 } };
+        }
+        if (format === 'match_play') {
+            let s1Wins = 0, s2Wins = 0, halved = 0;
+            for (let i = 0; i < N; i++) {
+                const x = bestHoleScore(side1, i);
+                const y = bestHoleScore(side2, i);
+                if (x == null || y == null)
+                    continue;
+                if (x < y)
+                    s1Wins++;
+                else if (y < x)
+                    s2Wins++;
+                else
+                    halved++;
+            }
+            return { side1Perf: -s1Wins, side2Perf: -s2Wins, details: { s1Holes: s1Wins, s2Holes: s2Wins, halved } };
+        }
+        if (format === 'skins') {
+            let s1Skins = 0, s2Skins = 0, carry = 1;
+            for (let i = 0; i < N; i++) {
+                const x = bestHoleScore(side1, i);
+                const y = bestHoleScore(side2, i);
+                if (x == null || y == null)
+                    continue;
+                const value = carry;
+                if (x < y) {
+                    s1Skins += value;
+                    carry = 1;
+                }
+                else if (y < x) {
+                    s2Skins += value;
+                    carry = 1;
+                }
+                else {
+                    carry += 1;
+                }
+            }
+            return { side1Perf: -s1Skins, side2Perf: -s2Skins, details: { s1Skins, s2Skins } };
+        }
+        return null;
+    };
+    const getDiff = (ps, topN) => {
+        const diffs = ps.map((p) => {
+            if (!p.course_rating || !p.slope_rating)
+                return p.strokes;
+            const overrideRating = holesSubsetForCalc === 'front' ? p.front_course_rating
+                : holesSubsetForCalc === 'back' ? p.back_course_rating
+                    : null;
+            const overrideSlope = holesSubsetForCalc === 'front' ? p.front_slope_rating
+                : holesSubsetForCalc === 'back' ? p.back_slope_rating
+                    : null;
+            return diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
+        }).sort((x, y) => x - y);
+        const used = topN ? diffs.slice(0, topN) : diffs;
+        return used.reduce((x, y) => x + y, 0) / used.length;
+    };
+    const compareCount = Math.min(curPlayers.length, parPlayers.length);
+    const strokeCurDiff = getDiff(curPlayers, compareCount);
+    const strokeParDiff = getDiff(parPlayers, compareCount);
+    const formatPerf = computeFormatPerf(matchFormat, curPlayers, parPlayers);
+    const curDiff = formatPerf ? formatPerf.side1Perf : strokeCurDiff;
+    const parDiff = formatPerf ? formatPerf.side2Perf : strokeParDiff;
+    const formatDetails = formatPerf?.details ?? null;
+    const isTie = Math.abs(curDiff - parDiff) < 0.05;
+    const curWins = !isTie && curDiff < parDiff;
+    const c1 = curPlayers[0];
+    const p1 = parPlayers[0];
+    const expCur = expectedScore(c1.elo, p1.elo);
+    const k = kFactor(c1.total_matches, c1.elo);
+    const curActual = isTie ? 0.5 : (curWins ? 1 : 0);
+    const curDelta = Math.round(k * (curActual - expCur));
+    const parDelta = -curDelta;
+    const perkApplications = [];
+    const allIds = [...curPlayers, ...parPlayers].map((p) => p.user_id);
+    const { rows: perkRows } = await client.query(`SELECT DISTINCT ON (user_id) user_id, perk_id
+     FROM user_perks
+     WHERE user_id = ANY($1)
+       AND consumed_at IS NULL
+       AND (earned_match_id IS NULL OR (earned_match_id != $2 AND earned_match_id != $3))
+     ORDER BY user_id, earned_at ASC`, [allIds, matchAId, matchBId]);
+    const perkByUser = new Map(perkRows.map((r) => [r.user_id, r.perk_id]));
+    const perkConsumed = new Set();
+    // Placement shaping. The shared player is on BOTH sides, so each side's
+    // final delta is tracked separately — their match-A screen should show
+    // their side-A delta, their match-B screen the side-B delta.
+    const placementSet = await placementUserSet(client, allIds, matchAId);
+    const curDeltas = {};
+    const parDeltas = {};
+    const applySide = async (ps, delta, sideWon, into) => {
+        for (const p of ps) {
+            let eloChange = shapeDelta(delta, sideWon, placementSet.has(p.user_id));
+            const perkId = perkByUser.get(p.user_id);
+            // A shared player can appear on both sides; let their perk fire once.
+            if (perkId && eloChange !== 0 && !perkConsumed.has(p.user_id)) {
+                const before = eloChange;
+                if (eloChange < 0)
+                    eloChange = 0;
+                else
+                    eloChange = eloChange * 2;
+                perkConsumed.add(p.user_id);
+                await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, matchAId]);
+                perkApplications.push({ user_id: p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
+            }
+            into[p.user_id] = eloChange;
+            await client.query(`UPDATE users
+         SET elo = GREATEST(100, elo + $1),
+             total_matches = total_matches + 1,
+             total_wins = total_wins + $2,
+             total_ties = total_ties + $3
+         WHERE user_id = $4`, [eloChange, sideWon ? 1 : 0, isTie ? 1 : 0, p.user_id]);
+        }
+    };
+    await applySide(curPlayers, curDelta, !isTie && curWins, curDeltas);
+    await applySide(parPlayers, parDelta, !isTie && !curWins, parDeltas);
+    const writeResult = async (matchId, s1, s2, s1Diff, s2Diff, s1Delta, s2Delta, s1Won, playerDeltas) => {
+        await client.query(`INSERT INTO match_results (match_id, match_type, winner_side, side1_score_differential,
+       side2_score_differential, delta_elo, details)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (match_id) DO NOTHING`, [
+            matchId, matchType,
+            isTie ? null : (s1Won ? 1 : 2),
+            s1Diff, s2Diff, Math.abs(curDelta),
+            JSON.stringify({
+                side1Players: s1.map((p) => p.user_id),
+                side2Players: s2.map((p) => p.user_id),
+                tied: isTie,
+                side1DeltaSignedElo: s1Delta,
+                side2DeltaSignedElo: s2Delta,
+                playerDeltas,
+                perks: perkApplications,
+                format: matchFormat,
+                formatDetails,
+                linked: true,
+            }),
+        ]);
+        await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
+        await client.query(`INSERT INTO posts (user_id, kind, match_id, body)
+       SELECT pid, 'round', $2, r.caption
+         FROM unnest($1::uuid[]) AS pid
+         LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`, [s1.map((p) => p.user_id), matchId]);
+    };
+    // Each row's playerDeltas favors ITS side-1 players (the shared player's
+    // side-appropriate delta wins the merge).
+    await writeResult(matchAId, curPlayers, parPlayers, curDiff, parDiff, curDelta, parDelta, curWins, { ...parDeltas, ...curDeltas });
+    await writeResult(matchBId, parPlayers, curPlayers, parDiff, curDiff, parDelta, curDelta, !isTie && !curWins, { ...curDeltas, ...parDeltas });
+    return {
+        linked: true,
+        winnerSide: isTie ? null : (curWins ? 1 : 2),
+        tied: isTie,
+        deltaElo: Math.abs(curDelta),
+        side1Diff: curDiff,
+        side2Diff: parDiff,
+        perks: perkApplications,
+    };
+}
 // Get match details
 router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows: matchRows } = await pool_1.default.query(`SELECT * FROM matches WHERE match_id = $1`, [req.params.id]);
     if (!matchRows.length)
         return res.status(404).json({ error: 'Match not found' });
-    const { rows: players } = await pool_1.default.query(`SELECT mp.user_id, mp.side, mp.strokes, mp.completed, mp.teebox_id,
-            u.username, u.elo, u.avatar_url, u.handicap_index,
-            t.name AS teebox_name, t.course_rating, t.slope_rating, t.par,
-            t.course_id, t.num_holes,
-            c.course_name,
-            r.round_id, r.hole_scores, r.hole_stats,
-            -- Personal theme song — falls back to this if no team theme.
-            u.theme_track_title   AS user_theme_title,
-            u.theme_track_artist  AS user_theme_artist,
-            u.theme_track_artwork AS user_theme_artwork,
-            u.theme_track_preview AS user_theme_preview,
-            -- Team attribution (for the match-found "VS" transition).
-            -- Picks the player's most-recently-joined team as their banner.
-            cl.clan_id,
-            cl.name              AS clan_name,
-            cl.elo               AS clan_elo,
-            cl.avatar_url        AS clan_avatar_url,
-            cl.theme_track_title AS clan_theme_title,
-            cl.theme_track_artist AS clan_theme_artist,
-            cl.theme_track_artwork AS clan_theme_artwork,
-            cl.theme_track_preview AS clan_theme_preview
-     FROM match_players mp
-     JOIN users u ON u.user_id = mp.user_id
-     LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
-     LEFT JOIN courses c ON c.course_id = t.course_id
-     LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
-     LEFT JOIN LATERAL (
-       SELECT cl.clan_id, cl.name, cl.elo, cl.avatar_url,
-              cl.theme_track_title, cl.theme_track_artist,
-              cl.theme_track_artwork, cl.theme_track_preview
-         FROM clan_members cm
-         JOIN clans cl ON cl.clan_id = cm.clan_id
-        WHERE cm.user_id = mp.user_id
-        ORDER BY cm.joined_at DESC
-        LIMIT 1
-     ) cl ON true
-     WHERE mp.match_id = $1`, [req.params.id]);
+    const { rows: ownPlayers } = await pool_1.default.query(MATCH_DETAIL_PLAYERS_SQL, [req.params.id]);
+    // Linked match: pull the paired match's players and present them as the
+    // opponent side (side 2), each carrying their OWN match's round data.
+    // The mobile screen groups purely by `side` and reads inline hole_scores,
+    // so this is all it takes to render a linked matchup as one VS screen.
+    // A shared player legitimately appears twice — side 1 (this match) and
+    // side 2 (their round in the paired match).
+    let players = ownPlayers;
+    if (matchRows[0].paired_match_id) {
+        const { rows: oppPlayers } = await pool_1.default.query(MATCH_DETAIL_PLAYERS_SQL, [matchRows[0].paired_match_id]);
+        players = [...ownPlayers, ...oppPlayers.map((p) => ({ ...p, side: 2 }))];
+    }
     const { rows: resultRows } = await pool_1.default.query(`SELECT * FROM match_results WHERE match_id = $1`, [req.params.id]);
     // Pre-compute the requesting user's signed ELO delta so UIs don't have to
     // figure out whether they were favored or not in a tie. Honor perk overrides.
@@ -331,17 +756,26 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
         const result = resultRows[0];
         const me = players.find((p) => p.user_id === req.userId);
         if (me) {
-            if (result.winner_side === null) {
+            // Prefer the per-player delta (placement + perk already baked in;
+            // also the only correct source for FFA). Fall back to the side-level
+            // value for legacy result rows written before playerDeltas existed.
+            const pd = result.details?.playerDeltas;
+            const mine = pd && req.userId ? pd[req.userId] : undefined;
+            if (mine != null) {
+                my_delta_elo = mine;
+            }
+            else if (result.winner_side === null) {
                 const key = me.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
                 my_delta_elo = result.details?.[key] ?? 0;
             }
             else {
                 my_delta_elo = result.winner_side === me.side ? result.delta_elo : -result.delta_elo;
             }
-            // Apply perk override if I consumed one on this match
+            // Perk badge for the result screen. The delta override only matters
+            // for legacy rows — playerDeltas already includes the perk.
             const perks = result.details?.perks ?? [];
             my_perk = perks.find((pa) => pa.user_id === req.userId) ?? null;
-            if (my_perk)
+            if (my_perk && mine == null)
                 my_delta_elo = my_perk.adjusted;
         }
     }
@@ -357,9 +791,17 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
     const matchCompleted = !!matchRows[0].completed;
     const me = players.find((p) => p.user_id === req.userId);
     const mySide = me?.side ?? null;
+    // Live scoreboard: when at least one player on EACH side has opted in
+    // ("both sides agree"), the anti-cheat redaction lifts and everyone sees
+    // live scores hole-by-hole. Consensual, so it's not a cheat vector.
+    const side1Optin = players.some((p) => p.side === 1 && p.live_scores_optin);
+    const side2Optin = players.some((p) => p.side !== 1 && p.live_scores_optin);
+    const liveScoresActive = side1Optin && side2Optin;
     const redactedPlayers = players.map((p) => {
         if (matchCompleted)
             return p;
+        if (liveScoresActive)
+            return p; // both sides agreed → show live
         if (p.user_id === req.userId)
             return p;
         if (mySide != null && p.side === mySide)
@@ -373,7 +815,15 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
             round_id: null,
         };
     });
-    return res.json({ ...matchRows[0], players: redactedPlayers, result: resultRows[0] || null, my_delta_elo, my_perk });
+    return res.json({
+        ...matchRows[0],
+        players: redactedPlayers,
+        result: resultRows[0] || null,
+        my_delta_elo, my_perk,
+        // Live-scoreboard state for the client.
+        live_scores_active: liveScoresActive,
+        my_live_optin: !!me?.live_scores_optin,
+    });
 }));
 // List my matches
 router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
@@ -385,14 +835,16 @@ router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =>
             -- THIS user on THIS match. Watcher uses this to decide whether
             -- to play the VS reveal — guaranteed-once across devices.
             mp_me.intro_shown_at,
-            -- True once an opponent has been added on the other side.
+            -- True once an opponent exists — either a side-2 player in this
+            -- match (merge pairing) OR a linked partner match (linked
+            -- pairing, where the opponents live in their own match record).
             -- Powers the "match found" intro on the client — when this flips
             -- from false to true between polls we know to fire the animation.
-            EXISTS(
+            (EXISTS(
               SELECT 1 FROM match_players mp_opp
               WHERE mp_opp.match_id = m.match_id
                 AND mp_opp.side != mp_me.side
-            ) AS has_opponent
+            ) OR m.paired_match_id IS NOT NULL) AS has_opponent
      FROM matches m
      JOIN match_players mp_me ON mp_me.match_id = m.match_id AND mp_me.user_id = $1
      LEFT JOIN match_results mr ON mr.match_id = m.match_id
@@ -409,7 +861,14 @@ router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =>
     // Compute signed my_delta_elo per row, honoring perks.
     const decorated = rows.map((r) => {
         let my_delta_elo = null;
-        if (r.delta_elo != null && r.my_side != null) {
+        // Prefer the per-player delta (placement + perk baked in; correct for
+        // FFA too). Fall back to the side-level value for legacy rows.
+        const pd = r.details?.playerDeltas;
+        const mine = pd && req.userId ? pd[req.userId] : undefined;
+        if (mine != null) {
+            my_delta_elo = mine;
+        }
+        else if (r.delta_elo != null && r.my_side != null) {
             if (r.winner_side == null) {
                 const key = r.my_side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
                 my_delta_elo = r.details?.[key] ?? 0;
@@ -463,6 +922,177 @@ router.post('/:id/join', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req
     finally {
         client.release();
     }
+}));
+// Opt in / out of the live scoreboard for a match. When at least one
+// player on EACH side has opted in, GET /:id stops redacting opponent
+// scores so everyone follows the round live (the client re-fetches the
+// match to pick up live_scores_active).
+router.post('/:id/live-scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const optIn = req.body?.optIn === true;
+    const { rowCount } = await pool_1.default.query(`UPDATE match_players SET live_scores_optin = $3
+      WHERE match_id = $1 AND user_id = $2`, [req.params.id, req.userId, optIn]);
+    if (!rowCount)
+        return res.status(404).json({ error: 'Not in this match' });
+    return res.json({ success: true, optIn });
+}));
+// Live leaderboard for a match: ranked standings (position, thru, to-par /
+// points) computed from each player's posted holes. Same consent rule as the
+// live scoreboard — we only expose in-progress standings when both sides have
+// opted in (or the match is final), so this is never a scouting vector. Open
+// to non-participants too once live, which is what lets friends spectate.
+router.get('/:id/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const id = req.params.id;
+    const { rows: mRows } = await pool_1.default.query(`SELECT match_id, format, num_holes, holes_subset, completed, is_practice, guest_players
+       FROM matches WHERE match_id = $1`, [id]);
+    if (!mRows.length)
+        return res.status(404).json({ error: 'Match not found' });
+    const m = mRows[0];
+    const { rows: players } = await pool_1.default.query(`SELECT mp.user_id, mp.side, mp.completed, mp.teebox_id, mp.live_scores_optin,
+            u.username, u.avatar_url, u.elo, u.is_bot,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual,
+            r.hole_scores
+       FROM match_players mp
+       JOIN users u ON u.user_id = mp.user_id
+       LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
+      WHERE mp.match_id = $1`, [id]);
+    if (!players.length)
+        return res.status(404).json({ error: 'Match not found' });
+    // Casual group rounds (is_practice) are organizer-scored on one device with
+    // nothing to hide, so their board is always live. Ranked matches still need
+    // both sides to opt in (or be final) so it can't be used to scout.
+    const side1Optin = players.some((p) => p.side === 1 && p.live_scores_optin);
+    const side2Optin = players.some((p) => p.side !== 1 && p.live_scores_optin);
+    const liveActive = m.is_practice || (side1Optin && side2Optin);
+    if (!liveActive && !m.completed) {
+        return res.json({ active: false, completed: false, format: m.format, num_holes: m.num_holes, leaderboard: [] });
+    }
+    // Per-hole pars per teebox (cached), sliced to the nine/eighteen played.
+    const offset = m.holes_subset === 'back' ? 9 : 0;
+    const want = m.num_holes ?? 18;
+    const parCache = new Map();
+    const parsFor = async (teeboxId) => {
+        if (!teeboxId)
+            return [];
+        const hit = parCache.get(teeboxId);
+        if (hit)
+            return hit;
+        const { rows } = await pool_1.default.query(`SELECT par FROM holes WHERE teebox_id = $1 ORDER BY hole_num`, [teeboxId]);
+        const arr = rows.slice(offset, offset + want).map((h) => h.par);
+        parCache.set(teeboxId, arr);
+        return arr;
+    };
+    const entries = [];
+    for (const p of players) {
+        entries.push({
+            user_id: p.user_id, username: p.username, side: p.side,
+            hole_scores: p.hole_scores ?? [],
+            parByHole: await parsFor(p.teebox_id),
+            completed: p.completed,
+            meta: { avatar_url: p.avatar_url, elo: p.elo, is_bot: p.is_bot, equipped_visual: p.equipped_visual },
+        });
+    }
+    // Guests (organizer-scored non-account players) rank right alongside accounts.
+    // They use their own teebox's pars, falling back to the host's teebox.
+    const fallbackTee = players.find((p) => p.teebox_id)?.teebox_id ?? null;
+    const guests = Array.isArray(m.guest_players) ? m.guest_players : [];
+    for (let gi = 0; gi < guests.length; gi++) {
+        const g = guests[gi];
+        const scores = Array.isArray(g?.scores) ? g.scores : [];
+        if (!scores.some((s) => typeof s === 'number' && s > 0))
+            continue; // not yet scored
+        entries.push({
+            user_id: `guest:${gi}`, username: (g?.name || `Guest ${gi + 1}`), side: 0,
+            hole_scores: scores,
+            parByHole: await parsFor(g?.teebox_id ?? fallbackTee),
+            completed: !!m.completed,
+            meta: { is_guest: true },
+        });
+    }
+    const leaderboard = (0, leaderboard_1.computeLeaderboard)(entries, m.format);
+    return res.json({ active: liveActive, completed: m.completed, format: m.format, num_holes: want, leaderboard });
+}));
+// Organizer scoring: one person enters hole-by-hole scores for a whole group on
+// one device. CASUAL ONLY (is_practice) — these scores never touch ranked ELO,
+// and practice rounds are already excluded from handicap + best-round, so an
+// organizer typing scores for the table can't game anything. Account players
+// must already be in the match (they consented by joining); non-accounts are
+// stored as guests. Call repeatedly with partial scores to drive the live
+// leaderboard; pass finish:true to lock it in.
+//   body: { accounts?: [{ user_id, hole_scores:number[] }],
+//           guests?:   [{ name, scores:number[], teebox_id? }],
+//           finish?: boolean }
+router.post('/:id/organizer-scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const id = req.params.id;
+    const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+    const guests = Array.isArray(req.body?.guests) ? req.body.guests : [];
+    const finish = req.body?.finish === true;
+    const { rows: mRows } = await pool_1.default.query(`SELECT match_id, is_practice, completed, num_holes, match_type FROM matches WHERE match_id = $1`, [id]);
+    if (!mRows.length)
+        return res.status(404).json({ error: 'Match not found' });
+    const m = mRows[0];
+    if (m.completed)
+        return res.status(409).json({ error: 'Match already completed' });
+    if (!m.is_practice)
+        return res.status(403).json({ error: 'Organizer scoring is only for casual group rounds' });
+    const { rows: memberRows } = await pool_1.default.query(`SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`, [id, req.userId]);
+    if (!memberRows.length)
+        return res.status(403).json({ error: 'Not in this match' });
+    const N = m.num_holes ?? 18;
+    const clampScores = (arr) => {
+        const a = Array.isArray(arr) ? arr : [];
+        const out = [];
+        for (let i = 0; i < N; i++) {
+            const n = parseInt(a[i], 10);
+            out.push(Number.isFinite(n) && n > 0 && n < 30 ? n : 0);
+        }
+        return out;
+    };
+    const client = await pool_1.default.connect();
+    try {
+        await client.query('BEGIN');
+        for (const acc of accounts) {
+            const uid = acc?.user_id;
+            if (!uid)
+                continue;
+            // Only write rounds for players actually in this match (consent gate).
+            const { rows: chk } = await client.query(`SELECT teebox_id FROM match_players WHERE match_id = $1 AND user_id = $2`, [id, uid]);
+            if (!chk.length)
+                continue;
+            const scores = clampScores(acc.hole_scores);
+            const total = scores.reduce((s, n) => s + n, 0);
+            const tee = chk[0].teebox_id ?? null;
+            await client.query(`INSERT INTO rounds (match_id, user_id, teebox_id, hole_scores, total_score, round_type)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (match_id, user_id)
+         DO UPDATE SET hole_scores = $4, total_score = $5, teebox_id = COALESCE($3, rounds.teebox_id)`, [id, uid, tee, scores, total, m.match_type]);
+            await client.query(`UPDATE match_players
+            SET strokes = $1,
+                completed = $2,
+                completed_at = CASE WHEN $2 THEN NOW() ELSE completed_at END
+          WHERE match_id = $3 AND user_id = $4`, [total, finish, id, uid]);
+        }
+        const cleanedGuests = guests
+            .filter((g) => (g?.name ?? '').toString().trim())
+            .slice(0, 16)
+            .map((g) => ({
+            name: g.name.toString().trim().slice(0, 30),
+            scores: clampScores(g.scores),
+            teebox_id: g.teebox_id ?? null,
+        }));
+        await client.query(`UPDATE matches SET guest_players = $1::jsonb WHERE match_id = $2`, [JSON.stringify(cleanedGuests), id]);
+        if (finish) {
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [id]);
+        }
+        await client.query('COMMIT');
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+    return res.json({ success: true, finished: finish });
 }));
 // Sanitise a hole_stats array — same length as scores, each entry has
 // putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null) plus the
@@ -580,7 +1210,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
        ON CONFLICT (match_id, user_id)
        DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10`, [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]);
         // Update match_players for the submitting player
-        await client.query(`UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+        await client.query(`UPDATE match_players SET strokes = $1, completed = true, completed_at = NOW(), teebox_id = COALESCE($2, teebox_id)
        WHERE match_id = $3 AND user_id = $4`, [totalScore, resolvedTeeboxId, req.params.id, req.userId]);
         // Reconcile the match's hole count with what was ACTUALLY played. A match
         // created as 9 holes where the player logged all 18 (or vice versa) left a
@@ -641,7 +1271,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
         // AND copy the submitter's rounds row to each so resolveElo's COALESCE on
         // hole_scores.length doesn't fall back to 18 for their teammates.
         if (matchFormat === 'scramble') {
-            await client.query(`UPDATE match_players SET strokes = $1, completed = true, teebox_id = COALESCE($2, teebox_id)
+            await client.query(`UPDATE match_players SET strokes = $1, completed = true, completed_at = NOW(), teebox_id = COALESCE($2, teebox_id)
          WHERE match_id = $3 AND side = $4 AND user_id != $5`, [totalScore, resolvedTeeboxId, req.params.id, myeSide, req.userId]);
             // Mirror the submitter's rounds row to each teammate so holes_played
             // (derived from array_length(hole_scores, 1)) stays consistent. Also
@@ -656,19 +1286,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
         // Check if all players have submitted. Pull both the standard and the
         // front/back ratings — the resolver below picks the right one based on
         // matches.holes_subset.
-        const { rows: allPlayers } = await client.query(`SELECT mp.user_id, mp.side, mp.strokes, mp.teebox_id,
-              t.course_rating, t.slope_rating, t.par,
-              t.front_course_rating, t.front_slope_rating,
-              t.back_course_rating,  t.back_slope_rating,
-              t.num_holes AS teebox_num_holes,
-              r.hole_scores,
-              COALESCE(array_length(r.hole_scores, 1), 18) AS holes_played,
-              u.elo, u.total_matches
-       FROM match_players mp
-       JOIN users u ON u.user_id = mp.user_id
-       LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
-       LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
-       WHERE mp.match_id = $1`, [req.params.id]);
+        const { rows: allPlayers } = await client.query(MATCH_SCORING_PLAYERS_SQL, [req.params.id]);
         const holesSubsetForCalc = matchRows[0].holes_subset ?? 'full';
         // Per-hole pars for the played holes, in hole order. Used by the
         // hole-by-hole formats (stableford, match_play, skins) — stroke and
@@ -831,24 +1449,32 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
            AND (earned_match_id IS NULL OR earned_match_id != $2)
          ORDER BY user_id, earned_at ASC`, [allPlayerIds, matchId]);
             const perkByUser = new Map(perkRows.map((r) => [r.user_id, r.perk_id]));
+            // Placement status per player + the actual signed delta each player
+            // ends up with (after placement shaping + perk), so the result screen
+            // shows the real number instead of the side-level approximation.
+            const placementSet = await placementUserSet(client, allPlayerIds, matchId);
+            const playerDeltas = {};
             for (const p of [...side1Players, ...side2Players]) {
                 const onSide1 = side1Players.includes(p);
                 const baseChange = onSide1 ? side1Delta : side2Delta;
                 const won = !isTie && onSide1 === side1Wins;
+                // Placement multiplier + minimum-win floor (see shapeDelta).
+                let eloChange = shapeDelta(baseChange, won, placementSet.has(p.user_id));
                 // Check for an unused 'lucky_round' perk and apply it.
                 // - Loss  → set ELO change to 0 (loss prevention)
                 // - Win   → double the ELO gain
                 // - 0 ELO → don't consume (no benefit; nothing to absorb or double)
-                let eloChange = baseChange;
                 const perkId = perkByUser.get(p.user_id);
-                if (perkId && baseChange !== 0) {
+                if (perkId && eloChange !== 0) {
+                    const before = eloChange;
                     if (eloChange < 0)
                         eloChange = 0;
                     else
                         eloChange = eloChange * 2;
                     await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, matchId]);
-                    perkApplications.push({ user_id: p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+                    perkApplications.push({ user_id: p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
                 }
+                playerDeltas[p.user_id] = eloChange;
                 await client.query(`UPDATE users
            SET elo = GREATEST(100, elo + $1),
                total_matches = total_matches + 1,
@@ -871,6 +1497,9 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                     tied: isTie,
                     side1DeltaSignedElo: side1Delta,
                     side2DeltaSignedElo: side2Delta,
+                    // Per-player final signed delta (placement + perk shaped). The
+                    // read endpoints prefer this over the side-level value.
+                    playerDeltas,
                     perks: perkApplications,
                     // Stableford / match_play / skins details so the result screen
                     // can render "12 to 9 in points" / "won 5&3" / "8 skins to 4" etc.
@@ -897,15 +1526,36 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                 perks: perkApplications,
             };
         };
+        // Linked-match resolution lives in the module-level resolveLinkedPair()
+        // (defined above, near the player-projection SQL). It's shared with the
+        // cron link pass so a pair that was ALREADY fully played before being
+        // linked — two finished-and-waiting matches the backfill just connected
+        // — resolves the instant it's linked, not only on a future score submit.
         /**
-         * Arena (free-for-all) ELO resolution. Each player is on their own side.
-         * For N players we run N×(N−1)/2 virtual 1v1s and average each player's
-         * cumulative delta by (N−1) so the per-match ELO magnitude stays
-         * comparable to a regular 1v1. Mathematically equivalent to "every player
-         * plays every other player and we count the average outcome."
+         * Arena (free-for-all) ELO resolution. Each player is on their own
+         * side and gets ranked against the entire field by score
+         * differential. For N players we run N×(N−1)/2 virtual 1v1s; each
+         * player's per-match delta is the SUM of their virtual 1v1 results,
+         * divided by 2(N−1)/N — chosen so that every doubling of the field
+         * roughly doubles the ELO swing (the "this felt twice as big as a
+         * 1v1" intuition, taken seriously).
          *
-         * Tie handling: differentials within 0.05 strokes of each other count as
-         * a draw for that pair (each gets 0.5). Standard chess-Elo tie semantics.
+         * Concretely, the magnitude a clean-sweep winner takes at K=24:
+         *
+         *   • N=2   (1v1)   →  divisor 1.000  →  +12 / −12
+         *   • N=4   arena   →  divisor 1.500  →  +24 / −24    (2× a 1v1)
+         *   • N=8   arena   →  divisor 1.750  →  +48 / −48    (4× a 1v1)
+         *   • N=16  arena   →  divisor 1.875  →  +96 / −96    (8× a 1v1)
+         *
+         * Mathematically the per-match swing is exactly linear in N
+         * (≈ K·N/4 for a sweep at equal ELOs). N=2 is continuous with the
+         * 1v1 path so the math doesn't jump when a 2-player Arena
+         * coincidentally happens. Cap the field at 16 elsewhere to keep
+         * the upper bound sane.
+         *
+         * Tie handling: differentials within 0.05 strokes of each other count
+         * as a draw for that pair (each gets 0.5). Standard chess-Elo tie
+         * semantics.
          *
          * Stableford support: when the match format is stableford we use the
          * negated points sum as the "differential" so lower = better, matching
@@ -973,9 +1623,13 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                     }
                 }
             }
-            // Normalise so a tournament-of-N gives roughly the same per-match ELO
-            // swing as a 1v1 (avoids 8-player arenas blowing your rating by ±100).
-            const divisor = Math.max(1, N - 1);
+            // divisor = 2(N−1)/N makes the per-match swing linear in N:
+            //   every doubling of field size doubles the ELO change.
+            //   (1v1 = ±12, 4-player = ±24, 8-player = ±48, 16-player = ±96.)
+            // Floor at 1 keeps N=2 continuous with the Solo / 1v1 path and
+            // guards against a degenerate N=1 (which should be impossible —
+            // Arena needs ≥2 — but cheap to defend against).
+            const divisor = Math.max(1, (2 * (N - 1)) / N);
             // Sort entries by differential (best → worst) to compute placements.
             const placement = [...entries].sort((a, b) => a.diff - b.diff);
             const placementByUser = new Map();
@@ -991,19 +1645,34 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
          ORDER BY user_id, earned_at ASC`, [allPlayerIds, matchId]);
             const perkByUser = new Map(perkRows.map((r) => [r.user_id, r.perk_id]));
             const perkApplications = [];
+            const placementSet = await placementUserSet(client, allPlayerIds, matchId);
+            const playerDeltas = {};
             for (const e of entries) {
                 const baseRaw = (deltaByUser.get(e.p.user_id) ?? 0) / divisor;
-                const baseChange = Math.round(baseRaw);
-                let eloChange = baseChange;
+                // Arena ELO is the RAW round-robin result: a clean, symmetric spread by
+                // finishing position — top gains, bottom loses, the middle ≈ 0 — already
+                // tilted by rank differences via the pairwise expected scores (a low-ELO
+                // player who places high gains more, a favourite who flops loses more).
+                // e.g. a 5-player field at even ELO is +30 / +15 / 0 / −15 / −30.
+                //
+                // We deliberately do NOT apply the solo win-gain multiplier or min-win
+                // floor here — those are 1v1 mechanics that break the zero-sum and let
+                // the whole field gain ELO. The placement multiplier still applies (a
+                // new player's first matches swing 3x), symmetrically, so it keeps the
+                // shape and only scales the magnitude.
+                const isPlacement = placementSet.has(e.p.user_id);
+                let eloChange = Math.round(baseRaw * (isPlacement ? PLACEMENT_MULTIPLIER : 1));
                 const perkId = perkByUser.get(e.p.user_id);
-                if (perkId && baseChange !== 0) {
+                if (perkId && eloChange !== 0) {
+                    const before = eloChange;
                     if (eloChange < 0)
                         eloChange = 0;
                     else
                         eloChange = eloChange * 2;
                     await client.query(`UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`, [perkId, matchId]);
-                    perkApplications.push({ user_id: e.p.user_id, original: baseChange, adjusted: eloChange, type: 'lucky_round' });
+                    perkApplications.push({ user_id: e.p.user_id, original: before, adjusted: eloChange, type: 'lucky_round' });
                 }
+                playerDeltas[e.p.user_id] = eloChange;
                 const place = placementByUser.get(e.p.user_id) ?? 0;
                 const isWinner = place === 1;
                 const tiedForFirst = placement.filter(x => Math.abs(x.diff - placement[0].diff) < 0.05).length > 1;
@@ -1027,7 +1696,9 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                 place: placementByUser.get(e.p.user_id) ?? 0,
                 strokes: e.p.strokes,
                 diff: e.diff,
-                delta_elo_signed: Math.round((deltaByUser.get(e.p.user_id) ?? 0) / divisor),
+                // The ACTUAL applied change (placement + perk shaped), not the raw
+                // pre-shaping value.
+                delta_elo_signed: playerDeltas[e.p.user_id] ?? 0,
                 stableford_points: e.rawPoints,
             }));
             // For the match_results row we record the winner's side; rendering code
@@ -1049,6 +1720,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                 JSON.stringify({
                     ffa: true,
                     placements,
+                    playerDeltas,
                     tied: isOverallTie,
                     perks: perkApplications,
                     format: matchFormat,
@@ -1069,7 +1741,23 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                 perks: perkApplications,
             };
         };
-        if (allDone && !matchRows[0].is_practice && allPlayers.length >= 2) {
+        // ── Linked match: resolve against the paired match, not in-place ──
+        // A linked match never has side-2 players of its own and must never
+        // auto-match a solo opponent. It resolves only when BOTH it and its
+        // partner are fully done; the trigger fires on whichever match's last
+        // score lands. linkedHandled suppresses every normal branch below.
+        const pairedMatchId = matchRows[0].paired_match_id;
+        let linkedHandled = false;
+        if (pairedMatchId && !matchRows[0].is_practice && matchRows[0].match_type !== 'ffa') {
+            linkedHandled = true;
+            if (allDone) {
+                // resolveLinkedPair is a no-op unless BOTH matches are fully played
+                // and neither is already completed — so it's safe to call on every
+                // submit, and it also guards the double-submit race itself.
+                result = await resolveLinkedPair(client, req.params.id, pairedMatchId);
+            }
+        }
+        if (!linkedHandled && allDone && !matchRows[0].is_practice && allPlayers.length >= 2) {
             // Multiple players already in match — resolve normally.
             const sides = {};
             for (const p of allPlayers) {
@@ -1085,7 +1773,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                 result = await resolveElo(sides[1], sides[2], req.params.id, matchRows[0].match_type);
             }
         }
-        else if (allDone && !matchRows[0].is_practice && allPlayers.length === 1) {
+        else if (!linkedHandled && allDone && !matchRows[0].is_practice && allPlayers.length === 1) {
             // Solo submission — find the best-ELO match from the pending pool
             const myP = allPlayers[0];
             const myHolesPlayed = holeScores.length;
@@ -1184,30 +1872,37 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
             }
             // No candidate → stay pending (match.completed stays false, scores are recorded)
         }
-        else if (allDone) {
+        else if (!linkedHandled && allDone) {
             // Practice round — just complete it
             await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
         }
         // Decorate the response with the submitter's signed ELO delta so the
         // client doesn't have to figure out which side they were on.
         if (result) {
-            const tied = result.tied || result.winnerSide === null;
-            const submitterIsSide1 = myeSide === 1;
-            const baseDelta = result.deltaElo ?? 0;
-            if (tied) {
-                const { rows: mrRows } = await client.query(`SELECT details FROM match_results WHERE match_id = $1`, [req.params.id]);
-                const details = mrRows[0]?.details;
-                const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
-                result.myDeltaElo = details?.[key] ?? 0;
+            const { rows: mrRows } = await client.query(`SELECT details FROM match_results WHERE match_id = $1`, [req.params.id]);
+            const details = mrRows[0]?.details;
+            // Prefer the per-player delta (placement + perk baked in). Fall back
+            // to the side-level computation for legacy rows.
+            const mine = details?.playerDeltas && req.userId ? details.playerDeltas[req.userId] : undefined;
+            if (mine != null) {
+                result.myDeltaElo = mine;
             }
             else {
-                const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
-                result.myDeltaElo = won ? baseDelta : -baseDelta;
+                const tied = result.tied || result.winnerSide === null;
+                const submitterIsSide1 = myeSide === 1;
+                const baseDelta = result.deltaElo ?? 0;
+                if (tied) {
+                    const key = submitterIsSide1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
+                    result.myDeltaElo = details?.[key] ?? 0;
+                }
+                else {
+                    const won = (result.winnerSide === 1 && submitterIsSide1) || (result.winnerSide === 2 && !submitterIsSide1);
+                    result.myDeltaElo = won ? baseDelta : -baseDelta;
+                }
+                const myPerk = (result.perks ?? []).find((pa) => pa.user_id === req.userId);
+                if (myPerk)
+                    result.myDeltaElo = myPerk.adjusted;
             }
-            // Override with per-player perk-adjusted delta if the submitter consumed a perk
-            const myPerk = (result.perks ?? []).find((pa) => pa.user_id === req.userId);
-            if (myPerk)
-                result.myDeltaElo = myPerk.adjusted;
         }
         // Surface whether THIS submission earned the user a fresh perk
         if (perkAwarded) {
@@ -1222,7 +1917,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
         // Each user gets their personal narrative (you won / lost / tied + Δ).
         if (result && (result.winnerSide != null || result.tied)) {
             try {
-                const { rows: pushRows } = await pool_1.default.query(`SELECT mp.user_id, mp.side, u.push_token, u.username,
+                const { rows: pushRows } = await pool_1.default.query(`SELECT mp.user_id, mp.side, u.push_token, u.username, u.elo,
                   m.match_type, m.format
            FROM match_players mp
            JOIN users u ON u.user_id = mp.user_id
@@ -1235,18 +1930,32 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                     const tied = winnerSide == null;
                     const won = !tied && row.side === winnerSide;
                     const key = row.side === 1 ? 'side1DeltaSignedElo' : 'side2DeltaSignedElo';
-                    let delta = detailsBlob[key] ?? 0;
-                    // Apply per-player perk override if any
-                    const perk = (detailsBlob.perks ?? []).find((p) => p.user_id === row.user_id);
-                    if (perk)
-                        delta = perk.adjusted;
+                    // Per-player delta (placement + perk baked in) preferred; legacy
+                    // rows fall back to the side-level value + perk override.
+                    const perPlayer = detailsBlob.playerDeltas?.[row.user_id];
+                    let delta = perPlayer ?? detailsBlob[key] ?? 0;
+                    if (perPlayer == null) {
+                        const perk = (detailsBlob.perks ?? []).find((p) => p.user_id === row.user_id);
+                        if (perk)
+                            delta = perk.adjusted;
+                    }
                     const sign = delta > 0 ? '+' : '';
                     const title = tied ? 'Match drawn' : won ? 'You won!' : 'Match decided';
-                    const body = tied
+                    let body = tied
                         ? `Even round. ELO ${sign}${delta}.`
                         : won
                             ? `Nice round. ELO ${sign}${delta}.`
                             : `Better luck next time. ELO ${sign}${delta}.`;
+                    // FOMO hook: call out a tier promotion / demotion from this result.
+                    const afterElo = Number(row.elo);
+                    const beforeElo = afterElo - delta;
+                    const beforeTier = (0, seasons_1.divisionForElo)(beforeElo);
+                    const afterTier = (0, seasons_1.divisionForElo)(afterElo);
+                    if (afterTier.key !== beforeTier.key) {
+                        body += afterElo > beforeElo
+                            ? `  You climbed to ${afterTier.name}! 📈`
+                            : `  You dropped to ${afterTier.name}.`;
+                    }
                     // Fire-and-forget — sendPush already swallows network errors.
                     (0, notify_1.sendPush)([row.push_token], title, body, { type: 'match_result', matchId: req.params.id, won, delta });
                 }
@@ -1270,6 +1979,20 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
             }
             catch (e) {
                 console.error('round-caption mention processing failed:', e);
+            }
+        }
+        // ── Season Pass XP ─────────────────────────────────────────────────
+        // +1 XP per completed non-practice round. The full pass is 10 XP =
+        // 10 rounds. Best-effort post-commit: a failure to grant XP doesn't
+        // roll back the score save, and the next round resync (or the
+        // boot-time ensureCurrentSeason) keeps the ladder healthy.
+        if (!matchRows[0].is_practice) {
+            try {
+                const { awardRoundXp } = await Promise.resolve().then(() => __importStar(require('../utils/seasonPass')));
+                await awardRoundXp(req.userId);
+            }
+            catch (e) {
+                console.error('[season-pass] xp grant failed:', e);
             }
         }
         // ── Friend push: "<name> just finished a round" ─────────────────────
@@ -1329,7 +2052,7 @@ router.post('/:id/forfeit', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (
     const client = await pool_1.default.connect();
     try {
         await client.query('BEGIN');
-        const { rows: playerRows } = await client.query(`SELECT mp.side, m.completed, m.is_practice, m.match_type
+        const { rows: playerRows } = await client.query(`SELECT mp.side, m.completed, m.is_practice, m.match_type, m.paired_match_id
        FROM match_players mp JOIN matches m ON m.match_id = mp.match_id
        WHERE mp.match_id = $1 AND mp.user_id = $2 FOR UPDATE`, [req.params.id, req.userId]);
         if (!playerRows.length) {
@@ -1342,11 +2065,23 @@ router.post('/:id/forfeit', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (
         }
         const mySide = playerRows[0].side;
         const isPractice = playerRows[0].is_practice;
+        const pairedMatchId = playerRows[0].paired_match_id;
         const { rows: allPlayers } = await client.query(`SELECT mp.user_id, mp.side, u.elo, u.total_matches
        FROM match_players mp JOIN users u ON u.user_id = mp.user_id
        WHERE mp.match_id = $1`, [req.params.id]);
         const mySidePlayers = allPlayers.filter((p) => p.side === mySide);
-        const otherSidePlayers = allPlayers.filter((p) => p.side !== mySide);
+        let otherSidePlayers = allPlayers.filter((p) => p.side !== mySide);
+        // Linked match: the opponents live in the PAIRED match, not as side-2
+        // rows here. Pull them so the forfeit resolves as a real loss to that
+        // team (and a win for them) instead of a silent abandon that would
+        // dangle the partner's paired_match_id forever.
+        const linkedForfeit = otherSidePlayers.length === 0 && !isPractice && !!pairedMatchId;
+        if (linkedForfeit) {
+            const { rows: pp } = await client.query(`SELECT mp.user_id, 2 AS side, u.elo, u.total_matches
+           FROM match_players mp JOIN users u ON u.user_id = mp.user_id
+          WHERE mp.match_id = $1`, [pairedMatchId]);
+            otherSidePlayers = pp;
+        }
         if (otherSidePlayers.length === 0 || isPractice) {
             // No real opponent — just abandon
             await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
@@ -1404,6 +2139,25 @@ router.post('/:id/forfeit', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (
             }),
         ]);
         await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [req.params.id]);
+        // Linked forfeit: also write the winning result to the PARTNER match
+        // (their players = side 1, they won) and complete it, so both players
+        // see the outcome on their own match screen and neither dangles.
+        if (linkedForfeit && pairedMatchId) {
+            await client.query(`INSERT INTO match_results (match_id, match_type, winner_side, delta_elo, details)
+         VALUES ($1, $2, 1, $3, $4)
+         ON CONFLICT (match_id) DO NOTHING`, [
+                pairedMatchId, playerRows[0].match_type, Math.abs(deltaElo),
+                JSON.stringify({
+                    forfeit: true,
+                    forfeitByOpponent: true,
+                    side1DeltaSignedElo: -deltaElo, // partner team won
+                    side2DeltaSignedElo: deltaElo, // forfeiter team lost
+                    perks: forfeitPerkApplications,
+                    linked: true,
+                }),
+            ]);
+            await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [pairedMatchId]);
+        }
         await client.query('COMMIT');
         return res.json({ success: true, forfeited: true, deltaElo });
     }
@@ -1425,19 +2179,26 @@ router.post('/:id/progress', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async 
     if (!Array.isArray(holeScores))
         return res.status(400).json({ error: 'holeScores required' });
     const cleanStats = cleanHoleStats(holeStats, holeScores.length);
-    // Don't accept progress for already-finished matches
-    const { rows: matchRows } = await pool_1.default.query(`SELECT completed FROM matches WHERE match_id = $1`, [req.params.id]);
+    // Don't accept progress for already-finished matches.
+    // We also pull format here so the scramble teammate-mirror below can
+    // tell whether to broadcast — scramble teams play ONE physical ball, so
+    // their scorecard is genuinely shared. Other formats (stroke / stableford
+    // / match_play / skins) keep per-player drafts as today.
+    const { rows: matchRows } = await pool_1.default.query(`SELECT completed, format FROM matches WHERE match_id = $1`, [req.params.id]);
     if (!matchRows.length)
         return res.status(404).json({ error: 'Match not found' });
     if (matchRows[0]?.completed)
         return res.json({ success: true, ignored: 'completed' });
+    const matchFormat = matchRows[0]?.format;
     // If client passed a teeboxId, persist it on match_players when not already set
     if (teeboxId) {
         await pool_1.default.query(`UPDATE match_players SET teebox_id = COALESCE(teebox_id, $1)
        WHERE match_id = $2 AND user_id = $3`, [teeboxId, req.params.id, req.userId]);
     }
-    // Resolve teebox + course from match_players (now that we may have just set it)
-    const { rows: pRows } = await pool_1.default.query(`SELECT mp.teebox_id, t.course_id FROM match_players mp
+    // Resolve teebox + course + side from match_players (now that we may have just
+    // set teebox_id above). Side is included so the scramble mirror below knows
+    // which other rows to write to.
+    const { rows: pRows } = await pool_1.default.query(`SELECT mp.teebox_id, mp.side, t.course_id FROM match_players mp
      LEFT JOIN teeboxes t ON t.teebox_id = mp.teebox_id
      WHERE mp.match_id = $1 AND mp.user_id = $2`, [req.params.id, req.userId]);
     if (!pRows.length)
@@ -1449,6 +2210,37 @@ router.post('/:id/progress', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async 
                    hole_stats = $6,
                    course_id = COALESCE(rounds.course_id, EXCLUDED.course_id),
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`, [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]);
+    // ── Scramble: mirror to teammates on the same side ─────────────────
+    // Scramble teams play ONE ball per shot — they share a single scorecard
+    // in real life — so the in-progress draft has to be shared too. We
+    // upsert each teammate's rounds row with the same hole_scores +
+    // hole_stats so their scoring screens see the latest edits on the
+    // next poll. Without this they each maintained an independent draft
+    // and only converged at submit time, which the user reported as the
+    // bug: "we each could put in our individual scores."
+    //
+    // Last-write-wins per hole; whichever teammate's POST lands at the
+    // server later overrides earlier values. In practice a single phone
+    // keeps the card, so collisions are vanishingly rare.
+    //
+    // We DON'T overwrite course_id / teebox_id when a teammate already
+    // picked their own — kept symmetric with the per-player UPSERT above
+    // so a player who set a different teebox doesn't lose it (rare for
+    // scramble, but harmless to be defensive).
+    if (matchFormat === 'scramble' && pRows[0].side != null) {
+        await pool_1.default.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats)
+       SELECT $1, mp.user_id, $3, $4, $5, $6
+         FROM match_players mp
+        WHERE mp.match_id = $1
+          AND mp.side    = $7
+          AND mp.user_id <> $2
+       ON CONFLICT (match_id, user_id)
+       DO UPDATE SET hole_scores = EXCLUDED.hole_scores,
+                     hole_stats  = EXCLUDED.hole_stats,
+                     course_id   = COALESCE(rounds.course_id, EXCLUDED.course_id),
+                     teebox_id   = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`, [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id,
+            holeScores, JSON.stringify(cleanStats), pRows[0].side]);
+    }
     // ── Celebration detection ──────────────────────────────────────────
     // Scan the just-saved hole_scores for any birdie/eagle/HIO. The unique
     // constraint on (match_id, user_id, hole_num) means a celebration fires
@@ -1854,37 +2646,44 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
 router.get('/:id/shots', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const userFilter = req.query.user;
     const params = [req.params.id];
-    let where = `WHERE match_id = $1`;
+    // Qualified with the shots alias: the users join makes a bare user_id
+    // ambiguous.
+    let where = `WHERE s.match_id = $1`;
     if (userFilter) {
         params.push(userFilter);
-        where += ` AND user_id = $2`;
+        where += ` AND s.user_id = $2`;
     }
-    const { rows } = await pool_1.default.query(`SELECT user_id, hole_num,
+    const { rows } = await pool_1.default.query(`SELECT s.user_id, s.hole_num,
             json_agg(
               json_build_object(
-                'club',  club,
-                'lie',   lie,
+                'club',  s.club,
+                'lie',   s.lie,
                 'start', json_build_object(
-                  'lat', start_lat, 'lng', start_lng, 'elevation_m', start_elevation_m
+                  'lat', s.start_lat, 'lng', s.start_lng, 'elevation_m', s.start_elevation_m
                 ),
                 'end',   json_build_object(
-                  'lat', end_lat, 'lng', end_lng, 'elevation_m', end_elevation_m
+                  'lat', s.end_lat, 'lng', s.end_lng, 'elevation_m', s.end_elevation_m
                 ),
-                'recorded_at', recorded_at,
-                'plays_like_yds', plays_like_yds,
-                'total_yds', total_yds,
-                'lateral_yds', lateral_yds,
-                'lateral_ref', lateral_ref,
-                'aim', CASE WHEN aim_lat IS NOT NULL AND aim_lng IS NOT NULL
-                            THEN json_build_object('lat', aim_lat, 'lng', aim_lng)
+                'recorded_at', s.recorded_at,
+                'plays_like_yds', s.plays_like_yds,
+                'total_yds', s.total_yds,
+                'lateral_yds', s.lateral_yds,
+                'lateral_ref', s.lateral_ref,
+                'aim', CASE WHEN s.aim_lat IS NOT NULL AND s.aim_lng IS NOT NULL
+                            THEN json_build_object('lat', s.aim_lat, 'lng', s.aim_lng)
                             ELSE NULL END
               )
-              ORDER BY shot_index
-            ) AS shots
-     FROM shots
+              ORDER BY s.shot_index
+            ) AS shots,
+            -- Shooter's equipped ball-trail cosmetic, resolved to its
+            -- visual_data so the shot map can paint the trail effect.
+            (SELECT visual_data FROM cosmetics
+              WHERE cosmetic_id = u.equipped_ball_trail) AS trail_visual
+     FROM shots s
+     JOIN users u ON u.user_id = s.user_id
      ${where}
-     GROUP BY user_id, hole_num
-     ORDER BY user_id, hole_num`, params);
+     GROUP BY s.user_id, s.hole_num, u.equipped_ball_trail
+     ORDER BY s.user_id, s.hole_num`, params);
     return res.json(rows);
 }));
 // Group-scoring endpoint: replace the match's guest_players list with whatever

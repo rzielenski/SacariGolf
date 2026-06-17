@@ -27,6 +27,8 @@ const auth_1 = require("../middleware/auth");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const notify_1 = require("../utils/notify");
 const mentions_1 = require("../utils/mentions");
+const cosmeticSql_1 = require("../utils/cosmeticSql");
+const owner_1 = require("../utils/owner");
 const router = (0, express_1.Router)();
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const FEED_DIR = path_1.default.join(UPLOADS_DIR, 'feed');
@@ -88,12 +90,16 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
             unlinkFeedImage(imageUrl);
         return res.status(400).json({ error: 'body or image required' });
     }
+    // @everyone broadcast — OWNERS ONLY. A normal user typing @everyone just
+    // posts it as text (it resolves to no one). For an owner it flags the post
+    // as an announcement (shown in every user's feed) and pushes all users.
+    const wantsBroadcast = (0, mentions_1.hasEveryoneTag)(text) && await (0, owner_1.isOwner)(req.userId);
     const kind = imageUrl ? 'photo' : 'text';
     let rows;
     try {
-        ({ rows } = await pool_1.default.query(`INSERT INTO posts (user_id, kind, body, image_url)
-       VALUES ($1, $2, $3, $4)
-       RETURNING post_id, user_id, kind, body, image_url, match_id, created_at`, [req.userId, kind, text || null, imageUrl]));
+        ({ rows } = await pool_1.default.query(`INSERT INTO posts (user_id, kind, body, image_url, is_announcement)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING post_id, user_id, kind, body, image_url, match_id, created_at, is_announcement`, [req.userId, kind, text || null, imageUrl, wantsBroadcast]));
     }
     catch (err) {
         // INSERT failed — unlink the orphan image (if any) before re-throwing
@@ -105,6 +111,9 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
     // "tagged you" notification. Fire-and-forget; never blocks the response.
     if (text)
         (0, mentions_1.processMentions)(rows[0].post_id, req.userId, text);
+    // Owner @everyone → push every user. Fire-and-forget; never blocks.
+    if (wantsBroadcast)
+        (0, mentions_1.broadcastToEveryone)(rows[0].post_id, req.userId, text);
     return res.status(201).json(rows[0]);
 }));
 /**
@@ -300,7 +309,9 @@ router.get('/feed', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
      )${localCte}
      SELECT
        p.post_id, p.user_id, p.kind, p.body, p.image_url, p.match_id, p.created_at,
+       p.is_announcement,
        u.username AS author_username, u.avatar_url AS author_avatar,
+       ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS author_equipped,
        m.match_type, m.format, m.completed AS match_completed,
        -- num_holes + holes_subset on the MATCH (what was actually played)
        -- so a 9-hole round of an 18-hole teebox is shown against the right
@@ -312,6 +323,21 @@ router.get('/feed', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
        m.num_holes AS match_num_holes,
        m.holes_subset AS match_holes_subset,
        mr.winner_side, mr.delta_elo,
+       -- The post AUTHOR's own signed ELO change for this match. Drives the
+       -- win/loss label per person — essential for Arena (FFA), where everyone
+       -- shares a side so winner_side would mark the whole field a winner.
+       -- Gained ELO → win, lost → loss. Null for legacy rows (card falls back
+       -- to winner_side vs author_side).
+       -- p.user_id is a uuid; the jsonb ->>/-> operators only accept a text
+       -- (or int) key, and Postgres won't implicitly cast uuid->text, so the
+       -- key MUST be ::text or the whole query fails to compile with
+       -- "operator does not exist: jsonb ->> uuid" (a 500 on every feed load).
+       -- The jsonb_typeof guard then makes the ::float cast bulletproof: a
+       -- missing or non-numeric playerDeltas entry yields NULL instead of
+       -- "invalid input syntax for type double precision".
+       CASE WHEN jsonb_typeof(mr.details -> 'playerDeltas' -> p.user_id::text) = 'number'
+            THEN (mr.details -> 'playerDeltas' ->> p.user_id::text)::float
+       END AS author_elo_delta,
        mp_me.side  AS author_side,
        mp_me.strokes AS author_strokes,
        t.name AS teebox_name, t.par AS teebox_par, t.num_holes AS teebox_num_holes,
@@ -363,7 +389,14 @@ router.get('/feed', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
      LEFT JOIN rounds r_me         ON r_me.match_id = p.match_id AND r_me.user_id = p.user_id
      LEFT JOIN teeboxes t        ON t.teebox_id = mp_me.teebox_id
      LEFT JOIN courses c         ON c.course_id = t.course_id
-     WHERE TRUE${beforeClause}${scopeClause}
+     -- Bots never appear in the feed. They play and rank like real players but
+     -- don't author posts; this read-layer filter is the hard guarantee, so a
+     -- stray bot post from ANY code path can never surface here (no more
+     -- deleting them by hand after every deploy).
+     -- Owner @everyone announcements bypass the scope filter so they reach
+     -- every user's feed; everything else honors friends / local scope.
+     WHERE u.is_bot = false
+       AND (TRUE${scopeClause} OR p.is_announcement = TRUE)${beforeClause}
      ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`, params);
     return res.json({
@@ -383,19 +416,27 @@ router.get('/feed', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
 // viewing the post.
 // GET /posts/:id/comments → list, oldest first, each flagged `mine`.
 router.get('/:id/comments', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { rows } = await pool_1.default.query(`SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at,
-            (c.user_id = $2) AS mine
+    const { rows } = await pool_1.default.query(`SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
+            (c.user_id = $2) AS mine,
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual
        FROM post_comments c
        JOIN users u ON u.user_id = c.user_id
       WHERE c.post_id = $1
       ORDER BY c.created_at ASC`, [req.params.id, req.userId]);
     return res.json(rows);
 }));
-// POST /posts/:id/comments  body: { body }
+// POST /posts/:id/comments  body: { body, clientId? }
 router.post('/:id/comments', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
     if (!body)
         return res.status(400).json({ error: 'body required' });
+    // Client-generated idempotency key — same contract as chat sends. A retry
+    // after an ambiguous network failure (request landed, response lost)
+    // carries the same clientId; the partial unique index collapses it onto
+    // the original row and we return that row instead of double-posting.
+    const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+        ? req.body.clientId.slice(0, 64)
+        : null;
     // Verify the post exists + grab the owner for the push.
     const { rows: postRows } = await pool_1.default.query(`SELECT p.user_id AS owner_id, owner.push_token, owner.username AS owner_name,
             actor.username AS actor_name
@@ -406,8 +447,25 @@ router.post('/:id/comments', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async 
     if (!postRows.length)
         return res.status(404).json({ error: 'post not found' });
     const post = postRows[0];
-    const { rows } = await pool_1.default.query(`INSERT INTO post_comments (post_id, user_id, body)
-     VALUES ($1, $2, $3) RETURNING comment_id, created_at`, [req.params.id, req.userId, body]);
+    const { rows } = await pool_1.default.query(`INSERT INTO post_comments (post_id, user_id, body, client_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+     RETURNING comment_id, created_at, client_id`, [req.params.id, req.userId, body, clientId]);
+    if (!rows.length && clientId) {
+        // Duplicate retry — the original comment already landed. Return it and
+        // skip the push + mention processing (both fired on the original send).
+        const { rows: existing } = await pool_1.default.query(`SELECT comment_id, created_at, client_id FROM post_comments
+       WHERE user_id = $1 AND client_id = $2`, [req.userId, clientId]);
+        if (existing.length) {
+            return res.json({
+                success: true,
+                comment_id: existing[0].comment_id,
+                created_at: existing[0].created_at,
+                client_id: existing[0].client_id,
+            });
+        }
+        return res.status(409).json({ error: 'Duplicate send' });
+    }
     // Notify the post owner (fire-and-forget). Skip if commenting on your
     // own post or the owner has no push token.
     if (post.owner_id !== req.userId && post.push_token) {
@@ -418,7 +476,12 @@ router.post('/:id/comments', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async 
     // "tagged you" notification that routes to the feed (the post is publicly
     // viewable, so anyone can be mentioned). Fire-and-forget.
     (0, mentions_1.processMentions)(req.params.id, req.userId, body);
-    return res.json({ success: true, comment_id: rows[0].comment_id, created_at: rows[0].created_at });
+    return res.json({
+        success: true,
+        comment_id: rows[0].comment_id,
+        created_at: rows[0].created_at,
+        client_id: rows[0].client_id,
+    });
 }));
 // DELETE /posts/:id/comments/:commentId — your own comment, OR the post
 // owner can remove any comment on their post (basic moderation).

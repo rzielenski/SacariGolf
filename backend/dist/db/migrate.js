@@ -1241,6 +1241,18 @@ const MIGRATIONS = [
     `,
     },
     {
+        // Theme song max-volume preference. When TRUE the mobile theme player
+        // overrides the silent switch and plays at max output (the most
+        // iOS will allow a third-party app — system volume itself is not
+        // programmatically controllable). Defaults FALSE so existing users
+        // keep "respect silent mode" behaviour.
+        name: 'users.theme_song_max_volume',
+        sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS theme_song_max_volume BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+    },
+    {
         // Referral system:
         //   • users.referral_code        — the inviter's share code (in their
         //                                  /invite/<code> link). 7 chars,
@@ -1314,17 +1326,795 @@ const MIGRATIONS = [
       );
     `,
     },
+    {
+        // Rate-limit + audit log for scorecard OCR scans. Every
+        // /courses/scan-scorecard call that actually reaches (and is billed by)
+        // the vision API logs a row here; the endpoint counts a user's rows in
+        // the trailing 24h and refuses past a daily cap, so a bored or malicious
+        // user can't run the Anthropic bill up by spamming scans. One row per
+        // billed attempt (not per course added), since every attempt costs a call.
+        name: 'scorecard_scans.create',
+        sql: `
+      CREATE TABLE IF NOT EXISTS scorecard_scans (
+        scan_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS scorecard_scans_user_created_idx
+        ON scorecard_scans(user_id, created_at DESC);
+    `,
+    },
+    {
+        // F2P cosmetics. Five slot kinds today (border / background / username
+        // / ball_trail / fx) with one row per item in `cosmetics`, one row per
+        // owned item in `user_cosmetics`, and a denormalised "what's equipped
+        // right now" set on the users table itself so feed/profile reads
+        // don't have to join through a separate table on every render.
+        //
+        // unlock_kind discriminates how an item is acquired:
+        //   • 'free'        — everyone owns it (seed loop below grants to all)
+        //   • 'premium'     — premium members get it (granted on premium flip)
+        //   • 'cup_winner'  — won the weekly Sacari Cup at a specific place
+        //                     (1/2/3); awarded by the cup-resolution job
+        //   • 'rank'        — reached a specific rank tier (granted by the
+        //                     elo-tier promotion code path)
+        // visual_data is opaque JSON that the mobile renderer interprets per
+        // kind — e.g. { color: '#d4a93f' } for username flair, or a gradient
+        // pair for backgrounds. The catalog ships as data, not code, so a
+        // future cosmetic can be added without an app release.
+        name: 'cosmetics.create',
+        sql: `
+      CREATE TABLE IF NOT EXISTS cosmetics (
+        cosmetic_id  TEXT PRIMARY KEY,
+        kind         TEXT NOT NULL CHECK (kind IN ('border','background','username','ball_trail','fx')),
+        name         TEXT NOT NULL,
+        rarity       TEXT NOT NULL DEFAULT 'common',
+        unlock_kind  TEXT NOT NULL CHECK (unlock_kind IN ('free','premium','cup_winner','rank')),
+        unlock_data  JSONB,
+        visual_data  JSONB NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS cosmetics_kind_idx ON cosmetics(kind);
+      CREATE INDEX IF NOT EXISTS cosmetics_unlock_kind_idx ON cosmetics(unlock_kind);
+
+      CREATE TABLE IF NOT EXISTS user_cosmetics (
+        user_id        UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        cosmetic_id    TEXT NOT NULL REFERENCES cosmetics(cosmetic_id) ON DELETE CASCADE,
+        unlocked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        unlock_source  TEXT,
+        PRIMARY KEY (user_id, cosmetic_id)
+      );
+      CREATE INDEX IF NOT EXISTS user_cosmetics_user_idx ON user_cosmetics(user_id);
+
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS equipped_border      TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_background  TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_username    TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_ball_trail  TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS equipped_fx          TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL;
+    `,
+    },
+    {
+        // Seed the starter catalog. Twelve items: enough for the screen to
+        // feel populated on day one without locking the user into a tiny set
+        // of cosmetics. Each item is idempotent via cosmetic_id PK.
+        //
+        // Naming scheme: <kind>_<theme> so adding new items doesn't risk
+        // collision with anything outside this seed.
+        name: 'cosmetics.seed_starter_catalog',
+        sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- Borders
+        ('border_classic',   'border', 'Classic',         'common',    'free',
+          NULL,
+          '{"color":"#aeb6c2","width":2}'::jsonb),
+        ('border_fairway',   'border', 'Fairway Stripe',  'common',    'free',
+          NULL,
+          '{"color":"#74bd9a","width":3}'::jsonb),
+        ('border_gold',      'border', 'Gold Frame',      'rare',      'premium',
+          NULL,
+          '{"color":"#d4a93f","width":3,"animated":true}'::jsonb),
+        ('border_champion',  'border', 'Champion Wreath', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","width":4,"animated":true,"glow":true}'::jsonb),
+        ('border_obsidian',  'border', 'Obsidian Edge',   'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"color":"#e8623a","width":3,"animated":true}'::jsonb),
+
+        -- Backgrounds
+        ('bg_default',       'background', 'Slate',         'common',    'free',
+          NULL,
+          '{"from":"#1a1a1d","to":"#26262b"}'::jsonb),
+        ('bg_fairway',       'background', 'Sunset Fairway','common',    'free',
+          NULL,
+          '{"from":"#0f3a2e","to":"#74bd9a"}'::jsonb),
+        ('bg_royal',         'background', 'Royal Velvet',  'rare',      'premium',
+          NULL,
+          '{"from":"#1a0a2e","to":"#a89cf0"}'::jsonb),
+        ('bg_gold_dust',     'background', 'Gold Dust',     'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"from":"#1a1410","to":"#d4a93f"}'::jsonb),
+
+        -- Username flair
+        ('uname_default',    'username',   'Standard',      'common',    'free',
+          NULL,
+          '{"color":"#ffffff"}'::jsonb),
+        ('uname_gold',       'username',   'Gold Text',     'rare',      'premium',
+          NULL,
+          '{"color":"#d4a93f"}'::jsonb),
+        ('uname_champion',   'username',   'Champion Gold', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","gradient":["#d4a93f","#ffe28a","#d4a93f"]}'::jsonb),
+
+        -- Ball trails (shot-map polyline color)
+        ('trail_default',    'ball_trail', 'White',         'common',    'free',
+          NULL,
+          '{"color":"#ffffff","width":2}'::jsonb),
+        ('trail_crimson',    'ball_trail', 'Crimson',       'common',    'free',
+          NULL,
+          '{"color":"#d83a5e","width":2}'::jsonb),
+        ('trail_lightning',  'ball_trail', 'Lightning',     'rare',      'premium',
+          NULL,
+          '{"color":"#74e0ff","width":3,"glow":true}'::jsonb),
+        ('trail_gold',       'ball_trail', 'Gold Streak',   'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"color":"#d4a93f","width":3,"glow":true,"animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO NOTHING;
+
+      -- Grant every 'free' item to every existing user so the locker room
+      -- shows owned items on day one. Idempotent via PK.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u
+          CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Grant every 'premium' item to current premium members. The flip
+      -- in routes/auth + premium handlers should also grant on future
+      -- premium upgrades; this catches the existing population once.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u
+          CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium'
+           AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Default equipped: nudge every user into the 'free' starter set
+      -- so the profile renders consistently even before they tap
+      -- into the locker room. Only sets columns that are still null
+      -- (won't overwrite anyone's existing pick).
+      UPDATE users SET
+        equipped_border     = COALESCE(equipped_border,     'border_classic'),
+        equipped_background = COALESCE(equipped_background, 'bg_default'),
+        equipped_username   = COALESCE(equipped_username,   'uname_default'),
+        equipped_ball_trail = COALESCE(equipped_ball_trail, 'trail_default');
+    `,
+    },
+    {
+        // Weekly Sacari Cup. Auto-recurring tournament; one row per week,
+        // keyed by Monday 00:00 UTC. The server boot routine in index.ts
+        // (a) creates the current week's cup if it's missing and (b)
+        // resolves any active cup whose week has ended.
+        //
+        // Resolution awards cup-winner cosmetics to top 3 finishers + posts
+        // a feed card + sends push notifications. The leaderboard query
+        // pulls each user's BEST round (lowest to-par with pro-rating for
+        // 9/18-hole rounds) submitted during the week window.
+        name: 'weekly_cups.create',
+        sql: `
+      CREATE TABLE IF NOT EXISTS weekly_cups (
+        cup_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        week_starts_at  TIMESTAMPTZ NOT NULL UNIQUE,
+        status          TEXT NOT NULL DEFAULT 'active',
+        resolved_at     TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS weekly_cups_status_idx
+        ON weekly_cups(status, week_starts_at DESC);
+    `,
+    },
+    {
+        // Pin which user_id won which cup. Used for the home-page banner,
+        // the per-profile trophy row, and stats. The resolver writes here
+        // alongside the user_cosmetics grant.
+        name: 'weekly_cup_winners.create',
+        sql: `
+      CREATE TABLE IF NOT EXISTS weekly_cup_winners (
+        cup_id        UUID PRIMARY KEY REFERENCES weekly_cups(cup_id) ON DELETE CASCADE,
+        user_id       UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        best_to_par   INTEGER NOT NULL,
+        decided_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS weekly_cup_winners_user_idx
+        ON weekly_cup_winners(user_id);
+    `,
+    },
+    {
+        // Cosmetics v2 — rewrite the catalog around a richer visual_data
+        // schema and ditch the placeholder gold-frame/gold-text items. New
+        // items are designed as season-pass tier rewards or premium perks,
+        // not cup payouts; cup payouts collapse to just the Champion Wreath
+        // border (+ a trophy count tracked separately via
+        // weekly_cup_winners). Idempotent — only DELETEs items the seed
+        // explicitly replaced, never touches user_cosmetics rows for
+        // surviving items.
+        name: 'cosmetics.catalog_v2',
+        sql: `
+      -- Drop the items the v2 seed is replacing. CASCADE clears any
+      -- user_cosmetics rows pointing at them so nobody's stuck with a
+      -- now-deleted reference.
+      DELETE FROM user_cosmetics WHERE cosmetic_id IN (
+        'border_gold', 'border_obsidian',
+        'bg_fairway', 'bg_royal', 'bg_gold_dust',
+        'uname_gold', 'uname_champion',
+        'trail_lightning', 'trail_gold'
+      );
+      DELETE FROM cosmetics WHERE cosmetic_id IN (
+        'border_gold', 'border_obsidian',
+        'bg_fairway', 'bg_royal', 'bg_gold_dust',
+        'uname_gold', 'uname_champion',
+        'trail_lightning', 'trail_gold'
+      );
+
+      -- Clear equipped pointers that referenced now-deleted items so
+      -- the FK doesn't dangle. Replacement defaults are reinstated below.
+      UPDATE users SET
+        equipped_border     = CASE WHEN equipped_border     IN ('border_gold','border_obsidian') THEN 'border_classic' ELSE equipped_border END,
+        equipped_background = CASE WHEN equipped_background IN ('bg_fairway','bg_royal','bg_gold_dust') THEN 'bg_default' ELSE equipped_background END,
+        equipped_username   = CASE WHEN equipped_username   IN ('uname_gold','uname_champion') THEN 'uname_default' ELSE equipped_username END,
+        equipped_ball_trail = CASE WHEN equipped_ball_trail IN ('trail_lightning','trail_gold') THEN 'trail_default' ELSE equipped_ball_trail END;
+
+      -- Seed v2. Each visual_data carries a 'style' discriminator the
+      -- mobile renderer branches on; the rest of the fields describe
+      -- the look. Tier rewards are season-pass-only — players can't
+      -- find them anywhere else.
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── Borders ────────────────────────────────────────────────
+        ('border_champion',  'border', 'Champion Wreath', 'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"glow","color":"#d4a93f","accent":"#ffe28a","width":4,"animated":true}'::jsonb),
+        ('border_holographic','border','Holographic',    'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"holographic","colors":["#ff6b9d","#74e0ff","#a89cf0","#ffe28a"],"width":3,"animated":true}'::jsonb),
+        ('border_storm',     'border', 'Storm Edge',     'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"pulse","color":"#5a76b0","accent":"#cad9ff","width":3,"animated":true}'::jsonb),
+
+        -- ── Backgrounds ────────────────────────────────────────────
+        ('bg_america',       'background', 'Stars & Stripes', 'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"flag","stripes":["#bf0a30","#ffffff"],"canton":"#002868","stars":50,"animated":false}'::jsonb),
+        ('bg_storm',         'background', 'Thunderstorm',    'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"pulse","from":"#0a0f1c","to":"#3a4060","flash":"#cad9ff","animated":true}'::jsonb),
+        ('bg_aurora',        'background', 'Aurora',          'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"aurora","layers":["#00ff9d","#7fa2ff","#c779ff"],"from":"#04161e","animated":true}'::jsonb),
+        ('bg_cosmic',        'background', 'Cosmic Drift',    'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"stars","from":"#040515","to":"#1a0a3a","stars":80,"animated":false}'::jsonb),
+        ('bg_volcanic',      'background', 'Volcanic',        'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","from":"#1a0807","to":"#e8623a","accent":"#ffd700"}'::jsonb),
+
+        -- ── Ball trails (shot map polyline) ────────────────────────
+        ('trail_lightning',  'ball_trail', 'Lightning Crackle','legendary','rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"crackle","color":"#74e0ff","accent":"#ffffff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_fire',       'ball_trail', 'Wildfire',        'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","color":"#ffb14a","accent":"#d83a5e","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_galaxy',     'ball_trail', 'Galaxy',          'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"gradient","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_neon',       'ball_trail', 'Neon Pulse',      'rare',     'premium',
+          NULL,
+          '{"style":"pulse","color":"#39ff14","width":3,"animated":true,"glow":true}'::jsonb),
+
+        -- ── Username flair ────────────────────────────────────────
+        ('uname_holographic','username', 'Holographic Text',  'legendary','rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"gradient","gradient":["#ff6b9d","#74e0ff","#a89cf0"],"animated":true}'::jsonb),
+        ('uname_fire',       'username', 'Wildfire Text',     'epic',     'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffb14a","#d83a5e"],"animated":true}'::jsonb),
+        ('uname_ice',        'username', 'Ice Crystal',       'rare',     'premium',
+          NULL,
+          '{"style":"solid","color":"#74e0ff","glow":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      -- Catch-up: grant premium items to current premium members + grant
+      -- free items to everyone, same as v1. Rank-locked items are NOT
+      -- granted here — they're awarded via the season-pass and
+      -- rank-promotion code paths.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium'
+           AND u.is_premium  = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+    },
+    {
+        // Season pass. One season per calendar month, auto-created by
+        // utils/seasonPass.ts on boot. XP is earned 1 per completed ranked
+        // round (~10 rounds = full pass). The reward ladder is data-driven:
+        // season_pass_tiers rows define which cosmetic the player gets at
+        // each XP threshold. claimed_tiers JSONB on the progress row
+        // tracks what the user has already pulled.
+        name: 'season_pass.create_tables',
+        sql: `
+      CREATE TABLE IF NOT EXISTS seasons (
+        season_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        starts_at      TIMESTAMPTZ NOT NULL UNIQUE,
+        ends_at        TIMESTAMPTZ NOT NULL,
+        name           TEXT NOT NULL,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS seasons_window_idx
+        ON seasons(starts_at, ends_at);
+
+      CREATE TABLE IF NOT EXISTS season_pass_tiers (
+        season_id      UUID NOT NULL REFERENCES seasons(season_id) ON DELETE CASCADE,
+        tier           INT  NOT NULL,
+        xp_required    INT  NOT NULL,
+        cosmetic_id    TEXT REFERENCES cosmetics(cosmetic_id) ON DELETE SET NULL,
+        PRIMARY KEY (season_id, tier)
+      );
+
+      CREATE TABLE IF NOT EXISTS season_pass_progress (
+        user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        season_id       UUID NOT NULL REFERENCES seasons(season_id) ON DELETE CASCADE,
+        xp              INT  NOT NULL DEFAULT 0,
+        claimed_tiers   INT[] NOT NULL DEFAULT '{}',
+        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, season_id)
+      );
+      CREATE INDEX IF NOT EXISTS season_pass_progress_season_idx
+        ON season_pass_progress(season_id, xp DESC);
+    `,
+    },
+    {
+        // Catalog v3: refines visual_data on items the v2 seed used a
+        // placeholder style for (e.g. trail_fire was 'gradient', now 'fire'
+        // so the renderer paints rising embers; bg_volcanic was a static
+        // gradient, now uses the 'flame' renderer with wisps) AND adds 18
+        // new cosmetics across every kind so the renderer's full set of
+        // styles has paying inventory behind it.
+        //
+        // Idempotent — UPSERT on cosmetic_id means re-running the migration
+        // just refreshes visual_data. New rank-locked items are NOT
+        // back-granted to qualifying users here; rank promotion writes the
+        // grant rows so this migration stays predictable. Premium items
+        // catch up via the same pattern v2 used.
+        name: 'cosmetics.catalog_v3',
+        sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── REFRESH: existing items get the right renderer style ─────
+        ('bg_volcanic',       'background', 'Volcanic',         'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"flame","from":"#1a0807","to":"#5e1a14","accent":"#ffb14a","animated":true}'::jsonb),
+        ('trail_fire',        'ball_trail', 'Wildfire',         'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"fire","color":"#ffb14a","accent":"#d83a5e","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_galaxy',      'ball_trail', 'Galaxy',           'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"galaxy","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true,"glow":true}'::jsonb),
+        ('uname_holographic', 'username',   'Holographic Text', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"holographic","gradient":["#ff6b9d","#74e0ff","#a89cf0","#ffe28a","#ff6b9d"],"animated":true}'::jsonb),
+        ('uname_fire',        'username',   'Wildfire Text',    'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffe28a","#ffb14a","#d83a5e"],"animated":true}'::jsonb),
+
+        -- ── NEW BACKGROUNDS (6) ──────────────────────────────────────
+        ('bg_cyber_grid',     'background', 'Cyber Grid',       'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"cyber","from":"#02060e","to":"#0a1e2e","accent":"#00ffd5","animated":true}'::jsonb),
+        ('bg_solar_flare',    'background', 'Solar Flare',      'legendary', 'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"solar","from":"#2a0d05","to":"#0a0204","accent":"#ffb14a","core":"#fff3a8","animated":true}'::jsonb),
+        ('bg_deep_ocean',     'background', 'Deep Ocean',       'epic',      'premium',
+          NULL,
+          '{"style":"ocean","from":"#0a1e3a","to":"#072a48","accent":"#5aacd9","animated":true}'::jsonb),
+        ('bg_sakura_fall',    'background', 'Sakura Fall',      'epic',      'premium',
+          NULL,
+          '{"style":"sakura","from":"#3a1a2a","to":"#7a3a55","animated":true}'::jsonb),
+        ('bg_liquid_gold',    'background', 'Liquid Gold',      'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"liquid","animated":true}'::jsonb),
+        ('bg_phoenix_rise',   'background', 'Phoenix Rise',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"flame","from":"#1a0207","to":"#5e0a14","accent":"#ff8a3a","animated":true}'::jsonb),
+
+        -- ── NEW BORDERS (4) ──────────────────────────────────────────
+        ('border_comet',      'border',     'Comet Trail',      'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"traveling","color":"#ffe28a","width":3,"animated":true}'::jsonb),
+        ('border_plasma',     'border',     'Plasma Coil',      'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"plasma","color":"#c779ff","accent":"#74e0ff","width":3,"animated":true}'::jsonb),
+        ('border_frost',      'border',     'Frost Crown',      'epic',      'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"frost","color":"#74e0ff","accent":"#cad9ff","width":3,"animated":true}'::jsonb),
+        ('border_inferno',    'border',     'Inferno Ring',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"flame","width":3,"animated":true}'::jsonb),
+
+        -- ── NEW BALL TRAILS (2) ──────────────────────────────────────
+        ('trail_phoenix',     'ball_trail', 'Phoenix Wing',     'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"fire","color":"#ff8a3a","accent":"#bf1a3a","width":3,"animated":true,"glow":true}'::jsonb),
+        ('trail_comet',       'ball_trail', 'Comet',            'rare',      'premium',
+          NULL,
+          '{"style":"traveling","color":"#ffe28a","width":3,"animated":true,"glow":true}'::jsonb),
+
+        -- ── NEW USERNAMES (3) ────────────────────────────────────────
+        ('uname_sunset',      'username',   'Sunset',           'epic',      'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"gradient","gradient":["#ffe28a","#ff6b9d","#a36bff"],"animated":true}'::jsonb),
+        ('uname_ocean',       'username',   'Ocean',            'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"gradient","gradient":["#74e0ff","#3d8bbf","#0a1e3a"],"animated":true}'::jsonb),
+        ('uname_shimmer',     'username',   'Gold Shimmer',     'epic',      'cup_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"shimmer","color":"#d4a93f","animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      -- Catch-up grants for non-rank items: same pattern as v2. Rank-
+      -- locked items wait for the rank-promotion code path so this
+      -- migration doesn't accidentally hand out rewards to people who
+      -- haven't earned them — except for the testing account.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium' AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      -- Test account gets everything so Richard can preview before
+      -- shipping. Safe to leave in — the username is unique.
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'admin_grant'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE LOWER(u.username) = 'rickybobbyfairways'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+    },
+    {
+        // Catalog v4: ten artistic, VFX-heavy additions. Each maps to a new
+        // renderer style shipped in the same binary as v3's styles, so there
+        // is no live-binary regression risk: nothing existing is restyled,
+        // these are purely new rows. Same idempotent UPSERT + grant pattern
+        // as v3.
+        name: 'cosmetics.catalog_v4',
+        sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        -- ── Backgrounds (5) ──────────────────────────────────────────
+        ('bg_synthwave',   'background', 'Synthwave',     'epic',      'premium',
+          NULL,
+          '{"style":"synthwave","accent":"#ff2d95","grid":"#ff2d95","animated":true}'::jsonb),
+        ('bg_eclipse',     'background', 'Total Eclipse', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"eclipse","accent":"#ffdf8a","animated":true}'::jsonb),
+        ('bg_matrix',      'background', 'Digital Rain',  'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"matrix","color":"#00ff41","animated":true}'::jsonb),
+        ('bg_dusk',        'background', 'Golden Hour',   'epic',      'premium',
+          NULL,
+          '{"style":"dusk","animated":true}'::jsonb),
+        ('bg_thunder',     'background', 'Tempest',       'legendary', 'rank',
+          '{"tier":"ruby"}'::jsonb,
+          '{"style":"thunder","from":"#0b0918","to":"#2a2440","animated":true}'::jsonb),
+
+        -- ── Borders (2) ──────────────────────────────────────────────
+        ('border_tesla',   'border', 'Storm Cage', 'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"tesla","color":"#74e0ff","accent":"#e4ecff","width":3,"animated":true}'::jsonb),
+        ('border_corona',  'border', 'Corona',     'epic',      'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"eclipse","color":"#d4a93f","accent":"#ffe28a","width":3,"animated":true}'::jsonb),
+
+        -- ── Usernames (2) ────────────────────────────────────────────
+        ('uname_neon',     'username', 'Neon Sign', 'epic', 'premium',
+          NULL,
+          '{"style":"neon","color":"#ff2d95","animated":true}'::jsonb),
+        ('uname_glitch',   'username', 'Glitch',    'epic', 'rank',
+          '{"tier":"platinum"}'::jsonb,
+          '{"style":"glitch","color":"#ffffff","animated":true}'::jsonb),
+
+        -- ── Ball trails (1) ──────────────────────────────────────────
+        ('trail_rainbow',  'ball_trail', 'Prism Ribbon', 'epic', 'premium',
+          NULL,
+          '{"style":"rainbow","width":3,"animated":true,"glow":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'free'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'free'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium' AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'admin_grant'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE LOWER(u.username) = 'rickybobbyfairways'
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+    },
+    {
+        // Chat send idempotency. The mobile app stamps every send with a
+        // client-generated id; a retry after an ambiguous network failure
+        // (request landed, response lost) hits the partial unique index and
+        // returns the original row instead of duplicating the message. Also
+        // adds the thread-poll indexes: every open chat screen polls its
+        // thread every 5 seconds, which was a sequential scan before.
+        name: 'chat.client_id_idempotency',
+        sql: `
+      ALTER TABLE messages        ADD COLUMN IF NOT EXISTS client_id TEXT;
+      ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_client_dedupe
+        ON messages(user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS dm_client_dedupe
+        ON direct_messages(from_user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS messages_match_created_idx
+        ON messages(match_id, created_at) WHERE match_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS messages_clan_created_idx
+        ON messages(clan_id, created_at) WHERE clan_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS dm_pair_created_idx
+        ON direct_messages(from_user_id, to_user_id, created_at);
+    `,
+    },
+    {
+        // Server-driven app configuration. The mobile app fetches /config on
+        // boot (cached locally); keys can be changed from the Railway console
+        // or POST /admin/config without an app release. Today: min_version
+        // (drives the in-app "update required" banner), banner (freeform
+        // announcement text or null), features (flag object for gating
+        // future work). Seed defaults never overwrite edited values.
+        name: 'app_config.create',
+        sql: `
+      CREATE TABLE IF NOT EXISTS app_config (
+        key        TEXT PRIMARY KEY,
+        value      JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO app_config (key, value) VALUES
+        ('min_version', '"1.0.0"'::jsonb),
+        ('banner',      'null'::jsonb),
+        ('features',    '{}'::jsonb)
+      ON CONFLICT (key) DO NOTHING;
+    `,
+    },
+    {
+        // Linked matches. Two waiting duo/squad matches that share a player
+        // can't be MERGED (one match can't hold a player on both sides or two
+        // rounds for them — match_players PK and rounds UNIQUE are both
+        // (match_id,user_id)). Instead they're LINKED: both stay separate,
+        // paired_match_id points each at the other, every player plays their
+        // own round, and resolution compares the two teams. Nullable + ON
+        // DELETE SET NULL so deleting one match doesn't cascade-orphan.
+        name: 'matches.paired_match_id',
+        sql: `
+      ALTER TABLE matches
+        ADD COLUMN IF NOT EXISTS paired_match_id UUID REFERENCES matches(match_id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS matches_paired_idx
+        ON matches(paired_match_id) WHERE paired_match_id IS NOT NULL;
+    `,
+    },
+    {
+        // Hot-path indexes for the highest-frequency reads: home feed, the
+        // profile screens' recent/best round queries, membership checks, and
+        // the friends graph that gates feed, DMs, and follower lists.
+        name: 'perf.hot_path_indexes',
+        sql: `
+      CREATE INDEX IF NOT EXISTS posts_created_idx
+        ON posts(created_at DESC);
+      CREATE INDEX IF NOT EXISTS rounds_user_created_idx
+        ON rounds(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS match_players_user_idx
+        ON match_players(user_id);
+      CREATE INDEX IF NOT EXISTS friends_user_status_idx
+        ON friends(user_id, status);
+      CREATE INDEX IF NOT EXISTS friends_friend_status_idx
+        ON friends(friend_id, status);
+    `,
+    },
+    {
+        // Comment send idempotency for round + post comments. Same contract as
+        // chat.client_id_idempotency: the composer stamps every send with a
+        // client-generated id, so a retry after an ambiguous network failure
+        // (request landed, response lost) hits the partial unique index and
+        // gets the original row back instead of double-posting the comment.
+        // Partial indexes so pre-existing NULL rows coexist.
+        name: 'comments.client_id_idempotency',
+        sql: `
+      ALTER TABLE round_comments ADD COLUMN IF NOT EXISTS client_id TEXT;
+      ALTER TABLE post_comments  ADD COLUMN IF NOT EXISTS client_id TEXT;
+      CREATE UNIQUE INDEX IF NOT EXISTS round_comments_client_dedupe
+        ON round_comments(user_id, client_id) WHERE client_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS post_comments_client_dedupe
+        ON post_comments(user_id, client_id) WHERE client_id IS NOT NULL;
+    `,
+    },
+    {
+        // Owner group. users.is_owner flags staff/owner accounts: they
+        // dynamically own every cosmetic, count as premium, and can broadcast
+        // an "@everyone" announcement post that pushes to all users. Add or
+        // remove an owner straight from the DB, no app change:
+        //   UPDATE users SET is_owner = true  WHERE LOWER(username) = 'someone';
+        //   UPDATE users SET is_owner = false WHERE LOWER(username) = 'someone';
+        // posts.is_announcement marks an owner's @everyone broadcast so it
+        // surfaces in EVERY user's feed (bypassing the friends/local scope),
+        // and the partial index keeps that feed union cheap.
+        name: 'owner_group.create',
+        sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_announcement BOOLEAN NOT NULL DEFAULT FALSE;
+      CREATE INDEX IF NOT EXISTS posts_announcement_idx
+        ON posts(created_at DESC) WHERE is_announcement = TRUE;
+      -- Seed the existing test/owner account so it works out of the box.
+      UPDATE users SET is_owner = TRUE WHERE LOWER(username) = 'rickybobbyfairways';
+    `,
+    },
+    {
+        // Live scoreboard opt-in. Each player can agree to share their scores
+        // live during a match; when at least one player on EACH side has opted
+        // in ("both sides agree"), the match's anti-cheat redaction lifts and
+        // everyone sees live scores hole-by-hole (Golf Game Book style).
+        name: 'match_players.live_scores_optin',
+        sql: `
+      ALTER TABLE match_players
+        ADD COLUMN IF NOT EXISTS live_scores_optin BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+    },
+    {
+        // Per-hole tee-box GPS for the course-preview feature. Unlike pins (the
+        // green is shared across every teebox), the tee marker is PER teebox —
+        // the Black tees and Red tees start at different spots — so these columns
+        // live on the per-teebox holes rows and are set by the teebox-specific
+        // tee-marking screen. Crowd-sourced, last-write-wins, audited like pins.
+        name: 'holes.tee_coords',
+        sql: `
+      ALTER TABLE holes
+        ADD COLUMN IF NOT EXISTS tee_lat REAL,
+        ADD COLUMN IF NOT EXISTS tee_lng REAL,
+        ADD COLUMN IF NOT EXISTS tee_set_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS tee_set_by UUID REFERENCES users(user_id);
+    `,
+    },
+    {
+        // When a match was LINKED to its opponent (paired_match_id set). The
+        // un-pair cron releases a linked pair after 3 days if one side never
+        // finished. Backfill existing linked matches from created_at so the rule
+        // applies to the current backlog of paired-but-unresolved matches too.
+        name: 'matches.paired_at',
+        sql: `
+      ALTER TABLE matches ADD COLUMN IF NOT EXISTS paired_at TIMESTAMPTZ;
+      UPDATE matches
+         SET paired_at = created_at
+       WHERE paired_match_id IS NOT NULL AND paired_at IS NULL;
+    `,
+    },
+    {
+        // CPU opponents. A pool of bot accounts (one per rank) fills a player's
+        // match when no human turns up for a few hours, so nobody is stranded
+        // waiting. Bots are hidden from leaderboards / feed / search and never
+        // gain or lose ELO themselves (their rating just marks their skill band).
+        name: 'users.is_bot',
+        sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;
+      CREATE INDEX IF NOT EXISTS users_is_bot_idx ON users(is_bot) WHERE is_bot = TRUE;
+    `,
+    },
+    {
+        // When a player FINISHED their round. The bot fill-in waits a few hours
+        // after THIS (not after match creation) before subbing in a CPU opponent.
+        // Backfill existing finished rows to NOW() so the clock starts at deploy
+        // rather than instantly bot-matching the whole waiting backlog.
+        name: 'match_players.completed_at',
+        sql: `
+      ALTER TABLE match_players ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+      UPDATE match_players SET completed_at = NOW()
+       WHERE completed = TRUE AND completed_at IS NULL;
+    `,
+    },
+    {
+        // Phase 3 tournaments: a winner pin + a dedicated champion cosmetic prize.
+        // The cosmetics CHECK only allowed free/premium/cup_winner/rank — widen it
+        // for a 'tournament_winner' kind so the prize is NOT auto-granted to weekly
+        // Sacari Cup winners (which key on unlock_kind='cup_winner').
+        name: 'tournaments.phase3_prize',
+        sql: `
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS winner_id UUID REFERENCES users(user_id) ON DELETE SET NULL;
+      ALTER TABLE cosmetics DROP CONSTRAINT IF EXISTS cosmetics_unlock_kind_check;
+      ALTER TABLE cosmetics ADD CONSTRAINT cosmetics_unlock_kind_check
+        CHECK (unlock_kind IN ('free','premium','cup_winner','rank','tournament_winner'));
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        ('border_tournament_champ', 'border', 'Tournament Champion', 'legendary', 'tournament_winner',
+          '{"place":1}'::jsonb,
+          '{"style":"glow","color":"#d4a93f","width":3,"animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind = EXCLUDED.kind, name = EXCLUDED.name, rarity = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind, unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+    `,
+    },
 ];
 async function runMigrations() {
+    // Ledger table first, outside the loop, so even a first-boot migration
+    // failure is visible remotely via GET /admin/migration-status instead
+    // of only in deploy logs. Each migration upserts its latest outcome —
+    // these are idempotent and re-run every boot, so the ledger reflects
+    // the MOST RECENT run, which is what "is prod healthy" actually means.
+    try {
+        await pool_1.default.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name        TEXT PRIMARY KEY,
+        ok          BOOLEAN NOT NULL,
+        error       TEXT,
+        last_ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`);
+    }
+    catch (err) {
+        console.error('Migration ledger create failed:', err);
+    }
     for (const m of MIGRATIONS) {
+        let ok = true;
+        let errText = null;
         try {
             await pool_1.default.query(m.sql);
             // Quiet on success — startup logs stay tidy.
         }
         catch (err) {
+            ok = false;
+            errText = err instanceof Error ? err.message : String(err);
             console.error(`Migration "${m.name}" failed:`, err);
             // Don't crash on migration failure — let the server start anyway so
             // other endpoints keep working. The failed feature simply won't function.
         }
+        try {
+            await pool_1.default.query(`INSERT INTO schema_migrations (name, ok, error, last_ran_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (name)
+         DO UPDATE SET ok = $2, error = $3, last_ran_at = NOW()`, [m.name, ok, errText]);
+        }
+        catch { /* ledger write is best-effort */ }
     }
 }

@@ -10,6 +10,7 @@ const asyncHandler_1 = require("../utils/asyncHandler");
 const notify_1 = require("../utils/notify");
 const email_1 = require("../utils/email");
 const courseEstimate_1 = require("../utils/courseEstimate");
+const scorecardScan_1 = require("../utils/scorecardScan");
 const router = (0, express_1.Router)();
 router.get('/nearby', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const lat = parseFloat(req.query.lat);
@@ -131,8 +132,11 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
         // Otherwise (blank, zero, garbage) estimate from par + computed yards.
         const userRating = tb.courseRating != null && tb.courseRating !== '' ? Number(tb.courseRating) : null;
         const userSlope = tb.slopeRating != null && tb.slopeRating !== '' ? Number(tb.slopeRating) : null;
-        const fullPlausible = (0, courseEstimate_1.looksPlausibleRating)(userRating, userSlope)
+        const fullPlausible = (0, courseEstimate_1.looksPlausibleRating)(userRating, userSlope, numHoles)
             && userRating != null && userSlope != null;
+        // Plausible windows differ by hole count: 9-hole tees are half-scale.
+        const ratingMin = numHoles === 9 ? 27 : 55, ratingMax = numHoles === 9 ? 42 : 80;
+        const slopeMin = numHoles === 9 ? 40 : 55, slopeMax = numHoles === 9 ? 90 : 155;
         let rating;
         let slope;
         let estimated = false;
@@ -141,10 +145,10 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
             slope = userSlope;
         }
         else {
-            const est = (0, courseEstimate_1.estimateRatingSlope)(computedPar || (numHoles === 9 ? 36 : 72), computedYards, gender);
+            const est = (0, courseEstimate_1.estimateRatingSlope)(computedPar || (numHoles === 9 ? 36 : 72), computedYards, gender, numHoles);
             // If they gave one of the two, prefer the user's plausible value.
-            rating = (userRating != null && userRating >= 55 && userRating <= 80) ? userRating : est.rating;
-            slope = (userSlope != null && userSlope >= 55 && userSlope <= 155) ? userSlope : est.slope;
+            rating = (userRating != null && userRating >= ratingMin && userRating <= ratingMax) ? userRating : est.rating;
+            slope = (userSlope != null && userSlope >= slopeMin && userSlope <= slopeMax) ? userSlope : est.slope;
             estimated = !fullPlausible;
         }
         shaped.push({
@@ -205,6 +209,69 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
         warnings: allWarnings,
     });
 }));
+/**
+ * Scorecard OCR. The in-app course builder posts a photo of a paper
+ * scorecard here; we relay it to Claude's vision API and return structured
+ * tee/hole data the builder drops straight into its form, so a player can add
+ * a course by snapping one photo instead of typing ~90 numbers.
+ *
+ * The image is NOT persisted — it's relayed to Anthropic and discarded; only
+ * the parsed numbers come back.
+ *
+ *   POST /courses/scan-scorecard
+ *     body: { imageBase64: string, mimeType: 'image/jpeg' | 'image/png' }
+ *   response: { courseName?, city?, state?, numHoles, teeboxes[], warnings[] }
+ */
+router.post('/scan-scorecard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { imageBase64, mimeType } = req.body ?? {};
+    if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
+        return res.status(400).json({ error: 'imageBase64 required' });
+    }
+    const mediaType = mimeType === 'image/png' ? 'image/png'
+        : mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'image/jpeg'
+            : null;
+    if (!mediaType)
+        return res.status(400).json({ error: 'Only PNG and JPEG images are allowed' });
+    // Size cap (5 MB decoded). express.json is capped at 8mb, so a base64
+    // payload above ~5 MB binary risks bouncing off the body-parser limit
+    // before it even reaches here.
+    const approxBytes = Math.floor((imageBase64.length * 3) / 4);
+    if (approxBytes > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: 'Image must be 5 MB or smaller' });
+    }
+    // Per-user daily cap. Every scan that reaches the vision API costs money, so
+    // we gate on billed attempts in the trailing 24h (counted from the
+    // scorecard_scans log below), NOT on courses actually added. This is the
+    // hard stop against a bored or malicious user spamming the endpoint to run
+    // up the API bill. The Anthropic Console spend limit is the global backstop.
+    const SCAN_DAILY_CAP = 20;
+    const { rows: capRows } = await pool_1.default.query(`SELECT COUNT(*)::int AS n FROM scorecard_scans
+      WHERE user_id = $1 AND created_at > NOW() - INTERVAL '24 hours'`, [req.userId]);
+    if ((capRows[0]?.n ?? 0) >= SCAN_DAILY_CAP) {
+        return res.status(429).json({
+            error: `You've reached the daily limit of ${SCAN_DAILY_CAP} scorecard scans. Try again tomorrow, or enter the course manually.`,
+        });
+    }
+    // Log a billed attempt so it counts against the cap. We only count outcomes
+    // where Anthropic actually returned a 200 and generated tokens (success, or
+    // a 422 "couldn't read / refused" — both are billed). Pre-flight failures
+    // (no key → 503) and transport/API errors (→ 502, not billed by Anthropic)
+    // don't consume the user's quota.
+    const logScan = () => pool_1.default.query(`INSERT INTO scorecard_scans (user_id) VALUES ($1)`, [req.userId]).catch(() => { });
+    try {
+        const result = await (0, scorecardScan_1.scanScorecard)(imageBase64, mediaType);
+        await logScan();
+        return res.json(result);
+    }
+    catch (e) {
+        if (e instanceof scorecardScan_1.ScorecardScanError) {
+            if (e.status === 422)
+                await logScan();
+            return res.status(e.status).json({ error: e.message });
+        }
+        throw e;
+    }
+}));
 router.get('/:id/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { rows } = await pool_1.default.query(`SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
             array_length(r.hole_scores, 1) AS holes_played,
@@ -232,7 +299,7 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
     let holes = [];
     if (teeboxIds.length > 0) {
         const { rows: holeRows } = await pool_1.default.query(`SELECT hole_id, teebox_id, hole_num, par, yardage, handicap,
-              pin_lat, pin_lng, pin_elevation_m
+              pin_lat, pin_lng, pin_elevation_m, tee_lat, tee_lng
        FROM holes WHERE teebox_id = ANY($1) ORDER BY teebox_id, hole_num`, [teeboxIds]);
         holes = holeRows;
     }
@@ -599,6 +666,76 @@ router.post('/admin/set-pins', auth_1.requireAuth, (0, asyncHandler_1.wrap)(asyn
             updated += n;
     }
     return res.json({ updated, missing_hole_nums: missing });
+}));
+/**
+ * POST /courses/admin/set-teeboxes
+ *   body: { teeboxId, tees: [{ holeNum, lat, lng }] }
+ *
+ * Tee markers for the course-preview feature. Unlike pins, a tee box is
+ * specific to ONE teebox set (the Black tee and Red tee start in different
+ * places), so this writes only to the given teebox's holes. Crowd-sourced,
+ * last-write-wins, stamped with the contributor like pins.
+ *
+ * Response: { updated: N, missing_hole_nums: [...] }
+ */
+router.post('/admin/set-teeboxes', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { teeboxId, tees } = req.body ?? {};
+    if (typeof teeboxId !== 'string' || !teeboxId) {
+        return res.status(400).json({ error: 'teeboxId required' });
+    }
+    if (!Array.isArray(tees) || tees.length === 0) {
+        return res.status(400).json({ error: 'tees array required' });
+    }
+    const { rows: tRows } = await pool_1.default.query(`SELECT teebox_id FROM teeboxes WHERE teebox_id = $1`, [teeboxId]);
+    if (!tRows.length)
+        return res.status(404).json({ error: 'Teebox not found' });
+    let updated = 0;
+    const missing = [];
+    for (const tee of tees) {
+        const holeNum = Number(tee?.holeNum);
+        const lat = Number(tee?.lat);
+        const lng = Number(tee?.lng);
+        if (!Number.isInteger(holeNum) || holeNum < 1 || holeNum > 18) {
+            missing.push(tee?.holeNum);
+            continue;
+        }
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+            missing.push(holeNum);
+            continue;
+        }
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+            missing.push(holeNum);
+            continue;
+        }
+        const { rowCount } = await pool_1.default.query(`UPDATE holes
+          SET tee_lat = $3, tee_lng = $4, tee_set_by = $5, tee_set_at = NOW()
+        WHERE teebox_id = $1 AND hole_num = $2`, [teeboxId, holeNum, lat, lng, req.userId]);
+        const n = rowCount ?? 0;
+        if (n === 0)
+            missing.push(holeNum);
+        else
+            updated += n;
+    }
+    return res.json({ updated, missing_hole_nums: missing });
+}));
+/**
+ * GET /courses/:id/my-shots
+ *
+ * The requesting user's tracked shots across all rounds on this course,
+ * keyed for the course-preview per-hole heatmap. Returns a flat list the
+ * client groups by hole_num — each row is one shot's start→end segment.
+ */
+router.get('/:id/my-shots', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const { rows } = await pool_1.default.query(`SELECT s.hole_num, s.club, s.shot_index,
+            s.start_lat, s.start_lng, s.end_lat, s.end_lng, s.total_yds
+       FROM shots s
+       JOIN holes h ON h.hole_id = s.hole_id
+       JOIN teeboxes t ON t.teebox_id = h.teebox_id
+      WHERE t.course_id = $1 AND s.user_id = $2
+        AND s.start_lat IS NOT NULL AND s.end_lat IS NOT NULL
+      ORDER BY s.hole_num, s.shot_index
+      LIMIT 3000`, [req.params.id, req.userId]);
+    return res.json({ shots: rows });
 }));
 /**
  * User-submitted "please add this course" inbox. Writes a row to

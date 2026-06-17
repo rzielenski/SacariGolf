@@ -141,6 +141,7 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
        LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY MIN(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`, [req.params.id]);
@@ -155,6 +156,7 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
        LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY SUM(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`, [req.params.id]);
@@ -171,6 +173,7 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
        LEFT JOIN match_players mp ON mp.match_id = m.match_id AND mp.user_id = tp.user_id
        LEFT JOIN match_results mr ON mr.match_id = m.match_id
        WHERE tp.tournament_id = $1
+         AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY COUNT(*) FILTER (WHERE mr.winner_side = mp.side) DESC NULLS LAST, COUNT(mr.match_id) DESC`, [req.params.id]);
@@ -246,5 +249,68 @@ router.post('/:id/link-match', auth_1.requireAuth, (0, asyncHandler_1.wrap)(asyn
     }
     await pool_1.default.query(`UPDATE matches SET tournament_id = $1 WHERE match_id = $2`, [req.params.id, matchId]);
     return res.json({ success: true });
+}));
+// Finalize a tournament: lock it, crown the leaderboard winner, and award the
+// Tournament Champion cosmetic. Owner-only. Idempotent-ish (409 once finished).
+router.post('/:id/finalize', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
+    const id = req.params.id;
+    const { rows: tRows } = await pool_1.default.query(`SELECT * FROM tournaments WHERE tournament_id = $1`, [id]);
+    if (!tRows.length)
+        return res.status(404).json({ error: 'Tournament not found' });
+    const t = tRows[0];
+    if (t.owner_id !== req.userId)
+        return res.status(403).json({ error: 'Only the organizer can finalize' });
+    if (t.status !== 'active')
+        return res.status(409).json({ error: 'Tournament already finalized' });
+    // Winner = top of the leaderboard for this scoring rule, among players who
+    // actually posted a round. Same ordering as the GET /:id leaderboard.
+    let winnerSql;
+    if (t.scoring === 'total_strokes') {
+        winnerSql = `
+      SELECT u.user_id FROM tournament_players tp
+        JOIN users u ON u.user_id = tp.user_id
+        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
+        LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
+       WHERE tp.tournament_id = $1 AND u.is_bot = false AND (m.completed IS NULL OR m.completed = true)
+       GROUP BY u.user_id HAVING COUNT(r.round_id) > 0
+       ORDER BY SUM(r.total_score) ASC LIMIT 1`;
+    }
+    else if (t.scoring === 'wins') {
+        winnerSql = `
+      SELECT u.user_id FROM tournament_players tp
+        JOIN users u ON u.user_id = tp.user_id
+        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
+        LEFT JOIN match_players mp ON mp.match_id = m.match_id AND mp.user_id = tp.user_id
+        LEFT JOIN match_results mr ON mr.match_id = m.match_id
+       WHERE tp.tournament_id = $1 AND u.is_bot = false AND (m.completed IS NULL OR m.completed = true)
+       GROUP BY u.user_id HAVING COUNT(mr.match_id) > 0
+       ORDER BY COUNT(*) FILTER (WHERE mr.winner_side = mp.side) DESC LIMIT 1`;
+    }
+    else {
+        // best_round (default; also the fallback for the unimplemented 'points').
+        winnerSql = `
+      SELECT u.user_id FROM tournament_players tp
+        JOIN users u ON u.user_id = tp.user_id
+        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
+        LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
+       WHERE tp.tournament_id = $1 AND u.is_bot = false AND (m.completed IS NULL OR m.completed = true)
+       GROUP BY u.user_id HAVING COUNT(r.round_id) > 0
+       ORDER BY MIN(r.total_score) ASC LIMIT 1`;
+    }
+    const { rows: top } = await pool_1.default.query(winnerSql, [id]);
+    const winnerId = top[0]?.user_id ?? null;
+    await pool_1.default.query(`UPDATE tournaments SET status = 'finished', winner_id = $2 WHERE tournament_id = $1`, [id, winnerId]);
+    if (winnerId) {
+        await pool_1.default.query(`INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+         SELECT $1, c.cosmetic_id, $2 FROM cosmetics c
+          WHERE c.unlock_kind = 'tournament_winner' AND (c.unlock_data ->> 'place')::int = 1
+       ON CONFLICT (user_id, cosmetic_id) DO NOTHING`, [winnerId, `tournament_${id}_winner`]);
+        // Champion feed post — best-effort, never blocks the finalize.
+        try {
+            await pool_1.default.query(`INSERT INTO posts (user_id, kind, body) SELECT $1, 'text', '🏆 Won ' || $2 || ' on Sacari Golf'`, [winnerId, t.name]);
+        }
+        catch { /* non-fatal */ }
+    }
+    return res.json({ success: true, winner_id: winnerId });
 }));
 exports.default = router;

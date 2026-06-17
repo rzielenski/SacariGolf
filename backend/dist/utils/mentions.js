@@ -19,6 +19,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseMentions = parseMentions;
 exports.processMentions = processMentions;
+exports.hasEveryoneTag = hasEveryoneTag;
+exports.broadcastToEveryone = broadcastToEveryone;
 const pool_1 = __importDefault(require("../db/pool"));
 const notify_1 = require("./notify");
 // 3–20 chars matches the username validation in auth/register. The handle is
@@ -68,5 +70,40 @@ async function processMentions(postId, authorId, text) {
     catch (err) {
         // eslint-disable-next-line no-console
         console.error('processMentions failed:', err);
+    }
+}
+/** True if the body contains an "@everyone" broadcast tag (case-insensitive,
+ *  word-bounded so "@everyonething" doesn't match). */
+function hasEveryoneTag(text) {
+    if (!text)
+        return false;
+    return /@everyone\b/i.test(text);
+}
+/**
+ * Broadcast an owner's @everyone announcement: push to EVERY user with a
+ * registered device (except the author). sendPush chunks to Expo's 100/req
+ * limit internally, so one call covers the whole user base. Best-effort —
+ * never throws, so a push failure can't break post creation.
+ *
+ * Caller is responsible for verifying the author is an owner BEFORE calling
+ * this — there's no permission check here.
+ */
+async function broadcastToEveryone(postId, authorId, text) {
+    try {
+        const { rows: a } = await pool_1.default.query(`SELECT username FROM users WHERE user_id = $1`, [authorId]);
+        const authorName = a[0]?.username ?? 'Sacari';
+        // Strip the @everyone tag from the preview so the notification reads
+        // cleanly ("Big news!" not "@everyone Big news!").
+        const preview = (text ?? '').replace(/@everyone\b/ig, '').trim().slice(0, 140);
+        const { rows: recipients } = await pool_1.default.query(`SELECT push_token FROM users
+        WHERE push_token IS NOT NULL AND user_id <> $1`, [authorId]);
+        const tokens = recipients.map((r) => r.push_token);
+        if (!tokens.length)
+            return;
+        await (0, notify_1.sendPush)(tokens, `📣 ${authorName}`, preview || `${authorName} posted an announcement`, { type: 'announcement', postId });
+    }
+    catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('broadcastToEveryone failed:', err);
     }
 }

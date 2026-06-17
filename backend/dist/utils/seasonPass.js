@@ -1,0 +1,102 @@
+"use strict";
+/**
+ * Season Pass — one season per calendar month, 10 tiers, XP earned by
+ * playing ranked rounds (1 XP per completed ranked round). Each tier
+ * unlocks a cosmetic from the season's reward ladder; full unlock at
+ * tier 10 = 10 XP = 10 rounds.
+ *
+ * Lifecycle:
+ *   • ensureCurrentSeason() on boot + every minute creates the current
+ *     month's season if missing and writes the tier ladder rows.
+ *   • awardRoundXp(userId) is called by routes/matches.ts after a
+ *     successful score submit on a non-practice match.
+ *
+ * The reward ladder is data-driven via season_pass_tiers rows. Today
+ * we seed every season with the same 10 cosmetics in a fixed order —
+ * future seasons can ship a different ladder by changing the seed
+ * function below without touching the schema.
+ */
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.ensureCurrentSeason = ensureCurrentSeason;
+exports.awardRoundXp = awardRoundXp;
+const pool_1 = __importDefault(require("../db/pool"));
+/** Ten cosmetics ordered easiest → most prestigious. Each season seed
+ *  inserts these as tiers 1..10. */
+const TIER_LADDER = [
+    'trail_neon', // 1  — easy unlock, premium-tier feel
+    'uname_ice', // 2
+    'border_storm', // 3
+    'bg_volcanic', // 4
+    'trail_fire', // 5
+    'bg_cosmic', // 6
+    'uname_fire', // 7
+    'bg_storm', // 8
+    'trail_galaxy', // 9
+    'bg_america', // 10 — capstone
+];
+/** Format the season's display name: "June 2026", "September 2025", ... */
+function seasonName(monthStart) {
+    return monthStart.toLocaleString('en-US', {
+        month: 'long', year: 'numeric', timeZone: 'UTC',
+    });
+}
+/** Ensure the current month's season exists. Idempotent via unique
+ *  index on starts_at. Also seeds the tier ladder rows. */
+async function ensureCurrentSeason() {
+    // First-of-month UTC for the current month.
+    const { rows: anchor } = await pool_1.default.query(`SELECT date_trunc('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS s,
+            (date_trunc('month', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+              + INTERVAL '1 month') AS e`);
+    if (!anchor.length)
+        return;
+    const startsAt = anchor[0].s;
+    const endsAt = anchor[0].e;
+    const name = seasonName(startsAt);
+    const { rows: ins } = await pool_1.default.query(`INSERT INTO seasons (starts_at, ends_at, name)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (starts_at) DO NOTHING
+     RETURNING season_id`, [startsAt, endsAt, name]);
+    // If we created the row, also seed the tier ladder. Otherwise verify
+    // the ladder is populated (covers the case where a partial setup left
+    // the season without any tier rows — defensive but cheap).
+    let seasonId = ins[0]?.season_id ?? null;
+    if (!seasonId) {
+        const { rows: existing } = await pool_1.default.query(`SELECT season_id FROM seasons WHERE starts_at = $1 LIMIT 1`, [startsAt]);
+        seasonId = existing[0]?.season_id ?? null;
+    }
+    if (!seasonId)
+        return;
+    for (let i = 0; i < TIER_LADDER.length; i++) {
+        const tier = i + 1;
+        await pool_1.default.query(`INSERT INTO season_pass_tiers (season_id, tier, xp_required, cosmetic_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (season_id, tier) DO NOTHING`, [seasonId, tier, tier, TIER_LADDER[i]]);
+    }
+}
+/** Grant +1 XP to a user for the current season. Creates the
+ *  progress row on first call. Safe to call multiple times per round
+ *  (the matches.ts caller only fires once per submit anyway).
+ *
+ *  NOTE: don't write this as `INSERT … SELECT … LIMIT 1 ON CONFLICT`.
+ *  Postgres rejects `LIMIT` between the SELECT and the ON CONFLICT
+ *  clause with a "syntax error at or near 'LIMIT'". A two-step lookup
+ *  (find the season id, then upsert) is clearer anyway, and the unique
+ *  index on seasons.starts_at means the SELECT can return at most one
+ *  row, so the limit was redundant. */
+async function awardRoundXp(userId) {
+    await ensureCurrentSeason();
+    const { rows } = await pool_1.default.query(`SELECT season_id FROM seasons
+      WHERE NOW() >= starts_at AND NOW() < ends_at
+      LIMIT 1`);
+    const seasonId = rows[0]?.season_id;
+    if (!seasonId)
+        return;
+    await pool_1.default.query(`INSERT INTO season_pass_progress (user_id, season_id, xp, updated_at)
+     VALUES ($1, $2, 1, NOW())
+     ON CONFLICT (user_id, season_id)
+     DO UPDATE SET xp         = season_pass_progress.xp + 1,
+                   updated_at = NOW()`, [userId, seasonId]);
+}

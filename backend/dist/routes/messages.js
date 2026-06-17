@@ -3,6 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.persistVoiceClip = persistVoiceClip;
+exports.blockStateBetween = blockStateBetween;
 const express_1 = require("express");
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
@@ -11,6 +13,7 @@ const pool_1 = __importDefault(require("../db/pool"));
 const auth_1 = require("../middleware/auth");
 const notify_1 = require("../utils/notify");
 const asyncHandler_1 = require("../utils/asyncHandler");
+const cosmeticSql_1 = require("../utils/cosmeticSql");
 const router = (0, express_1.Router)();
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const VOICE_DIR = path_1.default.join(UPLOADS_DIR, 'voice');
@@ -43,7 +46,8 @@ const VOICE_MIME_EXT = {
 };
 /** Decode + persist a base64 voice clip. Returns the public URL or null if
  *  validation failed (size cap, mime, duration). Caller decides whether to
- *  surface a 400 or just drop the field. */
+ *  surface a 400 or just drop the field. Exported so routes/users.ts can
+ *  reuse it for theme-song voice uploads (same storage shape, same caps). */
 function persistVoiceClip(base64, mimeType, durationMs) {
     const ext = VOICE_MIME_EXT[mimeType];
     if (!ext)
@@ -216,12 +220,25 @@ async function areFriends(a, b) {
        AND status = 'accepted'`, [a, b]);
     return rows.length > 0;
 }
+/** Block state between two users, both directions in one query. Blocking
+ *  someone doesn't tear down the friends row, so DM gating has to check
+ *  this separately from areFriends. */
+async function blockStateBetween(sender, recipient) {
+    const { rows } = await pool_1.default.query(`SELECT blocker_id FROM blocked_users
+     WHERE (blocker_id = $1 AND blocked_id = $2)
+        OR (blocker_id = $2 AND blocked_id = $1)`, [sender, recipient]);
+    return {
+        senderBlockedRecipient: rows.some((r) => r.blocker_id === sender),
+        recipientBlockedSender: rows.some((r) => r.blocker_id === recipient),
+    };
+}
 router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
     const { matchId, clanId, toUserId } = req.query;
     if (toUserId) {
         const { rows } = await pool_1.default.query(`SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
               u.username, u.avatar_url,
-              dm.voice_url, dm.voice_duration_ms, dm.image_url
+              ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual,
+              dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id
        FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
        WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
           OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
@@ -238,7 +255,8 @@ router.get('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =>
     const val = matchId ?? clanId;
     const { rows } = await pool_1.default.query(`SELECT m.message_id, m.created_at, m.body, m.user_id,
             u.username, u.avatar_url,
-            m.voice_url, m.voice_duration_ms, m.image_url
+            ${(0, cosmeticSql_1.equippedVisualSql)('u')} AS equipped_visual,
+            m.voice_url, m.voice_duration_ms, m.image_url, m.client_id
      FROM messages m JOIN users u ON u.user_id = m.user_id
      WHERE m.${col} = $1
      ORDER BY m.created_at ASC
@@ -250,6 +268,13 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
     // Trim text; cap at 2000 chars. For voice/image messages the body becomes
     // the push-notification preview; text-only messages must have non-empty body.
     const text = typeof body === 'string' ? body.trim().slice(0, 2000) : '';
+    // Client-generated idempotency key. A retry after an ambiguous failure
+    // (request landed, response lost in transit) carries the same clientId;
+    // the partial unique index collapses it to the original row and we
+    // return that row instead of inserting a duplicate.
+    const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+        ? req.body.clientId.slice(0, 64)
+        : null;
     // Voice clip — optional. When present, decode to disk before the INSERT
     // so we have a URL to store. We unlink the file on any failure below so
     // a failed message doesn't leak audio on disk.
@@ -297,16 +322,44 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
             onFail();
             return res.status(403).json({ error: 'You can only DM friends' });
         }
+        // Blocking doesn't remove the friends row, so check it explicitly.
+        // The blocked sender gets the same generic message as a non-friend
+        // (no "they blocked you" information leak); a sender who blocked the
+        // recipient is told plainly since that's their own action.
+        const blocks = await blockStateBetween(req.userId, toUserId);
+        if (blocks.senderBlockedRecipient) {
+            onFail();
+            return res.status(403).json({ error: 'You blocked this user. Unblock them to send messages.' });
+        }
+        if (blocks.recipientBlockedSender) {
+            onFail();
+            return res.status(403).json({ error: 'You can only DM friends' });
+        }
         let rows;
         try {
-            ({ rows } = await pool_1.default.query(`INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms, image_url)
-         VALUES ($1, $2, $3, $4, $5, $6)
+            ({ rows } = await pool_1.default.query(`INSERT INTO direct_messages (from_user_id, to_user_id, body, voice_url, voice_duration_ms, image_url, client_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (from_user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
          RETURNING dm_id AS message_id, created_at, body, from_user_id AS user_id,
-                   voice_url, voice_duration_ms, image_url`, [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]));
+                   voice_url, voice_duration_ms, image_url, client_id`, [req.userId, toUserId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null, clientId]));
         }
         catch (err) {
             onFail();
             throw err;
+        }
+        if (!rows.length && clientId) {
+            // Duplicate retry — the original send already landed. Return it,
+            // skip the push (the recipient was already notified), and clean up
+            // the media files this retry just wrote to disk.
+            onFail();
+            const { rows: existing } = await pool_1.default.query(`SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
+                dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id,
+                u.username
+         FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
+         WHERE dm.from_user_id = $1 AND dm.client_id = $2`, [req.userId, clientId]);
+            if (existing.length)
+                return res.status(200).json(existing[0]);
+            return res.status(409).json({ error: 'Duplicate send' });
         }
         const msg = rows[0];
         const { rows: senderRows } = await pool_1.default.query('SELECT username FROM users WHERE user_id = $1', [req.userId]);
@@ -333,13 +386,27 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
     const val = matchId ?? clanId;
     let rows;
     try {
-        ({ rows } = await pool_1.default.query(`INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms, image_url)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms, image_url`, [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null]));
+        ({ rows } = await pool_1.default.query(`INSERT INTO messages (${col}, user_id, body, voice_url, voice_duration_ms, image_url, client_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+       RETURNING message_id, created_at, body, user_id, voice_url, voice_duration_ms, image_url, client_id`, [val, req.userId, effectiveBody, voice?.url ?? null, voice?.durationMs ?? null, image?.url ?? null, clientId]));
     }
     catch (err) {
         onFail();
         throw err;
+    }
+    if (!rows.length && clientId) {
+        // Duplicate retry — return the original row, skip pushes, clean up
+        // any media files this retry wrote.
+        onFail();
+        const { rows: existing } = await pool_1.default.query(`SELECT m.message_id, m.created_at, m.body, m.user_id,
+              m.voice_url, m.voice_duration_ms, m.image_url, m.client_id,
+              u.username
+       FROM messages m JOIN users u ON u.user_id = m.user_id
+       WHERE m.user_id = $1 AND m.client_id = $2`, [req.userId, clientId]);
+        if (existing.length)
+            return res.status(200).json(existing[0]);
+        return res.status(409).json({ error: 'Duplicate send' });
     }
     const msg = rows[0];
     const { rows: senderRows } = await pool_1.default.query(`SELECT username FROM users WHERE user_id = $1`, [req.userId]);
@@ -350,9 +417,16 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
     // generic label if the lookup misses.
     let roomName = '';
     if (matchId) {
+        // Skip pushing to anyone who has blocked the sender — they can't avoid
+        // sharing a match chat with an opponent, but they shouldn't get that
+        // person's messages on their lock screen.
         const r = await pool_1.default.query(`SELECT u.push_token FROM match_players mp
        JOIN users u ON u.user_id = mp.user_id
-       WHERE mp.match_id = $1 AND mp.user_id != $2 AND u.push_token IS NOT NULL`, [matchId, req.userId]);
+       WHERE mp.match_id = $1 AND mp.user_id != $2 AND u.push_token IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocked_users b
+           WHERE b.blocker_id = u.user_id AND b.blocked_id = $2
+         )`, [matchId, req.userId]);
         tokenRows = r.rows;
         const { rows: mr } = await pool_1.default.query(`SELECT name, match_type FROM matches WHERE match_id = $1`, [matchId]);
         roomName = mr[0]?.name || `${mr[0]?.match_type ?? 'Match'} chat`;
@@ -360,7 +434,11 @@ router.post('/', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) =
     else {
         const r = await pool_1.default.query(`SELECT u.push_token FROM clan_members cm
        JOIN users u ON u.user_id = cm.user_id
-       WHERE cm.clan_id = $1 AND cm.user_id != $2 AND u.push_token IS NOT NULL`, [clanId, req.userId]);
+       WHERE cm.clan_id = $1 AND cm.user_id != $2 AND u.push_token IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocked_users b
+           WHERE b.blocker_id = u.user_id AND b.blocked_id = $2
+         )`, [clanId, req.userId]);
         tokenRows = r.rows;
         const { rows: cr } = await pool_1.default.query(`SELECT name FROM clans WHERE clan_id = $1`, [clanId]);
         roomName = cr[0]?.name || 'Team chat';

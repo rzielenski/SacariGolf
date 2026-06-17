@@ -8,6 +8,7 @@ const pool_1 = __importDefault(require("../db/pool"));
 const auth_1 = require("../middleware/auth");
 const notify_1 = require("../utils/notify");
 const asyncHandler_1 = require("../utils/asyncHandler");
+const messages_1 = require("./messages");
 const router = (0, express_1.Router)();
 router.use(auth_1.requireAuth);
 async function areFriends(a, b) {
@@ -45,6 +46,14 @@ router.post('/:userId', (0, asyncHandler_1.wrap)(async (req, res) => {
     if (!text)
         return res.status(400).json({ error: 'body required' });
     if (!(await areFriends(me, userId))) {
+        return res.status(403).json({ error: 'You can only DM friends' });
+    }
+    // Blocking doesn't remove the friends row — same gate as routes/messages.
+    const blocks = await (0, messages_1.blockStateBetween)(me, userId);
+    if (blocks.senderBlockedRecipient) {
+        return res.status(403).json({ error: 'You blocked this user. Unblock them to send messages.' });
+    }
+    if (blocks.recipientBlockedSender) {
         return res.status(403).json({ error: 'You can only DM friends' });
     }
     const { rows } = await pool_1.default.query(`INSERT INTO direct_messages (from_user_id, to_user_id, body)
