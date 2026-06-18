@@ -698,12 +698,22 @@ export default function ScoringScreen() {
     setTeebox(tb);
     setHoles(sorted);
 
-    if (saved?.scores && localEntered.length > 0) {
-      // On-device draft is the source of truth when it has entered holes —
-      // it's the only place that knows EXACTLY which holes were scored.
-      setScores(saved.scores);
+    if (saved?.scores && saved.scores.length > 0) {
+      // On-device draft is the most recent local truth — exactly what the
+      // player last saw on their card — so it ALWAYS wins over the partial
+      // server backstop (which only holds holes up to the last live upload and
+      // pads the rest with par). Some leave-paths historically saved the draft
+      // WITHOUT the entered-set; when it's missing we derive "entered" from any
+      // hole whose saved score differs from par, so we never fall through to the
+      // par-padded server rebuild below and submit a card full of pars.
+      const savedScores = saved.scores;
+      setScores(savedScores);
       setHoleStats(Array.isArray(saved.holeStats) ? saved.holeStats : sorted.map(() => ({})));
-      setEnteredHoles(new Set(localEntered));
+      setEnteredHoles(
+        localEntered.length > 0
+          ? new Set(localEntered)
+          : new Set(savedScores.map((_, i) => i).filter((i) => typeof savedScores[i] === 'number' && savedScores[i] !== par[i]))
+      );
       setCurrentHole(saved.currentHole ?? 0);
     } else if (serverScores && serverScores.length > 0) {
       // Draft gone → rebuild from the server. We can't know which of the
@@ -2031,20 +2041,13 @@ export default function ScoringScreen() {
   // ── Leave / Cancel / Forfeit ────────────────────────────────────────────────
 
   const saveAndLeave = useCallback(async () => {
-    try {
-      await AsyncStorage.setItem(
-        SAVE_KEY,
-        JSON.stringify({
-          scores,
-          holeStats,
-          currentHole,
-          teeboxId: teebox?.teebox_id,
-          courseId: course?.course_id,
-        })
-      );
-    } catch { /* best-effort */ }
+    // Use the shared persistDraft so the leave-path writes the SAME complete
+    // draft as autosave — crucially including the entered-set (+ savedAt).
+    // Omitting `entered` here used to make the next restore skip the draft and
+    // rebuild from the partial server scores, padding unplayed holes with par.
+    await persistDraft();
     router.back();
-  }, [scores, holeStats, currentHole, teebox, course, SAVE_KEY]);
+  }, [persistDraft]);
 
   const doCancel = useCallback(async () => {
     setForfeiting(true);
