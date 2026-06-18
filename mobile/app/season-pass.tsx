@@ -193,7 +193,8 @@ function TierCard({
 function TierVisual({ kind, visual }: { kind: string | null; visual: any }) {
   if (!visual) return <View style={s.tierEmpty}><Text style={{ color: C.textMuted, fontSize: 11 }}>No reward</Text></View>;
   if (kind === 'background') {
-    return <CosmeticBackground visual={visual} style={s.tierBgPreview} />;
+    // Static swatch (the ladder shows many at once; animate only when equipped).
+    return <CosmeticBackground visual={visual} style={s.tierBgPreview} animated={false} />;
   }
   if (kind === 'border') {
     return (

@@ -57,28 +57,48 @@ function useGradientId(prefix: string): string {
 
 // ─── Path helpers (worklet-safe: only Math + string ops) ─────────────────────
 
-/** 5-point star outline centred at (cx,cy), outer radius r. Shared with the
- *  backgrounds (FlagBg-style waving stars). */
-export function starPath(cx: number, cy: number, r: number): string {
-  'worklet';
-  let d = '';
+// Precomputed vertex unit-vectors. The angles never change, so a per-frame path
+// rebuild (sparkle twinkle, waving stars) becomes pure adds/mults with ZERO trig
+// — this is the hot path for every background that runs a SparkleField.
+const STAR_UNIT: { c: number; s: number; outer: boolean }[] = (() => {
+  const a: { c: number; s: number; outer: boolean }[] = [];
   for (let i = 0; i < 10; i++) {
     const ang = (Math.PI / 5) * i - Math.PI / 2;
-    const rad = i % 2 === 0 ? r : r * 0.42;
-    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * Math.cos(ang)).toFixed(2)} ${(cy + rad * Math.sin(ang)).toFixed(2)} `;
+    a.push({ c: Math.cos(ang), s: Math.sin(ang), outer: i % 2 === 0 });
+  }
+  return a;
+})();
+const SPARK_UNIT: { c: number; s: number; outer: boolean }[] = (() => {
+  const a: { c: number; s: number; outer: boolean }[] = [];
+  for (let i = 0; i < 8; i++) {
+    const ang = (Math.PI / 4) * i - Math.PI / 2;
+    a.push({ c: Math.cos(ang), s: Math.sin(ang), outer: i % 2 === 0 });
+  }
+  return a;
+})();
+
+/** 5-point star outline centred at (cx,cy), outer radius r. Trig-free. */
+export function starPath(cx: number, cy: number, r: number): string {
+  'worklet';
+  const inner = r * 0.42;
+  let d = '';
+  for (let i = 0; i < 10; i++) {
+    const u = STAR_UNIT[i];
+    const rad = u.outer ? r : inner;
+    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * u.c).toFixed(2)} ${(cy + rad * u.s).toFixed(2)} `;
   }
   return d + 'Z ';
 }
 
-/** 4-point sparkle/glint (sharper inner ratio than a star) centred at (cx,cy). */
+/** 4-point sparkle/glint (sharper inner ratio than a star) centred at (cx,cy). Trig-free. */
 export function sparkPath(cx: number, cy: number, r: number): string {
   'worklet';
   const inner = r * 0.26;
   let d = '';
   for (let i = 0; i < 8; i++) {
-    const ang = (Math.PI / 4) * i - Math.PI / 2;
-    const rad = i % 2 === 0 ? r : inner;
-    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * Math.cos(ang)).toFixed(2)} ${(cy + rad * Math.sin(ang)).toFixed(2)} `;
+    const u = SPARK_UNIT[i];
+    const rad = u.outer ? r : inner;
+    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * u.c).toFixed(2)} ${(cy + rad * u.s).toFixed(2)} `;
   }
   return d + 'Z';
 }

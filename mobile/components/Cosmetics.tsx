@@ -174,15 +174,75 @@ function BreathingGlow({ cx, cy, r, color, periodMs = 9000, min = 0.3, max = 0.6
 // BACKGROUND
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Cheap, ZERO-driver static representation of each background, for places that
+// render MANY at once (the locker grid, season-pass tiers). Animating ~20 full
+// backgrounds simultaneously backs up the UI thread; a static swatch reads the
+// same at thumbnail size for a fraction of the cost.
+const STATIC_BG: Record<string, { colors: string[]; diag?: boolean; accent?: string }> = {
+  flag:        { colors: ['#b22234', '#dddddd', '#3c3b6e'], diag: true },
+  storm:       { colors: ['#0a0f1c', '#26304a'], accent: '#cad9ff' },
+  pulse:       { colors: ['#0a0f1c', '#26304a'], accent: '#cad9ff' },
+  aurora:      { colors: ['#04161e', '#0a3a4a', '#06202e'], accent: '#00ff9d' },
+  stars:       { colors: ['#040515', '#1a0a3a'], accent: '#7a3ab5' },
+  cosmic:      { colors: ['#040515', '#1a0a3a'], accent: '#7a3ab5' },
+  flame:       { colors: ['#160503', '#5e1a14', '#ffb14a'] },
+  fire:        { colors: ['#160503', '#5e1a14', '#ffb14a'] },
+  holographic: { colors: ['#ff6b9d', '#74e0ff', '#a89cf0', '#ffe28a'], diag: true },
+  cyber:       { colors: ['#02060e', '#0a1e2e'], accent: '#00ffd5' },
+  solar:       { colors: ['#2a0d05', '#0a0204'], accent: '#ffb14a' },
+  ocean:       { colors: ['#0a1e3a', '#3d8bbf', '#041d33'] },
+  sakura:      { colors: ['#3a1a2a', '#7a3a55'], accent: '#ffc4d1' },
+  liquid:      { colors: ['#140f0a', '#d4a93f', '#241a0e'] },
+  synthwave:   { colors: ['#16042e', '#a3155e'], accent: '#ff2d95' },
+  eclipse:     { colors: ['#05060d', '#0a0d18'], accent: '#ffdf8a' },
+  matrix:      { colors: ['#010a04', '#04220e'], accent: '#00ff41' },
+  dusk:        { colors: ['#1c1440', '#c2542e', '#ffb14a'] },
+  thunder:     { colors: ['#0b0918', '#2a2440'], accent: '#dcd2ff' },
+  nebula:      { colors: ['#070314', '#13042a'], accent: '#b14ad9' },
+  embers:      { colors: ['#0a0f0a', '#04140e'], accent: '#ffcf7a' },
+  meteor:      { colors: ['#060814', '#0e1430'], accent: '#cfe0ff' },
+  plasma:      { colors: ['#0b0518', '#04030f'], accent: '#7a2ad9' },
+  blizzard:    { colors: ['#1a2a3e', '#0a1420'], accent: '#cfe6ff' },
+  prism:       { colors: ['#0a0a14', '#141020'], accent: '#ff6b9d' },
+};
+
+function StaticBg({ v, style, children }: BgProps) {
+  const styleId = v.style as string | undefined;
+  const def = (styleId && STATIC_BG[styleId]) || { colors: [v.from ?? C.bg, v.to ?? '#1a1a1a'] } as { colors: string[]; diag?: boolean; accent?: string };
+  const base = def.colors.length >= 2 ? def.colors : [def.colors[0], def.colors[0]];
+  const colors = base as readonly string[] as readonly [string, string, ...string[]];
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={colors}
+        start={{ x: 0, y: 0 }} end={def.diag ? { x: 1, y: 1 } : { x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {def.accent ? (
+        <View pointerEvents="none" style={{
+          position: 'absolute', top: '24%', left: '26%', width: '60%', height: '60%',
+          borderRadius: 999, backgroundColor: def.accent, opacity: 0.3,
+        }} />
+      ) : null}
+      {children}
+    </View>
+  );
+}
+
 export function CosmeticBackground({
-  visual, style, children,
+  visual, style, children, animated = true,
 }: {
   visual: VisualData;
   style?: StyleProp<ViewStyle>;
   children?: React.ReactNode;
+  /** false → render a cheap static swatch (no animation drivers). Use in grids
+   *  that show many backgrounds at once. Defaults to true (full animation). */
+  animated?: boolean;
 }) {
   const v = visual ?? {};
   const styleId = v.style as string | undefined;
+
+  if (!animated) return <StaticBg v={v} style={style}>{children}</StaticBg>;
 
   switch (styleId) {
     case 'gradient':    return <GradientBg     v={v} style={style}>{children}</GradientBg>;
@@ -271,19 +331,6 @@ function shade(hex: string, amt: number): string {
   return `rgb(${f(r)},${f(g)},${f(b)})`;
 }
 
-/** SVG path for a 5-point star centred at (cx,cy), outer radius r. Worklet-safe
- *  so it can be rebuilt per-frame inside the waving star group. */
-function starPath(cx: number, cy: number, r: number): string {
-  'worklet';
-  let d = '';
-  for (let i = 0; i < 10; i++) {
-    const ang = (Math.PI / 5) * i - Math.PI / 2;
-    const rad = i % 2 === 0 ? r : r * 0.42;
-    d += `${i === 0 ? 'M' : 'L'}${(cx + rad * Math.cos(ang)).toFixed(2)} ${(cy + rad * Math.sin(ang)).toFixed(2)} `;
-  }
-  return d + 'Z ';
-}
-
 // 50-star canton layout (viewBox coords): 9 rows alternating 6 / 5 stars.
 const FLAG_STAR_R = 4.4;
 const FLAG_STAR_POS: { cx: number; cy: number }[] = (() => {
@@ -309,6 +356,37 @@ function flagWaveOffset(x: number, t: number): number {
   const fx = x / FLAG_VB_W;
   const amp = (0.25 + 0.75 * fx) * 17;
   return amp * (0.72 * Math.sin(fx * Math.PI * 2 * 1.3 - t) + 0.28 * Math.sin(fx * Math.PI * 2 * 2.7 - t * 1.7));
+}
+
+// ── Flag perf precompute ─────────────────────────────────────────────────────
+// The flag was the single heaviest per-frame worklet (13 stripes each
+// re-deriving the SAME wave offsets, + a 50-star path calling cos/sin per
+// vertex every frame). These cut that ~15x:
+//   - one SHARED offset grid (useDerivedValue) feeds all 13 stripes, so the
+//     sin terms are computed once per frame, not 13 times,
+//   - the star vertices are unit-vectors precomputed ONCE (the angles never
+//     change), so the per-frame star path is pure adds/mults, no trig,
+//   - fewer steps (14 / 16) on the stripe + canton edges.
+const FLAG_STRIPE_STEPS = 14;
+const FLAG_STRIPE_XS: number[] = Array.from({ length: FLAG_STRIPE_STEPS + 1 }, (_, s) => (s / FLAG_STRIPE_STEPS) * FLAG_VB_W);
+const FLAG_STAR_UNIT: { fx: number; fy: number }[] = (() => {
+  const arr: { fx: number; fy: number }[] = [];
+  for (let i = 0; i < 10; i++) {
+    const ang = (Math.PI / 5) * i - Math.PI / 2;
+    const f = i % 2 === 0 ? 1 : 0.42;
+    arr.push({ fx: f * Math.cos(ang), fy: f * Math.sin(ang) });
+  }
+  return arr;
+})();
+/** Trig-free 5-point star (vertices precomputed in FLAG_STAR_UNIT). */
+function flagStarPath(cx: number, cy: number, r: number): string {
+  'worklet';
+  let d = '';
+  for (let i = 0; i < 10; i++) {
+    const u = FLAG_STAR_UNIT[i];
+    d += `${i === 0 ? 'M' : 'L'}${(cx + u.fx * r).toFixed(2)} ${(cy + u.fy * r).toFixed(2)} `;
+  }
+  return d + 'Z ';
 }
 
 /**
@@ -337,6 +415,15 @@ function FlagBg({ v, style, children }: BgProps) {
     foldB.value = withRepeat(withTiming(1, { duration: 3300, easing: Easing.linear }), -1, false);
     return () => { [wave, foldA, foldB].forEach(cancelAnimation); };
   }, [wave, foldA, foldB]);
+
+  // One shared wave-offset grid feeds all 13 stripes, so the sin terms run once
+  // per frame instead of 13x.
+  const stripeOff = useDerivedValue(() => {
+    const t = wave.value * Math.PI * 2;
+    const a: number[] = [];
+    for (let s = 0; s <= FLAG_STRIPE_STEPS; s++) a.push(flagWaveOffset(FLAG_STRIPE_XS[s], t));
+    return a;
+  });
 
   // Soft fold light/shadow bands drift across (+ vertical bob) for 3-D depth.
   const shadow1 = useAnimatedStyle(() => ({
@@ -380,7 +467,7 @@ function FlagBg({ v, style, children }: BgProps) {
           </SvgLinearGradient>
         </Defs>
         {Array.from({ length: 13 }).map((_, i) => (
-          <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? `url(#${redId})` : `url(#${whiteId})`} wave={wave} />
+          <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? `url(#${redId})` : `url(#${whiteId})`} off={stripeOff} />
         ))}
         {/* Canton, riding the same wave as the stripes underneath it */}
         <FlagCanton wave={wave} fill={`url(#${blueId})`} />
@@ -420,21 +507,18 @@ function FlagBg({ v, style, children }: BgProps) {
 
 /** One stripe as a vector band whose top + bottom edges ride the shared wave,
  *  so all 13 ripple together as one sheet. */
-function FlagWaveStripe({ index, fill, wave }: { index: number; fill: string; wave: SharedValue<number> }) {
+function FlagWaveStripe({ index, fill, off }: { index: number; fill: string; off: SharedValue<number[]> }) {
   const animatedProps = useAnimatedProps(() => {
     const overscan = 24;
     const top = index === 0 ? -overscan : index * FLAG_STRIPE_H;
     const bot = index === 12 ? FLAG_VB_H + overscan : (index + 1) * FLAG_STRIPE_H;
-    const steps = 28;
-    const t = wave.value * Math.PI * 2;
+    const o = off.value;   // shared grid: no trig here, just read + concat
     let d = '';
-    for (let s = 0; s <= steps; s++) {
-      const x = (s / steps) * FLAG_VB_W;
-      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + flagWaveOffset(x, t)).toFixed(2)} `;
+    for (let s = 0; s <= FLAG_STRIPE_STEPS; s++) {
+      d += `${s === 0 ? 'M' : 'L'}${FLAG_STRIPE_XS[s].toFixed(1)} ${(top + o[s]).toFixed(2)} `;
     }
-    for (let s = steps; s >= 0; s--) {
-      const x = (s / steps) * FLAG_VB_W;
-      d += `L${x.toFixed(1)} ${(bot + flagWaveOffset(x, t)).toFixed(2)} `;
+    for (let s = FLAG_STRIPE_STEPS; s >= 0; s--) {
+      d += `L${FLAG_STRIPE_XS[s].toFixed(1)} ${(bot + o[s]).toFixed(2)} `;
     }
     return { d: d + 'Z' };
   });
@@ -450,7 +534,7 @@ function FlagCanton({ wave, fill }: { wave: SharedValue<number>; fill: string })
     const overscan = 24;
     const x0 = -overscan, x1 = FLAG_CANTON_W;
     const top = -overscan, bot = FLAG_CANTON_H + 3; // overlap hides any seam
-    const steps = 30;
+    const steps = 16;
     const t = wave.value * Math.PI * 2;
     let d = '';
     for (let s = 0; s <= steps; s++) {
@@ -475,7 +559,9 @@ function FlagStars({ wave }: { wave: SharedValue<number> }) {
     let d = '';
     for (let i = 0; i < FLAG_STAR_POS.length; i++) {
       const s = FLAG_STAR_POS[i];
-      d += starPath(s.cx, s.cy + flagWaveOffset(s.cx, t), FLAG_STAR_R);
+      // flagStarPath is trig-free (vertices precomputed), so only the per-star
+      // wave offset costs a couple of sin calls.
+      d += flagStarPath(s.cx, s.cy + flagWaveOffset(s.cx, t), FLAG_STAR_R);
     }
     return { d } as any;
   });

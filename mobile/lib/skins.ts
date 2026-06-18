@@ -123,6 +123,78 @@ export const SKINS: Skin[] = [
       silver: '#ddccba', silverDim: '#8a7560',
     },
   },
+  {
+    id: 'synthwave', name: 'Synthwave',
+    blurb: 'Neon magenta over a retro purple night.',
+    swatch: ['#1c0a30', '#ff2d95', '#f5e6f5'],
+    palette: {
+      bg: '#0d0418', surface: '#140622', card: '#1c0a30', cardAlt: '#260f40', border: '#3a1a55',
+      gold: '#ff2d95', goldLight: '#ff7ac0',
+      text: '#f5e6f5', textMuted: '#b48ab8', textDim: '#5e4068',
+      green: '#5fd6a0', red: '#ff5a7a', blue: '#74a8ff',
+      silver: '#d9c5dd', silverDim: '#8a6e90',
+    },
+  },
+  {
+    id: 'matrix', name: 'Matrix',
+    blurb: 'Phosphor green on terminal black.',
+    swatch: ['#07180e', '#2bd96a', '#d8ffe0'],
+    palette: {
+      bg: '#020a05', surface: '#04110a', card: '#07180e', cardAlt: '#0b2213', border: '#14361f',
+      gold: '#2bd96a', goldLight: '#6effa0',
+      text: '#d8ffe0', textMuted: '#7aae8a', textDim: '#355a40',
+      green: '#3ddc7a', red: '#e2685c', blue: '#5ac8a0',
+      silver: '#b8e0c4', silverDim: '#6d8a76',
+    },
+  },
+  {
+    id: 'sakura', name: 'Sakura',
+    blurb: 'Soft cherry blossom over dark plum.',
+    swatch: ['#2c1320', '#ff8fb0', '#f7e6ee'],
+    palette: {
+      bg: '#1a0a12', surface: '#220e18', card: '#2c1320', cardAlt: '#391829', border: '#4e2238',
+      gold: '#ff8fb0', goldLight: '#ffb6cf',
+      text: '#f7e6ee', textMuted: '#c099a8', textDim: '#6e4658',
+      green: '#84c79f', red: '#ff6a86', blue: '#b692d9',
+      silver: '#e0c8d2', silverDim: '#946e7e',
+    },
+  },
+  {
+    id: 'tide', name: 'Deep Tide',
+    blurb: 'Sunlit cyan over an ocean trench.',
+    swatch: ['#0a2336', '#2aa8d9', '#e2f1fb'],
+    palette: {
+      bg: '#04121f', surface: '#06192a', card: '#0a2336', cardAlt: '#102f45', border: '#1a3f5a',
+      gold: '#2aa8d9', goldLight: '#6fd0f0',
+      text: '#e2f1fb', textMuted: '#88a8bf', textDim: '#3c5a70',
+      green: '#4fd6b0', red: '#e2756c', blue: '#5ac8e0',
+      silver: '#c5dbe8', silverDim: '#71889c',
+    },
+  },
+  {
+    id: 'sunset', name: 'Sunset',
+    blurb: 'Coral and dusk over deep indigo.',
+    swatch: ['#261334', '#ff7a5c', '#f7e8e2'],
+    palette: {
+      bg: '#140a1e', surface: '#1c0e26', card: '#261334', cardAlt: '#341a40', border: '#4a2450',
+      gold: '#ff7a5c', goldLight: '#ffae8a',
+      text: '#f7e8e2', textMuted: '#c099a0', textDim: '#6e4858',
+      green: '#84c79f', red: '#ff5a4a', blue: '#a07ad9',
+      silver: '#e0c8c5', silverDim: '#94707a',
+    },
+  },
+  {
+    id: 'cyber', name: 'Cyber',
+    blurb: 'Electric teal on a circuit-board night.',
+    swatch: ['#07211d', '#00d9c4', '#dffaf5'],
+    palette: {
+      bg: '#02100e', surface: '#041815', card: '#07211d', cardAlt: '#0b2e28', border: '#144039',
+      gold: '#00d9c4', goldLight: '#5ff0e0',
+      text: '#dffaf5', textMuted: '#7aaea6', textDim: '#355a54',
+      green: '#3ddc9a', red: '#e2685c', blue: '#5ad0e0',
+      silver: '#b8e0d8', silverDim: '#6d8a84',
+    },
+  },
 ];
 
 export const DEFAULT_SKIN_ID = 'default';

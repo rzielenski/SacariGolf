@@ -15,7 +15,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Alert,
+  ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
@@ -24,6 +24,7 @@ import { C, F } from '../lib/colors';
 import {
   CosmeticBackground, CosmeticBorder, CosmeticUsername, CosmeticTrailPreview,
 } from '../components/Cosmetics';
+import { SkinPicker } from '../components/SkinPicker';
 
 type CatalogItem = {
   cosmetic_id: string;
@@ -133,6 +134,18 @@ export default function LockerRoomScreen() {
             Win the Sacari Cup or hit the top tiers to unlock the rare ones.
           </Text>
 
+          {/* App theme: re-skins the WHOLE app (iOS). Lives here in the
+              customization hub so it's discoverable alongside profile cosmetics. */}
+          {Platform.OS === 'ios' && (
+            <View style={{ marginBottom: 22 }}>
+              <Text style={s.sectionLabel}>APP THEME</Text>
+              <Text style={[s.intro, { marginBottom: 10 }]}>
+                Re-skin the entire app to match your vibe. Tap a theme to apply it.
+              </Text>
+              <SkinPicker />
+            </View>
+          )}
+
           {(['border', 'background', 'username', 'ball_trail', 'fx'] as const).map((kind) => (
             <View key={kind} style={{ marginBottom: 22 }}>
               <Text style={s.sectionLabel}>{KIND_LABEL[kind]}</Text>
@@ -175,18 +188,21 @@ export default function LockerRoomScreen() {
   );
 }
 
-/** Real preview — uses the same components that render the cosmetic
- *  on the profile screen / shot map. Animations run inside each tile,
- *  capped to roughly 30 visible cosmetics → ~60 simultaneous animation
- *  drivers, which sits well inside the ~500-on-iOS / ~100-on-Android
- *  budget for animated views before commit phase backs up. */
+/** Real preview — uses the same components that render the cosmetic on the
+ *  profile screen / shot map. BACKGROUNDS render as a static swatch here
+ *  (animated={false}) because the grid shows the whole catalog at once and
+ *  animating ~20+ full backgrounds backs up the UI thread. The lighter
+ *  border / username / trail effects still animate (few of them, cheap). */
 function CosmeticPreview({ item }: { item: CatalogItem }) {
   const v = item.visual_data ?? {};
 
   if (item.kind === 'background') {
+    // Static swatch: the grid shows the whole catalog at once, so animating
+    // every background here backs up the UI thread. The full animation plays
+    // once the background is equipped (one at a time) on the profile.
     return (
       <View style={s.preview}>
-        <CosmeticBackground visual={v} style={StyleSheet.absoluteFill} />
+        <CosmeticBackground visual={v} style={StyleSheet.absoluteFill} animated={false} />
       </View>
     );
   }
