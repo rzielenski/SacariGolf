@@ -98,6 +98,14 @@ export function MatchFoundWatcher() {
           // a VS intro. Filtered here as defense-in-depth in case a backend
           // edge case ever leaves a stale player row on the other side.
           if (m.is_practice) continue;
+          // Arena (ffa) is an invite-only free-for-all, not a 1v1/team pairing.
+          // Friends trickle into the lobby by invitation, so a side-2 player
+          // appearing is normal lobby fill, not an "opponent found" moment.
+          // Firing the team-style VS reveal here wrongly reads two arena rivals
+          // as "you vs them" — and clanmates in the same arena get the same
+          // banner on both sides, so it looks like "duo vs duo". No VS intro for
+          // Arena; the host just fills the lobby and starts.
+          if (m.match_type === 'ffa') continue;
           if (!m.has_opponent) continue;
           // Server already recorded that this user has seen the intro.
           if (m.intro_shown_at) continue;
