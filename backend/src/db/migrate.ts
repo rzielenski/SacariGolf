@@ -2213,10 +2213,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     // Owners are implicitly creators (the gate is is_owner OR is_creator); this
     // also flags any existing owner so a direct is_creator read is true too.
     name: 'users.is_creator',
-    sql: `
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_creator BOOLEAN NOT NULL DEFAULT FALSE;
-      UPDATE users SET is_creator = TRUE WHERE is_owner = TRUE AND is_creator = FALSE;
-    `,
+    // DDL ONLY, as a single statement so it commits on its own. This MUST NOT be
+    // batched with the owner-backfill UPDATE below: node-postgres runs a
+    // multi-statement string in ONE implicit transaction, so if the UPDATE ever
+    // errored it would roll the ADD COLUMN back with it — leaving the column
+    // absent while GET /users/me (which selects is_creator) 500s every user out
+    // of the app's user-gated tabs (home/profile/finds). Keep DDL + backfill apart.
+    sql: `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_creator BOOLEAN NOT NULL DEFAULT FALSE;`,
+  },
+  {
+    // Backfill owners as creators, in its OWN migration so a failure here can
+    // never undo the column add above. Idempotent + re-run every boot.
+    name: 'users.is_creator_backfill_owners',
+    sql: `UPDATE users SET is_creator = TRUE WHERE is_owner = TRUE AND is_creator = FALSE;`,
   },
   {
     // Creator-league social + seasons:

@@ -80,7 +80,10 @@ export default function HomeScreen() {
     return () => { if (eloTapTimer.current) clearTimeout(eloTapTimer.current); };
   }, []);
 
-  if (!user) return null;
+  // Render the themed dark background (not bare null) while the user is briefly
+  // absent — the Tabs navigator's default scene is WHITE, so returning null here
+  // flashes a blank white screen. AuthGuard handles the actual redirect/load.
+  if (!user) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
   const rank = rankForElo(user.elo);
   const winRate = user.total_matches > 0

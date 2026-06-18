@@ -23,7 +23,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
-            u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner, u.is_creator,
+            u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
             u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter, u.partial_swing_mode,
@@ -46,6 +46,17 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   );
   if (!rows.length) return res.status(404).json({ error: 'User not found' });
   const row = rows[0];
+  // is_creator is a newer, feature-gated column (creator leagues). Read it in
+  // its OWN guarded query rather than the main SELECT above: if a deploy ever
+  // races ahead of the column's migration, the AUTH endpoint must still return
+  // 200, not 500 every user out of the app (which blanks the home/profile/finds
+  // tabs that gate on a loaded user). Defaults to false; owners are forced true
+  // just below regardless.
+  row.is_creator = false;
+  try {
+    const cr = await pool.query('SELECT is_creator FROM users WHERE user_id = $1', [req.userId]);
+    row.is_creator = cr.rows[0]?.is_creator === true;
+  } catch { /* column not present on this deploy yet — leave false (owner check still applies) */ }
   // Open-beta override — see backend/src/utils/openBeta.ts. The DB column is
   // left untouched (so a real future purchase / lifetime code is preserved),
   // but the API response reports premium = true so the client gates open.

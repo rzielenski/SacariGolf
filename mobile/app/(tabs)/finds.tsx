@@ -544,7 +544,10 @@ const CARD_H = (H - 240) / 2;
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32 },
+  // backgroundColor is REQUIRED here: the Tabs navigator's default scene is
+  // white, so a transparent full-screen state (auth loading / not-logged-in)
+  // would show as a blank white page instead of the themed dark.
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: C.bg },
 
   header: {
     flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',

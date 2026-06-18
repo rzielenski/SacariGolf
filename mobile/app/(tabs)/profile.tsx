@@ -237,7 +237,9 @@ export default function ProfileScreen() {
     }
   }, [NOTIF_BELL_KEY]);
 
-  if (!user) return null;
+  // Themed dark fill (not bare null) while the user is briefly absent — the Tabs
+  // navigator's default scene is WHITE, so null here flashes a blank white page.
+  if (!user) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
   const rank = rankForElo(user.elo);
   const winRate = user.total_matches > 0
