@@ -456,21 +456,27 @@ app.get('/course/:id', async (req, res) => {
     // Each player's single best round here (lowest to-par; ties → most recent),
     // not every round they've ever posted. Bots are excluded — they play real
     // teeboxes when filling matches, so they'd otherwise leak onto the board.
+    // Read the stored 18-hole-equivalent to-par (normalized_to_par) that the
+    // app computes and writes — no scoring formula in SQL here either, just an
+    // ORDER BY on the column.
     const { rows: topRounds } = await pool.query(
-      `SELECT username, total_score, teebox_par, teebox_name, created_at
+      `SELECT username, total_score, teebox_par, teebox_name, num_holes, holes_played, to_par, created_at
          FROM (
            SELECT DISTINCT ON (r.user_id)
                   u.username, r.total_score, t.par AS teebox_par,
-                  t.name AS teebox_name, r.created_at
+                  t.name AS teebox_name, t.num_holes,
+                  COALESCE(array_length(r.hole_scores, 1), t.num_holes) AS holes_played,
+                  r.normalized_to_par AS to_par,
+                  r.created_at
              FROM rounds r
              JOIN matches m ON m.match_id = r.match_id AND m.completed = true
              JOIN teeboxes t ON t.teebox_id = r.teebox_id
              JOIN users u ON u.user_id = r.user_id
-            WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND t.par IS NOT NULL
+            WHERE t.course_id = $1 AND r.normalized_to_par IS NOT NULL
               AND u.is_bot = false
-            ORDER BY r.user_id, (r.total_score - t.par) ASC, r.created_at DESC
+            ORDER BY r.user_id, r.normalized_to_par ASC, r.created_at DESC
          ) best
-        ORDER BY (total_score - teebox_par) ASC, created_at DESC
+        ORDER BY to_par ASC, created_at DESC
         LIMIT 15`,
       [id]
     );

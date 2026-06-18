@@ -163,13 +163,17 @@ export default function TournamentDetailScreen() {
             </View>
             <View style={{ alignItems: 'flex-end' }}>
               <Text style={s.lbScore}>
-                {t.scoring === 'best_round'    ? (row.best_score ?? '—')
-                : t.scoring === 'total_strokes' ? (row.total_strokes ?? '—')
-                : t.scoring === 'wins'          ? (row.wins ?? 0)
-                                                : '—'}
+                {(() => {
+                  // Stroke rules now rank on 18-hole-equivalent to-par (so a
+                  // 9-hole round can't beat a full 18), shown as +/E/-.
+                  if (t.scoring === 'wins') return row.wins ?? 0;
+                  const v = t.scoring === 'total_strokes' ? row.total_to_par : row.best_to_par;
+                  if (v == null) return '—';
+                  return v === 0 ? 'E' : v > 0 ? `+${v}` : `${v}`;
+                })()}
               </Text>
               <Text style={s.lbUnit}>
-                {t.scoring === 'wins' ? 'wins' : 'strokes'}
+                {t.scoring === 'wins' ? 'wins' : 'to par'}
               </Text>
             </View>
           </TouchableOpacity>

@@ -43,6 +43,7 @@ const LOCK_WEEKLY_CUP    = 42104;
 const LOCK_ELO_RESET     = 42105;
 const LOCK_UNPAIR        = 42106;
 const LOCK_BOTS          = 42107;
+const LOCK_NORMALIZE     = 42108;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -717,6 +718,7 @@ let pairingHandle: ReturnType<typeof setInterval> | null = null;
 let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
 let seasonResetHandle: ReturnType<typeof setInterval> | null = null;
+let normalizeHandle: ReturnType<typeof setInterval> | null = null;
 
 // ── Partial ELO reset at season rollover ──────────────────────────────
 // Anchor + retention for the soft reset: at each new competitive season,
@@ -822,6 +824,10 @@ export function startCleanupSchedule() {
   const feedTick    = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
   const cupTick     = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
   const eloResetTick = () => withCronLock(LOCK_ELO_RESET, applySeasonEloReset);
+  const normalizeTick = () => withCronLock(LOCK_NORMALIZE, async () => {
+    const { reconcileNormalizedScores } = await import('./roundScore');
+    await reconcileNormalizedScores();
+  });
 
   staleTick();
   cleanupHandle = setInterval(staleTick, 60 * 60 * 1000);
@@ -865,6 +871,13 @@ export function startCleanupSchedule() {
   // (the queries hit a unique index + a tiny status='active' set).
   cupTick();
   weeklyCupHandle = setInterval(cupTick, 60 * 1000);
+
+  // Backfill rounds.normalized_to_par for any round the submit hook didn't set
+  // (bots, solo auto-play, organizer rounds — plus all history on first deploy).
+  // Computed in app code (utils/roundScore.ts). The boot run clears the backlog;
+  // 60s keeps new rounds ranked promptly.
+  normalizeTick();
+  normalizeHandle = setInterval(normalizeTick, 60 * 1000);
 }
 
 async function weeklyCupTick(): Promise<void> {
@@ -897,4 +910,5 @@ export function stopCleanupSchedule() {
   if (feedBackfillHandle) { clearInterval(feedBackfillHandle); feedBackfillHandle = null; }
   if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }
   if (seasonResetHandle) { clearInterval(seasonResetHandle); seasonResetHandle = null; }
+  if (normalizeHandle) { clearInterval(normalizeHandle); normalizeHandle = null; }
 }

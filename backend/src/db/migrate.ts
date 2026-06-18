@@ -2080,6 +2080,20 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE users ADD COLUMN IF NOT EXISTS partial_swing_mode TEXT NOT NULL DEFAULT 'percentage';
     `,
   },
+  {
+    // Stored per-round comparison score, computed in app code (utils/scoring.ts
+    // normalizedScore, via utils/roundScore.ts): an 18-hole-equivalent score
+    // that is rating/slope-adjusted (a USGA differential) when the teebox has a
+    // course rating + slope, else a par-based to-par. Every cross-player board
+    // ranks on this one integer instead of recomputing a formula in SQL. NULL
+    // until the submit hook / reconcile pass fills it (or forever if the teebox
+    // has no par). The index covers the reconcile scan + leaderboard ORDER BYs.
+    name: 'rounds.normalized_to_par',
+    sql: `
+      ALTER TABLE rounds ADD COLUMN IF NOT EXISTS normalized_to_par INTEGER;
+      CREATE INDEX IF NOT EXISTS rounds_normalized_to_par_idx ON rounds(normalized_to_par);
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -33,7 +33,8 @@
  */
 
 import pool from '../db/pool';
-import { diff18, expectedScore, kFactor, shapeDelta, placementUserSet } from '../routes/matches';
+import { expectedScore, kFactor, shapeDelta, placementUserSet } from '../routes/matches';
+import { diff18 } from '../utils/scoring';
 import { notifyMatchResolved } from './notifyFomo';
 
 const DIAMOND_FLOOR = 1300;          // ELO at which a bot plays scratch

@@ -7,6 +7,8 @@ import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { computeLeaderboard } from '../utils/leaderboard';
 import { ALLOWED_CLUBS_SHOT as ALLOWED_CLUBS } from '../utils/clubs';
+import { syncRoundNormalized } from '../utils/roundScore';
+import { diff18 } from '../utils/scoring';
 import { currentSeason, divisionForElo } from './seasons';
 
 const router = Router();
@@ -81,82 +83,10 @@ export function shapeDelta(base: number, won: boolean, isPlacement: boolean): nu
   return d;
 }
 
-// Score differential scaled to an 18-hole equivalent so players on different
-// courses, teeboxes, and hole counts compare fairly.
-//
-// Instead of special-casing every combination, we convert ALL THREE inputs to
-// one common 18-hole, full-slope scale, then apply the single WHS formula:
-//
-//     diff = (113 / slopeFull) × (gross18 − ratingFull)
-//
-// The conversions are independent, so every (holes played) × (teebox scale)
-// combination falls out automatically — including the weird ones:
-//
-//   teebox scale (by num_holes — authoritative, never guessed from magnitude):
-//     • 9-hole teebox  → half-scale data: ratingFull = CR×2, slopeFull = slope×2
-//     • 18-hole teebox → full-scale: ratingFull = CR, slopeFull = slope
-//        - if only a NINE of an 18-hole course was played and the course has a
-//          dedicated front/back-9 rating, use that ×2 (its slope is full-scale)
-//   gross → 18-hole equivalent: gross × (18 / holesPlayed)
-//     • 9 played  → ×2     • 18 played → ×1     • any partial N → ×(18/N)
-//
-// Worked combos:
-//   18 on 18-hole     → ×1, CR, slope                      (standard)
-//   9  on 9-hole      → gross×2, CR×2, slope×2
-//   18 on 9-hole      → gross×1, CR×2, slope×2             (two loops)
-//   9  on 18-hole     → gross×2, (front/back×2 ?? CR), slope (or front/back)
-//   18 on 9-hole RATING but card says 18, etc.            → all covered
-export function diff18(
-  gross: number,
-  courseRating: number,
-  slopeRating: number,
-  holesPlayed = 18,
-  teeboxHoles = 18,
-  overrideRating?: number | null,
-  overrideSlope?: number | null,
-) {
-  // Authoritative 9-vs-18 by the teebox's hole count, never by value magnitude
-  // (a 9-hole tee can legitimately have a slope in the 40-55 band).
-  const teeNine = teeboxHoles === 9;
-  const playedNine = holesPlayed === 9;
-  // Guard a missing/garbage hole count so the gross extrapolation can't divide
-  // by zero — default to the teebox's own size.
-  const hp = holesPlayed && holesPlayed > 0 ? holesPlayed : (teeNine ? 9 : 18);
-
-  // Full-scale (18-hole-equivalent) slope.
-  let slopeFull: number;
-  if (teeNine) {
-    slopeFull = slopeRating * 2;                            // half-scale → full
-  } else if (playedNine && typeof overrideSlope === 'number' && overrideSlope > 0) {
-    slopeFull = overrideSlope;                              // front/back-9 slope (already full-scale)
-  } else {
-    slopeFull = slopeRating;
-  }
-  if (!(slopeFull > 0)) slopeFull = 113;                    // never divide by 0/NaN
-
-  // Full 18-hole-equivalent course rating.
-  let ratingFull: number;
-  if (teeNine) {
-    ratingFull = courseRating * 2;                          // 9-hole rating → 18
-  } else if (playedNine) {
-    ratingFull = (typeof overrideRating === 'number' && overrideRating > 0)
-      ? overrideRating * 2                                  // dedicated nine rating → 18
-      : courseRating;                                       // else the full 18 rating
-  } else {
-    ratingFull = courseRating;
-  }
-
-  // Gross extrapolated to an 18-hole equivalent.
-  const gross18 = gross * (18 / hp);
-
-  return (113 / slopeFull) * (gross18 - ratingFull);
-}
-
-// Kept for backwards compatibility / one place that still wants the un-doubled value
-function scoreDifferential(gross: number, courseRating: number, slopeRating: number, holesPlayed = 18, teeboxHoles = 18) {
-  const adjustedRating = courseRating * (holesPlayed / teeboxHoles);
-  return (gross - adjustedRating) * (113 / slopeRating);
-}
+// diff18 (the 18-hole-equivalent score differential used for ELO) now lives in
+// utils/scoring.ts — the single home for all round-scoring math — and is
+// imported at the top of this file. The old un-doubled scoreDifferential was
+// dead code (no call sites) and was removed.
 
 // Create match
 // Allowed match formats. `stroke` is the default (gross score wins). The new
@@ -1327,13 +1257,21 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     }
 
     // Upsert round (only for the submitting player; scramble teammates share the same final score)
-    await client.query(
+    const { rows: submittedRound } = await client.query(
       `INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers, caption)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (match_id, user_id)
-       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10`,
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10
+       RETURNING round_id`,
       [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]
     );
+
+    // Store this round's 18-hole-equivalent to-par now, computed in app code
+    // (utils/roundScore.ts), so it ranks on the cup / course / profile boards
+    // immediately. The reconcile tick covers every other write path.
+    if (submittedRound[0]?.round_id) {
+      await syncRoundNormalized(client, submittedRound[0].round_id);
+    }
 
     // Update match_players for the submitting player
     await client.query(

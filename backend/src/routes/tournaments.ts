@@ -156,8 +156,10 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   if (t.scoring === 'best_round') {
     // Lowest single-round score wins. Show that round's score per player.
     const { rows: lb } = await pool.query(
+      // Best single round as the stored 18-hole-equivalent to-par, so a 9-hole
+      // round can't beat a full 18 just by having fewer strokes.
       `SELECT u.user_id, u.username, u.avatar_url,
-              MIN(r.total_score) AS best_score,
+              MIN(r.normalized_to_par) AS best_to_par,
               COUNT(r.round_id)::int AS rounds_played
        FROM tournament_players tp
        JOIN users u ON u.user_id = tp.user_id
@@ -167,14 +169,16 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
          AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
-       ORDER BY MIN(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`,
+       ORDER BY MIN(r.normalized_to_par) ASC NULLS LAST, COUNT(r.round_id) DESC`,
       [req.params.id]
     );
     leaderboard = lb;
   } else if (t.scoring === 'total_strokes') {
     const { rows: lb } = await pool.query(
+      // Cumulative score as summed stored 18-hole-equivalent to-par, so rounds
+      // of different hole counts add up on one fair basis.
       `SELECT u.user_id, u.username, u.avatar_url,
-              SUM(r.total_score)::int AS total_strokes,
+              SUM(r.normalized_to_par)::int AS total_to_par,
               COUNT(r.round_id)::int AS rounds_played
        FROM tournament_players tp
        JOIN users u ON u.user_id = tp.user_id
@@ -184,7 +188,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
          AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
-       ORDER BY SUM(r.total_score) ASC NULLS LAST, COUNT(r.round_id) DESC`,
+       ORDER BY SUM(r.normalized_to_par) ASC NULLS LAST, COUNT(r.round_id) DESC`,
       [req.params.id]
     );
     leaderboard = lb;
@@ -325,7 +329,7 @@ router.post('/:id/finalize', requireAuth, wrap(async (req: AuthRequest, res: Res
         LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1 AND u.is_bot = false AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id HAVING COUNT(r.round_id) > 0
-       ORDER BY SUM(r.total_score) ASC LIMIT 1`;
+       ORDER BY SUM(r.normalized_to_par) ASC LIMIT 1`;
   } else if (t.scoring === 'wins') {
     winnerSql = `
       SELECT u.user_id FROM tournament_players tp
@@ -345,7 +349,7 @@ router.post('/:id/finalize', requireAuth, wrap(async (req: AuthRequest, res: Res
         LEFT JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
        WHERE tp.tournament_id = $1 AND u.is_bot = false AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id HAVING COUNT(r.round_id) > 0
-       ORDER BY MIN(r.total_score) ASC LIMIT 1`;
+       ORDER BY MIN(r.normalized_to_par) ASC LIMIT 1`;
   }
   const { rows: top } = await pool.query(winnerSql, [id]);
   const winnerId: string | null = top[0]?.user_id ?? null;

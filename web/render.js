@@ -595,11 +595,15 @@ function renderCourse({ course, teeboxes, topRounds, holeRows }) {
   const viewer = courseHoleViewer(scTees, holes, center);
 
   const rounds = (topRounds || []).map((r, i) => {
-    const tp = r.total_score != null && r.teebox_par != null ? r.total_score - r.teebox_par : null;
+    // 18-hole-equivalent to-par from the query (what the board is ranked on);
+    // fall back to a raw par-diff only for older payloads without to_par.
+    const tp = r.to_par != null
+      ? r.to_par
+      : (r.total_score != null && r.teebox_par != null ? r.total_score - r.teebox_par : null);
     return `<li class="round">
       <span class="lb-pos">${i + 1}</span>
       <a class="round-course" href="/u/${encodeURIComponent(r.username)}">${esc(r.username)}</a>
-      <span class="round-meta">${esc(r.teebox_name || '')} · ${esc(fmtDate(r.created_at))}</span>
+      <span class="round-meta">${esc(r.teebox_name || '')} · ${r.holes_played != null ? esc(r.holes_played) + ' holes · ' : ''}${esc(fmtDate(r.created_at))}</span>
       <span class="round-score">${r.total_score != null ? esc(r.total_score) : ''}</span>
       ${tp != null ? `<span class="round-topar ${toParClass(tp)}">${esc(fmtToPar(tp))}</span>` : ''}
     </li>`;

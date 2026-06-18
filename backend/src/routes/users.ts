@@ -1727,29 +1727,24 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   // Best round (lowest score-to-par across completed SOLO rounds). Scoped to
   // solo — same as the handicap, Sacari Cup, and cup-standings queries —
   // because team (duo/squad/scramble) scores are shared and Arena is multi-way,
-  // so they don't represent an individual's round. Par is pro-rated to the
-  // holes the player actually completed — without this, a 9-hole 41 on a par-72
-  // teebox looks like a -31 round and beats every legitimate 18-hole entry. The
-  // same expression is used in SELECT and ORDER BY so the lowest-differential
+  // so they don't represent an individual's round. to_par is the 18-hole-
+  // equivalent differential (shared helper, same basis as the Sacari Cup and
+  // every other cross-player board): par is pro-rated to the holes played,
+  // then scaled to a full 18 — so a 9-hole 41 doesn't look like a course
+  // record. The same expression is used in SELECT and ORDER BY so the best
   // round actually wins.
   const { rows: bestRows } = await pool.query(
     `SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores, r.hole_stats,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
-            (r.total_score
-              - ROUND(t.par::numeric
-                      * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                      / NULLIF(t.num_holes, 0)::numeric)::int) AS to_par
+            r.normalized_to_par AS to_par
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
      LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
      LEFT JOIN courses c ON c.course_id = t.course_id
-     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND t.par IS NOT NULL
+     WHERE r.user_id = $1 AND r.normalized_to_par IS NOT NULL AND m.completed = true
        AND m.is_practice = false AND m.match_type = 'solo'
-     ORDER BY (r.total_score
-                - ROUND(t.par::numeric
-                        * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                        / NULLIF(t.num_holes, 0)::numeric)::int) ASC
+     ORDER BY r.normalized_to_par ASC
      LIMIT 1`,
     [req.params.id]
   );

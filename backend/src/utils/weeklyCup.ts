@@ -74,21 +74,18 @@ async function resolveOne(cupId: string, weekStartsAt: Date): Promise<boolean> {
   const { rows: top } = await pool.query(
     `WITH best AS (
        SELECT r.user_id,
-              MIN(r.total_score
-                  - ROUND(t.par::numeric
-                          * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                          / NULLIF(t.num_holes, 0)::numeric)::int) AS best_to_par,
+              -- Pre-computed 18-hole-equivalent to-par (app code fills the
+              -- column), so 9- and 18-hole rounds compare on one basis.
+              MIN(r.normalized_to_par) AS best_to_par,
               MIN(r.round_id::text) AS round_id
          FROM rounds r
          JOIN matches m ON m.match_id = r.match_id
-         JOIN teeboxes t ON t.teebox_id = r.teebox_id
-        WHERE r.total_score IS NOT NULL
+        WHERE r.normalized_to_par IS NOT NULL
           AND m.completed = true
           AND m.is_practice = false
           AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
           AND r.created_at >= $1
           AND r.created_at <  $2
-          AND t.par IS NOT NULL
         GROUP BY r.user_id
      )
      SELECT b.user_id, b.best_to_par, u.username, u.push_token

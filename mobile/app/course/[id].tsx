@@ -213,7 +213,12 @@ export default function CourseInfoScreen() {
             <View style={styles.lbScoreBox}>
               <Text style={styles.lbScore}>{r.total_score}</Text>
               <Text style={styles.lbPar}>
-                {r.total_score - r.par > 0 ? `+${r.total_score - r.par}` : r.total_score - r.par === 0 ? 'E' : r.total_score - r.par}
+                {(() => {
+                  // 18-hole-equivalent to-par from the backend (what the board
+                  // is ranked on). Falls back to raw par-diff for older payloads.
+                  const tp = r.to_par ?? (r.total_score - r.par);
+                  return tp > 0 ? `+${tp}` : tp === 0 ? 'E' : `${tp}`;
+                })()}
               </Text>
             </View>
           </TouchableOpacity>

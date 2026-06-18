@@ -151,21 +151,18 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
   const { rows: leaderboard } = await pool.query(
     `WITH best AS (
        SELECT r.user_id,
-              MIN(r.total_score
-                  - ROUND(t.par::numeric
-                          * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                          / NULLIF(t.num_holes, 0)::numeric)::int) AS best_to_par,
+              -- Pre-computed 18-hole-equivalent to-par (app code fills the
+              -- column), so 9- and 18-hole rounds compare on one basis.
+              MIN(r.normalized_to_par) AS best_to_par,
               MIN(r.created_at) AS first_at
          FROM rounds r
          JOIN matches m ON m.match_id = r.match_id
-         JOIN teeboxes t ON t.teebox_id = r.teebox_id
-        WHERE r.total_score IS NOT NULL
+        WHERE r.normalized_to_par IS NOT NULL
           AND m.completed = true
           AND m.is_practice = false
           AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
           AND r.created_at >= $1
           AND r.created_at <  $2
-          AND t.par IS NOT NULL
         GROUP BY r.user_id
      )
      SELECT b.user_id, b.best_to_par,
@@ -187,41 +184,21 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
   }));
   const myRow = ranked.find((r: any) => r.is_me) ?? null;
 
-  // Past champions strip — last 4 resolved cups' winners. Decorates the
-  // screen with social proof.
+  // Past champions strip — the last 4 resolved cups' ACTUAL winners, read
+  // straight from weekly_cup_winners (what utils/weeklyCup.ts pinned and paid
+  // out). This used to RECOMPUTE the winner from rounds, which picked the
+  // wrong name: that subquery had no is_bot filter and used raw (un-normalized)
+  // to-par, so a bot or a strong 9-hole round could outrank the real champion.
+  // Reading the stored table makes the strip match the trophy + home banner.
   const { rows: pastChamps } = await pool.query(
-    `WITH resolved AS (
-       SELECT cup_id, week_starts_at,
-              week_starts_at + INTERVAL '7 days' AS week_ends_at
-         FROM weekly_cups
-        WHERE status = 'resolved'
-        ORDER BY week_starts_at DESC
-        LIMIT 4
-     )
-     SELECT res.week_starts_at, u.username, u.avatar_url,
+    `SELECT wc.week_starts_at, u.username, u.avatar_url,
             ${equippedVisualSql('u')} AS equipped_visual
-       FROM resolved res
-       JOIN LATERAL (
-         SELECT r.user_id,
-                (r.total_score
-                 - ROUND(t.par::numeric
-                         * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                         / NULLIF(t.num_holes, 0)::numeric)::int) AS to_par
-           FROM rounds r
-           JOIN matches m ON m.match_id = r.match_id
-           JOIN teeboxes t ON t.teebox_id = r.teebox_id
-          WHERE r.total_score IS NOT NULL
-            AND m.completed = true
-            AND m.is_practice = false
-            AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
-            AND r.created_at >= res.week_starts_at
-            AND r.created_at <  res.week_ends_at
-            AND t.par IS NOT NULL
-          ORDER BY to_par ASC
-          LIMIT 1
-       ) winner ON true
-       JOIN users u ON u.user_id = winner.user_id
-      ORDER BY res.week_starts_at DESC`,
+       FROM weekly_cup_winners w
+       JOIN weekly_cups wc ON wc.cup_id = w.cup_id
+       JOIN users u        ON u.user_id = w.user_id
+      WHERE u.is_bot = false
+      ORDER BY wc.week_starts_at DESC
+      LIMIT 4`,
   );
 
   return res.json({
