@@ -15,12 +15,13 @@
 import React, { useCallback, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch,
-  ActivityIndicator, Alert,
+  ActivityIndicator, Alert, Platform,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { C, F } from '../lib/colors';
+import { C, F, ACTIVE_SKIN_ID } from '../lib/colors';
+import { SKINS, applySkin } from '../lib/skins';
 import { ThemeSongPicker } from '../components/ThemeSongPicker';
 import * as themePlayer from '../lib/themePlayer';
 
@@ -162,6 +163,24 @@ export default function SettingsScreen() {
           busy={savingMaxVol}
         />
 
+        {/* ── Appearance ───────────────────────────────────────────── */}
+        {Platform.OS === 'ios' ? (
+          <>
+            <SectionLabel>APPEARANCE</SectionLabel>
+            <View style={s.card}>
+              <Text style={s.cardLabel}>APP THEME</Text>
+              <Text style={s.themeSub}>
+                Re-skin the whole app. Picking a theme reloads it once to repaint every screen.
+              </Text>
+              <View style={s.skinGrid}>
+                {SKINS.map((sk) => (
+                  <SkinChip key={sk.id} skin={sk} active={sk.id === ACTIVE_SKIN_ID} />
+                ))}
+              </View>
+            </View>
+          </>
+        ) : null}
+
         {/* ── Content ──────────────────────────────────────────────── */}
         <SectionLabel>CONTENT</SectionLabel>
 
@@ -249,6 +268,49 @@ export default function SettingsScreen() {
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return <Text style={s.sectionLabel}>{children}</Text>;
+}
+
+function SkinChip({ skin, active }: { skin: (typeof SKINS)[number]; active: boolean }) {
+  const onPress = useCallback(() => {
+    if (active) return;
+    Alert.alert(
+      `Switch to ${skin.name}?`,
+      'The app reloads once to repaint every screen in the new theme. Saved data like matches and drafts is kept.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Apply',
+          onPress: async () => {
+            const reloaded = await applySkin(skin.id);
+            // If reloadAsync wasn't available (dev / Expo Go) the choice is saved
+            // but the screen is still here — tell the user it lands next launch.
+            if (!reloaded) {
+              Alert.alert('Theme saved', `${skin.name} applies the next time you open the app.`);
+            }
+          },
+        },
+      ],
+    );
+  }, [active, skin.id, skin.name]);
+
+  return (
+    <TouchableOpacity
+      style={[s.skinChip, active && s.skinChipActive]}
+      onPress={onPress}
+      activeOpacity={0.85}
+    >
+      <View style={s.skinSwatch}>
+        {skin.swatch.map((c, i) => (
+          <View key={i} style={{ flex: 1, backgroundColor: c }} />
+        ))}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={s.skinName} numberOfLines={1}>{skin.name}</Text>
+        <Text style={s.skinBlurb} numberOfLines={2}>{skin.blurb}</Text>
+      </View>
+      {active ? <Text style={s.skinActiveTag}>ACTIVE</Text> : null}
+    </TouchableOpacity>
+  );
 }
 
 function ToggleRow({
@@ -379,6 +441,23 @@ const s = StyleSheet.create({
     paddingVertical: 12, alignItems: 'center',
   },
   bigBtnText: { color: C.bg, fontWeight: '900', fontSize: 12, letterSpacing: 0.8 },
+
+  skinGrid: { marginTop: 12, gap: 8 },
+  skinChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.cardAlt, borderRadius: 8,
+    padding: 10, borderWidth: 1, borderColor: C.border,
+  },
+  skinChipActive: { borderColor: C.gold },
+  skinSwatch: {
+    width: 40, height: 40, borderRadius: 8, overflow: 'hidden',
+    flexDirection: 'row', borderWidth: 1, borderColor: C.border,
+  },
+  skinName: { color: C.text, fontWeight: '800', fontSize: 14 },
+  skinBlurb: { color: C.textMuted, fontSize: 11, marginTop: 2, lineHeight: 15 },
+  skinActiveTag: {
+    color: C.gold, fontSize: 9, fontWeight: '900', letterSpacing: 1,
+  },
 
   fineprint: {
     color: C.textDim, fontFamily: F.serif, fontSize: 11,

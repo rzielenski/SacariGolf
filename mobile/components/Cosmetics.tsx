@@ -21,7 +21,8 @@
  *
  *   background:  gradient | flag | storm | aurora | stars | flame | holographic |
  *                cyber | solar | ocean | sakura | liquid | synthwave | eclipse |
- *                matrix | dusk | thunder
+ *                matrix | dusk | thunder | nebula | embers | meteor | plasma |
+ *                blizzard | prism
  *   border:      glow | pulse | holographic | traveling | flame | plasma | frost |
  *                tesla | eclipse
  *   username:    solid | gradient | shimmer | holographic | neon | glitch
@@ -45,7 +46,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, {
-  Circle, Path, Line, G, Defs, Rect,
+  Circle, Ellipse, Path, Line, G, Defs, Rect,
   LinearGradient as SvgLinearGradient, Stop, RadialGradient, Mask, ClipPath, Use,
 } from 'react-native-svg';
 import Animated, {
@@ -56,6 +57,7 @@ import Animated, {
 import type { SharedValue } from 'react-native-reanimated';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { C } from '../lib/colors';
+import { SparkleField } from './vfx';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -82,6 +84,91 @@ const TIMING = {
   storm:        2500,
   traveling:    2400,
 };
+
+// ── Shared background helpers ────────────────────────────────────────────────
+// Reusable depth/light/motion building blocks so each background gains polish
+// without re-rolling the same code. All are pointerEvents="none" decoration.
+
+let _bgIdSeq = 0;
+/** Unique, colon-free SVG gradient id (React.useId() colons break url(#id)). */
+function useBgId(prefix: string): string {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => `${prefix}${_bgIdSeq++}`, [prefix]);
+}
+
+/** Soft edge vignette — darkens the frame so a flat field gains depth. */
+function Vignette({ color = '#000000', opacity = 0.5 }: { color?: string; opacity?: number }) {
+  const gid = useBgId('vig');
+  return (
+    <Svg pointerEvents="none" style={StyleSheet.absoluteFill} preserveAspectRatio="none" viewBox="0 0 100 100">
+      <Defs>
+        <RadialGradient id={gid} cx="50" cy="50" r="62" gradientUnits="userSpaceOnUse">
+          <Stop offset="0.45" stopColor={color} stopOpacity="0" />
+          <Stop offset="1" stopColor={color} stopOpacity={opacity} />
+        </RadialGradient>
+      </Defs>
+      <Rect x="0" y="0" width="100" height="100" fill={`url(#${gid})`} />
+    </Svg>
+  );
+}
+
+/** A diagonal specular sheen that sweeps across on a slow loop — makes a flat
+ *  gradient feel lit. */
+function SheenSweep({ color = 'rgba(255,255,255,0.5)', durationMs = 7000, angle = 18, opacity = 0.16 }: {
+  color?: string; durationMs?: number; angle?: number; opacity?: number;
+}) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withRepeat(withTiming(1, { duration: durationMs, easing: Easing.inOut(Easing.sin) }), -1, false);
+    return () => cancelAnimation(t);
+  }, [t, durationMs]);
+  const aStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(t.value, [0, 1], [-260, 260]) }, { rotate: `${angle}deg` }],
+    opacity: interpolate(t.value, [0, 0.5, 1], [0, opacity, 0]),
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: -60, bottom: -60, left: -40, width: 90 }, aStyle]}>
+      <LinearGradient
+        colors={['transparent', color, 'transparent'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+        style={StyleSheet.absoluteFill}
+      />
+    </Animated.View>
+  );
+}
+
+/** A soft breathing radial bloom at a fixed spot — fakes volumetric light. */
+function BreathingGlow({ cx, cy, r, color, periodMs = 9000, min = 0.3, max = 0.6, delay = 0 }: {
+  cx: string; cy: string; r: number; color: string; periodMs?: number; min?: number; max?: number; delay?: number;
+}) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: periodMs, easing: Easing.inOut(Easing.sin) }), -1, true));
+    return () => cancelAnimation(t);
+  }, [t, periodMs, delay]);
+  const aStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(t.value, [0, 1], [min, max]),
+    transform: [{ scale: interpolate(t.value, [0, 1], [0.9, 1.15]) }],
+  }));
+  const gid = useBgId('glow');
+  return (
+    <Animated.View pointerEvents="none" style={[
+      { position: 'absolute', left: cx as any, top: cy as any, width: r * 2, height: r * 2, marginLeft: -r, marginTop: -r },
+      aStyle,
+    ]}>
+      <Svg width={r * 2} height={r * 2} viewBox={`0 0 ${r * 2} ${r * 2}`}>
+        <Defs>
+          <RadialGradient id={gid} cx={r} cy={r} r={r} gradientUnits="userSpaceOnUse">
+            <Stop offset="0" stopColor={color} stopOpacity="0.7" />
+            <Stop offset="0.5" stopColor={color} stopOpacity="0.25" />
+            <Stop offset="1" stopColor={color} stopOpacity="0" />
+          </RadialGradient>
+        </Defs>
+        <Circle cx={r} cy={r} r={r} fill={`url(#${gid})`} />
+      </Svg>
+    </Animated.View>
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BACKGROUND
@@ -118,6 +205,13 @@ export function CosmeticBackground({
     case 'matrix':      return <MatrixBg       v={v} style={style}>{children}</MatrixBg>;
     case 'dusk':        return <DuskLinksBg    v={v} style={style}>{children}</DuskLinksBg>;
     case 'thunder':     return <ThunderBg      v={v} style={style}>{children}</ThunderBg>;
+    case 'nebula':      return <NebulaBg       v={v} style={style}>{children}</NebulaBg>;
+    case 'embers':      return <EmbersBg       v={v} style={style}>{children}</EmbersBg>;
+    case 'meteor':      return <MeteorBg       v={v} style={style}>{children}</MeteorBg>;
+    case 'plasma':      return <PlasmaBg       v={v} style={style}>{children}</PlasmaBg>;
+    case 'blizzard':
+    case 'snow':        return <BlizzardBg     v={v} style={style}>{children}</BlizzardBg>;
+    case 'prism':       return <PrismBg        v={v} style={style}>{children}</PrismBg>;
     default:
       return (
         <View style={[{ backgroundColor: v.from ?? C.bg }, style]}>
@@ -130,21 +224,28 @@ export function CosmeticBackground({
 // ── 1. Gradient ─────────────────────────────────────────────────────────────
 
 function GradientBg({ v, style, children }: BgProps) {
-  const colors = [v.from ?? '#000', v.to ?? '#222'] as const as readonly [string, string, ...string[]];
+  const from = v.from ?? '#000';
+  const to = v.to ?? '#222';
+  // 3-stop grade: a slightly lifted mid and a darker floor give the flat
+  // gradient body instead of a single linear ramp.
+  const mid = shade(to, -0.08);
+  const accent = v.accent ?? C.gold;
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={colors}
+        colors={[from, mid, shade(to, -0.12)] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {v.accent ? (
-        <LinearGradient
-          colors={['transparent', v.accent, 'transparent']}
-          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-          style={[StyleSheet.absoluteFill, { opacity: 0.18 }]}
-        />
-      ) : null}
+      {/* Two large radial blooms breathing out of phase add depth + life. */}
+      <BreathingGlow cx="22%" cy="26%" r={150} color={accent} periodMs={9000} min={0.08} max={0.2} />
+      <BreathingGlow cx="82%" cy="78%" r={170} color={shade(accent, 0.1)} periodMs={11000} min={0.06} max={0.16} delay={1400} />
+      {/* A slow diagonal sheen sweeping across so it never reads as static. */}
+      <SheenSweep color={`${accent}`} durationMs={8000} opacity={0.12} />
+      {/* A few drifting motes for foreground life. */}
+      <SparkleField count={10} color={shade(accent, 0.2)} durationMs={3200} />
+      <Vignette opacity={0.42} />
       {children}
     </View>
   );
@@ -223,6 +324,9 @@ function FlagBg({ v, style, children }: BgProps) {
   const RED = v.red ?? stripes[0] ?? '#b22234';
   const WHITE = v.white ?? stripes[1] ?? '#ffffff';
   const CANTON = v.canton ?? '#3c3b6e';
+  const redId = useBgId('flagRed');     // per-instance ids (avoid collisions)
+  const whiteId = useBgId('flagWhite');
+  const blueId = useBgId('flagBlue');
 
   const wave = useSharedValue(0);
   const foldA = useSharedValue(0);
@@ -259,27 +363,27 @@ function FlagBg({ v, style, children }: BgProps) {
       {/* One SVG: stripes + canton + stars all share flagWaveOffset */}
       <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
         <Defs>
-          <SvgLinearGradient id="flagRed" x1="0" y1="0" x2="0" y2="1">
+          <SvgLinearGradient id={redId} x1="0" y1="0" x2="0" y2="1">
             <Stop offset="0" stopColor={shade(RED, -0.26)} />
             <Stop offset="0.5" stopColor={RED} />
             <Stop offset="1" stopColor={shade(RED, -0.4)} />
           </SvgLinearGradient>
-          <SvgLinearGradient id="flagWhite" x1="0" y1="0" x2="0" y2="1">
+          <SvgLinearGradient id={whiteId} x1="0" y1="0" x2="0" y2="1">
             <Stop offset="0" stopColor={shade(WHITE, -0.14)} />
             <Stop offset="0.5" stopColor={WHITE} />
             <Stop offset="1" stopColor={shade(WHITE, -0.22)} />
           </SvgLinearGradient>
-          <SvgLinearGradient id="flagBlue" x1="0" y1="0" x2="0" y2="1">
+          <SvgLinearGradient id={blueId} x1="0" y1="0" x2="0" y2="1">
             <Stop offset="0" stopColor={shade(CANTON, 0.12)} />
             <Stop offset="0.55" stopColor={CANTON} />
             <Stop offset="1" stopColor={shade(CANTON, -0.24)} />
           </SvgLinearGradient>
         </Defs>
         {Array.from({ length: 13 }).map((_, i) => (
-          <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? 'url(#flagRed)' : 'url(#flagWhite)'} wave={wave} />
+          <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? `url(#${redId})` : `url(#${whiteId})`} wave={wave} />
         ))}
         {/* Canton, riding the same wave as the stripes underneath it */}
-        <FlagCanton wave={wave} fill="url(#flagBlue)" />
+        <FlagCanton wave={wave} fill={`url(#${blueId})`} />
         {/* Stars bob with the canton's local wave so they stay attached to it */}
         <FlagStars wave={wave} />
       </Svg>
@@ -409,32 +513,54 @@ function StormBg({ v, style, children }: BgProps) {
   }, [flash, bolt1, bolt2]);
 
   const flashStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(flash.value, [0, 1], [0, 0.55]),
+    opacity: interpolate(flash.value, [0, 1], [0, 0.5]),
+  }));
+  // The ground glow is COUPLED to the same flash driver so the floor lights up
+  // in sync with the strike (it used to be an independent wash).
+  const groundStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(flash.value, [0, 1], [0, 0.42]),
   }));
   const boltAProps = useAnimatedProps(() => ({ opacity: bolt1.value }));
   const boltBProps = useAnimatedProps(() => ({ opacity: bolt2.value }));
 
+  // Forked bolts (main channel + a branch each, as subpaths of one path).
+  const BOLT_A = 'M30 0 L25 60 L35 70 L20 130 L32 140 L18 200 M25 62 L13 96 M20 132 L31 158';
+  const BOLT_B = 'M72 10 L68 50 L78 58 L65 110 L75 120 L62 180 M68 52 L82 84';
+  const rim = v.flash ?? '#7a96d9';
+
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#0a0f1c', v.to ?? '#26304a']}
+        colors={[v.from ?? '#0a0f1c', '#161c30', v.to ?? '#26304a'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {/* Lightning bolts — two paths positioned in different regions */}
+      {/* Roiling storm clouds drifting across (parallax) */}
+      <DriftingCloud top="5%"  width={160} dur={42000} delay={0}    color="rgba(120,140,180,0.18)" />
+      <DriftingCloud top="15%" width={115} dur={32000} delay={6000} color="rgba(150,168,200,0.14)" />
+      {/* Driving rain, two staggered layers */}
+      <RainLayer dur={900}  delay={0}   opacity={0.26} />
+      <RainLayer dur={1250} delay={400} opacity={0.16} />
+      {/* Lightning bolts — a fat soft-blue glow underlay under a crisp bright core */}
       <Svg style={StyleSheet.absoluteFill} pointerEvents="none" preserveAspectRatio="none" viewBox="0 0 100 200">
-        <AnimatedPath
-          d="M30 0 L25 60 L35 70 L20 130 L32 140 L18 200"
-          stroke="#cad9ff" strokeWidth="1.2" fill="none"
-          animatedProps={boltAProps}
-        />
-        <AnimatedPath
-          d="M72 10 L68 50 L78 58 L65 110 L75 120 L62 180"
-          stroke="#e4ecff" strokeWidth="1.4" fill="none"
-          animatedProps={boltBProps}
-        />
+        <AnimatedPath d={BOLT_A} stroke="#6f86ff" strokeWidth="4.5" strokeOpacity={0.35} strokeLinecap="round" strokeLinejoin="round" fill="none" animatedProps={boltAProps} />
+        <AnimatedPath d={BOLT_A} stroke="#eaf0ff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" animatedProps={boltAProps} />
+        <AnimatedPath d={BOLT_B} stroke="#6f86ff" strokeWidth="4"   strokeOpacity={0.32} strokeLinecap="round" strokeLinejoin="round" fill="none" animatedProps={boltBProps} />
+        <AnimatedPath d={BOLT_B} stroke="#e4ecff" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" fill="none" animatedProps={boltBProps} />
       </Svg>
+      {/* Ground glow rising on each strike */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, groundStyle]}>
+        <LinearGradient
+          colors={['transparent', 'transparent', `${rim}aa`] as const as readonly [string, string, ...string[]]}
+          locations={[0, 0.62, 1]}
+          start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+      {/* Sheet-lightning wash */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, flashStyle, { backgroundColor: v.flash ?? '#cad9ff' }]} />
+      <Vignette opacity={0.4} />
       {children}
     </View>
   );
@@ -444,56 +570,84 @@ function StormBg({ v, style, children }: BgProps) {
 
 function AuroraBg({ v, style, children }: BgProps) {
   const layers: string[] = v.layers ?? ['#00ff9d', '#7fa2ff', '#c779ff'];
-  const drift = useSharedValue(0);
-
-  useEffect(() => {
-    drift.value = withRepeat(withTiming(1, { duration: TIMING.aurora, easing: Easing.inOut(Easing.sin) }), -1, true);
-    return () => cancelAnimation(drift);
-  }, [drift]);
-
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#04161e', '#0a2a3a']}
+        colors={[v.from ?? '#04161e', '#06202e', '#020a12'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {layers.map((c, i) => <AuroraBand key={i} color={c} index={i} drift={drift} />)}
+      {/* Starfield behind the curtains */}
+      <SparkleField count={16} color="#cfe6ff" durationMs={2600} />
+      {/* Hanging aurora curtains with undulating tops */}
+      {layers.map((c, i) => <AuroraCurtain key={i} color={c} index={i} total={layers.length} />)}
+      {/* Faint reflection of the aurora glow on the ground haze */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', `${layers[0]}1f`] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0.7 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
       {children}
     </View>
   );
 }
 
-function AuroraBand({ color, index, drift }: { color: string; index: number; drift: SharedValue<number> }) {
-  const animStyle = useAnimatedStyle(() => {
-    const phase = index * 0.33;
-    const t = (drift.value + phase) % 1;
-    return {
-      transform: [
-        { translateX: interpolate(t, [0, 1], [-40, 40]) },
-        { translateY: interpolate(t, [0, 0.5, 1], [0, -20, 0]) },
-        { scaleX:     interpolate(t, [0, 0.5, 1], [1, 1.4, 1]) },
-      ],
-      opacity: interpolate(t, [0, 0.5, 1], [0.25, 0.5, 0.25]),
-    };
-  });
+/** Builds the wavy top edge of a hanging aurora curtain (filled to the bottom).
+ *  Worklet-safe so it can be rebuilt per frame inside useAnimatedProps. */
+function auroraCurtainPath(t: number, W: number, baseTop: number, amp: number): string {
+  'worklet';
+  const steps = 8;
+  const phase = t * Math.PI * 2;
+  let d = `M0 100 L0 ${(baseTop + Math.sin(phase) * amp).toFixed(1)} `;
+  for (let i = 1; i <= steps; i++) {
+    const x = (W * i) / steps;
+    const y = baseTop + Math.sin(phase + (i / steps) * Math.PI * 3) * amp;
+    d += `L${x.toFixed(1)} ${y.toFixed(1)} `;
+  }
+  return d + `L${W} 100 Z`;
+}
+
+function AuroraCurtain({ color, index, total }: { color: string; index: number; total: number }) {
+  const wave = useSharedValue(0);
+  const drift = useSharedValue(0);
+  useEffect(() => {
+    wave.value = withRepeat(withTiming(1, { duration: 7000 + index * 1500, easing: Easing.inOut(Easing.sin) }), -1, true);
+    drift.value = withRepeat(withTiming(1, { duration: 9000 + index * 2000, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(wave); cancelAnimation(drift); };
+  }, [wave, drift, index]);
+
+  const W = 70;
+  const baseTop = 16 + index * 7;
+  const amp = 10;
+  const gid = useBgId('aurc');
+  const pathProps = useAnimatedProps(() => ({ d: auroraCurtainPath(wave.value, W, baseTop, amp) }));
+  const driftStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(drift.value, [0, 1], [-24, 24]) }],
+    opacity: interpolate(wave.value, [0, 0.5, 1], [0.4, 0.72, 0.4]),
+  }));
 
   return (
     <Animated.View pointerEvents="none" style={[
-      {
-        position: 'absolute',
-        left: -40, right: -40,
-        top: `${15 + index * 22}%`,
-        height: '40%',
-        borderRadius: 999,
-      },
-      animStyle,
+      { position: 'absolute', left: `${(index / total) * 70}%` as any, top: 0, bottom: 0, width: `${W}%` as any },
+      driftStyle,
     ]}>
-      <LinearGradient
-        colors={['transparent', color, 'transparent'] as const as readonly [string, string, ...string[]]}
-        start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }}
-        style={[StyleSheet.absoluteFill, { borderRadius: 999 }]}
-      />
+      <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${W} 100`} preserveAspectRatio="none">
+        <Defs>
+          <SvgLinearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={color} stopOpacity="0" />
+            <Stop offset="0.15" stopColor={color} stopOpacity="0.85" />
+            <Stop offset="0.6" stopColor={color} stopOpacity="0.3" />
+            <Stop offset="1" stopColor={color} stopOpacity="0" />
+          </SvgLinearGradient>
+        </Defs>
+        <AnimatedPath animatedProps={pathProps as any} fill={`url(#${gid})`} />
+        {/* Inner vertical ray slivers shimmering within the curtain */}
+        {[0.2, 0.4, 0.6, 0.8].map((fx, i) => (
+          <Line key={i} x1={W * fx} y1={baseTop} x2={W * fx} y2={100} stroke={color} strokeOpacity={0.16} strokeWidth={0.5} />
+        ))}
+      </Svg>
     </Animated.View>
   );
 }
@@ -501,44 +655,54 @@ function AuroraBand({ color, index, drift }: { color: string; index: number; dri
 // ── 5. Cosmic (twinkling stars + nebula) ────────────────────────────────────
 
 function StarsBg({ v, style, children }: BgProps) {
-  const starCount = Math.min(120, v.stars ?? 80);
-  // Memoise positions so re-renders don't reshuffle the field.
-  const stars = useMemo(() => Array.from({ length: starCount }, () => ({
-    cx: Math.random() * 100,
-    cy: Math.random() * 100,
-    r: Math.random() * 1.4 + 0.3,
-    delay: Math.random() * 2000,
-    duration: TIMING.star + Math.random() * 1200,
-  })), [starCount]);
+  // Two depth layers: small dim far stars + larger bright near stars, with a
+  // touch of colour temperature variety.
+  const far = useMemo(() => Array.from({ length: 40 }, () => ({
+    cx: Math.random() * 100, cy: Math.random() * 100, r: Math.random() * 0.7 + 0.2,
+    delay: Math.random() * 2500, duration: TIMING.star + Math.random() * 1800,
+  })), []);
+  const near = useMemo(() => Array.from({ length: 70 }, () => ({
+    cx: Math.random() * 100, cy: Math.random() * 100, r: Math.random() * 1.3 + 0.5,
+    delay: Math.random() * 2000, duration: TIMING.star + Math.random() * 1200,
+    color: Math.random() < 0.18 ? (Math.random() < 0.5 ? '#ffd9c4' : '#cfe0ff') : '#ffffff',
+  })), []);
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#040515', v.to ?? '#1a0a3a']}
+        colors={[v.from ?? '#040515', '#0a0828', v.to ?? '#1a0a3a'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {/* Nebula glow — two soft colored circles to break up the flat gradient */}
-      <View pointerEvents="none" style={{
-        position: 'absolute', top: '20%', left: '15%',
-        width: 220, height: 220, borderRadius: 110,
-        backgroundColor: '#7a3ab5', opacity: 0.18,
-      }} />
-      <View pointerEvents="none" style={{
-        position: 'absolute', bottom: '15%', right: '10%',
-        width: 180, height: 180, borderRadius: 90,
-        backgroundColor: '#3a6bb5', opacity: 0.20,
-      }} />
-      {/* Star field — SVG so all stars can be one render */}
+      {/* Faint Milky-Way band cutting diagonally across */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', 'rgba(150,130,210,0.12)', 'transparent'] as const as readonly [string, string, ...string[]]}
+        locations={[0.3, 0.5, 0.7]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Soft drifting nebulae with real radial falloff (was two flat coins) */}
+      <BreathingGlow cx="20%" cy="24%" r={130} color="#7a3ab5" periodMs={9000} min={0.12} max={0.24} />
+      <BreathingGlow cx="82%" cy="74%" r={110} color="#3a6bb5" periodMs={11000} min={0.12} max={0.22} delay={1500} />
+      <BreathingGlow cx="60%" cy="40%" r={90} color="#b53a7a" periodMs={13000} min={0.06} max={0.14} delay={3000} />
+      {/* Far + near star layers */}
       <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
-        {stars.map((s, i) => <TwinklingStar key={i} {...s} />)}
+        {far.map((s, i) => <TwinklingStar key={`f${i}`} {...s} color="#bcd0ff" />)}
+        {near.map((s, i) => <TwinklingStar key={`n${i}`} {...s} />)}
       </Svg>
+      {/* Occasional shooting stars */}
+      <Meteor top={12} left={70} delay={2000} dur={1100} len={90} color="#dfeaff" scale={1.1} />
+      <Meteor top={30} left={88} delay={6500} dur={1300} len={70} color="#ffe9c4" scale={0.9} />
       {children}
     </View>
   );
 }
 
-function TwinklingStar({ cx, cy, r, delay, duration }: { cx: number; cy: number; r: number; delay: number; duration: number }) {
+function TwinklingStar({ cx, cy, r, delay, duration, color = '#ffffff' }: {
+  cx: number; cy: number; r: number; delay: number; duration: number; color?: string;
+}) {
   const t = useSharedValue(0);
   useEffect(() => {
     t.value = withDelay(delay, withRepeat(withTiming(1, { duration }), -1, true));
@@ -548,64 +712,124 @@ function TwinklingStar({ cx, cy, r, delay, duration }: { cx: number; cy: number;
     opacity: interpolate(t.value, [0, 1], [0.25, 1]),
     r: interpolate(t.value, [0, 1], [r * 0.6, r * 1.2]),
   }));
-  return <AnimatedCircle cx={cx} cy={cy} r={r} fill="#ffffff" animatedProps={animatedProps} />;
+  return <AnimatedCircle cx={cx} cy={cy} r={r} fill={color} animatedProps={animatedProps} />;
 }
 
 // ── 6. Flame / Fire (rising wisps) ──────────────────────────────────────────
 
 function FlameBg({ v, style, children }: BgProps) {
+  const accent = v.accent ?? '#ffb14a';
+  const ember = useSharedValue(0);
+  useEffect(() => {
+    ember.value = withRepeat(withTiming(1, { duration: 600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(ember);
+  }, [ember]);
+  const emberStyle = useAnimatedStyle(() => ({ opacity: interpolate(ember.value, [0, 1], [0.4, 0.62]) }));
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#1a0807', v.to ?? '#5e1a14']}
+        colors={[v.from ?? '#160503', '#3a0c08', v.to ?? '#5e1a14'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {/* Bottom ember glow */}
+      {/* Two-tone fire body glowing up from the base */}
       <LinearGradient
-        colors={['transparent', v.accent ?? '#ffb14a'] as const as readonly [string, string, ...string[]]}
+        pointerEvents="none"
+        colors={['transparent', `${accent}33`, `${accent}66`] as const as readonly [string, string, ...string[]]}
+        locations={[0.4, 0.75, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
-        style={[StyleSheet.absoluteFill, { opacity: 0.5 }]}
+        style={StyleSheet.absoluteFill}
       />
-      {/* Rising flame wisps */}
-      {Array.from({ length: 6 }).map((_, i) => (
-        <RisingWisp key={i} index={i} accent={v.accent ?? '#ffb14a'} />
-      ))}
+      {/* Flickering bottom ember glow */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, emberStyle]}>
+        <LinearGradient
+          colors={['transparent', accent] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0.55 }} end={{ x: 0, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+      {/* Flame tongues that lick and waver */}
+      {Array.from({ length: 8 }).map((_, i) => <FlameTongue key={i} index={i} accent={accent} hot="#ffd27a" />)}
+      {/* Rising ember sparks */}
+      {Array.from({ length: 14 }).map((_, i) => <EmberSpark key={i} index={i} color="#ffcf7a" />)}
+      <Vignette color="#1a0402" opacity={0.5} />
       {children}
     </View>
   );
 }
 
-function RisingWisp({ index, accent }: { index: number; accent: string }) {
-  const t = useSharedValue(0);
-  const left = useMemo(() => `${10 + (index * 13) + Math.random() * 6}%`, [index]);
-  const size = useMemo(() => 24 + Math.random() * 22, []);
-  const dur = 1800 + Math.random() * 1400;
+/** A teardrop flame shape in a w×h box, tip at top centre wavering by `sway`.
+ *  Worklet-safe (rebuilt per frame for the flicker). */
+function flamePath(sway: number, h: number, w: number): string {
+  'worklet';
+  const cx = w / 2;
+  const tipX = cx + sway;
+  return `M${cx} ${h} `
+    + `C${(cx - w * 0.5).toFixed(1)} ${(h * 0.7).toFixed(1)} ${(cx - w * 0.4).toFixed(1)} ${(h * 0.3).toFixed(1)} ${tipX.toFixed(1)} 0 `
+    + `C${(cx + w * 0.4).toFixed(1)} ${(h * 0.3).toFixed(1)} ${(cx + w * 0.5).toFixed(1)} ${(h * 0.7).toFixed(1)} ${cx} ${h} Z`;
+}
 
+function FlameTongue({ index, accent, hot }: { index: number; accent: string; hot: string }) {
+  const rise = useSharedValue(0);
+  const flick = useSharedValue(0);
+  const left = useMemo(() => `${8 + index * 11 + Math.random() * 5}%`, [index]);
+  const w = useMemo(() => 30 + Math.random() * 20, []);
+  const h = useMemo(() => 60 + Math.random() * 40, []);
+  const dur = useMemo(() => 1500 + Math.random() * 1100, []);
+  const flickDur = useMemo(() => 280 + Math.random() * 180, []);
+  const gid = useBgId('flame');
   useEffect(() => {
-    t.value = withDelay(index * 250, withRepeat(withTiming(1, { duration: dur, easing: Easing.out(Easing.cubic) }), -1, false));
+    rise.value = withDelay(index * 180, withRepeat(withTiming(1, { duration: dur, easing: Easing.out(Easing.quad) }), -1, false));
+    flick.value = withRepeat(withTiming(1, { duration: flickDur, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(rise); cancelAnimation(flick); };
+  }, [rise, flick, index, dur, flickDur]);
+  const wrapStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(rise.value, [0, 1], [40, -150]) },
+      { scale: interpolate(rise.value, [0, 0.35, 1], [0.4, 1, 0.55]) },
+    ],
+    opacity: interpolate(rise.value, [0, 0.12, 0.75, 1], [0, 0.95, 0.55, 0]),
+  }));
+  const pathProps = useAnimatedProps(() => ({ d: flamePath(Math.sin(flick.value * Math.PI * 2) * (w * 0.14), h, w) }));
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', bottom: 0, left: left as any, width: w, height: h }, wrapStyle]}>
+      <Svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        <Defs>
+          <SvgLinearGradient id={gid} x1="0" y1="1" x2="0" y2="0">
+            <Stop offset="0" stopColor={accent} stopOpacity="0.95" />
+            <Stop offset="0.55" stopColor={hot} stopOpacity="0.85" />
+            <Stop offset="1" stopColor="#fff2c2" stopOpacity="0.4" />
+          </SvgLinearGradient>
+        </Defs>
+        <AnimatedPath animatedProps={pathProps as any} fill={`url(#${gid})`} />
+      </Svg>
+    </Animated.View>
+  );
+}
+
+function EmberSpark({ index, color }: { index: number; color: string }) {
+  const t = useSharedValue(0);
+  const left = useMemo(() => 5 + Math.random() * 90, []);
+  const size = useMemo(() => 1.5 + Math.random() * 2.5, []);
+  const dur = useMemo(() => 2600 + Math.random() * 2200, []);
+  const sway = useMemo(() => (Math.random() - 0.5) * 40, []);
+  useEffect(() => {
+    t.value = withDelay(index * 220, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
     return () => cancelAnimation(t);
   }, [t, index, dur]);
-
-  const style = useAnimatedStyle(() => ({
+  const aStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateY: interpolate(t.value, [0, 1], [60, -180]) },
-      { scale:      interpolate(t.value, [0, 0.4, 1], [0.3, 1, 0.6]) },
+      { translateY: interpolate(t.value, [0, 1], [20, -200]) },
+      { translateX: interpolate(t.value, [0, 0.5, 1], [0, sway, 0]) },
     ],
-    opacity: interpolate(t.value, [0, 0.15, 0.8, 1], [0, 0.85, 0.5, 0]),
+    opacity: interpolate(t.value, [0, 0.2, 0.8, 1], [0, 0.9, 0.6, 0]),
   }));
-
   return (
     <Animated.View pointerEvents="none" style={[
-      { position: 'absolute', bottom: 0, left: left as any, width: size, height: size, borderRadius: size / 2 },
-      style,
-    ]}>
-      <LinearGradient
-        colors={[accent, 'transparent'] as const as readonly [string, string, ...string[]]}
-        start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }}
-        style={[StyleSheet.absoluteFill, { borderRadius: size / 2 }]}
-      />
-    </Animated.View>
+      { position: 'absolute', bottom: -6, left: `${left}%`, width: size, height: size, borderRadius: size / 2, backgroundColor: color, shadowColor: color, shadowOpacity: 0.9, shadowRadius: size * 1.8 },
+      aStyle,
+    ]} />
   );
 }
 
@@ -613,36 +837,46 @@ function RisingWisp({ index, accent }: { index: number; accent: string }) {
 
 function HolographicBg({ v, style, children }: BgProps) {
   const colors = (v.colors ?? ['#ff6b9d', '#74e0ff', '#a89cf0', '#ffe28a', '#ff6b9d']) as readonly [string, string, ...string[]];
-  const t = useSharedValue(0);
-
+  const reversed = [...colors].reverse() as unknown as readonly [string, string, ...string[]];
+  const a = useSharedValue(0);
+  const b = useSharedValue(0);
   useEffect(() => {
-    t.value = withRepeat(withTiming(1, { duration: TIMING.holographic }), -1, true);
-    return () => cancelAnimation(t);
-  }, [t]);
+    a.value = withRepeat(withTiming(1, { duration: TIMING.holographic }), -1, true);
+    b.value = withRepeat(withTiming(1, { duration: TIMING.holographic * 1.45 }), -1, true);
+    return () => { cancelAnimation(a); cancelAnimation(b); };
+  }, [a, b]);
 
-  // Animate the gradient origin so the rainbow shifts.
-  const animStyle = useAnimatedStyle(() => ({
+  // Two rainbow layers drift on INDEPENDENT drivers in opposite directions so
+  // the spectrum shears and churns instead of sliding as one flat sheet.
+  const layerA = useAnimatedStyle(() => ({
     transform: [
-      { translateX: interpolate(t.value, [0, 1], [-30, 30]) },
-      { translateY: interpolate(t.value, [0, 1], [-15, 15]) },
+      { translateX: interpolate(a.value, [0, 1], [-34, 34]) },
+      { translateY: interpolate(a.value, [0, 1], [-18, 18]) },
+      { scale: interpolate(a.value, [0, 0.5, 1], [1.1, 1.25, 1.1]) },
     ],
+  }));
+  const layerB = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: interpolate(b.value, [0, 1], [30, -30]) },
+      { translateY: interpolate(b.value, [0, 1], [20, -20]) },
+    ],
+    opacity: interpolate(b.value, [0, 0.5, 1], [0.3, 0.5, 0.3]),
   }));
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0a0a14' }]} />
-      <Animated.View style={[StyleSheet.absoluteFill, animStyle]}>
-        <LinearGradient
-          colors={colors}
-          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-          style={[StyleSheet.absoluteFill, { opacity: 0.55 }]}
-        />
-        <LinearGradient
-          colors={[...colors].reverse() as unknown as readonly [string, string, ...string[]]}
-          start={{ x: 1, y: 0 }} end={{ x: 0, y: 1 }}
-          style={[StyleSheet.absoluteFill, { opacity: 0.4 }]}
-        />
+      <Animated.View style={[StyleSheet.absoluteFill, layerA]}>
+        <LinearGradient colors={colors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={[StyleSheet.absoluteFill, { opacity: 0.55 }]} />
       </Animated.View>
+      <Animated.View style={[StyleSheet.absoluteFill, layerB]}>
+        <LinearGradient colors={reversed} start={{ x: 1, y: 0 }} end={{ x: 0, y: 1 }} style={StyleSheet.absoluteFill} />
+      </Animated.View>
+      {/* Bright specular streak sweeping across — the foil "tilt" highlight. */}
+      <SheenSweep color="rgba(255,255,255,0.6)" durationMs={2600} angle={22} opacity={0.4} />
+      {/* Scattered glints catching the light. */}
+      <SparkleField count={7} color="#ffffff" durationMs={2200} />
+      <Vignette opacity={0.4} />
       {children}
     </View>
   );
@@ -650,44 +884,74 @@ function HolographicBg({ v, style, children }: BgProps) {
 
 // ── 8. Cyber (grid + scan line) ─────────────────────────────────────────────
 
+const CYBER_FLOOR_H = 240;
+const CYBER_CELL = 26;
+
 function CyberBg({ v, style, children }: BgProps) {
   const scan = useSharedValue(0);
+  const scan2 = useSharedValue(0);
+  const floor = useSharedValue(0);
+  const horizon = useSharedValue(0);
   useEffect(() => {
     scan.value = withRepeat(withTiming(1, { duration: 3000, easing: Easing.linear }), -1, false);
-    return () => cancelAnimation(scan);
-  }, [scan]);
-  const scanStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: interpolate(scan.value, [0, 1], [0, 400]) }],
-  }));
+    scan2.value = withRepeat(withTiming(1, { duration: 1700, easing: Easing.linear }), -1, false);
+    floor.value = withRepeat(withTiming(1, { duration: 2200, easing: Easing.linear }), -1, false);
+    horizon.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(scan); cancelAnimation(scan2); cancelAnimation(floor); cancelAnimation(horizon); };
+  }, [scan, scan2, floor, horizon]);
+  const scanStyle = useAnimatedStyle(() => ({ transform: [{ translateY: interpolate(scan.value, [0, 1], [0, 400]) }] }));
+  const scan2Style = useAnimatedStyle(() => ({ transform: [{ translateY: interpolate(scan2.value, [0, 1], [0, 400]) }] }));
+  // The near floor flows toward the viewer: a uniform line set translating one
+  // cell then wrapping (seamless because the spacing is uniform).
+  const floorStyle = useAnimatedStyle(() => ({ transform: [{ translateY: interpolate(floor.value, [0, 1], [0, CYBER_CELL]) }] }));
+  const horizonStyle = useAnimatedStyle(() => ({ opacity: interpolate(horizon.value, [0, 1], [0.5, 1]) }));
 
   const accent = v.accent ?? '#00ffd5';
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#02060e', v.to ?? '#0a1e2e'] as const as readonly [string, string, ...string[]]}
+        colors={[v.from ?? '#02060e', '#061320', v.to ?? '#0a1e2e'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
+      {/* Sky: faint vertical grid in the upper half */}
       <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
-        {/* Vertical grid lines */}
         {Array.from({ length: 10 }).map((_, i) => (
-          <Line key={`v${i}`} x1={i * 10} y1={0} x2={i * 10} y2={100} stroke={accent} strokeOpacity="0.18" strokeWidth="0.2" />
+          <Line key={`v${i}`} x1={i * 10} y1={0} x2={i * 10} y2={50} stroke={accent} strokeOpacity="0.1" strokeWidth="0.2" />
         ))}
-        {/* Horizontal grid lines, with perspective (closer-together near the bottom) */}
-        {Array.from({ length: 8 }).map((_, i) => (
-          <Line key={`h${i}`} x1={0} y1={50 + (i * i) * 0.8} x2={100} y2={50 + (i * i) * 0.8} stroke={accent} strokeOpacity="0.22" strokeWidth="0.2" />
+        {/* Perspective floor verticals fanning from the vanishing point */}
+        {[-70, -34, -12, 6, 22, 40, 64, 112, 134, 170].map((endX, i) => (
+          <Line key={`p${i}`} x1={50} y1={50} x2={endX} y2={100} stroke={accent} strokeOpacity="0.22" strokeWidth="0.25" />
         ))}
       </Svg>
-      <Animated.View pointerEvents="none" style={[
-        { position: 'absolute', left: 0, right: 0, height: 60, top: -60 },
-        scanStyle,
-      ]}>
-        <LinearGradient
-          colors={['transparent', accent + '40', 'transparent'] as const as readonly [string, string, ...string[]]}
-          start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
-          style={StyleSheet.absoluteFill}
-        />
+      {/* Near floor: uniform horizontal lines flowing toward the viewer */}
+      <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: CYBER_FLOOR_H, overflow: 'hidden' }}>
+        <Animated.View style={[{ position: 'absolute', left: 0, right: 0, top: 0, height: CYBER_FLOOR_H + CYBER_CELL }, floorStyle]}>
+          {Array.from({ length: Math.ceil(CYBER_FLOOR_H / CYBER_CELL) + 2 }).map((_, i) => (
+            <View key={i} style={{ position: 'absolute', left: 0, right: 0, top: i * CYBER_CELL, height: 1, backgroundColor: accent, opacity: 0.16 }} />
+          ))}
+        </Animated.View>
+      </View>
+      {/* Depth fog over the far floor for distance */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', `${accent}14`, 'transparent'] as const as readonly [string, string, ...string[]]}
+        locations={[0.5, 0.72, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Horizon glow bar */}
+      <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: 0, right: 0, top: '50%', height: 2, marginTop: -1, backgroundColor: accent, shadowColor: accent, shadowOpacity: 0.9, shadowRadius: 8 }, horizonStyle]} />
+      {/* Two scan lines (slow wide + fast thin) */}
+      <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: 0, right: 0, height: 60, top: -60 }, scanStyle]}>
+        <LinearGradient colors={['transparent', accent + '40', 'transparent'] as const as readonly [string, string, ...string[]]} start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={StyleSheet.absoluteFill} />
       </Animated.View>
+      <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: 0, right: 0, height: 22, top: -22 }, scan2Style]}>
+        <LinearGradient colors={['transparent', accent + '2a', 'transparent'] as const as readonly [string, string, ...string[]]} start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }} style={StyleSheet.absoluteFill} />
+      </Animated.View>
+      {/* Rising data motes */}
+      <SparkleField count={9} color={accent} durationMs={2400} />
       {children}
     </View>
   );
@@ -696,6 +960,7 @@ function CyberBg({ v, style, children }: BgProps) {
 // ── 9. Solar Flare (pulsing sun core + counter-rotating rays + prominences) ──
 
 function SolarBg({ v, style, children }: BgProps) {
+  const coreId = useBgId('solarCore');   // per-instance gradient id (avoid collisions)
   const rot   = useSharedValue(0);   // outer long rays
   const rot2  = useSharedValue(0);   // inner rays (counter-rotating)
   const pulse = useSharedValue(0);   // sun core flare / breathe
@@ -777,14 +1042,14 @@ function SolarBg({ v, style, children }: BgProps) {
           <Defs>
             {/* userSpaceOnUse: coords are viewBox units (objectBoundingBox
                 would wash the gradient out). */}
-            <RadialGradient id="solarCore" cx="0" cy="0" r="34" fx="0" fy="0" gradientUnits="userSpaceOnUse">
+            <RadialGradient id={coreId} cx="0" cy="0" r="34" fx="0" fy="0" gradientUnits="userSpaceOnUse">
               <Stop offset="0%"   stopColor="#ffffff" stopOpacity="1" />
               <Stop offset="20%"  stopColor={core}    stopOpacity="0.95" />
               <Stop offset="52%"  stopColor={accent}  stopOpacity="0.6" />
               <Stop offset="100%" stopColor={accent}  stopOpacity="0" />
             </RadialGradient>
           </Defs>
-          <Circle cx={0} cy={0} r={50} fill="url(#solarCore)" />
+          <Circle cx={0} cy={0} r={50} fill={`url(#${coreId})`} />
         </Svg>
       </Animated.View>
 
@@ -804,39 +1069,69 @@ function SolarBg({ v, style, children }: BgProps) {
 
 // ── 10. Ocean (rolling waves) ────────────────────────────────────────────────
 
-function OceanBg({ v, style, children }: BgProps) {
-  const w1 = useSharedValue(0);
-  const w2 = useSharedValue(0);
+// One rolling wave band. The wave path has period 300; translating by exactly
+// ±300 (one period) and wrapping makes the drift seamless (no pop), and a
+// gentle vertical bob on a separate driver gives it swell.
+function WaveLayer({ bottom, height, color, opacity, dur, dir, bobDur, amp }: {
+  bottom: any; height: number; color: string; opacity: number; dur: number; dir: number; bobDur: number; amp: number;
+}) {
+  const t = useSharedValue(0);
+  const bob = useSharedValue(0);
   useEffect(() => {
-    w1.value = withRepeat(withTiming(1, { duration: 6000, easing: Easing.linear }), -1, false);
-    w2.value = withRepeat(withTiming(1, { duration: 9000, easing: Easing.linear }), -1, false);
-    return () => { cancelAnimation(w1); cancelAnimation(w2); };
-  }, [w1, w2]);
-
-  const wave1Style = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(w1.value, [0, 1], [-200, 200]) }],
+    // YOYO + sine easing: the band laps left and back with the velocity easing
+    // to zero at each extreme, so there is NO snap-back seam (a one-directional
+    // wrap can't be seamless here because the px translate and the stretched
+    // viewBox period don't match).
+    t.value = withRepeat(withTiming(1, { duration: dur, easing: Easing.inOut(Easing.sin) }), -1, true);
+    bob.value = withRepeat(withTiming(1, { duration: bobDur, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(t); cancelAnimation(bob); };
+  }, [t, bob, dur, bobDur]);
+  const aStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: interpolate(t.value, [0, 1], [dir * -150, dir * 150]) },
+      { translateY: interpolate(bob.value, [0, 0.5, 1], [0, amp, 0]) },
+    ],
   }));
-  const wave2Style = useAnimatedStyle(() => ({
-    transform: [{ translateX: interpolate(w2.value, [0, 1], [200, -200]) }],
-  }));
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', bottom, left: -260, right: -260, height }, aStyle]}>
+      <Svg viewBox="0 0 600 80" width="100%" height={height} preserveAspectRatio="none">
+        {/* Periodic crest/trough profile (period 150) reads as rolling swell. */}
+        <Path d="M0 40 Q75 20 150 40 T300 40 T450 40 T600 40 V80 H0 Z" fill={color} opacity={opacity} />
+      </Svg>
+    </Animated.View>
+  );
+}
 
+function OceanBg({ v, style, children }: BgProps) {
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#0a1e3a', v.to ?? '#072a48'] as const as readonly [string, string, ...string[]]}
+        colors={[v.from ?? '#0a1e3a', '#0a2742', v.to ?? '#041d33'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      <Animated.View pointerEvents="none" style={[{ position: 'absolute', bottom: '30%', left: -300, right: -300, height: 60 }, wave1Style]}>
-        <Svg viewBox="0 0 600 60" width="100%" height="60" preserveAspectRatio="none">
-          <Path d="M0 30 Q150 0 300 30 T 600 30 V 60 H 0 Z" fill={v.accent ?? '#3d8bbf'} opacity="0.45" />
-        </Svg>
-      </Animated.View>
-      <Animated.View pointerEvents="none" style={[{ position: 'absolute', bottom: '15%', left: -300, right: -300, height: 80 }, wave2Style]}>
-        <Svg viewBox="0 0 600 80" width="100%" height="80" preserveAspectRatio="none">
-          <Path d="M0 40 Q150 10 300 40 T 600 40 V 80 H 0 Z" fill={v.accent ?? '#5aacd9'} opacity="0.55" />
-        </Svg>
-      </Animated.View>
+      {/* God-rays slanting down from the surface */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={[`${v.accent ?? '#5aacd9'}22`, 'transparent'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0.3, y: 0 }} end={{ x: 0.7, y: 1 }}
+        style={[StyleSheet.absoluteFill, { opacity: 0.7 }]}
+      />
+      {/* Surface caustic shimmer */}
+      <SparkleField count={10} color="#bfe7fb" durationMs={2800} />
+      {/* Four parallax wave bands, dark + slow at the back to light + quick up front */}
+      <WaveLayer bottom="40%" height={70} color="#2a6a99" opacity={0.35} dur={11000} dir={-1} bobDur={5000} amp={5} />
+      <WaveLayer bottom="30%" height={80} color={v.accent ?? '#3d8bbf'} opacity={0.45} dur={9000} dir={1} bobDur={4200} amp={6} />
+      <WaveLayer bottom="17%" height={90} color={v.accent ?? '#5aacd9'} opacity={0.55} dur={7000} dir={-1} bobDur={3600} amp={7} />
+      <WaveLayer bottom="11%" height={64} color="#9fd8f0" opacity={0.4} dur={6000} dir={1} bobDur={3000} amp={4} />
+      {/* Deep fog at the floor */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', 'rgba(2,12,24,0.6)'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0.6 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
       {children}
     </View>
   );
@@ -844,45 +1139,77 @@ function OceanBg({ v, style, children }: BgProps) {
 
 // ── 11. Sakura (falling petals) ─────────────────────────────────────────────
 
+const SAKURA_PINKS = ['#ffc4d1', '#ffd9e2', '#ff9fc0', '#ffe0ec'];
+
 function SakuraBg({ v, style, children }: BgProps) {
-  const petals = useMemo(() => Array.from({ length: 14 }, (_, i) => ({
-    left:  `${(i * 7.3 + Math.random() * 6) % 100}%`,
-    delay: Math.random() * 4000,
-    dur:   4500 + Math.random() * 3500,
-    size:  6 + Math.random() * 6,
-    drift: (Math.random() - 0.5) * 60,
+  const near = useMemo(() => Array.from({ length: 14 }, (_, i) => ({
+    left: `${(i * 7.3 + Math.random() * 6) % 100}%`,
+    delay: Math.random() * 4000, dur: 4500 + Math.random() * 3500,
+    size: 7 + Math.random() * 6, drift: (Math.random() - 0.5) * 60,
+    color: SAKURA_PINKS[Math.floor(Math.random() * SAKURA_PINKS.length)], far: false,
+  })), []);
+  const far = useMemo(() => Array.from({ length: 10 }, (_, i) => ({
+    left: `${(i * 11 + Math.random() * 6) % 100}%`,
+    delay: Math.random() * 5000, dur: 6500 + Math.random() * 4000,
+    size: 4 + Math.random() * 3, drift: (Math.random() - 0.5) * 40,
+    color: '#ffd0dc', far: true,
   })), []);
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#3a1a2a', v.to ?? '#7a3a55'] as const as readonly [string, string, ...string[]]}
+        colors={[v.from ?? '#3a1a2a', '#5e2a44', v.to ?? '#7a3a55'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {petals.map((p, i) => <Petal key={i} {...p} />)}
+      {/* Soft warm sky bloom */}
+      <BreathingGlow cx="74%" cy="22%" r={110} color="#ffb6c9" periodMs={8000} min={0.12} max={0.22} />
+      {/* Far petals drift slower for parallax */}
+      {far.map((p, i) => <Petal key={`f${i}`} {...p} />)}
+      {/* Blossom branch reaching in from the top-left */}
+      <Svg pointerEvents="none" style={{ position: 'absolute', top: 0, left: 0, width: '60%', height: '34%' }} viewBox="0 0 100 60" preserveAspectRatio="none">
+        <Path d="M0 6 Q 22 10 38 4 Q 50 0 62 8" stroke="#2a1018" strokeWidth="2.4" fill="none" strokeLinecap="round" />
+        <Path d="M30 6 Q 36 16 30 24" stroke="#2a1018" strokeWidth="1.4" fill="none" strokeLinecap="round" />
+        {[[12, 6], [26, 5], [40, 4], [33, 20], [55, 8]].map(([cx, cy], i) => (
+          <Circle key={i} cx={cx} cy={cy} r={2.2} fill="#ffd0dc" opacity={0.9} />
+        ))}
+      </Svg>
+      {/* Near petals */}
+      {near.map((p, i) => <Petal key={`n${i}`} {...p} />)}
+      {/* Ground mist */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', '#ffd9e233'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0.8 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
       {children}
     </View>
   );
 }
 
-function Petal({ left, delay, dur, size, drift }: { left: any; delay: number; dur: number; size: number; drift: number }) {
+function Petal({ left, delay, dur, size, drift, color = '#ffc4d1', far = false }: {
+  left: any; delay: number; dur: number; size: number; drift: number; color?: string; far?: boolean;
+}) {
   const t = useSharedValue(0);
   useEffect(() => {
     t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
     return () => cancelAnimation(t);
   }, [t, delay, dur]);
+  const peak = far ? 0.6 : 1;
   const animStyle = useAnimatedStyle(() => ({
     transform: [
       { translateY: interpolate(t.value, [0, 1], [-30, 600]) },
       { translateX: interpolate(t.value, [0, 0.5, 1], [0, drift, drift * 2]) },
       { rotate: `${interpolate(t.value, [0, 1], [0, 540])}deg` },
+      { scaleX: Math.cos(interpolate(t.value, [0, 1], [0, Math.PI * 2 * 3])) }, // twist edge-on
     ],
-    opacity: interpolate(t.value, [0, 0.1, 0.9, 1], [0, 1, 1, 0]),
+    opacity: interpolate(t.value, [0, 0.1, 0.9, 1], [0, peak, peak, 0]),
   }));
   return (
     <Animated.View pointerEvents="none" style={[
-      { position: 'absolute', top: 0, left, width: size, height: size, backgroundColor: '#ffc4d1', borderRadius: size / 2, borderTopLeftRadius: 1 },
+      { position: 'absolute', top: 0, left, width: size, height: size, backgroundColor: color, borderRadius: size / 2, borderTopLeftRadius: 1 },
       animStyle,
     ]} />
   );
@@ -891,33 +1218,86 @@ function Petal({ left, delay, dur, size, drift }: { left: any; delay: number; du
 // ── 12. Liquid Gold (shifting molten gradient) ──────────────────────────────
 
 function LiquidGoldBg({ v, style, children }: BgProps) {
-  const t = useSharedValue(0);
+  const a = useSharedValue(0);
+  const b = useSharedValue(0);
+  const hot = useSharedValue(0);
+  const hotId = useBgId('liqhot');
   useEffect(() => {
-    t.value = withRepeat(withTiming(1, { duration: 6000, easing: Easing.inOut(Easing.sin) }), -1, true);
-    return () => cancelAnimation(t);
-  }, [t]);
-  const animStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: interpolate(t.value, [0, 1], [0, 40]) }],
+    a.value = withRepeat(withTiming(1, { duration: 6500, easing: Easing.inOut(Easing.sin) }), -1, true);
+    b.value = withRepeat(withTiming(1, { duration: 8200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    hot.value = withRepeat(withTiming(1, { duration: 7000, easing: Easing.linear }), -1, false);
+    return () => { cancelAnimation(a); cancelAnimation(b); cancelAnimation(hot); };
+  }, [a, b, hot]);
+  // Primary molten band: bigger travel + a slow rotate + a vertical breathe.
+  const bandA = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(a.value, [0, 1], [-30, 60]) },
+      { rotate: `${interpolate(a.value, [0, 1], [-6, 6])}deg` },
+      { scaleY: interpolate(a.value, [0, 0.5, 1], [1, 1.18, 1]) },
+    ],
   }));
+  // Counter-moving second band at a different angle, so the two streams cross
+  // and interfere like real molten metal instead of one stripe sliding.
+  const bandB = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(b.value, [0, 1], [70, -40]) },
+      { translateX: interpolate(b.value, [0, 1], [-30, 30]) },
+      { rotate: '32deg' },
+    ],
+    opacity: interpolate(b.value, [0, 0.5, 1], [0.35, 0.6, 0.35]),
+  }));
+  // A bright specular hotspot roaming a Lissajous path across the surface.
+  const hotStyle = useAnimatedStyle(() => {
+    const sx = Math.sin(hot.value * Math.PI * 2);
+    const sy = Math.sin(hot.value * Math.PI * 2 * 1.4 + 1);
+    return { transform: [{ translateX: sx * 80 }, { translateY: sy * 90 }] };
+  });
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={['#1a1410', '#3a2a14'] as const as readonly [string, string, ...string[]]}
+        colors={['#140f0a', '#3a2a14', '#241a0e'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      <Animated.View style={[StyleSheet.absoluteFill, animStyle]}>
+      <Animated.View style={[StyleSheet.absoluteFill, bandA]}>
         <LinearGradient
-          colors={['transparent', '#d4a93f', '#ffe28a', '#d4a93f', 'transparent'] as const as readonly [string, string, ...string[]]}
+          colors={['transparent', '#d4a93f', '#ffe9a8', '#d4a93f', 'transparent'] as const as readonly [string, string, ...string[]]}
           start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-          style={[StyleSheet.absoluteFill, { opacity: 0.7 }]}
+          style={[StyleSheet.absoluteFill, { opacity: 0.72 }]}
         />
       </Animated.View>
+      <Animated.View style={[StyleSheet.absoluteFill, bandB]}>
+        <LinearGradient
+          colors={['transparent', '#b58a2c', '#ffd970', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={[StyleSheet.absoluteFill, { opacity: 0.5 }]}
+        />
+      </Animated.View>
+      {/* Roaming specular hotspot */}
+      <Animated.View pointerEvents="none" style={[
+        { position: 'absolute', left: '50%', top: '50%', width: 120, height: 120, marginLeft: -60, marginTop: -60 },
+        hotStyle,
+      ]}>
+        <Svg width={120} height={120} viewBox="0 0 120 120">
+          <Defs>
+            <RadialGradient id={hotId} cx="60" cy="60" r="60" gradientUnits="userSpaceOnUse">
+              <Stop offset="0" stopColor="#fff6cf" stopOpacity="0.85" />
+              <Stop offset="0.5" stopColor="#ffe9a8" stopOpacity="0.25" />
+              <Stop offset="1" stopColor="#ffe9a8" stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <Circle cx="60" cy="60" r="60" fill={`url(#${hotId})`} />
+        </Svg>
+      </Animated.View>
+      {/* Polished floor seam */}
       <LinearGradient
-        colors={['transparent', 'rgba(0,0,0,0.4)'] as const as readonly [string, string, ...string[]]}
+        colors={['transparent', 'rgba(0,0,0,0.45)'] as const as readonly [string, string, ...string[]]}
         start={{ x: 0, y: 0.5 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
+      {/* Gold spark motes catching the light */}
+      <SparkleField count={6} color="#ffe9a8" durationMs={2600} />
       {children}
     </View>
   );
@@ -926,18 +1306,27 @@ function LiquidGoldBg({ v, style, children }: BgProps) {
 // ── 13. Synthwave (retro sun + perspective grid) ────────────────────────────
 
 function SynthwaveBg({ v, style, children }: BgProps) {
+  const sunGradId = useBgId('synthSun');   // per-instance ids; mask collisions render unmasked
+  const sunMaskId = useBgId('sunBands');
   const scan = useSharedValue(0);
   const glow = useSharedValue(0);
+  const sun = useSharedValue(0);
   useEffect(() => {
     scan.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.linear }), -1, false);
     glow.value = withRepeat(withTiming(1, { duration: 2800, easing: Easing.inOut(Easing.sin) }), -1, true);
-    return () => { cancelAnimation(scan); cancelAnimation(glow); };
-  }, [scan, glow]);
+    sun.value = withRepeat(withTiming(1, { duration: 5000, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(scan); cancelAnimation(glow); cancelAnimation(sun); };
+  }, [scan, glow, sun]);
   const scanStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: interpolate(scan.value, [0, 1], [0, 320]) }],
   }));
+  // The sun now breathes AND bobs gently on the horizon.
   const glowStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(glow.value, [0, 1], [0.55, 0.95]),
+    opacity: interpolate(glow.value, [0, 1], [0.6, 0.98]),
+    transform: [{ translateY: interpolate(sun.value, [0, 1], [-3, 5]) }],
+  }));
+  const reflectStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(glow.value, [0, 1], [0.3, 0.6]),
   }));
   const pink = v.accent ?? '#ff2d95';
   const grid = v.grid ?? '#ff2d95';
@@ -949,16 +1338,28 @@ function SynthwaveBg({ v, style, children }: BgProps) {
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
+      {/* Twinkling sky stars */}
+      <SparkleField count={12} color="#ffd9ec" durationMs={2600} />
+      {/* Horizon bloom under the sun */}
+      <BreathingGlow cx="50%" cy="58%" r={90} color={pink} periodMs={2800} min={0.18} max={0.34} />
+      {/* Sun reflection streak shimmering down the floor */}
+      <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: '58%', alignSelf: 'center', width: 44, height: '40%' }, reflectStyle]}>
+        <LinearGradient
+          colors={[`${pink}66`, 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
       {/* Banded retro sun, dropped behind the grid horizon */}
       <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: '16%', alignSelf: 'center', width: 150, height: 150 }, glowStyle]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Defs>
-            <SvgLinearGradient id="synthSun" x1="0" y1="0" x2="0" y2="1">
+            <SvgLinearGradient id={sunGradId} x1="0" y1="0" x2="0" y2="1">
               <Stop offset="0%"  stopColor="#ffe28a" />
               <Stop offset="55%" stopColor="#ff9a3a" />
               <Stop offset="100%" stopColor={pink} />
             </SvgLinearGradient>
-            <Mask id="sunBands">
+            <Mask id={sunMaskId}>
               <Circle cx="50" cy="50" r="42" fill="#ffffff" />
               {/* Horizontal slices get thicker toward the bottom of the disc */}
               <Rect x="0" y="58" width="100" height="2.5" fill="#000000" />
@@ -967,7 +1368,7 @@ function SynthwaveBg({ v, style, children }: BgProps) {
               <Rect x="0" y="85" width="100" height="5.5" fill="#000000" />
             </Mask>
           </Defs>
-          <Circle cx="50" cy="50" r="42" fill="url(#synthSun)" mask="url(#sunBands)" />
+          <Circle cx="50" cy="50" r="42" fill={`url(#${sunGradId})`} mask={`url(#${sunMaskId})`} />
         </Svg>
       </Animated.View>
       {/* Perspective grid below the horizon */}
@@ -1008,6 +1409,9 @@ function SynthwaveBg({ v, style, children }: BgProps) {
 // ── 14. Total Eclipse (corona streamers + moon disc + diamond-ring glint) ────
 
 function EclipseBg({ v, style, children }: BgProps) {
+  const coronaId = useBgId('eclipseCorona');   // per-instance gradient ids (avoid collisions)
+  const rimId = useBgId('eclipseRim');
+  const diamondId = useBgId('diamondGlow');
   const breathe = useSharedValue(0);
   const rot     = useSharedValue(0);
   const rim     = useSharedValue(0);
@@ -1071,13 +1475,13 @@ function EclipseBg({ v, style, children }: BgProps) {
       <Animated.View pointerEvents="none" style={[box, coronaStyle]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Defs>
-            <RadialGradient id="eclipseCorona" cx="50" cy="50" r="50" gradientUnits="userSpaceOnUse">
+            <RadialGradient id={coronaId} cx="50" cy="50" r="50" gradientUnits="userSpaceOnUse">
               <Stop offset="0%"  stopColor="#fff8e0" stopOpacity="0.95" />
               <Stop offset="34%" stopColor={corona} stopOpacity="0.5" />
               <Stop offset="100%" stopColor={corona} stopOpacity="0" />
             </RadialGradient>
           </Defs>
-          <Circle cx="50" cy="50" r="50" fill="url(#eclipseCorona)" />
+          <Circle cx="50" cy="50" r="50" fill={`url(#${coronaId})`} />
         </Svg>
       </Animated.View>
 
@@ -1098,13 +1502,13 @@ function EclipseBg({ v, style, children }: BgProps) {
       <Animated.View pointerEvents="none" style={[box, rimStyle]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Defs>
-            <RadialGradient id="eclipseRim" cx="50" cy="50" r="46" gradientUnits="userSpaceOnUse">
+            <RadialGradient id={rimId} cx="50" cy="50" r="46" gradientUnits="userSpaceOnUse">
               <Stop offset="88%"  stopColor="#fff8e0" stopOpacity="0" />
               <Stop offset="95%"  stopColor="#fff8e0" stopOpacity="0.5" />
               <Stop offset="100%" stopColor="#fff8e0" stopOpacity="0" />
             </RadialGradient>
           </Defs>
-          <Circle cx="50" cy="50" r="46" fill="url(#eclipseRim)" />
+          <Circle cx="50" cy="50" r="46" fill={`url(#${rimId})`} />
           <Circle cx="50" cy="50" r={DISC_R} fill="#04050c" />
           <Circle cx="50" cy="50" r={DISC_R} fill="none" stroke="#fff8e0" strokeOpacity="0.85" strokeWidth="0.9" />
           {/* Bailey's beads — bright spots along the rim near the diamond */}
@@ -1121,13 +1525,13 @@ function EclipseBg({ v, style, children }: BgProps) {
       <Animated.View pointerEvents="none" style={[box, diamondStyle]}>
         <Svg width="100%" height="100%" viewBox="0 0 100 100">
           <Defs>
-            <RadialGradient id="diamondGlow" cx={dx} cy={dy} r="13" gradientUnits="userSpaceOnUse">
+            <RadialGradient id={diamondId} cx={dx} cy={dy} r="13" gradientUnits="userSpaceOnUse">
               <Stop offset="0%"   stopColor="#ffffff" stopOpacity="1" />
               <Stop offset="30%"  stopColor="#fff8e0" stopOpacity="0.7" />
               <Stop offset="100%" stopColor="#fff8e0" stopOpacity="0" />
             </RadialGradient>
           </Defs>
-          <Circle cx={dx} cy={dy} r="12" fill="url(#diamondGlow)" />
+          <Circle cx={dx} cy={dy} r="12" fill={`url(#${diamondId})`} />
           <Line x1={dx - 11} y1={dy} x2={dx + 11} y2={dy} stroke="#ffffff" strokeOpacity="0.9" strokeWidth="0.8" strokeLinecap="round" />
           <Line x1={dx} y1={dy - 11} x2={dx} y2={dy + 11} stroke="#ffffff" strokeOpacity="0.9" strokeWidth="0.8" strokeLinecap="round" />
           <Circle cx={dx} cy={dy} r="2.6" fill="#ffffff" />
@@ -1144,18 +1548,29 @@ function EclipseBg({ v, style, children }: BgProps) {
 const MATRIX_GLYPHS = 'アイウエオカキクケコサシスセソタチツテト0123456789Φ$#';
 
 function MatrixBg({ v, style, children }: BgProps) {
-  const columns = useMemo(() => Array.from({ length: 8 }, (_, i) => ({
-    left: `${i * 12.5 + 2}%`,
-    glyphs: Array.from({ length: 22 }, () =>
-      MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)]).join('\n'),
-    dur: 2600 + Math.random() * 2800,
-    delay: Math.random() * 2000,
-    opacity: 0.35 + Math.random() * 0.55,
-  })), []);
+  const color = v.color ?? '#00ff41';
+  const columns = useMemo(() => Array.from({ length: 13 }, (_, i) => {
+    const fontSize = 10 + Math.round(Math.random() * 5);   // 10-15
+    return {
+      left: `${(i / 13) * 100 + 1}%`,
+      glyphs: Array.from({ length: 22 }, () => MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)]).join('\n'),
+      headGlyphs: Array.from({ length: 2 }, () => MATRIX_GLYPHS[Math.floor(Math.random() * MATRIX_GLYPHS.length)]).join('\n'),
+      dur: 4400 - fontSize * 150 + Math.random() * 1200,   // bigger glyphs fall faster (parallax)
+      delay: Math.random() * 2200,
+      opacity: 0.4 + Math.random() * 0.5,
+      fontSize,
+    };
+  }), []);
 
   return (
     <View style={[{ overflow: 'hidden', backgroundColor: '#010a04' }, style]}>
-      {columns.map((c, i) => <MatrixColumn key={i} {...c} color={v.color ?? '#00ff41'} />)}
+      {columns.map((c, i) => <MatrixColumn key={i} {...c} color={color} />)}
+      {/* CRT scanlines */}
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} preserveAspectRatio="none" viewBox="0 0 100 100">
+        {Array.from({ length: 50 }).map((_, i) => (
+          <Line key={i} x1={0} y1={i * 2} x2={100} y2={i * 2} stroke="#000000" strokeOpacity="0.18" strokeWidth="0.5" />
+        ))}
+      </Svg>
       {/* Soft vignette top + bottom so the glyphs fade in/out of frame */}
       <LinearGradient pointerEvents="none"
         colors={['#010a04', 'transparent', 'transparent', '#010a04'] as const as readonly [string, string, ...string[]]}
@@ -1168,12 +1583,13 @@ function MatrixBg({ v, style, children }: BgProps) {
   );
 }
 
-function MatrixColumn({ left, glyphs, dur, delay, opacity, color }: {
-  left: any; glyphs: string; dur: number; delay: number; opacity: number; color: string;
+function MatrixColumn({ left, glyphs, headGlyphs, dur, delay, opacity, color, fontSize }: {
+  left: any; glyphs: string; headGlyphs: string; dur: number; delay: number; opacity: number; color: string; fontSize: number;
 }) {
-  // Two stacked copies translate upward-to-downward in a seamless wrap:
-  // 22 glyphs x lineHeight 16 = 352px per copy.
-  const COPY_H = 352;
+  // Two stacked copies translate down in a seamless wrap. A bright white-green
+  // "head" rides the leading (bottom) edge of each copy, the classic effect.
+  const lineH = Math.round(fontSize * 1.25);
+  const COPY_H = 22 * lineH;
   const t = useSharedValue(0);
   useEffect(() => {
     t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
@@ -1182,14 +1598,21 @@ function MatrixColumn({ left, glyphs, dur, delay, opacity, color }: {
   const animStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: interpolate(t.value, [0, 1], [-COPY_H, 0]) }],
   }));
-  const textStyle = {
-    color, fontSize: 13, lineHeight: 16, fontWeight: '600' as const,
-    textShadowColor: color, textShadowRadius: 6, textShadowOffset: { width: 0, height: 0 },
+  const bodyStyle = {
+    color, fontSize, lineHeight: lineH, fontWeight: '600' as const,
+    textShadowColor: color, textShadowRadius: 5, textShadowOffset: { width: 0, height: 0 },
+  };
+  const headStyle = {
+    color: '#d8ffe0', fontSize, lineHeight: lineH, fontWeight: '800' as const,
+    textShadowColor: '#ffffff', textShadowRadius: 7, textShadowOffset: { width: 0, height: 0 },
   };
   return (
     <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: 0, left, opacity }, animStyle]}>
-      <Text style={textStyle}>{glyphs}</Text>
-      <Text style={textStyle}>{glyphs}</Text>
+      <Text style={bodyStyle}>{glyphs}</Text>
+      <Text style={bodyStyle}>{glyphs}</Text>
+      {/* Bright heads at the leading edge of each copy */}
+      <Text style={[headStyle, { position: 'absolute', left: 0, top: COPY_H - lineH * 2 }]}>{headGlyphs}</Text>
+      <Text style={[headStyle, { position: 'absolute', left: 0, top: COPY_H * 2 - lineH * 2 }]}>{headGlyphs}</Text>
     </Animated.View>
   );
 }
@@ -1216,6 +1639,18 @@ function DuskLinksBg({ v, style, children }: BgProps) {
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
+      {/* Big soft sun halo (real radial bloom, extends well past the disc) */}
+      <BreathingGlow cx="28%" cy="56%" r={120} color="#ff9a3a" periodMs={3600} min={0.3} max={0.5} />
+      {/* Crepuscular rays fanning up from the sun */}
+      <DuskRays />
+      {/* Warm haze band sitting on the horizon */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', '#ffcf7a55', 'transparent'] as const as readonly [string, string, ...string[]]}
+        locations={[0.55, 0.66, 0.78]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
       {/* Setting sun, pulsing gently just above the hills */}
       <Animated.View pointerEvents="none" style={[
         {
@@ -1229,22 +1664,52 @@ function DuskLinksBg({ v, style, children }: BgProps) {
       {/* Drifting clouds, warm-tinted */}
       <DriftingCloud top="14%" width={130} dur={34000} delay={0} />
       <DriftingCloud top="26%" width={90}  dur={26000} delay={9000} />
-      {/* Course silhouette: layered hills + flagstick */}
-      <Svg pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '34%' }} viewBox="0 0 100 40" preserveAspectRatio="none">
+      {/* Floating pollen motes catching the light */}
+      <SparkleField count={9} color="#ffe9a8" durationMs={3200} />
+      {/* Course silhouette: three layered hills + flagstick */}
+      <Svg pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: '40%' }} viewBox="0 0 100 40" preserveAspectRatio="none">
         {/* Far ridge */}
-        <Path d="M0 22 Q 18 14 36 20 T 70 18 Q 85 15 100 20 V40 H0 Z" fill="#241024" opacity="0.85" />
+        <Path d="M0 20 Q 18 12 36 18 T 70 16 Q 85 13 100 18 V40 H0 Z" fill="#2e1430" opacity="0.7" />
+        {/* Mid ridge */}
+        <Path d="M0 26 Q 30 18 60 24 T 100 22 V40 H0 Z" fill="#241024" opacity="0.9" />
         {/* Near fairway hill */}
-        <Path d="M0 30 Q 25 20 55 27 T 100 26 V40 H0 Z" fill="#120816" />
+        <Path d="M0 32 Q 25 23 55 29 T 100 28 V40 H0 Z" fill="#120816" />
         {/* Flagstick + flag on the near hill */}
-        <Line x1={62} y1={26.5} x2={62} y2={14} stroke="#0a050c" strokeWidth="0.7" />
-        <Path d="M62 14 L69.5 16.6 L62 19.2 Z" fill="#0a050c" />
+        <Line x1={62} y1={28.5} x2={62} y2={16} stroke="#0a050c" strokeWidth="0.7" />
+        <Path d="M62 16 L69.5 18.6 L62 21.2 Z" fill="#0a050c" />
       </Svg>
+      {/* Warm top vignette */}
+      <Vignette color="#0a0418" opacity={0.4} />
       {children}
     </View>
   );
 }
 
-function DriftingCloud({ top, width, dur, delay }: { top: any; width: number; dur: number; delay: number }) {
+/** Slow shimmering god-ray fan rising from the setting sun. */
+function DuskRays() {
+  const shim = useSharedValue(0);
+  useEffect(() => {
+    shim.value = withRepeat(withTiming(1, { duration: 4200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(shim);
+  }, [shim]);
+  const aStyle = useAnimatedStyle(() => ({ opacity: interpolate(shim.value, [0, 1], [0.1, 0.22]) }));
+  // Rays emanate from the sun (~28%, 56% of the frame) upward and outward.
+  const sx = 28, sy = 56;
+  const rays = [-40, -22, -8, 6, 22, 44];
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, aStyle]}>
+      <Svg style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        {rays.map((dx, i) => (
+          <Line key={i} x1={sx} y1={sy} x2={sx + dx} y2={sy - 70} stroke="#ffd27a" strokeOpacity={0.5} strokeWidth={1.6} strokeLinecap="round" />
+        ))}
+      </Svg>
+    </Animated.View>
+  );
+}
+
+function DriftingCloud({ top, width, dur, delay, color = 'rgba(255, 206, 150, 0.20)' }: {
+  top: any; width: number; dur: number; delay: number; color?: string;
+}) {
   const t = useSharedValue(0);
   useEffect(() => {
     t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
@@ -1258,7 +1723,7 @@ function DriftingCloud({ top, width, dur, delay }: { top: any; width: number; du
       {
         position: 'absolute', top, left: -width - 30,
         width, height: width * 0.22, borderRadius: width,
-        backgroundColor: 'rgba(255, 206, 150, 0.20)',
+        backgroundColor: color,
       },
       animStyle,
     ]} />
@@ -1296,42 +1761,62 @@ function ThunderBg({ v, style, children }: BgProps) {
   }));
   const b1Props = useAnimatedProps(() => ({ opacity: bolt1.value }));
   const b2Props = useAnimatedProps(() => ({ opacity: bolt2.value }));
+  const glowAId = useBgId('thA');
+  const glowBId = useBgId('thB');
+  const BOLT1 = 'M28 0 L24 42 L33 50 L20 98 L30 106 L17 160 M25 52 L14 76 M27 102 L38 128';
+  const BOLT2 = 'M74 8 L70 46 L79 54 L66 104 L76 112 L63 172 M71 58 L84 84';
 
   return (
     <View style={[{ overflow: 'hidden' }, style]}>
       <LinearGradient
-        colors={[v.from ?? '#0b0918', v.to ?? '#2a2440'] as const as readonly [string, string, ...string[]]}
+        colors={[v.from ?? '#0b0918', '#171232', v.to ?? '#2a2440'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
-      {/* Forked bolts: main channel + branches as subpaths of one Path */}
+      {/* Roiling storm clouds up top */}
+      <DriftingCloud top="2%"  width={170} dur={40000} delay={0}    color="rgba(90,84,130,0.22)" />
+      <DriftingCloud top="12%" width={120} dur={30000} delay={5000} color="rgba(120,112,160,0.16)" />
+      {/* Three parallax rain layers (denser + randomized) */}
+      <RainLayer dur={780}  delay={0}   opacity={0.34} count={14} slant={15} />
+      <RainLayer dur={1050} delay={300} opacity={0.22} count={11} slant={17} />
+      <RainLayer dur={1500} delay={600} opacity={0.12} count={8}  slant={13} color="#9aa4d9" />
+      {/* Forked bolts: a wide faint halo under a crisp core, plus a localized
+          flash bloom at the strike origin coupled to the same bolt driver. */}
       <Svg style={StyleSheet.absoluteFill} pointerEvents="none" preserveAspectRatio="none" viewBox="0 0 100 200">
-        <AnimatedPath
-          d="M28 0 L24 42 L33 50 L20 98 L30 106 L17 160 M25 52 L14 76 M27 102 L38 128"
-          stroke="#dcd2ff" strokeWidth="1.3" fill="none" strokeLinejoin="round"
-          animatedProps={b1Props}
-        />
-        <AnimatedPath
-          d="M74 8 L70 46 L79 54 L66 104 L76 112 L63 172 M71 58 L84 84"
-          stroke="#c4b8ff" strokeWidth="1.1" fill="none" strokeLinejoin="round"
-          animatedProps={b2Props}
-        />
+        <Defs>
+          <RadialGradient id={glowAId} cx="28" cy="2" r="16" gradientUnits="userSpaceOnUse">
+            <Stop offset="0" stopColor="#eae4ff" stopOpacity="0.9" />
+            <Stop offset="1" stopColor="#eae4ff" stopOpacity="0" />
+          </RadialGradient>
+          <RadialGradient id={glowBId} cx="74" cy="8" r="14" gradientUnits="userSpaceOnUse">
+            <Stop offset="0" stopColor="#d8ccff" stopOpacity="0.9" />
+            <Stop offset="1" stopColor="#d8ccff" stopOpacity="0" />
+          </RadialGradient>
+        </Defs>
+        <AnimatedPath d={BOLT1} stroke="#7a6fd9" strokeWidth="4" strokeOpacity={0.3} fill="none" strokeLinejoin="round" strokeLinecap="round" animatedProps={b1Props} />
+        <AnimatedPath d={BOLT1} stroke="#eae4ff" strokeWidth="1.3" fill="none" strokeLinejoin="round" strokeLinecap="round" animatedProps={b1Props} />
+        <AnimatedCircle cx="28" cy="2" r="16" fill={`url(#${glowAId})`} animatedProps={b1Props} />
+        <AnimatedPath d={BOLT2} stroke="#6a5fc9" strokeWidth="3.5" strokeOpacity={0.28} fill="none" strokeLinejoin="round" strokeLinecap="round" animatedProps={b2Props} />
+        <AnimatedPath d={BOLT2} stroke="#d8ccff" strokeWidth="1.1" fill="none" strokeLinejoin="round" strokeLinecap="round" animatedProps={b2Props} />
+        <AnimatedCircle cx="74" cy="8" r="14" fill={`url(#${glowBId})`} animatedProps={b2Props} />
       </Svg>
-      {/* Driving rain: two staggered groups of slanted streaks */}
-      <RainLayer dur={850} delay={0} opacity={0.32} />
-      <RainLayer dur={1150} delay={400} opacity={0.2} />
       {/* Sheet-lightning wash */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, flashStyle, { backgroundColor: '#cfc4ff' }]} />
+      <Vignette opacity={0.42} />
       {children}
     </View>
   );
 }
 
-function RainLayer({ dur, delay, opacity }: { dur: number; delay: number; opacity: number }) {
-  const streaks = useMemo(() => Array.from({ length: 7 }, (_, i) => ({
-    left: `${(i * 14 + Math.random() * 8) % 100}%`,
-    top: `${(i * 29) % 90}%`,
-  })), []);
+function RainLayer({ dur, delay, opacity, count = 12, slant = 16, color = '#bec8ff' }: {
+  dur: number; delay: number; opacity: number; count?: number; slant?: number; color?: string;
+}) {
+  const streaks = useMemo(() => Array.from({ length: count }, () => ({
+    left: `${Math.random() * 100}%`,
+    top: `${Math.random() * 90}%`,
+    h: 20 + Math.random() * 14,
+  })), [count]);
   const t = useSharedValue(0);
   useEffect(() => {
     t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
@@ -1348,12 +1833,495 @@ function RainLayer({ dur, delay, opacity }: { dur: number; delay: number; opacit
       {streaks.map((s, i) => (
         <View key={i} style={{
           position: 'absolute', left: s.left as any, top: s.top as any,
-          width: 1.5, height: 26, borderRadius: 1,
-          backgroundColor: '#bec8ff',
-          transform: [{ rotate: '16deg' }],
+          width: 1.5, height: s.h, borderRadius: 1,
+          backgroundColor: color,
+          transform: [{ rotate: `${slant}deg` }],
         }} />
       ))}
     </Animated.View>
+  );
+}
+
+// ── 18. Nebula (swirling cosmic gas clouds + drifting stars) ────────────────
+//
+// Distinct from `stars`: that one is twinkling pinpoints on a flat gradient.
+// This paints big soft radial gas clouds that slowly rotate AND breathe as one
+// sheet, with a separate (non-rotating) star field floating on top — so the
+// galaxy turns behind a still sky.
+
+type NebBlob = { cx: number; cy: number; rx: number; ry: number; color: string };
+
+function NebulaPlane({ blobs, spinMs, reverse, breatheMs, baseOpacity }: {
+  blobs: NebBlob[]; spinMs: number; reverse: boolean; breatheMs: number; baseOpacity: number;
+}) {
+  const spin = useSharedValue(0);
+  const breathe = useSharedValue(0);
+  useEffect(() => {
+    spin.value = withRepeat(withTiming(1, { duration: spinMs, easing: Easing.linear }), -1, false);
+    breathe.value = withRepeat(withTiming(1, { duration: breatheMs, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(spin); cancelAnimation(breathe); };
+  }, [spin, breathe, spinMs, breatheMs]);
+  const spinStyle = useAnimatedStyle(() => ({
+    transform: [
+      { rotate: `${interpolate(spin.value, [0, 1], reverse ? [360, 0] : [0, 360])}deg` },
+      { scale: interpolate(breathe.value, [0, 1], [1, 1.08]) },
+    ],
+    opacity: interpolate(breathe.value, [0, 1], [baseOpacity * 0.7, baseOpacity]),
+  }));
+  const prefix = useBgId('neb');
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, spinStyle]}>
+      <Svg style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        <Defs>
+          {blobs.map((b, i) => (
+            <RadialGradient key={i} id={`${prefix}_${i}`} cx="50%" cy="50%" r="50%">
+              <Stop offset="0" stopColor={b.color} stopOpacity="0.6" />
+              <Stop offset="0.6" stopColor={b.color} stopOpacity="0.2" />
+              <Stop offset="1" stopColor={b.color} stopOpacity="0" />
+            </RadialGradient>
+          ))}
+        </Defs>
+        {blobs.map((b, i) => <Ellipse key={i} cx={b.cx} cy={b.cy} rx={b.rx} ry={b.ry} fill={`url(#${prefix}_${i})`} />)}
+      </Svg>
+    </Animated.View>
+  );
+}
+
+function NebulaBg({ v, style, children }: BgProps) {
+  const raw: string[] = v.clouds ?? ['#b14ad9', '#4a6bd9', '#d94a8a'];
+  const c0 = raw[0] ?? '#b14ad9', c1 = raw[1] ?? '#4a6bd9', c2 = raw[2] ?? '#d94a8a';
+  const back: NebBlob[] = [
+    { cx: 34, cy: 42, rx: 50, ry: 36, color: c1 },
+    { cx: 70, cy: 60, rx: 44, ry: 34, color: c0 },
+    { cx: 54, cy: 26, rx: 36, ry: 28, color: c2 },
+  ];
+  const front: NebBlob[] = [
+    { cx: 28, cy: 64, rx: 30, ry: 22, color: c2 },
+    { cx: 76, cy: 36, rx: 28, ry: 24, color: c1 },
+    { cx: 50, cy: 50, rx: 24, ry: 20, color: c0 },
+    { cx: 62, cy: 78, rx: 22, ry: 18, color: '#7a3ab5' },
+  ];
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#070314', '#0a041e', v.to ?? '#13042a'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Two counter-drifting gas planes give real parallax instead of one
+          rigid turntable spin. */}
+      <NebulaPlane blobs={back} spinMs={60000} reverse={false} breatheMs={9000} baseOpacity={0.7} />
+      <NebulaPlane blobs={front} spinMs={38000} reverse breatheMs={6500} baseOpacity={0.85} />
+      {/* Hot cores */}
+      <BreathingGlow cx="34%" cy="42%" r={60} color="#ffd9f2" periodMs={5000} min={0.2} max={0.4} />
+      <BreathingGlow cx="72%" cy="58%" r={50} color="#cfe0ff" periodMs={6200} min={0.15} max={0.35} delay={1500} />
+      {/* Parallax star layers */}
+      <SparkleField count={20} color="#ffffff" durationMs={2400} />
+      <SparkleField count={12} color="#cfa8ff" durationMs={3400} />
+      {children}
+    </View>
+  );
+}
+
+// ── 19. Embers (magical glowing motes rising + swaying) ─────────────────────
+//
+// Calmer cousin of `flame`: instead of aggressive wisps it floats soft glowing
+// fireflies up the screen with a gentle horizontal sway, each fading in and out.
+
+const EMBER_RAMP = ['#ffe39a', '#ffcf7a', '#ff9d4a', '#ff6a3a'];
+
+function EmbersBg({ v, style, children }: BgProps) {
+  const color = v.accent ?? '#ffcf7a';
+  const motes = useMemo(() => Array.from({ length: 22 }, () => ({
+    left: Math.random() * 100,
+    size: 2 + Math.random() * 4,
+    delay: Math.random() * 5000,
+    dur: 5000 + Math.random() * 4500,
+    sway: (Math.random() * 2 - 1) * 34,
+    color: EMBER_RAMP[Math.floor(Math.random() * EMBER_RAMP.length)],
+  })), []);
+
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#0a0f0a', '#07120c', v.to ?? '#04140e'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Warm ground glow, plus a soft bloom over the embers' source */}
+      <LinearGradient
+        colors={['transparent', `${color}33`] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={[StyleSheet.absoluteFill, { opacity: 0.6 }]}
+      />
+      <BreathingGlow cx="50%" cy="96%" r={150} color={color} periodMs={5000} min={0.12} max={0.24} />
+      {motes.map((m, i) => <EmberMote key={i} {...m} />)}
+      <Vignette color="#02110a" opacity={0.4} />
+      {children}
+    </View>
+  );
+}
+
+function EmberMote({ left, size, delay, dur, sway, color }: {
+  left: number; size: number; delay: number; dur: number; sway: number; color: string;
+}) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, delay, dur]);
+  const aStyle = useAnimatedStyle(() => {
+    // Base rise/fade envelope, modulated by a fast flicker so each ember
+    // glimmers as it climbs (no extra driver — folded into the one timeline).
+    const env = interpolate(t.value, [0, 0.15, 0.75, 1], [0, 0.9, 0.7, 0]);
+    const flicker = 0.82 + 0.18 * Math.sin(t.value * Math.PI * 22);
+    return {
+      transform: [
+        { translateY: interpolate(t.value, [0, 1], [40, -260]) },
+        { translateX: interpolate(t.value, [0, 0.5, 1], [0, sway, 0]) },
+        { scale:      interpolate(t.value, [0, 0.2, 0.8, 1], [0.4, 1, 1, 0.5]) },
+      ],
+      opacity: env * flicker,
+    };
+  });
+  return (
+    <Animated.View pointerEvents="none" style={[
+      {
+        position: 'absolute', bottom: -10, left: `${left}%`,
+        width: size, height: size, borderRadius: size / 2,
+        backgroundColor: color,
+        shadowColor: color, shadowOpacity: 0.9, shadowRadius: size * 1.7, shadowOffset: { width: 0, height: 0 },
+      },
+      aStyle,
+    ]} />
+  );
+}
+
+// ── 20. Meteor Shower (twinkling sky + streaking meteors with tails) ────────
+
+function MeteorBg({ v, style, children }: BgProps) {
+  const color = v.accent ?? '#cfe0ff';
+  const stars = useMemo(() => Array.from({ length: 44 }, () => ({
+    cx: Math.random() * 100, cy: Math.random() * 65,
+    r: Math.random() * 1.1 + 0.25,
+    delay: Math.random() * 2000,
+    duration: 1800 + Math.random() * 1500,
+  })), []);
+  const meteors = useMemo(() => Array.from({ length: 6 }, (_, i) => ({
+    top: Math.random() * 38,
+    left: 38 + Math.random() * 60,
+    delay: i * 1200 + Math.random() * 1000,
+    dur: 1000 + Math.random() * 700,
+    len: 60 + Math.random() * 70,
+    // First couple are bright "hero" meteors; the rest are thin and faint.
+    scale: i < 2 ? 1.5 + Math.random() * 0.4 : 0.7 + Math.random() * 0.4,
+  })), []);
+
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#060814', '#0a0e22', v.to ?? '#0e1430'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Low nebula haze for depth under the horizon */}
+      <BreathingGlow cx="22%" cy="78%" r={120} color="#3a4a8a" periodMs={9000} min={0.1} max={0.22} />
+      <BreathingGlow cx="80%" cy="70%" r={100} color="#6a3a8a" periodMs={11000} min={0.08} max={0.18} delay={1800} />
+      {/* Far star haze (parallax) behind the near twinkles */}
+      <SparkleField count={14} color="#9fb8e0" durationMs={3200} />
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        {stars.map((s, i) => <TwinklingStar key={i} {...s} />)}
+      </Svg>
+      {meteors.map((m, i) => <Meteor key={i} {...m} color={color} />)}
+      {children}
+    </View>
+  );
+}
+
+function Meteor({ top, left, delay, dur, len, color, scale }: {
+  top: number; left: number; delay: number; dur: number; len: number; color: string; scale: number;
+}) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    // One streak, then a dark gap before the next, so the sky isn't a constant
+    // rain of meteors — they arrive in occasional flashes.
+    t.value = withDelay(delay, withRepeat(
+      withSequence(
+        withTiming(1, { duration: dur, easing: Easing.in(Easing.quad) }),
+        withDelay(2400 + Math.random() * 1800, withTiming(1, { duration: 0 })),
+        withTiming(0, { duration: 0 }),
+      ), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, delay, dur]);
+  const aStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(t.value, [0, 0.1, 0.85, 1], [0, 1, 1, 0]),
+    transform: [
+      { translateX: interpolate(t.value, [0, 1], [0, -230]) },
+      { translateY: interpolate(t.value, [0, 1], [0, 230]) },
+      { rotate: '135deg' },
+    ],
+  }));
+  const thick = 3 * scale;
+  const headSize = 5 * scale;
+  return (
+    <Animated.View pointerEvents="none" style={[
+      { position: 'absolute', top: `${top}%`, left: `${left}%`, width: len, height: thick },
+      aStyle,
+    ]}>
+      {/* Soft tapered tail (wide faint halo brightening into the head) */}
+      <LinearGradient
+        colors={['transparent', `${color}66`, color] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.7, 1]}
+        start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }}
+        style={[StyleSheet.absoluteFill, { borderRadius: thick }]}
+      />
+      {/* Glowing fireball head */}
+      <View style={{
+        position: 'absolute', right: -headSize * 0.4, top: (thick - headSize) / 2,
+        width: headSize, height: headSize, borderRadius: headSize / 2,
+        backgroundColor: '#ffffff',
+        shadowColor: color, shadowOpacity: 1, shadowRadius: 7 * scale, shadowOffset: { width: 0, height: 0 },
+      }} />
+    </Animated.View>
+  );
+}
+
+// ── 21. Plasma (lava-lamp morphing colour blobs) ────────────────────────────
+//
+// Soft radial blobs drift, swell and shrink on slow out-of-phase sine loops so
+// they merge and split like a lava lamp. SVG RadialGradient gives true soft
+// falloff (cross-platform, unlike shadow-only blur).
+
+function PlasmaBg({ v, style, children }: BgProps) {
+  const cols: string[] = v.colors ?? ['#7a2ad9', '#2a6bd9', '#d92a8a', '#2ad9c4', '#c98a2a'];
+  const prefix = useBgId('plasma');   // per-instance so two plasma cards never collide
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#0b0518', '#0a0420', v.to ?? '#04030f'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.5, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox="0 0 100 100" preserveAspectRatio="none">
+        <Defs>
+          {cols.map((c, i) => (
+            <RadialGradient key={i} id={`${prefix}_${i}`} cx="50%" cy="50%" r="50%">
+              <Stop offset="0" stopColor={c} stopOpacity="0.9" />
+              <Stop offset="0.5" stopColor={c} stopOpacity="0.4" />
+              <Stop offset="1" stopColor={c} stopOpacity="0" />
+            </RadialGradient>
+          ))}
+        </Defs>
+        {cols.map((_, i) => <PlasmaBlob key={i} index={i} total={cols.length} gradId={`${prefix}_${i}`} />)}
+      </Svg>
+      {/* Rising motes for foreground life */}
+      <SparkleField count={7} color="#d9b6ff" durationMs={3000} />
+      <Vignette opacity={0.45} />
+      {children}
+    </View>
+  );
+}
+
+function PlasmaBlob({ index, total, gradId }: { index: number; total: number; gradId: string }) {
+  // Three INDEPENDENT drivers (cx / cy / r) so the blob traces a Lissajous
+  // wander instead of pulsing in lockstep.
+  const cxD = useSharedValue(0);
+  const cyD = useSharedValue(0);
+  const rD = useSharedValue(0);
+  useEffect(() => {
+    cxD.value = withDelay(index * 300, withRepeat(withTiming(1, { duration: 9000 + index * 900, easing: Easing.inOut(Easing.sin) }), -1, true));
+    cyD.value = withDelay(index * 500, withRepeat(withTiming(1, { duration: 13000 + index * 700, easing: Easing.inOut(Easing.sin) }), -1, true));
+    rD.value  = withDelay(index * 200, withRepeat(withTiming(1, { duration: 7000 + index * 600, easing: Easing.inOut(Easing.sin) }), -1, true));
+    return () => { cancelAnimation(cxD); cancelAnimation(cyD); cancelAnimation(rD); };
+  }, [cxD, cyD, rD, index]);
+  const baseCx = (index / total) * 70 + 15;
+  const baseCy = ((index * 41) % 60) + 20;
+  const ampX = index % 2 === 0 ? 34 : -34;
+  const ampY = index % 3 === 0 ? 30 : -28;
+  const aProps = useAnimatedProps(() => ({
+    cx: baseCx + interpolate(cxD.value, [0, 1], [-ampX, ampX]),
+    cy: baseCy + interpolate(cyD.value, [0, 1], [-ampY, ampY]),
+    r:  interpolate(rD.value, [0, 1], [32, 50]),
+  }));
+  return <AnimatedCircle animatedProps={aProps} cx={baseCx} cy={baseCy} r={40} fill={`url(#${gradId})`} />;
+}
+
+// ── 22. Blizzard (parallax snowfall over an icy gradient) ────────────────────
+
+function BlizzardBg({ v, style, children }: BgProps) {
+  const accent = v.accent ?? '#cfe6ff';
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#1a2a3e', '#122236', v.to ?? '#0a1420'] as const as readonly [string, string, ...string[]]}
+        locations={[0, 0.55, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Cold top bloom */}
+      <LinearGradient
+        colors={[`${accent}22`, 'transparent'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={[StyleSheet.absoluteFill, { opacity: 0.7 }]}
+      />
+      {/* Four parallax depth layers: glowing close flakes down to a faint far haze */}
+      <SnowLayer count={14} size={3.5} dur={6500}  drift={26} opacity={0.95} glow />
+      <SnowLayer count={18} size={2.5} dur={9000}  drift={18} opacity={0.7} />
+      <SnowLayer count={22} size={1.6} dur={12000} drift={12} opacity={0.5} />
+      <SnowLayer count={20} size={1.0} dur={15000} drift={8}  opacity={0.32} color="#9fc0e6" />
+      {/* Drifted ground fog */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['transparent', `${accent}33`] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0.78 }} end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {children}
+    </View>
+  );
+}
+
+function SnowLayer({ count, size, dur, drift, opacity, glow = false, color = '#ffffff' }: {
+  count: number; size: number; dur: number; drift: number; opacity: number; glow?: boolean; color?: string;
+}) {
+  const flakes = useMemo(() => Array.from({ length: count }, () => ({
+    left: Math.random() * 100,
+    delay: Math.random() * dur,
+  })), [count, dur]);
+  return (
+    <>
+      {flakes.map((f, i) => (
+        <Snowflake key={i} left={f.left} delay={f.delay} size={size} dur={dur} drift={drift} opacity={opacity} glow={glow} color={color} />
+      ))}
+    </>
+  );
+}
+
+function Snowflake({ left, delay, size, dur, drift, opacity, glow = false, color = '#ffffff' }: {
+  left: number; delay: number; size: number; dur: number; drift: number; opacity: number; glow?: boolean; color?: string;
+}) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withDelay(delay, withRepeat(withTiming(1, { duration: dur, easing: Easing.linear }), -1, false));
+    return () => cancelAnimation(t);
+  }, [t, delay, dur]);
+  const aStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(t.value, [0, 1], [-20, 320]) },
+      { translateX: interpolate(t.value, [0, 0.5, 1], [0, drift, 0]) },
+    ],
+    opacity: interpolate(t.value, [0, 0.1, 0.9, 1], [0, opacity, opacity, 0]),
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[
+      {
+        position: 'absolute', left: `${left}%`, top: -10,
+        width: size, height: size, borderRadius: size / 2,
+        backgroundColor: color,
+        ...(glow ? { shadowColor: '#eaf3ff', shadowOpacity: 0.9, shadowRadius: size * 1.4, shadowOffset: { width: 0, height: 0 } } : null),
+      },
+      aStyle,
+    ]} />
+  );
+}
+
+// ── 23. Prism (prismatic light shafts radiating from a bright core) ─────────
+//
+// A bright central source breathes while two counter-rotating layers of soft
+// colour shafts fan out from it over the full 360, each shaft jittered in
+// width/length/opacity so it reads as refracted light, not a rigid wheel.
+
+function PrismLayer({ cols, spinMs, reverse, half, len, baseOpacity, angleOffset }: {
+  cols: string[]; spinMs: number; reverse: boolean; half: number; len: number; baseOpacity: number; angleOffset: number;
+}) {
+  const spin = useSharedValue(0);
+  const shimmer = useSharedValue(0);
+  useEffect(() => {
+    spin.value = withRepeat(withTiming(1, { duration: spinMs, easing: Easing.linear }), -1, false);
+    shimmer.value = withRepeat(withTiming(1, { duration: 3200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { cancelAnimation(spin); cancelAnimation(shimmer); };
+  }, [spin, shimmer, spinMs]);
+  const spinStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(spin.value, [0, 1], reverse ? [360, 0] : [0, 360])}deg` }],
+    opacity: interpolate(shimmer.value, [0, 1], [baseOpacity * 0.6, baseOpacity]),
+  }));
+  const prefix = useBgId('prism');
+  const n = cols.length;
+  // Each shaft spans -l..+l so a single rect covers two opposite directions;
+  // n shafts therefore cover the full 360.
+  const beams = useMemo(() => cols.map((c, i) => ({
+    color: c,
+    angle: (i * 360) / n + angleOffset,
+    w: half * (0.7 + Math.random() * 0.7),
+    l: len * (0.75 + Math.random() * 0.4),
+    op: 0.6 + Math.random() * 0.4,
+  })), [cols, n, half, len, angleOffset]);
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, spinStyle]}>
+      <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
+        <Defs>
+          {beams.map((b, i) => (
+            <SvgLinearGradient key={i} id={`${prefix}_${i}`} x1="0" y1={-b.l} x2="0" y2={b.l} gradientUnits="userSpaceOnUse">
+              <Stop offset="0" stopColor={b.color} stopOpacity="0" />
+              <Stop offset="0.5" stopColor={b.color} stopOpacity={b.op} />
+              <Stop offset="1" stopColor={b.color} stopOpacity="0" />
+            </SvgLinearGradient>
+          ))}
+        </Defs>
+        {beams.map((b, i) => (
+          <G key={i} rotation={b.angle} origin="0, 0">
+            <Rect x={-b.w} y={-b.l} width={b.w * 2} height={b.l * 2} fill={`url(#${prefix}_${i})`} />
+          </G>
+        ))}
+      </Svg>
+    </Animated.View>
+  );
+}
+
+function PrismBg({ v, style, children }: BgProps) {
+  const cols: string[] = v.colors ?? ['#ff6b9d', '#ffd166', '#5ad9c4', '#74a8ff', '#c779ff'];
+  const near = useMemo(() => [...cols].reverse(), [cols]);
+  const coreId = useBgId('prismcore');
+  const breathe = useSharedValue(0);
+  useEffect(() => {
+    breathe.value = withRepeat(withTiming(1, { duration: 4000, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(breathe);
+  }, [breathe]);
+  const coreProps = useAnimatedProps(() => ({
+    r: interpolate(breathe.value, [0, 1], [10, 16]),
+    opacity: interpolate(breathe.value, [0, 1], [0.6, 1]),
+  }));
+  return (
+    <View style={[{ overflow: 'hidden' }, style]}>
+      <LinearGradient
+        colors={[v.from ?? '#0a0a14', v.to ?? '#141020'] as const as readonly [string, string, ...string[]]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={StyleSheet.absoluteFill}
+      />
+      {/* Far + near counter-rotating shaft layers (parallax depth) */}
+      <PrismLayer cols={cols} spinMs={34000} reverse={false} half={6} len={62} baseOpacity={0.4} angleOffset={0} />
+      <PrismLayer cols={near} spinMs={20000} reverse half={4} len={70} baseOpacity={0.55} angleOffset={36} />
+      {/* Bright central source the shafts emanate from */}
+      <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+        <Svg style={StyleSheet.absoluteFill} viewBox="-50 -50 100 100" preserveAspectRatio="xMidYMid slice">
+          <Defs>
+            <RadialGradient id={coreId} cx="0" cy="0" r="18" gradientUnits="userSpaceOnUse">
+              <Stop offset="0" stopColor="#ffffff" stopOpacity="0.95" />
+              <Stop offset="0.4" stopColor="#ffe9f5" stopOpacity="0.5" />
+              <Stop offset="1" stopColor="#ffe9f5" stopOpacity="0" />
+            </RadialGradient>
+          </Defs>
+          <AnimatedCircle cx={0} cy={0} r={14} fill={`url(#${coreId})`} animatedProps={coreProps} />
+        </Svg>
+      </View>
+      {/* Iridescent motes */}
+      <SparkleField count={6} color="#ffffff" durationMs={2400} />
+      {children}
+    </View>
   );
 }
 

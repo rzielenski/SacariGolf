@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import { skinById, readActiveSkinId } from './skins';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Earlier "earthy vintage" palette — keep here for one-line revert if needed.
@@ -15,35 +16,48 @@ import { Platform } from 'react-native';
 // + sword pommel, silver blade. `gold` and `goldLight` are the warm-gold accent
 // pair; `text` and `textMuted` are silver tones used for body copy.
 //
-// PALETTE NOTES (2026 refresh):
-//   The dark surfaces used to lean warm (#0e0e10, #16161a, brown-tinged border)
-//   which muddied the contrast against the gold. Switched the surface stack
-//   to a slightly cooler near-black so the warm gold pops harder by complement,
-//   and dropped the border to a steel-grey-with-faint-gold instead of brown.
-//   Net effect: gold reads ~10% brighter against the same backgrounds, and
-//   text contrast against card/cardAlt surfaces measures cleaner.
+// SKINS (2026):
+//   `C` is no longer hard-coded — it's built from the player's active skin,
+//   resolved SYNCHRONOUSLY at module-eval (see lib/skins.ts) so it's in place
+//   before any StyleSheet.create captures it. The `default` skin is the exact
+//   palette below, so this is non-breaking: anyone who never picks a skin sees
+//   the original Sacari Classic. Switching a skin persists + reloads the bundle,
+//   re-evaluating this module against the new palette.
+//
+//   The shipped palette lives in skins.ts (DEFAULT_PALETTE). The annotated
+//   reference for it (kept for readability / one-line revert):
+//     bg #000000  surface #050507  card #0a0a0d  cardAlt #121216  border #1d1c18
+//     gold #d4a93f (antique gold)  goldLight #f0c95a
+//     text #ebe9df (polished silver)  textMuted #9a978a  textDim #4a4740
+//     green #7aab78 (WIN)  red #b03434 (LOSS/danger)  blue #7a96b8 (in-progress)
+const _skin = skinById(readActiveSkinId());
+const _p = _skin.palette;
+
+/** The id of the skin this module evaluated against. */
+export const ACTIVE_SKIN_ID = _skin.id;
+
 export const C = {
-  bg:        '#000000',  // pure black — matches the icon background exactly
-  surface:   '#050507',  // truer near-black, slight cool cast for depth
-  card:      '#0a0a0d',  // raised card — cooler than prev #0e0e10
-  cardAlt:   '#121216',  // lifted card — cooler than prev #16161a
-  border:    '#1d1c18',  // steel-with-faint-gold (was warm brown)
-  gold:      '#d4a93f',  // rich antique gold (matches SACARI lettering)
-  goldLight: '#f0c95a',  // brighter gold highlight
-  text:      '#ebe9df',  // bright polished silver — body text (touch brighter)
-  textMuted: '#9a978a',  // tarnished silver-grey
-  textDim:   '#4a4740',  // deep silver shadow
-  green:     '#7aab78',  // sage — WIN / JOIN / Playing Now
-  red:       '#b03434',  // crimson — LOSS / danger
-  blue:      '#7a96b8',  // steel blue — IN PROGRESS / info
+  bg:        _p.bg,
+  surface:   _p.surface,
+  card:      _p.card,
+  cardAlt:   _p.cardAlt,
+  border:    _p.border,
+  gold:      _p.gold,
+  goldLight: _p.goldLight,
+  text:      _p.text,
+  textMuted: _p.textMuted,
+  textDim:   _p.textDim,
+  green:     _p.green,
+  red:       _p.red,
+  blue:      _p.blue,
 };
 
 // Silver accent — exposed alongside `gold` for places that want the cool
 // counterpoint to gold (sword-blade highlights, secondary chrome). Most of the
 // app already uses `text` (which is silver) so this is mainly for borders
 // and rule lines that want explicit silver vs gold contrast.
-export const SILVER = '#c8c5b8';
-export const SILVER_DIM = '#7a786d';
+export const SILVER = _p.silver;
+export const SILVER_DIM = _p.silverDim;
 
 // Old-book serif for headings; keep mono for code/IDs.
 export const F = {

@@ -1,35 +1,39 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, Animated, Image, TouchableOpacity, Easing, Modal,
+  View, Text, StyleSheet, Image, Modal, Dimensions,
 } from 'react-native';
+import Animated, {
+  useSharedValue, useAnimatedStyle, withTiming, withDelay, withRepeat,
+  withSequence, withSpring, interpolate, Easing, cancelAnimation, Extrapolation,
+} from 'react-native-reanimated';
+import { LinearGradient } from 'expo-linear-gradient';
 import * as themePlayer from '../lib/themePlayer';
 import { C, F } from '../lib/colors';
 import { API_BASE } from '../lib/api';
 import { RankCrest } from './RankCrest';
 import { ShimmerButton } from './ui/ShimmerButton';
 import { useCensor } from '../lib/censor';
+import { GlowPulse, ShockwaveRing, ParticleBurst, SparkleField } from './vfx';
 
 /**
- * Match-found intro screen — animated reveal of both teams' clan info,
- * member rosters, and ELOs. While the modal is up, the OPPONENT's clan
- * theme song preview plays in the background. First-render only — once
- * dismissed it doesn't re-show for the same match.
+ * Match-found intro — a cinematic reveal of both sides, then a clash where they
+ * meet and the VS badge ignites. While the modal is up, the OPPONENT's theme
+ * song plays. First-render only (caller tracks "have I shown this" per match).
  *
- * Designed to be shown over the match page on first view of a newly-paired
- * match. Caller is responsible for tracking "have I shown this yet" state
- * (typically via AsyncStorage keyed on match_id).
+ * Rebuilt on reanimated worklets + the shared VFX primitives so the entrance
+ * has weight: sides slam in on a heavy decel curve, collide with a shockwave +
+ * spark burst at the badge, and the VS badge springs in with a halo and a
+ * recurring light sweep. Drop-in: same props, Modal, theme handoff, dismiss.
  */
 export type SidePlayer = {
   user_id: string;
   username: string;
   avatar_url?: string | null;
   elo?: number | null;
-  // Per-user theme — used when no team theme is set (solos use this).
   user_theme_title?: string | null;
   user_theme_artist?: string | null;
   user_theme_artwork?: string | null;
   user_theme_preview?: string | null;
-  // Team attribution. Takes priority over per-user theme when present.
   clan_name?: string | null;
   clan_elo?: number | null;
   clan_avatar_url?: string | null;
@@ -39,13 +43,19 @@ export type SidePlayer = {
   clan_theme_preview?: string | null;
 };
 
+const { width: SCREEN_W } = Dimensions.get('window');
+const E_OUT = Easing.out(Easing.cubic);
+const E_SIN = Easing.inOut(Easing.sin);
+const SLAM  = Easing.bezier(0.16, 1, 0.3, 1); // heavy late decel
+
+// VS badge VFX field — larger than the badge and centred on it so the clash
+// shockwave + ignition sparks fan out past it into the gap between the cards.
+const BADGE = 60;
+const VS_FIELD = 176;
+const VS_OFFSET = (BADGE - VS_FIELD) / 2;
+
 export function MatchFoundIntro({
-  visible,
-  matchType,         // 'solo' | 'duo' | 'squad' — controls banner + theme source
-  meSide,            // which side (1 or 2) belongs to the viewer
-  side1Players,
-  side2Players,
-  onDismiss,
+  visible, matchType, meSide, side1Players, side2Players, onDismiss,
 }: {
   visible: boolean;
   matchType: string;
@@ -54,26 +64,18 @@ export function MatchFoundIntro({
   side2Players: SidePlayer[];
   onDismiss: () => void;
 }) {
-  // Solo matches always show individual identity (avatar / username /
-  // personal theme). Team matches (duo, squad, anything else with multiple
-  // players per side) show the team banner + team theme. We branch on
-  // match type so a solo player who happens to be in a duo doesn't get
-  // their duo's banner pasted onto a 1v1 match.
   const isTeamMatch = matchType !== 'solo';
   const c = useCensor();
-  const fadeIn = useRef(new Animated.Value(0)).current;
-  const leftSlide = useRef(new Animated.Value(-300)).current;
-  const rightSlide = useRef(new Animated.Value(300)).current;
-  const versusScale = useRef(new Animated.Value(0)).current;
 
-  // Pick the OPPONENT side's theme preview based on match type:
-  //   • solo → opponent's personal theme only
-  //   • duo / squad → opponent's team theme only (no falling back to a
-  //     teammate's personal theme — if the team hasn't set one, we go silent)
-  //
-  // Memoized so the audio useEffect below doesn't get re-fired if the parent
-  // re-renders with the same data — its deps are `[visible, opponentTheme]`
-  // and unstable references would unload/reload the sound mid-playback.
+  // ── Drivers ─────────────────────────────────────────────────────────────
+  const fade   = useSharedValue(0);
+  const slam   = useSharedValue(0);
+  const clash  = useSharedValue(0);
+  const ignite = useSharedValue(0);
+  const sweep  = useSharedValue(0);
+  const cta    = useSharedValue(0);
+
+  // Pick the OPPONENT side's theme (solo = personal, team = clan only).
   const { opponentTheme, opponentThemeTitle } = useMemo(() => {
     const opponentPlayers = meSide === 1 ? side2Players : side1Players;
     if (isTeamMatch) {
@@ -90,69 +92,74 @@ export function MatchFoundIntro({
     };
   }, [isTeamMatch, meSide, side1Players, side2Players]);
 
-  // Run animations when the modal becomes visible.
+  // Run the entrance timeline when the modal becomes visible.
   useEffect(() => {
     if (!visible) return;
-    fadeIn.setValue(0);
-    leftSlide.setValue(-300);
-    rightSlide.setValue(300);
-    versusScale.setValue(0);
+    fade.value = 0; slam.value = 0; clash.value = 0; ignite.value = 0; sweep.value = 0; cta.value = 0;
 
-    Animated.sequence([
-      Animated.parallel([
-        Animated.timing(fadeIn, { toValue: 1, duration: 250, useNativeDriver: true }),
-        Animated.timing(leftSlide, { toValue: 0, duration: 500, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-        Animated.timing(rightSlide, { toValue: 0, duration: 500, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      ]),
-      Animated.spring(versusScale, { toValue: 1, friction: 4, useNativeDriver: true }),
-    ]).start();
+    fade.value = withTiming(1, { duration: 260, easing: E_OUT });
+    slam.value = withDelay(120, withTiming(1, { duration: 460, easing: SLAM }));
+    clash.value = withDelay(470, withSequence(
+      withTiming(1, { duration: 90, easing: Easing.out(Easing.quad) }),
+      withTiming(0, { duration: 380, easing: Easing.in(Easing.quad) }),
+    ));
+    ignite.value = withDelay(520, withSpring(1, { mass: 0.9, damping: 11, stiffness: 170 }));
+    cta.value = withDelay(720, withTiming(1, { duration: 320, easing: E_OUT }));
+    sweep.value = withDelay(1000, withRepeat(withSequence(
+      withTiming(1, { duration: 560, easing: Easing.inOut(Easing.quad) }),
+      withDelay(3200, withTiming(1, { duration: 0 })),
+      withTiming(0, { duration: 0 }),
+    ), -1, false));
+
+    return () => { [fade, slam, clash, ignite, sweep, cta].forEach(cancelAnimation); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
-  // Hand the opponent's theme off to the singleton player. The Sound is
-  // owned at the module level so it KEEPS playing after this modal
-  // dismisses — the previous version stopped after ~2.5s when the intro
-  // closed, cutting off 28s of a 30s preview. We never call stop() here
-  // because the user explicitly asked for the full preview to ride past
-  // the animation. The player self-unloads on didJustFinish.
+  // Hand the opponent's theme to the singleton player (rides past dismiss).
   useEffect(() => {
     if (!visible || !opponentTheme) return;
     themePlayer.play(opponentTheme);
   }, [visible, opponentTheme]);
 
-  // Don't early-return on !visible — the Modal handles that itself. Bailing
-  // out here would unmount the Animated.Value refs and reset the animation
-  // each time the parent re-renders, defeating the whole purpose.
+  // Do NOT early-return on !visible — the Modal gates visibility; bailing here
+  // would reset the shared values on every parent re-render.
 
-  const renderSide = (
-    players: SidePlayer[],
-    isMe: boolean,
-    slide: Animated.Value,
-  ) => {
-    // SOLO — show JUST the player. No clan banner, no member list, the
-    // player IS the side. Theme pill (when this is the opponent) shows
-    // the opponent's personal anthem.
+  const backdropStyle = useAnimatedStyle(() => ({ opacity: fade.value }));
+  const leftStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(slam.value, [0, 1], [-SCREEN_W * 0.62, 0]) + interpolate(clash.value, [0, 1], [0, -6]) }],
+  }));
+  const rightStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: interpolate(slam.value, [0, 1], [SCREEN_W * 0.62, 0]) + interpolate(clash.value, [0, 1], [0, 6]) }],
+  }));
+  const badgeStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(ignite.value, [0, 0.2], [0, 1], Extrapolation.CLAMP),
+    transform: [{ scale: ignite.value }],
+  }));
+  const sweepStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(sweep.value, [0, 0.2, 0.8, 1], [0, 0.75, 0.75, 0], Extrapolation.CLAMP),
+    transform: [{ translateX: interpolate(sweep.value, [0, 1], [-BADGE, BADGE]) }, { rotate: '22deg' }],
+  }));
+  const ctaStyle = useAnimatedStyle(() => ({
+    opacity: cta.value,
+    transform: [{ translateY: interpolate(cta.value, [0, 1], [16, 0]) }],
+  }));
+
+  const renderSide = (players: SidePlayer[], isMe: boolean, animStyle: any) => {
+    // SOLO — the player IS the side.
     if (!isTeamMatch) {
       const p = players[0];
       const avatar = p?.avatar_url ? `${API_BASE}${p.avatar_url}` : null;
       const name = p?.username ? c(p.username) : '—';
       const elo = p?.elo ?? null;
       return (
-        <Animated.View
-          style={[
-            s.sideCol,
-            isMe ? s.sideMe : s.sideOpponent,
-            { transform: [{ translateX: slide }] },
-          ]}
-        >
+        <Animated.View style={[s.sideCol, isMe ? s.sideMe : s.sideOpponent, animStyle]}>
           <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
           <RankCrest elo={elo ?? 0} size={72} avatarBorderRadius={8} style={s.crestSpacer}>
             {avatar ? (
               <Image source={{ uri: avatar }} style={s.clanAvatarInner} />
             ) : (
               <View style={[s.clanAvatarInner, s.clanAvatarFallback]}>
-                <Text style={s.clanAvatarFallbackText}>
-                  {name[0]?.toUpperCase()}
-                </Text>
+                <Text style={s.clanAvatarFallbackText}>{name[0]?.toUpperCase()}</Text>
               </View>
             )}
           </RankCrest>
@@ -161,35 +168,22 @@ export function MatchFoundIntro({
           {!isMe && opponentTheme && opponentThemeTitle && (
             <View style={s.themePill}>
               <Text style={s.themePillLabel}>♫ ANTHEM</Text>
-              <Text style={s.themePillTitle} numberOfLines={1}>
-                {opponentThemeTitle}
-              </Text>
+              <Text style={s.themePillTitle} numberOfLines={1}>{opponentThemeTitle}</Text>
             </View>
           )}
         </Animated.View>
       );
     }
 
-    // TEAM (duo / squad) — show the clan banner up top, then list every
-    // player underneath. Falls back to the first player's identity only if
-    // none of the players on this side actually have a clan attached
-    // (defensive — pairing should already require it for team matches).
+    // TEAM (duo / squad) — clan banner + member roster.
     const lead = players.find((p) => p.clan_name) ?? players[0];
     const clanAvatar = lead?.clan_avatar_url ? `${API_BASE}${lead.clan_avatar_url}` : null;
     const rawClanName = lead?.clan_name ?? lead?.username ?? '—';
     const clanName = c(rawClanName);
     const clanElo = lead?.clan_elo ?? lead?.elo ?? null;
     return (
-      <Animated.View
-        style={[
-          s.sideCol,
-          isMe ? s.sideMe : s.sideOpponent,
-          { transform: [{ translateX: slide }] },
-        ]}
-      >
+      <Animated.View style={[s.sideCol, isMe ? s.sideMe : s.sideOpponent, animStyle]}>
         <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
-        {/* Crest wraps the clan emblem and ranks by the clan's SR so the
-            tier symbolises team strength, not any single member's grind. */}
         <RankCrest elo={clanElo ?? 0} size={72} avatarBorderRadius={8} style={s.crestSpacer}>
           {clanAvatar ? (
             <Image source={{ uri: clanAvatar }} style={s.clanAvatarInner} />
@@ -221,49 +215,59 @@ export function MatchFoundIntro({
         {!isMe && opponentTheme && opponentThemeTitle && (
           <View style={s.themePill}>
             <Text style={s.themePillLabel}>♫ ANTHEM</Text>
-            <Text style={s.themePillTitle} numberOfLines={1}>
-              {opponentThemeTitle}
-            </Text>
+            <Text style={s.themePillTitle} numberOfLines={1}>{opponentThemeTitle}</Text>
           </View>
         )}
       </Animated.View>
     );
   };
 
-  // Wrapping in <Modal transparent> so the overlay floats above EVERY screen
-  // regardless of where MatchFoundWatcher sits in the layout tree. Without
-  // this, an absolute-positioned View can be drawn UNDER the Stack navigator
-  // (later siblings paint on top), making the intro invisible until you
-  // navigate.
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      onRequestClose={onDismiss}
-      statusBarTranslucent
-    >
-      <Animated.View style={[s.backdrop, { opacity: fadeIn }]} pointerEvents="auto">
+    <Modal visible={visible} transparent animationType="none" onRequestClose={onDismiss} statusBarTranslucent>
+      <Animated.View style={[s.backdrop, backdropStyle]} pointerEvents="auto">
+        {/* Energy backdrop: a gold-vs-red conflict wash meeting at the centre,
+            plus a faint gold sparkle drift. Reads as charged, not flat black. */}
+        <LinearGradient
+          pointerEvents="none"
+          colors={[C.gold + '22', 'transparent', C.red + '22']}
+          start={{ x: 0, y: 0.5 }} end={{ x: 1, y: 0.5 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <SparkleField count={14} color={C.goldLight} active={visible} durationMs={2600} />
+
         <View style={s.row}>
-          {renderSide(side1Players, meSide === 1, leftSlide)}
+          {renderSide(side1Players, meSide === 1, leftStyle)}
 
-          <Animated.View style={[s.versusBadge, { transform: [{ scale: versusScale }] }]}>
-            <Text style={s.versusText}>VS</Text>
-          </Animated.View>
+          <View style={s.versusZone}>
+            {/* Halo behind the badge */}
+            <View pointerEvents="none" style={s.vsField}>
+              <GlowPulse size={VS_FIELD} color={C.gold} maxOpacity={0.42} periodMs={1900} active={visible} />
+            </View>
+            {/* Clash shockwave + spark burst, timed to the moment the sides meet */}
+            <View pointerEvents="none" style={s.vsField}>
+              <ShockwaveRing size={VS_FIELD} color={C.goldLight} rings={2} durationMs={560} delay={470} active={visible} replayKey={visible} />
+            </View>
 
-          {renderSide(side2Players, meSide === 2, rightSlide)}
+            {/* The badge itself */}
+            <Animated.View style={[s.versusBadge, badgeStyle]}>
+              <Text style={s.versusText}>VS</Text>
+              <Animated.View pointerEvents="none" style={[s.sweepBar, sweepStyle]} />
+            </Animated.View>
+
+            {/* Ignition sparks fly over the badge */}
+            <View pointerEvents="none" style={s.vsField}>
+              <ParticleBurst size={VS_FIELD} count={14} color={C.goldLight} color2={C.text} particleR={2.6} durationMs={640} delay={500} active={visible} replayKey={visible} />
+            </View>
+          </View>
+
+          {renderSide(side2Players, meSide === 2, rightStyle)}
         </View>
 
-        {/* Dismiss button uses ShimmerButton so a subtle gold-light highlight
-            sweeps across every ~4 seconds — draws the eye to the action
-            without being a constant motion distraction. */}
-        <ShimmerButton
-          onPress={onDismiss}
-          background={C.gold}
-          style={s.dismissBtn}
-        >
-          <Text style={s.dismissText}>TAP TO START</Text>
-        </ShimmerButton>
+        <Animated.View style={[s.ctaWrap, ctaStyle]}>
+          <ShimmerButton onPress={onDismiss} background={C.gold} style={s.dismissBtn}>
+            <Text style={s.dismissText}>TAP TO START</Text>
+          </ShimmerButton>
+        </Animated.View>
       </Animated.View>
     </Modal>
   );
@@ -274,24 +278,19 @@ const s = StyleSheet.create({
     position: 'absolute', top: 0, bottom: 0, left: 0, right: 0,
     backgroundColor: 'rgba(0,0,0,0.92)',
     justifyContent: 'center', alignItems: 'center',
+    overflow: 'hidden',
     zIndex: 100,
   },
   row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, gap: 12 },
 
   sideCol: {
     flex: 1, alignItems: 'center',
-    backgroundColor: C.card, borderRadius: 12, padding: 14,
-    borderWidth: 2,
+    backgroundColor: C.card, borderRadius: 12, padding: 14, borderWidth: 2,
   },
   sideMe:       { borderColor: C.gold },
   sideOpponent: { borderColor: C.red },
-  sideTag: {
-    color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 8,
-  },
+  sideTag: { color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1.4, marginBottom: 8 },
 
-  // Inner avatar (sits inside the RankCrest, which provides the outer ring).
-  // No marginBottom — the crest container's own size + crestSpacer below
-  // give the breathing room.
   clanAvatarInner: { width: 72, height: 72, borderRadius: 8 },
   clanAvatarFallback: { backgroundColor: C.gold + '22', justifyContent: 'center', alignItems: 'center' },
   clanAvatarFallbackText: { color: C.gold, fontFamily: F.serif, fontSize: 32, fontWeight: '900' },
@@ -315,20 +314,28 @@ const s = StyleSheet.create({
   themePillLabel: { color: C.gold, fontSize: 8, fontWeight: '900', letterSpacing: 1, textAlign: 'center' },
   themePillTitle: { color: C.text, fontSize: 10, fontWeight: '700', marginTop: 2, textAlign: 'center' },
 
+  // The middle column. The badge sizes the box; the VFX fields are absolute and
+  // centred on it, overflowing into the gap between the two side cards.
+  versusZone: { width: BADGE, height: BADGE, alignItems: 'center', justifyContent: 'center' },
+  vsField: {
+    position: 'absolute', top: VS_OFFSET, left: VS_OFFSET, width: VS_FIELD, height: VS_FIELD,
+    alignItems: 'center', justifyContent: 'center',
+  },
   versusBadge: {
-    width: 56, height: 56, borderRadius: 28,
+    width: BADGE, height: BADGE, borderRadius: BADGE / 2,
     backgroundColor: C.gold,
     justifyContent: 'center', alignItems: 'center',
+    overflow: 'hidden',
     shadowColor: C.gold, shadowOpacity: 0.8, shadowRadius: 20,
   },
   versusText: { color: C.bg, fontFamily: F.serif, fontSize: 22, fontWeight: '900' },
-
-  dismissBtn: {
-    position: 'absolute', bottom: 60, alignSelf: 'center',
-    paddingHorizontal: 28, paddingVertical: 12,
-    borderRadius: 6,
+  // Light-sweep glint inside the badge.
+  sweepBar: {
+    position: 'absolute', top: -BADGE * 0.3, width: 14, height: BADGE * 1.6,
+    backgroundColor: 'rgba(255,255,255,0.85)',
   },
-  // Text now sits on a filled-gold ShimmerButton; flip color to bg
-  // (black) so the contrast reads cleanly.
+
+  ctaWrap: { position: 'absolute', bottom: 60, alignSelf: 'center' },
+  dismissBtn: { paddingHorizontal: 28, paddingVertical: 12, borderRadius: 6 },
   dismissText: { color: C.bg, fontWeight: '900', fontSize: 13, letterSpacing: 1.5 },
 });

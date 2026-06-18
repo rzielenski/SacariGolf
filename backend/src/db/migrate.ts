@@ -2137,6 +2137,55 @@ const MIGRATIONS: { name: string; sql: string }[] = [
             rarity = EXCLUDED.rarity, sort = EXCLUDED.sort;
     `,
   },
+  {
+    // Catalog v5: six new animated backgrounds. The renderer styles ship in
+    // Cosmetics.tsx (nebula / embers / meteor / plasma / blizzard / prism);
+    // this just gives them inventory. Same idempotent UPSERT + catch-up grant
+    // pattern as v4 — premium items reach premium users, rank items wait for
+    // the rank-promotion code path so this migration never hands out rewards.
+    name: 'cosmetics.catalog_v5',
+    sql: `
+      INSERT INTO cosmetics (cosmetic_id, kind, name, rarity, unlock_kind, unlock_data, visual_data) VALUES
+        ('bg_nebula',     'background', 'Nebula',        'legendary', 'premium',
+          NULL,
+          '{"style":"nebula","from":"#070314","to":"#13042a","clouds":["#b14ad9","#4a6bd9","#d94a8a"],"animated":true}'::jsonb),
+        ('bg_embers',     'background', 'Fireflies',     'epic',      'premium',
+          NULL,
+          '{"style":"embers","from":"#0a0f0a","to":"#04140e","accent":"#ffcf7a","animated":true}'::jsonb),
+        ('bg_meteor',     'background', 'Meteor Shower', 'legendary', 'rank',
+          '{"tier":"diamond"}'::jsonb,
+          '{"style":"meteor","from":"#060814","to":"#0e1430","accent":"#cfe0ff","animated":true}'::jsonb),
+        ('bg_plasma',     'background', 'Plasma',        'epic',      'premium',
+          NULL,
+          '{"style":"plasma","from":"#0b0518","to":"#04030f","colors":["#7a2ad9","#2a6bd9","#d92a8a","#2ad9c4","#c98a2a"],"animated":true}'::jsonb),
+        ('bg_blizzard',   'background', 'Blizzard',      'epic',      'premium',
+          NULL,
+          '{"style":"blizzard","from":"#1a2a3e","to":"#0a1420","accent":"#cfe6ff","animated":true}'::jsonb),
+        ('bg_prism',      'background', 'Prism',         'legendary', 'rank',
+          '{"tier":"obsidian"}'::jsonb,
+          '{"style":"prism","from":"#0a0a14","to":"#141020","colors":["#ff6b9d","#ffd166","#5ad9c4","#74a8ff","#c779ff"],"animated":true}'::jsonb)
+      ON CONFLICT (cosmetic_id) DO UPDATE
+        SET kind        = EXCLUDED.kind,
+            name        = EXCLUDED.name,
+            rarity      = EXCLUDED.rarity,
+            unlock_kind = EXCLUDED.unlock_kind,
+            unlock_data = EXCLUDED.unlock_data,
+            visual_data = EXCLUDED.visual_data;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'premium'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE c.unlock_kind = 'premium' AND u.is_premium = TRUE
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+
+      INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+        SELECT u.user_id, c.cosmetic_id, 'admin_grant'
+          FROM users u CROSS JOIN cosmetics c
+         WHERE LOWER(u.username) = 'rickybobbyfairways'
+           AND c.cosmetic_id IN ('bg_nebula','bg_embers','bg_meteor','bg_plasma','bg_blizzard','bg_prism')
+      ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
+    `,
+  },
 ];
 
 export async function runMigrations() {
