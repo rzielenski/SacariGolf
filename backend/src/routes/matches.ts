@@ -6,7 +6,7 @@ import { processMentions } from '../utils/mentions';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { computeLeaderboard } from '../utils/leaderboard';
-import { ALLOWED_CLUBS_SHOT as ALLOWED_CLUBS } from '../utils/clubs';
+import { sanitizeClubCode } from '../utils/clubs';
 import { syncRoundNormalized } from '../utils/roundScore';
 import { diff18 } from '../utils/scoring';
 import { currentSeason, divisionForElo } from './seasons';
@@ -2813,9 +2813,10 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
   const shots = req.body?.shots;
   if (!Array.isArray(shots)) return res.status(400).json({ error: 'shots array required' });
 
-  // ALLOWED_CLUBS comes from the shared whitelist (utils/clubs) so the bag
-  // editor and shot tracking can never drift. It includes 'chip', a special
-  // non-attributing tag (skipped by /club-stats) for tracking-only shots.
+  // Club codes are sanitized (shared sanitizeClubCode in utils/clubs) so the bag
+  // editor and shot tracking accept the same set — presets, the 'chip' tag, and
+  // any custom club a player carries — without drifting. 'chip' is the special
+  // non-attributing tag skipped by /club-stats.
   const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
 
   // Validate one Pt (used for start/end of segments AND for legacy points).
@@ -2839,11 +2840,10 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
       const end = cleanPt(s.end);
       if (!start || !end) return null;
       const out: any = { start, end };
-      if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
-        out.club = s.club.toLowerCase();
-      } else if (typeof s.club === 'string') {
-        out.club = 'unknown';
-      }
+      // Accept any sanitized club code — a preset, the 'chip' tag, or a custom
+      // club the player added to their bag — so custom clubs track and get
+      // their own stats instead of collapsing into 'unknown'.
+      out.club = sanitizeClubCode(s.club) ?? 'unknown';
       // Partial-swing tag: a percentage ('75%') or clock ('9:00') label, or
       // absent for a full swing. Validated to exactly one of those two shapes.
       if (typeof s.partial_value === 'string') {
@@ -2888,9 +2888,8 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
     const pt = cleanPt(s);
     if (!pt) return null;
     const out: any = { ...pt };
-    if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
-      out.club = s.club.toLowerCase();
-    }
+    const legacyClub = sanitizeClubCode(s.club);
+    if (legacyClub) out.club = legacyClub;
     if (typeof s.partial_value === 'string') {
       const pv = s.partial_value.trim().slice(0, 8);
       if (/^\d{1,3}%$/.test(pv) || /^\d{1,2}:\d{2}$/.test(pv)) out.partial_value = pv;

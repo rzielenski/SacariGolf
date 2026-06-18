@@ -9,7 +9,7 @@ import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
-import { ALLOWED_CLUBS } from '../utils/clubs';
+import { sanitizeClubCode } from '../utils/clubs';
 import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -163,11 +163,11 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
     }
   }
 
-  // Clubs-in-bag — array of `{ code, label? }` entries. Each `code` must
-  // be in the ALLOWED_CLUBS whitelist (so analytics never sees a phantom
-  // category); `label` is optional free-form display text (e.g. "TaylorMade
-  // Stealth" or "Vokey 56°") up to 30 chars. Null clears the override
-  // (back to "all clubs eligible").
+  // Clubs-in-bag — ordered array of `{ code, label? }` entries. Each `code` is
+  // sanitized to a safe slug so players can carry ANY club, not just the preset
+  // catalog (a custom club gets its own stats category); `label` is optional
+  // free-form display text (e.g. "TaylorMade Stealth" or "Vokey 56°") up to 30
+  // chars. Order is preserved. Null clears the override (all clubs eligible).
   //
   // Backwards-compatible: also accepts the legacy `string[]` form (just
   // codes) from older clients — auto-converted to `{code}` entries server-side.
@@ -188,8 +188,9 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
             if (trimmed) label = trimmed;
           }
         }
-        if (!code || !ALLOWED_CLUBS.has(code)) continue;
-        cleaned.push(label ? { code, label } : { code });
+        const safe = sanitizeClubCode(code);
+        if (!safe) continue;
+        cleaned.push(label ? { code: safe, label } : { code: safe });
       }
       // USGA cap is 14 clubs — enforce so a malicious client can't store
       // a 1000-element array. Saving fewer than 14 is fine.
@@ -2107,12 +2108,6 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
     return res.status(413).json({ error: 'Too many shots (max 2000 per import)' });
   }
 
-  const ALLOWED_CLUBS = new Set([
-    'driver', '3w', '5w', '7w', 'hybrid',
-    '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
-    'pw', 'gw', 'sw', 'lw', 'putter',
-  ]);
-
   // Synthesize GPS pair for a shot. Origin is fixed; each shot heads
   // "north" by its carry distance, with `lateral` yards of perpendicular
   // offset (positive = right). The aggregator computes haversine + bearing
@@ -2137,8 +2132,8 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
 
   const cleaned: any[] = [];
   for (const s of shots) {
-    const club = typeof s?.club === 'string' ? s.club.toLowerCase() : null;
-    if (!club || !ALLOWED_CLUBS.has(club)) continue;
+    const club = sanitizeClubCode(s?.club);
+    if (!club) continue;
     const dist = Number(s?.distance_yds);
     if (!Number.isFinite(dist) || dist < 5 || dist > 500) continue;
     const lat = Number(s?.lateral_yds ?? 0);

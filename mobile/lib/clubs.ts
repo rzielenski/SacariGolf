@@ -62,3 +62,10 @@ export const PARTIAL_PRESETS: Record<PartialMode, string[]> = {
 export function partialPresetsFor(mode: string | null | undefined): string[] {
   return mode === 'clock' ? PARTIAL_PRESETS.clock : PARTIAL_PRESETS.percentage;
 }
+
+/** Slugify a custom club name into a safe code (mirror of the backend's
+ *  sanitizeClubCode), so a player can carry any club as its own category and
+ *  track stats under it. */
+export function slugClubCode(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 20);
+}

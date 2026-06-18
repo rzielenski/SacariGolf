@@ -30,7 +30,7 @@ import { C, F } from '../lib/colors';
 // Club catalogue + by-code lookup now live in lib/clubs.ts (single source
 // shared with the in-round picker and club-stats). Aliased to the local names
 // this screen already used so the rest of the file is unchanged.
-import { CLUBS_CATALOG as CATALOG, CLUBS_BY_CODE as CATALOG_BY_CODE } from '../lib/clubs';
+import { CLUBS_CATALOG as CATALOG, CLUBS_BY_CODE as CATALOG_BY_CODE, slugClubCode } from '../lib/clubs';
 
 const MAX_BAG = 14;
 
@@ -66,6 +66,19 @@ export default function BagScreen() {
 
   const removeAt = (idx: number) => {
     setEntries((prev) => prev.filter((_, i) => i !== idx));
+    setRenamingIndex(null);
+  };
+
+  // Reorder — the bag is saved (and rendered in the in-round picker) in exactly
+  // the order you arrange it here.
+  const move = (idx: number, dir: -1 | 1) => {
+    setEntries((prev) => {
+      const j = idx + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[idx], next[j]] = [next[j], next[idx]];
+      return next;
+    });
     setRenamingIndex(null);
   };
 
@@ -155,7 +168,7 @@ export default function BagScreen() {
         <Text style={s.summaryLabel}>clubs in bag</Text>
       </View>
       <Text style={s.hint}>
-        Tap a club to rename it. Tap × to remove. Add a club from the bottom — pick a preset or type a custom name.
+        Tap a club to rename it. Use ▲▼ to reorder, × to remove. Add a club below — a preset, or type any custom club.
       </Text>
 
       <ScrollView contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
@@ -195,6 +208,14 @@ export default function BagScreen() {
               )}
               <View style={s.entryCodeChip}>
                 <Text style={s.entryCodeText}>{entry.code.toUpperCase()}</Text>
+              </View>
+              <View style={s.reorder}>
+                <TouchableOpacity onPress={() => move(idx, -1)} disabled={idx === 0} hitSlop={{ top: 4, bottom: 2, left: 6, right: 6 }}>
+                  <Text style={[s.reorderArrow, idx === 0 && { opacity: 0.25 }]}>▲</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => move(idx, 1)} disabled={idx === entries.length - 1} hitSlop={{ top: 2, bottom: 4, left: 6, right: 6 }}>
+                  <Text style={[s.reorderArrow, idx === entries.length - 1 && { opacity: 0.25 }]}>▼</Text>
+                </TouchableOpacity>
               </View>
               <TouchableOpacity
                 style={s.entryRemove}
@@ -269,6 +290,13 @@ function AddClubSheet({
 
   const submitCustom = () => {
     const label = customLabel.trim();
+    if (customCode === 'custom') {
+      // Fully custom club — its own category, slugged from the name.
+      const code = slugClubCode(label);
+      if (!code) { Alert.alert('Name your club', 'Type a name so your custom club has its own category to track under.'); return; }
+      onAdd(code, label);
+      return;
+    }
     onAdd(customCode, label || undefined);
   };
 
@@ -285,7 +313,7 @@ function AddClubSheet({
         <ScrollView style={{ flex: 1 }} contentContainerStyle={a.scrollContent} keyboardShouldPersistTaps="handled">
           {/* Custom-name path: type a label, pick a category, add. */}
           <Text style={a.sectionLabel}>CUSTOM NAME</Text>
-          <Text style={a.helper}>Use your brand, loft, or nickname — analytics still group by the category you pick.</Text>
+          <Text style={a.helper}>Use your brand, loft, or nickname. Pick a preset category to group its stats, or "Own category" to track the club on its own.</Text>
           <TextInput
             style={a.input}
             value={customLabel}
@@ -296,6 +324,17 @@ function AddClubSheet({
             returnKeyType="done"
           />
           <Text style={[a.sectionLabel, { marginTop: 14 }]}>CATEGORY</Text>
+          <View style={a.catBlock}>
+            <Text style={a.catGroup}>Custom</Text>
+            <View style={a.catGrid}>
+              <TouchableOpacity
+                style={[a.catChip, { minWidth: 120 }, customCode === 'custom' && a.catChipActive]}
+                onPress={() => setCustomCode('custom')}
+              >
+                <Text style={[a.catChipText, customCode === 'custom' && a.catChipTextActive]}>OWN CATEGORY</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
           {Object.entries(groups).map(([group, items]) => (
             <View key={group} style={a.catBlock}>
               <Text style={a.catGroup}>{group}</Text>
@@ -389,6 +428,8 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   entryRemoveText: { color: C.textMuted, fontSize: 18, fontWeight: '900', lineHeight: 20 },
+  reorder: { alignItems: 'center', justifyContent: 'center' },
+  reorderArrow: { color: C.gold, fontSize: 13, fontWeight: '900', lineHeight: 15 },
 
   addBtn: {
     marginTop: 8, paddingVertical: 14, borderRadius: 8,

@@ -13,3 +13,14 @@ export const ALLOWED_CLUBS = new Set([
 /** Shot tracking additionally allows 'chip' — a tracked-but-not-attributed tag
  *  (a chip could be a 56°, 60°, or a hybrid bump, so /club-stats skips it). */
 export const ALLOWED_CLUBS_SHOT = new Set<string>([...ALLOWED_CLUBS, 'chip']);
+
+/** Normalize a club code for storage so players can carry ANY club, not just
+ *  the preset catalog. Lowercases and keeps [a-z0-9] — every preset code
+ *  (driver, 3w, 7i, pw, putter) and the 'chip' tag already match — capping the
+ *  length so a custom club ("chipper", "2hybrid") becomes a safe slug. Returns
+ *  null for empty/garbage input. */
+export function sanitizeClubCode(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 20);
+  return slug.length ? slug : null;
+}
