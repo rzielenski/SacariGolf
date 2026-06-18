@@ -286,11 +286,11 @@ export default function RootLayout() {
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
-        <Stack.Screen name="tournaments" options={{ animation: 'slide_from_right' }} />
-        <Stack.Screen name="tournament/[id]" options={{ animation: 'slide_from_right' }} />
-        <Stack.Screen name="creator-leagues" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="tournaments" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="tournament/[id]" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="creator-leagues" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="join/[code]" options={{ animation: 'fade' }} />
-        <Stack.Screen name="blocked-users" options={{ animation: 'slide_from_right' }} />
+        <Stack.Screen name="blocked-users" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />
         <Stack.Screen name="match/scoring/[id]" options={{ animation: 'slide_from_bottom' }} />
         <Stack.Screen name="match/group/[id]" options={{ animation: 'slide_from_bottom' }} />
@@ -333,6 +333,8 @@ export default function RootLayout() {
         <Stack.Screen name="settings"    options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="invite"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="resume"      options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="dev/vfx-preview"   options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="dev/crest-preview" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
       </AuthProvider>

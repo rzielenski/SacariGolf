@@ -193,8 +193,8 @@ router.get('/unread-summary', requireAuth, wrap(async (req: AuthRequest, res: Re
  */
 router.post('/read', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { kind, key } = req.body ?? {};
-  if (kind !== 'dm' && kind !== 'match' && kind !== 'clan') {
-    return res.status(400).json({ error: 'kind must be dm | match | clan' });
+  if (kind !== 'dm' && kind !== 'match' && kind !== 'clan' && kind !== 'league') {
+    return res.status(400).json({ error: 'kind must be dm | match | clan | league' });
   }
   if (typeof key !== 'string' || !key) {
     return res.status(400).json({ error: 'key required' });
@@ -209,8 +209,8 @@ router.post('/read', requireAuth, wrap(async (req: AuthRequest, res: Response) =
   return res.json({ success: true });
 }));
 
-// Helper: confirm caller is allowed to read/post in this match or clan.
-async function memberOfChat(userId: string, matchId?: any, clanId?: any) {
+// Helper: confirm caller is allowed to read/post in this match, clan, or league.
+async function memberOfChat(userId: string, matchId?: any, clanId?: any, tournamentId?: any) {
   if (matchId) {
     const { rows } = await pool.query(
       `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
@@ -222,6 +222,13 @@ async function memberOfChat(userId: string, matchId?: any, clanId?: any) {
     const { rows } = await pool.query(
       `SELECT 1 FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
       [clanId, userId]
+    );
+    return rows.length > 0;
+  }
+  if (tournamentId) {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM tournament_players WHERE tournament_id = $1 AND user_id = $2`,
+      [tournamentId, userId]
     );
     return rows.length > 0;
   }
@@ -259,7 +266,7 @@ export async function blockStateBetween(sender: string, recipient: string): Prom
 }
 
 router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId, toUserId } = req.query;
+  const { matchId, clanId, toUserId, tournamentId } = req.query;
 
   if (toUserId) {
     const { rows } = await pool.query(
@@ -276,13 +283,13 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     return res.json(rows);
   }
 
-  if (!matchId && !clanId) return res.status(400).json({ error: 'matchId, clanId, or toUserId required' });
-  // Anyone can read a match's chat once they're in it; same for clan chats.
-  if (!(await memberOfChat(req.userId!, matchId, clanId))) {
+  if (!matchId && !clanId && !tournamentId) return res.status(400).json({ error: 'matchId, clanId, tournamentId, or toUserId required' });
+  // Anyone can read a match's chat once they're in it; same for clan + league chats.
+  if (!(await memberOfChat(req.userId!, matchId, clanId, tournamentId))) {
     return res.status(403).json({ error: 'Not a member of this chat' });
   }
-  const col = matchId ? 'match_id' : 'clan_id';
-  const val = matchId ?? clanId;
+  const col = matchId ? 'match_id' : clanId ? 'clan_id' : 'tournament_id';
+  const val = matchId ?? clanId ?? tournamentId;
 
   const { rows } = await pool.query(
     `SELECT m.message_id, m.created_at, m.body, m.user_id,
@@ -299,7 +306,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { matchId, clanId, toUserId, body, voiceBase64, voiceMime, voiceDurationMs,
+  const { matchId, clanId, tournamentId, toUserId, body, voiceBase64, voiceMime, voiceDurationMs,
           imageBase64, imageMime } = req.body ?? {};
   // Trim text; cap at 2000 chars. For voice/image messages the body becomes
   // the push-notification preview; text-only messages must have non-empty body.
@@ -411,16 +418,16 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     return res.status(201).json({ ...msg, username: senderName });
   }
 
-  if (!matchId && !clanId) { onFail(); return res.status(400).json({ error: 'matchId, clanId, or toUserId required' }); }
+  if (!matchId && !clanId && !tournamentId) { onFail(); return res.status(400).json({ error: 'matchId, clanId, tournamentId, or toUserId required' }); }
 
-  // Sender must actually be a participant of the match / clan
-  if (!(await memberOfChat(req.userId!, matchId, clanId))) {
+  // Sender must actually be a participant of the match / clan / league
+  if (!(await memberOfChat(req.userId!, matchId, clanId, tournamentId))) {
     onFail();
     return res.status(403).json({ error: 'Not a member of this chat' });
   }
 
-  const col = matchId ? 'match_id' : 'clan_id';
-  const val = matchId ?? clanId;
+  const col = matchId ? 'match_id' : clanId ? 'clan_id' : 'tournament_id';
+  const val = matchId ?? clanId ?? tournamentId;
 
   let rows: any[];
   try {
@@ -478,7 +485,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       `SELECT name, match_type FROM matches WHERE match_id = $1`, [matchId]
     );
     roomName = mr[0]?.name || `${mr[0]?.match_type ?? 'Match'} chat`;
-  } else {
+  } else if (clanId) {
     const r = await pool.query(
       `SELECT u.push_token FROM clan_members cm
        JOIN users u ON u.user_id = cm.user_id
@@ -494,6 +501,23 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
       `SELECT name FROM clans WHERE clan_id = $1`, [clanId]
     );
     roomName = cr[0]?.name || 'Team chat';
+  } else {
+    // League channel — push to every other member of the creator league.
+    const r = await pool.query(
+      `SELECT u.push_token FROM tournament_players tp
+       JOIN users u ON u.user_id = tp.user_id
+       WHERE tp.tournament_id = $1 AND tp.user_id != $2 AND u.push_token IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocked_users b
+           WHERE b.blocker_id = u.user_id AND b.blocked_id = $2
+         )`,
+      [tournamentId, req.userId]
+    );
+    tokenRows = r.rows;
+    const { rows: tr } = await pool.query(
+      `SELECT name FROM tournaments WHERE tournament_id = $1`, [tournamentId]
+    );
+    roomName = tr[0]?.name || 'League chat';
   }
 
   // Title shows the room ("Thunder Cats"), body shows "Alice: <message>"
@@ -505,7 +529,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `${senderName}: ${effectiveBody}`,
     matchId
       ? { type: 'chat', matchId, fromName: senderName }
-      : { type: 'clan_chat', clanId, fromName: senderName, roomName },
+      : clanId
+      ? { type: 'clan_chat', clanId, fromName: senderName, roomName }
+      : { type: 'league_chat', tournamentId, fromName: senderName, roomName },
   );
 
   return res.status(201).json({ ...msg, username: senderName });

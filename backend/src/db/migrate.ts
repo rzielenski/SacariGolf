@@ -2218,6 +2218,40 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       UPDATE users SET is_creator = TRUE WHERE is_owner = TRUE AND is_creator = FALSE;
     `,
   },
+  {
+    // Creator-league social + seasons:
+    //   - messages.tournament_id  → reuse the generic chat for a per-league channel
+    //   - league_posts            → a dedicated league feed (member text + system events)
+    //   - tournament_players.auto_post → member opt-in to auto-submit their solo rounds
+    //   - tournaments.reset_period / season_started_at / last_champion_* →
+    //     a recurring season that auto-crowns a winner + resets on a cadence.
+    name: 'creator_leagues.social_seasons',
+    sql: `
+      ALTER TABLE messages ADD COLUMN IF NOT EXISTS tournament_id UUID REFERENCES tournaments(tournament_id) ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS messages_tournament_created_idx
+        ON messages(tournament_id, created_at) WHERE tournament_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS league_posts (
+        post_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        league_id  UUID NOT NULL REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+        user_id    UUID REFERENCES users(user_id) ON DELETE SET NULL,  -- null = pure system event
+        kind       TEXT NOT NULL DEFAULT 'text' CHECK (kind IN ('text', 'event')),
+        body       TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS league_posts_feed_idx ON league_posts(league_id, created_at DESC);
+
+      ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS auto_post BOOLEAN NOT NULL DEFAULT FALSE;
+
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS reset_period      TEXT NOT NULL DEFAULT 'none'; -- none | weekly | monthly
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS season_started_at TIMESTAMPTZ;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS last_champion_id  UUID REFERENCES users(user_id) ON DELETE SET NULL;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS last_champion_at  TIMESTAMPTZ;
+      -- Existing creator leagues start their first season at creation time.
+      UPDATE tournaments SET season_started_at = created_at
+        WHERE is_creator_league = TRUE AND season_started_at IS NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {

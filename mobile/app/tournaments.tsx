@@ -43,7 +43,7 @@ export default function TournamentsScreen() {
       contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
-      <Stack.Screen options={{ title: 'Tournaments', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
+      <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold, headerShadowVisible: false }} />
 
       <Text style={s.title}>Tournaments</Text>
       <Text style={s.sub}>Recurring leaderboards across multiple rounds.</Text>

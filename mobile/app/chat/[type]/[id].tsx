@@ -38,7 +38,7 @@ type PersistedPending = { client_id: string; body: string; created_at: string };
 
 export default function ChatScreen() {
   const insets = useSafeAreaInsets();
-  const { type, id, name } = useLocalSearchParams<{ type: 'match' | 'clan' | 'dm'; id: string; name?: string }>();
+  const { type, id, name } = useLocalSearchParams<{ type: 'match' | 'clan' | 'dm' | 'league'; id: string; name?: string }>();
   const { user } = useAuth();
   // Censor flag for the OUTER screen — used for the header title (DM
   // recipient's name). The MessageBubble component has its own
@@ -97,7 +97,7 @@ export default function ChatScreen() {
 
   const load = useCallback(async () => {
     try {
-      const params = type === 'match' ? { matchId: id } : type === 'clan' ? { clanId: id } : { toUserId: id };
+      const params = type === 'match' ? { matchId: id } : type === 'clan' ? { clanId: id } : type === 'league' ? { tournamentId: id } : { toUserId: id };
       const data = await api.messages.list(params);
       setMessages(mergeServer(data));
     } catch { /* silent */ } finally { setLoading(false); }
@@ -127,6 +127,8 @@ export default function ChatScreen() {
       ? { matchId: id, body: bodyText, clientId }
       : type === 'clan'
       ? { clanId: id, body: bodyText, clientId }
+      : type === 'league'
+      ? { tournamentId: id, body: bodyText, clientId }
       : { toUserId: id, body: bodyText, clientId };
     try {
       const msg = await api.messages.send(params);
@@ -238,6 +240,8 @@ export default function ChatScreen() {
       api.matches.get(id).then((m) => apply(m?.players ?? [])).catch(() => { });
     } else if (type === 'clan') {
       api.clans.get(id).then((c) => apply(c?.members ?? [])).catch(() => { });
+    } else if (type === 'league') {
+      api.tournaments.get(id).then((t) => apply(t?.players ?? [])).catch(() => { });
     } else {
       setParticipants([]); // DM → MentionInput falls back to friends
     }
@@ -295,6 +299,8 @@ export default function ChatScreen() {
         ? { matchId: id }
         : type === 'clan'
         ? { clanId: id }
+        : type === 'league'
+        ? { tournamentId: id }
         : { toUserId: id };
       const msg = await api.messages.send({
         ...base,
@@ -325,6 +331,8 @@ export default function ChatScreen() {
         ? { matchId: id }
         : type === 'clan'
         ? { clanId: id }
+        : type === 'league'
+        ? { tournamentId: id }
         : { toUserId: id };
       const msg = await api.messages.send({
         ...base,
@@ -385,7 +393,10 @@ export default function ChatScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   })).current;
 
-  const title = type === 'dm' ? (name ? censorText(name, censor) : 'Direct Message') : type === 'match' ? 'Match Chat' : 'Team Chat';
+  const title = type === 'dm' ? (name ? censorText(name, censor) : 'Direct Message')
+    : type === 'match' ? 'Match Chat'
+    : type === 'league' ? (name ? censorText(name, censor) : 'League Chat')
+    : 'Team Chat';
   // Subtitle clarifies the audience. Easy to miss that match chat reaches
   // OPPONENTS too — team/clan chat is the teammates-only room. Making this
   // explicit avoids the "I thought my opponent couldn't see this" surprise.
@@ -393,6 +404,8 @@ export default function ChatScreen() {
     ? 'Everyone in this match'
     : type === 'clan'
     ? 'Your team only'
+    : type === 'league'
+    ? 'Everyone in this league'
     : null;
 
   const reportMessage = (msg: ChatMessage) => {

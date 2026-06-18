@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  Share, Alert, RefreshControl, Modal, TextInput,
+  Share, Alert, RefreshControl, Modal, TextInput, Switch,
 } from 'react-native';
 import { useLocalSearchParams, router, Stack } from 'expo-router';
 import QRCode from 'react-native-qrcode-svg';
@@ -33,6 +33,10 @@ export default function TournamentDetailScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   const [targetOpen, setTargetOpen] = useState(false);
+  const [tab, setTab] = useState<'leaderboard' | 'feed'>('leaderboard');
+  const [feed, setFeed] = useState<any[] | null>(null);
+  const [feedText, setFeedText] = useState('');
+  const [posting, setPosting] = useState(false);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -42,6 +46,11 @@ export default function TournamentDetailScreen() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  const loadFeed = useCallback(async () => {
+    try { setFeed(await api.tournaments.feed(id)); } catch { setFeed([]); }
+  }, [id]);
+  useEffect(() => { if (tab === 'feed' && feed === null) loadFeed(); }, [tab, feed, loadFeed]);
 
   if (loading) return <View style={s.center}><ActivityIndicator color={C.gold} size="large" /></View>;
   if (!t) return <View style={s.center}><Text style={{ color: C.textMuted }}>Tournament not found</Text></View>;
@@ -56,6 +65,35 @@ export default function TournamentDetailScreen() {
   const accent = isCreatorLeague ? (t.accent_color || C.gold) : C.gold;
   const myRow = (t.leaderboard ?? []).find((r: any) => r.user_id === user?.user_id);
   const iBeat = !!myRow?.beat_creator;
+
+  const toggleAutoPost = async (next: boolean) => {
+    try { await api.tournaments.autoPost(t.tournament_id, next); load(); }
+    catch (e: any) { Alert.alert('Could not update', e?.message ?? 'Try again.'); }
+  };
+  const postToFeed = async () => {
+    const body = feedText.trim();
+    if (!body) return;
+    setPosting(true);
+    try { await api.tournaments.postFeed(t.tournament_id, body); setFeedText(''); await loadFeed(); }
+    catch (e: any) { Alert.alert('Could not post', e?.message ?? 'Try again.'); }
+    finally { setPosting(false); }
+  };
+  const changeResetPeriod = (rp: 'none' | 'weekly' | 'monthly') => {
+    if (rp === t.reset_period) return;
+    Alert.alert(
+      'Change season cadence?',
+      rp === 'none'
+        ? 'The league will no longer auto-crown a champion or reset.'
+        : `The league will auto-crown a champion and reset every ${rp === 'weekly' ? 'week' : 'month'}, starting now.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Set', onPress: async () => {
+          try { await api.tournaments.settings(t.tournament_id, { resetPeriod: rp }); load(); }
+          catch (e: any) { Alert.alert('Error', e?.message ?? 'Try again.'); }
+        } },
+      ],
+    );
+  };
 
   const shareCode = async () => {
     if (!t.join_code) return;
@@ -111,7 +149,7 @@ export default function TournamentDetailScreen() {
       contentContainerStyle={{ padding: 20, paddingBottom: 60 }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
-      <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
+      <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold, headerShadowVisible: false }} />
 
       {isCreatorLeague ? (
         <View style={[s.creatorHeader, { borderColor: accent + '66' }]}>
@@ -205,65 +243,167 @@ export default function TournamentDetailScreen() {
         </TouchableOpacity>
       )}
 
-      <OrnamentTitle title="Leaderboard" />
-      {(!t.leaderboard || t.leaderboard.length === 0) ? (
-        <Text style={s.empty}>No rounds played yet. Standings update automatically as people submit scores.</Text>
-      ) : (
-        t.leaderboard.map((row: any, i: number) => (
-          <TouchableOpacity
-            key={row.user_id}
-            style={[s.lbRow, row.user_id === user?.user_id && { borderColor: C.gold }]}
-            onPress={() => router.push(`/user/${row.user_id}` as any)}
-            activeOpacity={0.7}
-          >
-            <Text style={[s.rank, { color: i === 0 ? C.gold : i === 1 ? '#c0c0c0' : i === 2 ? '#a1673a' : C.textDim }]}>
-              {i <= 2 ? ['I','II','III'][i] : `#${i + 1}`}
-            </Text>
-            <View style={{ flex: 1 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={s.lbName}>{c(row.username)}</Text>
-                {row.beat_creator ? <Text style={[s.beatTag, { color: accent, borderColor: accent }]}>BEAT ✓</Text> : null}
-              </View>
-              <Text style={s.lbMeta}>
-                {row.rounds_played ?? 0} round{row.rounds_played === 1 ? '' : 's'} played
-              </Text>
-            </View>
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text style={s.lbScore}>
-                {(() => {
-                  // Stroke rules now rank on 18-hole-equivalent to-par (so a
-                  // 9-hole round can't beat a full 18), shown as +/E/-.
-                  if (t.scoring === 'wins') return row.wins ?? 0;
-                  const v = t.scoring === 'total_strokes' ? row.total_to_par : row.best_to_par;
-                  if (v == null) return '—';
-                  return v === 0 ? 'E' : v > 0 ? `+${v}` : `${v}`;
-                })()}
-              </Text>
-              <Text style={s.lbUnit}>
-                {t.scoring === 'wins' ? 'wins' : 'to par'}
-              </Text>
-            </View>
-          </TouchableOpacity>
-        ))
+      {/* Last season champion (recurring leagues) */}
+      {isCreatorLeague && t.last_champion_name && (
+        <View style={[s.champStrip, { borderColor: accent + '55' }]}>
+          <Text style={s.champStripText}>Last season champion: 🏆 {c(t.last_champion_name)}</Text>
+        </View>
       )}
 
-      <OrnamentTitle title="Players" />
-      {(t.players ?? []).map((p: any) => (
-        <TouchableOpacity
-          key={p.user_id}
-          style={s.playerRow}
-          onPress={() => router.push(`/user/${p.user_id}` as any)}
-          activeOpacity={0.7}
-        >
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
-            <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={32} borderRadius={4} />
-            <Text style={s.playerName}>{c(p.username)}</Text>
-          </View>
-          <Text style={s.playerElo}>{p.elo} SR</Text>
-        </TouchableOpacity>
-      ))}
+      {/* Leaderboard / Feed tabs + chat (creator leagues only) */}
+      {isCreatorLeague && (
+        <View style={s.tabBar}>
+          <TouchableOpacity style={[s.tabBtn, tab === 'leaderboard' && { borderBottomColor: accent }]} onPress={() => setTab('leaderboard')}>
+            <Text style={[s.tabBtnText, tab === 'leaderboard' && { color: accent }]}>Leaderboard</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.tabBtn, tab === 'feed' && { borderBottomColor: accent }]} onPress={() => setTab('feed')}>
+            <Text style={[s.tabBtnText, tab === 'feed' && { color: accent }]}>Feed</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[s.tabChat, { borderColor: accent }]}
+            onPress={() => router.push(`/chat/league/${t.tournament_id}?name=${encodeURIComponent(t.name)}` as any)}
+          >
+            <Text style={[s.tabChatText, { color: accent }]}>💬 Chat</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {(!isCreatorLeague || tab === 'leaderboard') && (
+        <>
+          {isCreatorLeague && isMember && (
+            <View style={s.settingRow}>
+              <View style={{ flex: 1, marginRight: 12 }}>
+                <Text style={s.settingLabel}>Auto-post my solo rounds</Text>
+                <Text style={s.settingHint}>Finish a solo round and it lands on this leaderboard automatically.</Text>
+              </View>
+              <Switch
+                value={!!t.my_auto_post} onValueChange={toggleAutoPost}
+                trackColor={{ true: accent + '88', false: C.border }}
+                thumbColor={t.my_auto_post ? accent : C.textMuted}
+              />
+            </View>
+          )}
+
+          {!isCreatorLeague ? <OrnamentTitle title="Leaderboard" /> : <View style={{ height: 8 }} />}
+          {(!t.leaderboard || t.leaderboard.length === 0) ? (
+            <Text style={s.empty}>No rounds played yet. Standings update automatically as people submit scores.</Text>
+          ) : (
+            t.leaderboard.map((row: any, i: number) => (
+              <TouchableOpacity
+                key={row.user_id}
+                style={[s.lbRow, row.user_id === user?.user_id && { borderColor: accent }]}
+                onPress={() => router.push(`/user/${row.user_id}` as any)}
+                activeOpacity={0.7}
+              >
+                <Text style={[s.rank, { color: i === 0 ? C.gold : i === 1 ? '#c0c0c0' : i === 2 ? '#a1673a' : C.textDim }]}>
+                  {i <= 2 ? ['I', 'II', 'III'][i] : `#${i + 1}`}
+                </Text>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Text style={s.lbName}>{c(row.username)}</Text>
+                    {row.beat_creator ? <Text style={[s.beatTag, { color: accent, borderColor: accent }]}>BEAT ✓</Text> : null}
+                  </View>
+                  <Text style={s.lbMeta}>
+                    {row.rounds_played ?? 0} round{row.rounds_played === 1 ? '' : 's'} played
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={s.lbScore}>
+                    {(() => {
+                      if (t.scoring === 'wins') return row.wins ?? 0;
+                      const v = t.scoring === 'total_strokes' ? row.total_to_par : row.best_to_par;
+                      if (v == null) return '—';
+                      return v === 0 ? 'E' : v > 0 ? `+${v}` : `${v}`;
+                    })()}
+                  </Text>
+                  <Text style={s.lbUnit}>{t.scoring === 'wins' ? 'wins' : 'to par'}</Text>
+                </View>
+              </TouchableOpacity>
+            ))
+          )}
+
+          <OrnamentTitle title="Players" />
+          {(t.players ?? []).map((p: any) => (
+            <TouchableOpacity
+              key={p.user_id}
+              style={s.playerRow}
+              onPress={() => router.push(`/user/${p.user_id}` as any)}
+              activeOpacity={0.7}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+                <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={32} borderRadius={4} />
+                <Text style={s.playerName}>{c(p.username)}</Text>
+              </View>
+              <Text style={s.playerElo}>{p.elo} SR</Text>
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
+
+      {/* League feed */}
+      {isCreatorLeague && tab === 'feed' && (
+        <View style={{ marginTop: 4 }}>
+          {(isMember || isOwner) && (
+            <View style={s.composer}>
+              <TextInput
+                style={s.composerInput}
+                value={feedText} onChangeText={setFeedText}
+                placeholder="Share something with the league…" placeholderTextColor={C.textMuted}
+                multiline maxLength={1000}
+              />
+              <TouchableOpacity
+                style={[s.composerBtn, { backgroundColor: accent }, (!feedText.trim() || posting) && { opacity: 0.5 }]}
+                disabled={!feedText.trim() || posting} onPress={postToFeed}
+              >
+                <Text style={s.composerBtnText}>{posting ? '…' : 'Post'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+          {feed === null ? (
+            <ActivityIndicator color={accent} style={{ marginTop: 24 }} />
+          ) : feed.length === 0 ? (
+            <Text style={s.empty}>No posts yet. Beat the creator or drop the first message.</Text>
+          ) : (
+            feed.map((p: any) => (
+              <View key={p.post_id} style={[s.feedItem, p.kind === 'event' && { borderColor: accent + '55', backgroundColor: accent + '0d' }]}>
+                {p.kind === 'event' ? (
+                  <Text style={s.feedEvent}>{c(p.body)}</Text>
+                ) : (
+                  <>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={26} borderRadius={4} />
+                      <Text style={s.feedAuthor}>{c(p.username ?? 'Member')}</Text>
+                    </View>
+                    <Text style={s.feedBody}>{c(p.body)}</Text>
+                  </>
+                )}
+                <Text style={s.feedTime}>{new Date(p.created_at).toLocaleDateString()}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      )}
 
       <View style={{ marginTop: 30, gap: 10 }}>
+        {isOwner && isCreatorLeague && isActive && (
+          <View style={s.seasonBox}>
+            <Text style={s.seasonLabel}>SEASON CADENCE</Text>
+            <Text style={s.seasonHint}>Auto-crown a champion and reset the leaderboard on a schedule.</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+              {(['none', 'weekly', 'monthly'] as const).map((rp) => (
+                <TouchableOpacity
+                  key={rp}
+                  style={[s.seasonChip, t.reset_period === rp && { backgroundColor: accent, borderColor: accent }]}
+                  onPress={() => changeResetPeriod(rp)}
+                >
+                  <Text style={[s.seasonChipText, t.reset_period === rp && { color: '#000' }]}>
+                    {rp === 'none' ? 'Off' : rp === 'weekly' ? 'Weekly' : 'Monthly'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
         {isOwner && isActive && (
           <TouchableOpacity style={s.finalizeBtn} onPress={handleFinalize}>
             <Text style={s.finalizeBtnText}>Finalize &amp; crown the champion</Text>
@@ -463,4 +603,45 @@ const s = StyleSheet.create({
   saveBtnText: { color: '#000', fontWeight: '900', fontSize: 15 },
   clearBtn: { marginTop: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: C.red, borderRadius: 8 },
   clearBtnText: { color: C.red, fontWeight: '700' },
+
+  // Last-champion strip
+  champStrip: { borderWidth: 1, borderRadius: 10, paddingVertical: 10, paddingHorizontal: 14, marginBottom: 16, backgroundColor: C.card },
+  champStripText: { color: C.text, fontSize: 13, fontWeight: '700', textAlign: 'center' },
+
+  // Tabs + chat
+  tabBar: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 16, marginTop: 4 },
+  tabBtn: { paddingVertical: 10, paddingHorizontal: 6, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabBtnText: { color: C.textMuted, fontWeight: '900', fontSize: 14, letterSpacing: 0.5 },
+  tabChat: { marginLeft: 'auto', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 7, borderWidth: 1 },
+  tabChatText: { fontWeight: '900', fontSize: 12 },
+
+  // Member auto-post setting row
+  settingRow: {
+    flexDirection: 'row', alignItems: 'center', backgroundColor: C.card,
+    borderRadius: 10, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: C.border,
+  },
+  settingLabel: { color: C.text, fontWeight: '800', fontSize: 14 },
+  settingHint: { color: C.textMuted, fontSize: 12, marginTop: 3, lineHeight: 16 },
+
+  // Feed
+  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, marginBottom: 16 },
+  composerInput: {
+    flex: 1, backgroundColor: C.card, color: C.text, borderRadius: 8,
+    paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, borderWidth: 1, borderColor: C.border,
+    minHeight: 44, maxHeight: 120, textAlignVertical: 'top',
+  },
+  composerBtn: { paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  composerBtnText: { color: '#000', fontWeight: '900', fontSize: 13 },
+  feedItem: { backgroundColor: C.card, borderRadius: 10, padding: 14, marginBottom: 10, borderWidth: 1, borderColor: C.border },
+  feedEvent: { color: C.text, fontSize: 14, fontWeight: '700', lineHeight: 19 },
+  feedAuthor: { color: C.text, fontWeight: '800', fontSize: 13 },
+  feedBody: { color: C.text, fontSize: 14, lineHeight: 20 },
+  feedTime: { color: C.textDim, fontSize: 10, marginTop: 8 },
+
+  // Creator season cadence
+  seasonBox: { backgroundColor: C.card, borderRadius: 10, padding: 14, borderWidth: 1, borderColor: C.border },
+  seasonLabel: { color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  seasonHint: { color: C.textMuted, fontSize: 12, marginTop: 4, lineHeight: 16 },
+  seasonChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 7, borderWidth: 1, borderColor: C.border, backgroundColor: C.bg },
+  seasonChipText: { color: C.text, fontWeight: '800', fontSize: 13 },
 });

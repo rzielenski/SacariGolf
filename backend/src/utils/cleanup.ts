@@ -45,6 +45,7 @@ const LOCK_UNPAIR        = 42106;
 const LOCK_BOTS          = 42107;
 const LOCK_NORMALIZE     = 42108;
 const LOCK_TITLES        = 42109;
+const LOCK_LEAGUE_SEASONS = 42110;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -721,6 +722,7 @@ let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
 let seasonResetHandle: ReturnType<typeof setInterval> | null = null;
 let normalizeHandle: ReturnType<typeof setInterval> | null = null;
 let titlesHandle: ReturnType<typeof setInterval> | null = null;
+let leagueSeasonHandle: ReturnType<typeof setInterval> | null = null;
 
 // ── Partial ELO reset at season rollover ──────────────────────────────
 // Anchor + retention for the soft reset: at each new competitive season,
@@ -890,6 +892,15 @@ export function startCleanupSchedule() {
   });
   titlesTick();
   titlesHandle = setInterval(titlesTick, 5 * 60 * 1000);
+
+  // Creator-league recurring seasons — auto-crown + reset weekly/monthly leagues.
+  // Hourly is plenty (the boundary is days/weeks); runs once on boot to catch up.
+  const leagueSeasonTick = () => withCronLock(LOCK_LEAGUE_SEASONS, async () => {
+    const { runCreatorLeagueSeasons } = await import('./leagues');
+    await runCreatorLeagueSeasons();
+  });
+  leagueSeasonTick();
+  leagueSeasonHandle = setInterval(leagueSeasonTick, 60 * 60 * 1000);
 }
 
 async function weeklyCupTick(): Promise<void> {
@@ -924,4 +935,5 @@ export function stopCleanupSchedule() {
   if (seasonResetHandle) { clearInterval(seasonResetHandle); seasonResetHandle = null; }
   if (normalizeHandle) { clearInterval(normalizeHandle); normalizeHandle = null; }
   if (titlesHandle) { clearInterval(titlesHandle); titlesHandle = null; }
+  if (leagueSeasonHandle) { clearInterval(leagueSeasonHandle); leagueSeasonHandle = null; }
 }

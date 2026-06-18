@@ -8,6 +8,7 @@ import { equippedVisualSql } from '../utils/cosmeticSql';
 import { computeLeaderboard } from '../utils/leaderboard';
 import { sanitizeClubCode } from '../utils/clubs';
 import { syncRoundNormalized } from '../utils/roundScore';
+import { autoPostSoloRoundToLeague } from '../utils/leagues';
 import { diff18 } from '../utils/scoring';
 import { currentSeason, divisionForElo } from './seasons';
 
@@ -1271,6 +1272,10 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
     // immediately. The reconcile tick covers every other write path.
     if (submittedRound[0]?.round_id) {
       await syncRoundNormalized(client, submittedRound[0].round_id);
+      // Auto-post this round to the member's creator league if they opted in
+      // (the helper gates to an unlinked, non-practice SOLO round). Best-effort.
+      try { await autoPostSoloRoundToLeague(client, req.userId!, req.params.id, submittedRound[0].round_id); }
+      catch (e) { console.error('[auto-post] failed', e); }
     }
 
     // Update match_players for the submitting player

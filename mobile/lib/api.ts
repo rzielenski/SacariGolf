@@ -625,12 +625,15 @@ export const api = {
   },
 
   messages: {
-    list: (params: { matchId?: string; clanId?: string; toUserId?: string }) => {
-      const q = params.matchId ? `matchId=${params.matchId}` : params.clanId ? `clanId=${params.clanId}` : `toUserId=${params.toUserId}`;
+    list: (params: { matchId?: string; clanId?: string; tournamentId?: string; toUserId?: string }) => {
+      const q = params.matchId ? `matchId=${params.matchId}`
+        : params.clanId ? `clanId=${params.clanId}`
+        : params.tournamentId ? `tournamentId=${params.tournamentId}`
+        : `toUserId=${params.toUserId}`;
       return request<any[]>('GET', `/messages?${q}`);
     },
     send: (body: {
-      matchId?: string; clanId?: string; toUserId?: string;
+      matchId?: string; clanId?: string; tournamentId?: string; toUserId?: string;
       body?: string;
       /** Base64-encoded audio (typically AAC/m4a from expo-av). */
       voiceBase64?: string;
@@ -660,7 +663,7 @@ export const api = {
     ),
     /** Mark a chat read — call when opening a chat screen so the social
      *  tab's unread badge clears on next refresh. */
-    markRead: (kind: 'dm' | 'match' | 'clan', key: string) =>
+    markRead: (kind: 'dm' | 'match' | 'clan' | 'league', key: string) =>
       request<{ success: true }>('POST', '/messages/read', { kind, key }),
   },
 
@@ -1025,6 +1028,15 @@ export const api = {
     setTarget: (id: string, body: { toPar?: number | null; roundId?: string; label?: string }) =>
       request<{ success: true; target_to_par: number | null; target_label: string | null }>(
         'POST', `/tournaments/${id}/target`, body),
+    /** Creator-league feed: member text posts + system events. */
+    feed: (id: string) => request<any[]>('GET', `/tournaments/${id}/feed`),
+    postFeed: (id: string, body: string) => request<any>('POST', `/tournaments/${id}/feed`, { body }),
+    /** Member: auto-submit my solo rounds to this league (exclusive across leagues). */
+    autoPost: (id: string, enabled: boolean) =>
+      request<{ success: true; auto_post: boolean }>('POST', `/tournaments/${id}/auto-post`, { enabled }),
+    /** Creator: recurring-season cadence (none | weekly | monthly). */
+    settings: (id: string, body: { resetPeriod?: 'none' | 'weekly' | 'monthly' }) =>
+      request<{ success: true }>('POST', `/tournaments/${id}/settings`, body),
     join: (id: string, joinCode?: string) =>
       request<{ success: true }>('POST', `/tournaments/${id}/join`, joinCode ? { joinCode } : {}),
     joinByCode: (code: string) =>

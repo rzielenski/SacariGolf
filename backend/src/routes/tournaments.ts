@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { isApprovedCreator } from '../utils/creator';
+import { postLeagueEvent } from '../utils/leagues';
 
 /**
  * Tournaments / leagues. A tournament is a named container that gathers a
@@ -20,6 +21,13 @@ const router = Router();
 
 const SCORING_RULES = new Set(['best_round', 'total_strokes', 'wins', 'points']);
 const FORMATS = new Set(['stroke', 'match_play', 'stableford', 'skins', 'scramble']);
+
+async function isLeagueMember(leagueId: string, userId: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT 1 FROM tournament_players WHERE tournament_id = $1 AND user_id = $2`, [leagueId, userId],
+  );
+  return rows.length > 0;
+}
 
 // 6-character invite codes — capital alphanumerics, no ambiguous I/O/0/1.
 function genJoinCode(): string {
@@ -84,7 +92,8 @@ router.get('/creator-leagues', requireAuth, wrap(async (req: AuthRequest, res: R
                JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
               WHERE tp.tournament_id = t.tournament_id
                 AND t.target_to_par IS NOT NULL
-                AND r.normalized_to_par <= t.target_to_par) AS beaten_count,
+                AND r.normalized_to_par <= t.target_to_par
+                AND (t.season_started_at IS NULL OR r.created_at >= t.season_started_at)) AS beaten_count,
             EXISTS (SELECT 1 FROM tournament_players tp WHERE tp.tournament_id = t.tournament_id AND tp.user_id = $1) AS joined,
             (t.owner_id = $1) AS owned
      FROM tournaments t
@@ -134,8 +143,8 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     const { rows } = await client.query(
       `INSERT INTO tournaments
          (owner_id, clan_id, name, description, scoring, format, course_id, ends_at, is_open, join_code,
-          is_creator_league, accent_color, tagline)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          is_creator_league, accent_color, tagline, season_started_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         req.userId,
@@ -151,6 +160,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
         isCreatorLeague === true,
         safeAccent,
         safeTagline,
+        isCreatorLeague === true ? new Date() : null,
       ]
     );
     const tournament = rows[0];
@@ -197,6 +207,12 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     [req.params.id]
   );
 
+  // Creator leagues scope the leaderboard to the current SEASON (rounds posted
+  // since season_started_at) so a weekly/monthly reset starts everyone fresh.
+  const seasonStart: Date | null = t.is_creator_league ? (t.season_started_at ?? null) : null;
+  const seasonClause = seasonStart ? 'AND r.created_at >= $2' : '';
+  const lbParams: any[] = seasonStart ? [req.params.id, seasonStart] : [req.params.id];
+
   // Leaderboard: aggregate per-player scores from completed matches linked
   // to this tournament. The shape depends on the scoring rule.
   let leaderboard: any[] = [];
@@ -211,13 +227,13 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
        FROM tournament_players tp
        JOIN users u ON u.user_id = tp.user_id
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
-       LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
+       LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id ${seasonClause}
        WHERE tp.tournament_id = $1
          AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY MIN(r.normalized_to_par) ASC NULLS LAST, COUNT(r.round_id) DESC`,
-      [req.params.id]
+      lbParams
     );
     leaderboard = lb;
   } else if (t.scoring === 'total_strokes') {
@@ -230,13 +246,13 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
        FROM tournament_players tp
        JOIN users u ON u.user_id = tp.user_id
        LEFT JOIN matches m ON m.tournament_id = tp.tournament_id
-       LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id
+       LEFT JOIN rounds  r ON r.match_id = m.match_id AND r.user_id = tp.user_id ${seasonClause}
        WHERE tp.tournament_id = $1
          AND u.is_bot = false
          AND (m.completed IS NULL OR m.completed = true)
        GROUP BY u.user_id, u.username, u.avatar_url
        ORDER BY SUM(r.normalized_to_par) ASC NULLS LAST, COUNT(r.round_id) DESC`,
-      [req.params.id]
+      lbParams
     );
     leaderboard = lb;
   } else if (t.scoring === 'wins') {
@@ -272,7 +288,22 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   }
   const beatenCount = target != null ? leaderboard.filter((r) => r.beat_creator).length : 0;
 
-  return res.json({ ...t, players, leaderboard, beaten_count: beatenCount });
+  // Caller's per-league prefs + the last season champion's name.
+  const { rows: meRows } = await pool.query(
+    `SELECT auto_post FROM tournament_players WHERE tournament_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId],
+  );
+  let lastChampionName: string | null = null;
+  if (t.last_champion_id) {
+    const { rows: lc } = await pool.query(`SELECT username FROM users WHERE user_id = $1`, [t.last_champion_id]);
+    lastChampionName = lc[0]?.username ?? null;
+  }
+
+  return res.json({
+    ...t, players, leaderboard, beaten_count: beatenCount,
+    my_auto_post: meRows[0]?.auto_post === true,
+    last_champion_name: lastChampionName,
+  });
 }));
 
 // Join via tournament id (open tournaments) or join code.
@@ -402,7 +433,92 @@ router.post('/:id/target', requireAuth, wrap(async (req: AuthRequest, res: Respo
     `UPDATE tournaments SET target_to_par = $2, target_label = $3 WHERE tournament_id = $1`,
     [req.params.id, toPar, label]
   );
+  if (toPar != null) {
+    const n = Math.round(toPar);
+    await postLeagueEvent(pool, req.params.id, req.userId!, `🎯 New target to beat: ${n === 0 ? 'E' : n > 0 ? `+${n}` : `${n}`}${label ? ` · ${label}` : ''}`);
+  }
   return res.json({ success: true, target_to_par: toPar, target_label: label });
+}));
+
+// ── Creator-league feed ─────────────────────────────────────────────────────
+// A dedicated feed per league: member text posts + system events (beat-the-
+// creator, season champions). Members only.
+router.get('/:id/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  if (!(await isLeagueMember(req.params.id, req.userId!))) {
+    return res.status(403).json({ error: 'Join the league to see its feed' });
+  }
+  const { rows } = await pool.query(
+    `SELECT lp.post_id, lp.kind, lp.body, lp.created_at, lp.user_id,
+            u.username, u.avatar_url
+       FROM league_posts lp
+       LEFT JOIN users u ON u.user_id = lp.user_id
+      WHERE lp.league_id = $1
+      ORDER BY lp.created_at DESC
+      LIMIT 100`,
+    [req.params.id],
+  );
+  return res.json(rows);
+}));
+
+router.post('/:id/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const body = typeof req.body?.body === 'string' ? req.body.body.trim().slice(0, 1000) : '';
+  if (!body) return res.status(400).json({ error: 'body required' });
+  if (!(await isLeagueMember(req.params.id, req.userId!))) {
+    return res.status(403).json({ error: 'Join the league to post' });
+  }
+  const { rows } = await pool.query(
+    `INSERT INTO league_posts (league_id, user_id, kind, body) VALUES ($1, $2, 'text', $3)
+     RETURNING post_id, kind, body, created_at, user_id`,
+    [req.params.id, req.userId, body],
+  );
+  const { rows: u } = await pool.query(`SELECT username, avatar_url FROM users WHERE user_id = $1`, [req.userId]);
+  return res.status(201).json({ ...rows[0], username: u[0]?.username, avatar_url: u[0]?.avatar_url });
+}));
+
+// ── Member: auto-post solo rounds to THIS league ────────────────────────────
+// A round can only land on one leaderboard, so enabling here is EXCLUSIVE: it
+// turns auto-post off on the member's other leagues.
+router.post('/:id/auto-post', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const enabled = req.body?.enabled === true;
+  if (!(await isLeagueMember(req.params.id, req.userId!))) {
+    return res.status(403).json({ error: 'Join the league first' });
+  }
+  if (enabled) {
+    await pool.query(
+      `UPDATE tournament_players SET auto_post = (tournament_id = $1) WHERE user_id = $2`,
+      [req.params.id, req.userId],
+    );
+  } else {
+    await pool.query(
+      `UPDATE tournament_players SET auto_post = FALSE WHERE tournament_id = $1 AND user_id = $2`,
+      [req.params.id, req.userId],
+    );
+  }
+  return res.json({ success: true, auto_post: enabled });
+}));
+
+// ── Creator: recurring-season settings (auto-crown + reset cadence) ──────────
+router.post('/:id/settings', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: tRows } = await pool.query(
+    `SELECT owner_id, reset_period FROM tournaments WHERE tournament_id = $1`, [req.params.id],
+  );
+  if (!tRows.length) return res.status(404).json({ error: 'League not found' });
+  if (tRows[0].owner_id !== req.userId) return res.status(403).json({ error: 'Only the creator can change settings' });
+
+  const rp = req.body?.resetPeriod;
+  if (rp !== undefined) {
+    if (!['none', 'weekly', 'monthly'].includes(rp)) {
+      return res.status(400).json({ error: 'resetPeriod must be none | weekly | monthly' });
+    }
+    // Switching ON a cadence re-anchors the season to now, so the first window
+    // is a full week/month from the change rather than from league creation.
+    if (rp !== 'none' && tRows[0].reset_period === 'none') {
+      await pool.query(`UPDATE tournaments SET reset_period = $2, season_started_at = NOW() WHERE tournament_id = $1`, [req.params.id, rp]);
+    } else {
+      await pool.query(`UPDATE tournaments SET reset_period = $2 WHERE tournament_id = $1`, [req.params.id, rp]);
+    }
+  }
+  return res.json({ success: true, reset_period: rp });
 }));
 
 // Finalize a tournament: lock it, crown the leaderboard winner, and award the

@@ -69,7 +69,7 @@ export default function CreatorLeaguesScreen() {
       contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
     >
-      <Stack.Screen options={{ title: 'Creator Leagues', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
+      <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold, headerShadowVisible: false }} />
 
       <Text style={s.title}>Creator Leagues</Text>
       <Text style={s.sub}>Join a creator's league and chase their score. Beat the creator to earn their mark.</Text>
@@ -269,18 +269,18 @@ const s = StyleSheet.create({
   emptyTitle: { color: C.text, fontWeight: '800', fontSize: 16 },
   emptyBody: { color: C.textMuted, fontSize: 13, lineHeight: 18, textAlign: 'center', marginTop: 6 },
 
-  card: { flexDirection: 'row', backgroundColor: C.card, borderRadius: 10, marginBottom: 10, borderWidth: 1, overflow: 'hidden' },
-  accentBar: { width: 5 },
-  cardBody: { flex: 1, padding: 14 },
+  card: { flexDirection: 'row', backgroundColor: C.card, borderRadius: 12, marginBottom: 16, borderWidth: 1, overflow: 'hidden' },
+  accentBar: { width: 6 },
+  cardBody: { flex: 1, padding: 16 },
   cardName: { color: C.text, fontWeight: '900', fontSize: 16, fontFamily: F.serif },
-  cardHost: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  cardTagline: { color: C.text, fontSize: 13, marginTop: 10, lineHeight: 18 },
+  cardHost: { color: C.textMuted, fontSize: 12, marginTop: 3 },
+  cardTagline: { color: C.text, fontSize: 13, marginTop: 12, lineHeight: 19 },
   joinBtn: { paddingHorizontal: 16, paddingVertical: 9, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
   joinBtnText: { color: '#000', fontWeight: '900', fontSize: 12 },
   joinedPill: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 7, borderWidth: 1 },
   joinedPillText: { fontWeight: '900', fontSize: 11, letterSpacing: 1 },
 
-  beatRow: { marginTop: 12, borderRadius: 8, borderWidth: 1, paddingVertical: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  beatRow: { marginTop: 14, borderRadius: 8, borderWidth: 1, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
   beatLabel: { fontSize: 9, fontWeight: '900', letterSpacing: 1 },
   beatScore: { color: C.text, fontWeight: '900', fontSize: 14, fontFamily: F.serif, flex: 1 },
   beatCount: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
