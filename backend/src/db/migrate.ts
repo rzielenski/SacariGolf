@@ -2186,6 +2186,38 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ON CONFLICT (user_id, cosmetic_id) DO NOTHING;
     `,
   },
+  {
+    // Creator Leagues — a creator-branded flavor of a tournament. Reuses the
+    // whole tournaments/leaderboard/join-code engine; these columns add the
+    // branding + a "beat the creator" target (the creator's standing score the
+    // whole field tries to beat, stored as 18-hole-equivalent to-par so 9- and
+    // 18-hole attempts compare fairly, same basis as the leaderboard).
+    name: 'tournaments.creator_leagues',
+    sql: `
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS is_creator_league BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS accent_color   TEXT;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS tagline        TEXT;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS target_to_par  REAL;
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS target_label   TEXT;
+      -- Browse surface filters on (is_creator_league, is_open, status).
+      CREATE INDEX IF NOT EXISTS tournaments_creator_browse_idx
+        ON tournaments(is_creator_league, status) WHERE is_creator_league = TRUE;
+    `,
+  },
+  {
+    // Approved-creator group. users.is_creator gates who can HOST a creator
+    // league (POST /tournaments with isCreatorLeague). Managed from the DB the
+    // same way as the owner group:
+    //   UPDATE users SET is_creator = true  WHERE LOWER(username) = 'someone';
+    //   UPDATE users SET is_creator = false WHERE LOWER(username) = 'someone';
+    // Owners are implicitly creators (the gate is is_owner OR is_creator); this
+    // also flags any existing owner so a direct is_creator read is true too.
+    name: 'users.is_creator',
+    sql: `
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_creator BOOLEAN NOT NULL DEFAULT FALSE;
+      UPDATE users SET is_creator = TRUE WHERE is_owner = TRUE AND is_creator = FALSE;
+    `,
+  },
 ];
 
 export async function runMigrations() {

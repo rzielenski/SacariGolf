@@ -707,6 +707,7 @@ export default function ProfileScreen() {
       <Text style={[styles.sectionHeader, styles.menuHeader]}>COMPETE</Text>
       <MenuRow label="⚑  MY MATCHES" onPress={() => router.push('/matches' as any)} />
       <MenuRow label="★  LEADERBOARD" onPress={() => router.push('/leaderboard' as any)} />
+      <MenuRow label="◆  CREATOR LEAGUES" onPress={() => router.push('/creator-leagues' as any)} />
       <MenuRow label="♛  TOURNAMENTS" onPress={() => router.push('/tournaments' as any)} />
       <MenuRow label="🏆  SACARI CUP · THIS WEEK" onPress={() => router.push('/sacari-cup' as any)} />
       <MenuRow label="◎  CLOSEST TO THE PIN · THIS WEEK" onPress={() => router.push('/closest-to-pin' as any)} />

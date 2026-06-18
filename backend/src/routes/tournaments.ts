@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { isApprovedCreator } from '../utils/creator';
 
 /**
  * Tournaments / leagues. A tournament is a named container that gathers a
@@ -69,12 +70,53 @@ router.get('/discover', requireAuth, wrap(async (req: AuthRequest, res: Response
   return res.json(rows);
 }));
 
+// Browse public CREATOR LEAGUES — branded, open, active leagues anyone can
+// join. This is the fan discovery surface. Defined before '/:id' so the path
+// isn't swallowed by the id param. Ordered by liveliness then newest.
+router.get('/creator-leagues', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT t.tournament_id, t.name, t.tagline, t.accent_color, t.description,
+            t.join_code, t.scoring, t.target_to_par, t.target_label, t.created_at,
+            u.username AS owner_username, u.avatar_url AS owner_avatar_url, u.elo AS owner_elo,
+            (SELECT COUNT(*)::int FROM tournament_players tp WHERE tp.tournament_id = t.tournament_id) AS player_count,
+            (SELECT COUNT(DISTINCT tp.user_id)::int FROM tournament_players tp
+               JOIN matches m ON m.tournament_id = t.tournament_id AND (m.completed IS NULL OR m.completed = true)
+               JOIN rounds r ON r.match_id = m.match_id AND r.user_id = tp.user_id
+              WHERE tp.tournament_id = t.tournament_id
+                AND t.target_to_par IS NOT NULL
+                AND r.normalized_to_par <= t.target_to_par) AS beaten_count,
+            EXISTS (SELECT 1 FROM tournament_players tp WHERE tp.tournament_id = t.tournament_id AND tp.user_id = $1) AS joined,
+            (t.owner_id = $1) AS owned
+     FROM tournaments t
+     JOIN users u ON u.user_id = t.owner_id
+     WHERE t.is_creator_league = TRUE
+       AND t.status = 'active'
+       AND t.is_open = TRUE
+     ORDER BY player_count DESC, t.created_at DESC
+     LIMIT 60`,
+    [req.userId]
+  );
+  return res.json(rows);
+}));
+
 // Create a tournament. Owner is auto-joined as a player.
 router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { name, description, scoring, format, courseId, clanId, endsAt, isOpen } = req.body ?? {};
+  const { name, description, scoring, format, courseId, clanId, endsAt, isOpen,
+          isCreatorLeague, accentColor, tagline } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name required' });
   const safeScoring = SCORING_RULES.has(scoring) ? scoring : 'best_round';
   const safeFormat = FORMATS.has(format) ? format : 'stroke';
+  // Creator-league branding: a #hex accent + a short tagline. Sanitized so a
+  // bad client can't store junk that the renderer trusts.
+  const safeAccent = typeof accentColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(accentColor) ? accentColor : null;
+  const safeTagline = typeof tagline === 'string' ? tagline.trim().slice(0, 120) || null : null;
+
+  // Hosting a CREATOR LEAGUE is gated to the approved-creator group (or owners).
+  // A normal user can still make a plain tournament; they just can't brand it as
+  // a creator league that shows up on the public browse surface.
+  if (isCreatorLeague === true && !(await isApprovedCreator(req.userId))) {
+    return res.status(403).json({ error: 'Only approved creators can host a creator league.' });
+  }
 
   const client = await pool.connect();
   try {
@@ -91,8 +133,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 
     const { rows } = await client.query(
       `INSERT INTO tournaments
-         (owner_id, clan_id, name, description, scoring, format, course_id, ends_at, is_open, join_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (owner_id, clan_id, name, description, scoring, format, course_id, ends_at, is_open, join_code,
+          is_creator_league, accent_color, tagline)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         req.userId,
@@ -105,6 +148,9 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
         endsAt ? new Date(endsAt) : null,
         isOpen !== false, // default open
         code,
+        isCreatorLeague === true,
+        safeAccent,
+        safeTagline,
       ]
     );
     const tournament = rows[0];
@@ -131,6 +177,7 @@ router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows: tRows } = await pool.query(
     `SELECT t.*, u.username AS owner_username,
+            u.avatar_url AS owner_avatar_url, u.elo AS owner_elo,
             c.course_name AS course_name
      FROM tournaments t
      JOIN users u ON u.user_id = t.owner_id
@@ -213,7 +260,19 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     leaderboard = lb;
   }
 
-  return res.json({ ...t, players, leaderboard });
+  // "Beat the creator": flag each leaderboard row whose best 18-hole-equivalent
+  // to-par is at or under the creator's standing target. Meaningful for the
+  // best_round mode (the natural beat-the-creator format).
+  const target = t.target_to_par;
+  if (target != null) {
+    for (const row of leaderboard) {
+      const v = row.best_to_par;
+      row.beat_creator = v != null && Number(v) <= Number(target);
+    }
+  }
+  const beatenCount = target != null ? leaderboard.filter((r) => r.beat_creator).length : 0;
+
+  return res.json({ ...t, players, leaderboard, beaten_count: beatenCount });
 }));
 
 // Join via tournament id (open tournaments) or join code.
@@ -306,6 +365,44 @@ router.post('/:id/link-match', requireAuth, wrap(async (req: AuthRequest, res: R
     [req.params.id, matchId]
   );
   return res.json({ success: true });
+}));
+
+// Set the "beat the creator" target for a creator league: the creator's
+// standing score (18-hole-equivalent to-par) the whole field tries to beat.
+// Owner-only. Pass { toPar, label } directly, OR { roundId, label } to derive
+// the score from one of the creator's own scored rounds. { toPar: null } clears.
+router.post('/:id/target', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows: tRows } = await pool.query(
+    `SELECT owner_id FROM tournaments WHERE tournament_id = $1`, [req.params.id]
+  );
+  if (!tRows.length) return res.status(404).json({ error: 'League not found' });
+  if (tRows[0].owner_id !== req.userId) return res.status(403).json({ error: 'Only the creator can set the target' });
+
+  const label = typeof req.body?.label === 'string' ? req.body.label.trim().slice(0, 80) || null : null;
+  let toPar: number | null;
+
+  if (typeof req.body?.roundId === 'string') {
+    const { rows: rr } = await pool.query(
+      `SELECT normalized_to_par FROM rounds WHERE round_id = $1 AND user_id = $2`,
+      [req.body.roundId, req.userId]
+    );
+    if (!rr.length || rr[0].normalized_to_par == null) {
+      return res.status(400).json({ error: 'That round has no scored result yet' });
+    }
+    toPar = Number(rr[0].normalized_to_par);
+  } else if (req.body?.toPar === null) {
+    toPar = null; // explicit clear
+  } else if (req.body?.toPar != null && Number.isFinite(Number(req.body.toPar))) {
+    toPar = Number(req.body.toPar);
+  } else {
+    return res.status(400).json({ error: 'Provide toPar (number), toPar:null to clear, or roundId' });
+  }
+
+  await pool.query(
+    `UPDATE tournaments SET target_to_par = $2, target_label = $3 WHERE tournament_id = $1`,
+    [req.params.id, toPar, label]
+  );
+  return res.json({ success: true, target_to_par: toPar, target_label: label });
 }));
 
 // Finalize a tournament: lock it, crown the leaderboard winner, and award the

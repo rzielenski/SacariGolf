@@ -257,6 +257,7 @@ export default function HomeScreen() {
       <View style={styles.hubGrid}>
         {([
           { mark: '★', label: 'Leaderboard', to: '/leaderboard' },
+          { mark: '◆', label: 'Creator Leagues', to: '/creator-leagues' },
           { mark: '♛', label: 'Tournaments', to: '/tournaments' },
           { mark: '🏆', label: 'Sacari Cup', to: '/sacari-cup' },
           { mark: '▼', label: 'Season Pass', to: '/season-pass' },

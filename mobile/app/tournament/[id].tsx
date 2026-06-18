@@ -1,15 +1,23 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  Share, Alert, RefreshControl,
+  Share, Alert, RefreshControl, Modal, TextInput,
 } from 'react-native';
 import { useLocalSearchParams, router, Stack } from 'expo-router';
+import QRCode from 'react-native-qrcode-svg';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
 import { Divider, OrnamentTitle } from '../../components/Flourish';
 import { UserAvatar } from '../../components/UserAvatar';
 import { useCensor } from '../../lib/censor';
+
+/** "+N" / "E" / "-N" from an 18-hole-equivalent to-par. */
+function toParLabel(v: number | null | undefined): string {
+  if (v == null) return '—';
+  const n = Math.round(Number(v));
+  return n === 0 ? 'E' : n > 0 ? `+${n}` : `${n}`;
+}
 
 /**
  * Tournament detail + leaderboard. Shows the standings, the player roster,
@@ -23,6 +31,8 @@ export default function TournamentDetailScreen() {
   const [t, setT] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [targetOpen, setTargetOpen] = useState(false);
 
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -42,6 +52,10 @@ export default function TournamentDetailScreen() {
   const isFinished = t.status === 'finished';
   const winnerName = (t.players ?? []).find((p: any) => p.user_id === t.winner_id)?.username
     ?? (t.leaderboard ?? [])[0]?.username ?? null;
+  const isCreatorLeague = !!t.is_creator_league;
+  const accent = isCreatorLeague ? (t.accent_color || C.gold) : C.gold;
+  const myRow = (t.leaderboard ?? []).find((r: any) => r.user_id === user?.user_id);
+  const iBeat = !!myRow?.beat_creator;
 
   const shareCode = async () => {
     if (!t.join_code) return;
@@ -99,15 +113,48 @@ export default function TournamentDetailScreen() {
     >
       <Stack.Screen options={{ title: '', headerStyle: { backgroundColor: C.bg }, headerTintColor: C.gold }} />
 
-      <Text style={s.title}>{c(t.name)}</Text>
-      {t.description ? <Text style={s.desc}>{c(t.description)}</Text> : null}
-      <Text style={s.meta}>
-        {label('scoring', t.scoring)} · {label('format', t.format)}
-        {t.course_name ? ` · ${t.course_name}` : ''}
-        {t.ends_at ? ` · ends ${new Date(t.ends_at).toLocaleDateString()}` : ''}
-      </Text>
-      <Text style={s.meta}>Hosted by {c(t.owner_username)}</Text>
+      {isCreatorLeague ? (
+        <View style={[s.creatorHeader, { borderColor: accent + '66' }]}>
+          <View style={[s.accentStripe, { backgroundColor: accent }]} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <UserAvatar username={t.owner_username} avatarUrl={t.owner_avatar_url} size={50} borderRadius={8} />
+            <View style={{ flex: 1 }}>
+              <Text style={s.title}>{c(t.name)}</Text>
+              <Text style={s.meta}>
+                by {c(t.owner_username)} · {(t.players ?? []).length} player{(t.players ?? []).length === 1 ? '' : 's'}
+              </Text>
+            </View>
+          </View>
+          {t.tagline ? <Text style={[s.desc, { marginTop: 10 }]}>{c(t.tagline)}</Text> : null}
+        </View>
+      ) : (
+        <>
+          <Text style={s.title}>{c(t.name)}</Text>
+          {t.description ? <Text style={s.desc}>{c(t.description)}</Text> : null}
+          <Text style={s.meta}>
+            {label('scoring', t.scoring)} · {label('format', t.format)}
+            {t.course_name ? ` · ${t.course_name}` : ''}
+            {t.ends_at ? ` · ends ${new Date(t.ends_at).toLocaleDateString()}` : ''}
+          </Text>
+          <Text style={s.meta}>Hosted by {c(t.owner_username)}</Text>
+        </>
+      )}
       <Divider style={{ marginTop: 14, marginBottom: 14 }} />
+
+      {/* Beat the creator */}
+      {isCreatorLeague && t.target_to_par != null && (
+        <View style={[s.beatBanner, { backgroundColor: accent + '14', borderColor: accent }]}>
+          <Text style={[s.beatBannerLabel, { color: accent }]}>🎯 BEAT THE CREATOR</Text>
+          <Text style={s.beatBannerScore}>
+            {toParLabel(t.target_to_par)}{t.target_label ? `  ·  ${c(t.target_label)}` : ''}
+          </Text>
+          <Text style={s.beatBannerSub}>
+            {iBeat
+              ? 'You beat it. ✓'
+              : `${t.beaten_count ?? 0} player${(t.beaten_count ?? 0) === 1 ? ' has' : 's have'} done it. Post a better round to join them.`}
+          </Text>
+        </View>
+      )}
 
       {isFinished && (
         <View style={s.winnerBanner}>
@@ -117,11 +164,16 @@ export default function TournamentDetailScreen() {
       )}
 
       {t.join_code && (isOwner || isMember) && (
-        <TouchableOpacity style={s.codeBox} onPress={shareCode} activeOpacity={0.8}>
-          <Text style={s.codeLabel}>JOIN CODE</Text>
-          <Text style={s.code}>{t.join_code}</Text>
-          <Text style={s.codeShare}>Tap to share →</Text>
-        </TouchableOpacity>
+        <>
+          <TouchableOpacity style={s.codeBox} onPress={shareCode} activeOpacity={0.8}>
+            <Text style={s.codeLabel}>JOIN CODE</Text>
+            <Text style={s.code}>{t.join_code}</Text>
+            <Text style={s.codeShare}>Tap to share →</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.qrBtn, { borderColor: accent }]} onPress={() => setQrOpen(true)} activeOpacity={0.85}>
+            <Text style={[s.qrBtnText, { color: accent }]}>▦  Show join QR</Text>
+          </TouchableOpacity>
+        </>
       )}
 
       {!isMember && !isOwner && (
@@ -136,8 +188,20 @@ export default function TournamentDetailScreen() {
           onPress={() => router.push(`/play?type=group&tournament=${t.tournament_id}` as any)}
           activeOpacity={0.85}
         >
-          <Text style={s.runBtnText}>＋ Run a group round</Text>
-          <Text style={s.runBtnSub}>Score your group on one phone. Every player's round counts toward this leaderboard.</Text>
+          <Text style={s.runBtnText}>{isCreatorLeague ? '＋ Play your attempt' : '＋ Run a group round'}</Text>
+          <Text style={s.runBtnSub}>
+            {isCreatorLeague
+              ? 'Play a round that counts toward this league. Post the target score or better to beat the creator.'
+              : 'Score your group on one phone. Every player\'s round counts toward this leaderboard.'}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {isOwner && isCreatorLeague && isActive && (
+        <TouchableOpacity style={[s.setTargetBtn, { borderColor: accent }]} onPress={() => setTargetOpen(true)} activeOpacity={0.85}>
+          <Text style={[s.setTargetText, { color: accent }]}>
+            {t.target_to_par != null ? `🎯 Target: ${toParLabel(t.target_to_par)} — tap to change` : '🎯 Set the score to beat'}
+          </Text>
         </TouchableOpacity>
       )}
 
@@ -156,7 +220,10 @@ export default function TournamentDetailScreen() {
               {i <= 2 ? ['I','II','III'][i] : `#${i + 1}`}
             </Text>
             <View style={{ flex: 1 }}>
-              <Text style={s.lbName}>{c(row.username)}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={s.lbName}>{c(row.username)}</Text>
+                {row.beat_creator ? <Text style={[s.beatTag, { color: accent, borderColor: accent }]}>BEAT ✓</Text> : null}
+              </View>
               <Text style={s.lbMeta}>
                 {row.rounds_played ?? 0} round{row.rounds_played === 1 ? '' : 's'} played
               </Text>
@@ -212,7 +279,92 @@ export default function TournamentDetailScreen() {
           </TouchableOpacity>
         ) : null}
       </View>
+
+      <QrModal visible={qrOpen} onClose={() => setQrOpen(false)} code={t.join_code} name={c(t.name)} accent={accent} />
+      <SetTargetModal
+        visible={targetOpen}
+        onClose={() => setTargetOpen(false)}
+        leagueId={t.tournament_id}
+        current={t.target_to_par}
+        currentLabel={t.target_label}
+        accent={accent}
+        onSaved={() => { setTargetOpen(false); load(); }}
+      />
     </ScrollView>
+  );
+}
+
+function QrModal({ visible, onClose, code, name, accent }: {
+  visible: boolean; onClose: () => void; code: string | null; name: string; accent: string;
+}) {
+  if (!code) return null;
+  const link = `sacari://join/${code}`;
+  return (
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+      <TouchableOpacity style={s.qrBackdrop} activeOpacity={1} onPress={onClose}>
+        <View style={[s.qrSheet, { borderColor: accent }]}>
+          <Text style={s.qrTitle} numberOfLines={1}>{name}</Text>
+          <View style={s.qrBox}>
+            <QRCode value={link} size={216} backgroundColor="#ffffff" color="#000000" />
+          </View>
+          <Text style={s.qrCodeLabel}>JOIN CODE</Text>
+          <Text style={[s.qrCode, { color: accent }]}>{code}</Text>
+          <Text style={s.qrHint}>Point a phone camera at the code to jump straight in. Tap anywhere to close.</Text>
+        </View>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+function SetTargetModal({ visible, onClose, leagueId, current, currentLabel, accent, onSaved }: {
+  visible: boolean; onClose: () => void; leagueId: string;
+  current: number | null; currentLabel: string | null; accent: string; onSaved: () => void;
+}) {
+  const [toPar, setToPar] = useState(current != null ? String(Math.round(current)) : '');
+  const [lbl, setLbl] = useState(currentLabel ?? '');
+  const [saving, setSaving] = useState(false);
+  // Re-sync when reopened against a changed target.
+  useEffect(() => {
+    if (visible) { setToPar(current != null ? String(Math.round(current)) : ''); setLbl(currentLabel ?? ''); }
+  }, [visible, current, currentLabel]);
+
+  const save = async () => {
+    const n = parseInt(toPar, 10);
+    if (!Number.isFinite(n)) { Alert.alert('Enter a score', 'Use a number to par, like -2, 0, or 5.'); return; }
+    setSaving(true);
+    try { await api.tournaments.setTarget(leagueId, { toPar: n, label: lbl.trim() || undefined }); onSaved(); }
+    catch (e: any) { Alert.alert('Could not save', e?.message ?? 'Try again.'); }
+    finally { setSaving(false); }
+  };
+  const clear = async () => {
+    setSaving(true);
+    try { await api.tournaments.setTarget(leagueId, { toPar: null }); onSaved(); }
+    catch (e: any) { Alert.alert('Could not clear', e?.message ?? 'Try again.'); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <ScrollView style={{ flex: 1, backgroundColor: C.bg }} contentContainerStyle={{ padding: 20, paddingTop: 28 }} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={s.modalTitle}>Set the score to beat</Text>
+          <TouchableOpacity onPress={onClose}><Text style={s.cancel}>Cancel</Text></TouchableOpacity>
+        </View>
+        <Text style={s.fieldHint}>Your standing score, to par (18-hole equivalent). Anyone who posts this or better has "beaten the creator."</Text>
+        <Text style={s.fieldLabel}>Score to par</Text>
+        <TextInput style={[s.fieldInput, { fontSize: 22, textAlign: 'center', fontFamily: F.mono }]} value={toPar} onChangeText={setToPar} placeholder="-1" placeholderTextColor={C.textMuted} keyboardType="numbers-and-punctuation" maxLength={4} />
+        <Text style={s.fieldLabel}>Label (optional)</Text>
+        <TextInput style={s.fieldInput} value={lbl} onChangeText={setLbl} placeholder="e.g. Camroden · 18 holes" placeholderTextColor={C.textMuted} maxLength={80} />
+        <TouchableOpacity style={[s.saveBtn, { backgroundColor: accent }, saving && { opacity: 0.6 }]} disabled={saving} onPress={save}>
+          {saving ? <ActivityIndicator color="#000" /> : <Text style={s.saveBtnText}>Save target</Text>}
+        </TouchableOpacity>
+        {current != null && (
+          <TouchableOpacity style={s.clearBtn} disabled={saving} onPress={clear}>
+            <Text style={s.clearBtnText}>Clear target</Text>
+          </TouchableOpacity>
+        )}
+      </ScrollView>
+    </Modal>
   );
 }
 
@@ -274,4 +426,41 @@ const s = StyleSheet.create({
   winnerName: { color: C.text, fontSize: 22, fontWeight: '900', marginTop: 4 },
   finalizeBtn: { backgroundColor: C.gold, paddingVertical: 14, borderRadius: 8, alignItems: 'center' },
   finalizeBtnText: { color: '#000', fontWeight: '900', fontSize: 15 },
+
+  // Creator-league branding
+  creatorHeader: { backgroundColor: C.card, borderRadius: 12, borderWidth: 1, padding: 14, paddingLeft: 18, overflow: 'hidden' },
+  accentStripe: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 5 },
+
+  beatBanner: { borderRadius: 12, borderWidth: 1, padding: 14, marginBottom: 16 },
+  beatBannerLabel: { fontSize: 11, fontWeight: '900', letterSpacing: 1.5 },
+  beatBannerScore: { color: C.text, fontFamily: F.serif, fontSize: 26, fontWeight: '900', marginTop: 4 },
+  beatBannerSub: { color: C.textMuted, fontSize: 12, marginTop: 4, lineHeight: 17 },
+
+  beatTag: { fontSize: 9, fontWeight: '900', letterSpacing: 0.5, borderWidth: 1, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1, overflow: 'hidden' },
+
+  qrBtn: { paddingVertical: 12, borderRadius: 8, borderWidth: 1, alignItems: 'center', marginBottom: 16 },
+  qrBtnText: { fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+
+  setTargetBtn: { paddingVertical: 13, borderRadius: 8, borderWidth: 1, alignItems: 'center' },
+  setTargetText: { fontWeight: '900', fontSize: 14 },
+
+  // QR modal
+  qrBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', padding: 30 },
+  qrSheet: { backgroundColor: C.card, borderRadius: 18, borderWidth: 2, padding: 24, alignItems: 'center', width: '100%', maxWidth: 320 },
+  qrTitle: { color: C.text, fontFamily: F.serif, fontSize: 20, fontWeight: '900', marginBottom: 16, textAlign: 'center' },
+  qrBox: { backgroundColor: '#ffffff', padding: 14, borderRadius: 10 },
+  qrCodeLabel: { color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 2, marginTop: 16 },
+  qrCode: { fontFamily: F.mono, fontSize: 28, fontWeight: '900', letterSpacing: 6, marginTop: 2 },
+  qrHint: { color: C.textMuted, fontSize: 12, marginTop: 12, textAlign: 'center', lineHeight: 17 },
+
+  // Set-target modal
+  modalTitle: { color: C.text, fontSize: 22, fontWeight: '900', fontFamily: F.serif },
+  cancel: { color: C.textMuted, fontSize: 15 },
+  fieldHint: { color: C.textMuted, fontSize: 13, lineHeight: 18, marginTop: 12 },
+  fieldLabel: { color: C.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 1, marginTop: 18, marginBottom: 6 },
+  fieldInput: { backgroundColor: C.card, color: C.text, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, borderWidth: 1, borderColor: C.border },
+  saveBtn: { marginTop: 28, padding: 14, borderRadius: 8, alignItems: 'center' },
+  saveBtnText: { color: '#000', fontWeight: '900', fontSize: 15 },
+  clearBtn: { marginTop: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: C.red, borderRadius: 8 },
+  clearBtnText: { color: C.red, fontWeight: '700' },
 });

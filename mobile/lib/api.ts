@@ -1002,6 +1002,8 @@ export const api = {
   tournaments: {
     list: () => request<any[]>('GET', '/tournaments'),
     discover: () => request<any[]>('GET', '/tournaments/discover'),
+    /** Browse public creator leagues (the fan discovery surface). */
+    creatorLeagues: () => request<any[]>('GET', '/tournaments/creator-leagues'),
     get: (id: string) => request<any>('GET', `/tournaments/${id}`),
     create: (body: {
       name: string;
@@ -1012,7 +1014,17 @@ export const api = {
       clanId?: string;
       endsAt?: string;
       isOpen?: boolean;
+      // Creator-league branding.
+      isCreatorLeague?: boolean;
+      accentColor?: string;   // #rrggbb
+      tagline?: string;
     }) => request<any>('POST', '/tournaments', body),
+    /** Owner-only: set the "beat the creator" target (a standing to-par the
+     *  field chases). Pass toPar directly, roundId to derive it, or toPar:null
+     *  to clear. */
+    setTarget: (id: string, body: { toPar?: number | null; roundId?: string; label?: string }) =>
+      request<{ success: true; target_to_par: number | null; target_label: string | null }>(
+        'POST', `/tournaments/${id}/target`, body),
     join: (id: string, joinCode?: string) =>
       request<{ success: true }>('POST', `/tournaments/${id}/join`, joinCode ? { joinCode } : {}),
     joinByCode: (code: string) =>
