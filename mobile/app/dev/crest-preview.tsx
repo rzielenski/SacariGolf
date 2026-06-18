@@ -21,7 +21,7 @@ import {
 } from '../../components/HoleScoreCelebration';
 import { C, F } from '../../lib/colors';
 
-// ELO that lands squarely in each tier (per RankCrest's tierFromElo logic):
+// SR that lands squarely in each tier (per RankCrest's tierFromElo logic):
 //   Bronze   < 1400
 //   Silver   1400–1599
 //   Gold     1600–1799
@@ -81,7 +81,7 @@ export default function CrestPreviewScreen() {
           <View key={t.label} style={s.tierRow}>
             <View style={s.tierMeta}>
               <Text style={s.tierLabel}>{t.label}</Text>
-              <Text style={s.tierElo}>{t.floor === 0 ? `< ${1400}` : `${t.floor}+`} ELO</Text>
+              <Text style={s.tierElo}>{t.floor === 0 ? `< ${1400}` : `${t.floor}+`} SR</Text>
             </View>
             <View style={s.crestRow}>
               <View style={s.crestSlot}>

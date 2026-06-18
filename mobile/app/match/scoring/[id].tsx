@@ -108,7 +108,7 @@ export default function ScoringScreen() {
   const [scorecardVisible, setScorecardVisible] = useState(false);
   // In-round invite modal — only used for practice rounds, where the host can
   // pull in up to 8 friends to play the same course/teebox together (each on
-  // their own scorecard, no ELO).
+  // their own scorecard, no SR).
   const [inviteVisible, setInviteVisible] = useState(false);
 
   // Shot tracking — state machine in hooks/useShotTracking.ts. Recording flow:
@@ -2093,7 +2093,7 @@ export default function ScoringScreen() {
     // simply backs out.
     if (preview) { router.back(); return; }
 
-    // "Cancel" (no ELO) is offered when the user is still in course selection
+    // "Cancel" (no SR) is offered when the user is still in course selection
     // OR has not advanced past hole 0 with no score changes — backend enforces
     // the real rule (no player completed = safe to cancel).
     const noScoringStarted = selectingCourse || currentHole === 0;
@@ -2110,7 +2110,7 @@ export default function ScoringScreen() {
         onPress: () => {
           Alert.alert(
             'Cancel Match?',
-            'The match will be deleted. No ELO penalty for anyone.',
+            'The match will be deleted. No SR penalty for anyone.',
             [
               { text: 'Keep Match', style: 'cancel' },
               { text: 'Cancel Match', style: 'destructive', onPress: doCancel },
@@ -2125,7 +2125,7 @@ export default function ScoringScreen() {
         onPress: () => {
           Alert.alert(
             'Forfeit?',
-            'You will take an ELO penalty. This cannot be undone.',
+            'You will take an SR penalty. This cannot be undone.',
             [
               { text: 'Keep Playing', style: 'cancel' },
               { text: 'Forfeit', style: 'destructive', onPress: doForfeit },

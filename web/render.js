@@ -153,7 +153,7 @@ function crestLadder() {
     return `<div class="ladder-cell">
       <img src="/crests/${t.key}.png" alt="${esc(t.name)} crest" loading="lazy" />
       <div class="ladder-name" style="color:${t.color}">${esc(t.name)}</div>
-      <div class="ladder-range">${esc(range)} ELO</div>
+      <div class="ladder-range">${esc(range)} SR</div>
     </div>`;
   }).join('');
   return `<div class="ladder">${cells}</div>`;
@@ -183,7 +183,7 @@ function renderHome() {
     <div class="feature-grid">
       <div class="feature-card">
         <h3>Climb &amp; compete</h3>
-        <p>Ranked solo, duo, and squad matches with live ELO. Six-month seasons, the weekly Sacari Cup, and a partial reset each season so every climb counts.</p>
+        <p>Ranked solo, duo, and squad matches with live SR. Six-month seasons, the weekly Sacari Cup, and a partial reset each season so every climb counts.</p>
       </div>
       <div class="feature-card">
         <h3>Bring your crew</h3>
@@ -255,18 +255,18 @@ function renderHowTo() {
   <section class="guide">
     <h2 class="guide-h">Get started</h2>
     <ol class="guide-steps">
-      ${step(1, 'Download &amp; sign up', 'Grab Sacari Golf from the App Store and create an account. You start at the Wood floor (100 ELO) and climb from there.')}
+      ${step(1, 'Download &amp; sign up', 'Grab Sacari Golf from the App Store and create an account. You start at the Wood floor (100 SR) and climb from there.')}
       ${step(2, 'Set your home course', 'Pick your home course in Profile so the app can center maps, measure shot distances, and put you on your local feed. Missing a course? Tap "+ Request" on the Courses tab to add it.')}
       ${step(3, 'Play a ranked match', 'From the Play tab choose Solo, Duo, or Squad, pick your tees, and head out. Enter your score hole-by-hole; optionally track each shot on the satellite map for distances and stats.')}
-      ${step(4, 'Submit and get matched', 'Finish your round and submit. Solo rounds auto-match you against a similar-rated opponent who also played; duos and squads pair against another team. ELO is settled the moment both sides are in.')}
+      ${step(4, 'Submit and get matched', 'Finish your round and submit. Solo rounds auto-match you against a similar-rated opponent who also played; duos and squads pair against another team. SR is settled the moment both sides are in.')}
     </ol>
 
     <h2 class="guide-h">Climb the ladder</h2>
-    <p class="guide-lead">Eight tiers, Wood through Obsidian. Each tier has four divisions of 50 LP. Your rank is just your ELO, shown as division + LP (for example <strong>B III 23</strong> is Bronze 3, 23 LP).</p>
+    <p class="guide-lead">Eight tiers, Wood through Obsidian. Each tier has four divisions of 50 SR. Your rank is just your SR, shown as division + SR (for example <strong>B III 23</strong> is Bronze 3, 23 SR).</p>
     <div class="guide-grid">
       ${card('Placement games', 'Your first 5 ranked matches each season swing hard, so a few good rounds rocket you toward your true rank instead of grinding up from the bottom.')}
       ${card('Every win counts', 'A win always moves you up by a guaranteed minimum, so beating a weaker opponent still climbs you. No more winning and gaining nothing.')}
-      ${card('Seasons &amp; resets', 'Seasons run six months (Summer and Winter). At each rollover your ELO gets a partial reset toward the start, so every season is a fresh climb that still rewards skill.')}
+      ${card('Seasons &amp; resets', 'Seasons run six months (Summer and Winter). At each rollover your SR gets a partial reset toward the start, so every season is a fresh climb that still rewards skill.')}
       ${card('The Sacari Cup', 'A weekly best-round competition. Top the cup and you earn the Champion Wreath border and a spot on the home page for the week.')}
     </div>
 
@@ -352,7 +352,12 @@ function feedSide(side) {
   const rankLabel = rk.isObsidian ? `Obsidian ${rk.displayElo}` : rk.label;
   let score = '';
   if (side.players.length === 1 && rep.total_score != null) {
-    const tp = rep.teebox_par != null ? fmtToPar(rep.total_score - rep.teebox_par) : '';
+    // Prefer the stored 18-hole-equivalent to-par (same value the app + course
+    // board use); raw par-diff only as a fallback for un-backfilled rounds.
+    const tpVal = rep.normalized_to_par != null
+      ? rep.normalized_to_par
+      : (rep.teebox_par != null ? rep.total_score - rep.teebox_par : null);
+    const tp = tpVal != null ? fmtToPar(tpVal) : '';
     score = `${esc(rep.total_score)}${tp ? ` <small>${esc(tp)}</small>` : ''}`;
   }
   return `<div class="feed-side ${side.isWinner ? 'win' : ''}">
@@ -400,7 +405,7 @@ function renderMatchesFeed(data) {
 
   return page({
     title: 'Recent Matches. Sacari Golf',
-    description: 'A live feed of the latest resolved ranked golf matches on Sacari Golf, with scores, results, and ELO swings.',
+    description: 'A live feed of the latest resolved ranked golf matches on Sacari Golf, with scores, results, and SR swings.',
     ogImage: SITE_URL ? `${SITE_URL}/crests/diamond.png` : '',
     ogUrl: SITE_URL ? `${SITE_URL}/matches` : '',
     canonical: SITE_URL ? `${SITE_URL}/matches` : '',
@@ -675,7 +680,7 @@ function recapSide(side, tied) {
     const r = p.rank;
     const rankLine = r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
     const dlChip = p.delta
-      ? `<span class="rc-elo ${p.delta > 0 ? 'up' : 'down'}">${p.delta > 0 ? '+' : ''}${p.delta} ELO</span>`
+      ? `<span class="rc-elo ${p.delta > 0 ? 'up' : 'down'}">${p.delta > 0 ? '+' : ''}${p.delta} SR</span>`
       : '';
     return `<div class="rc-player">
       <img class="rc-crest" src="/crests/${esc(r.tier.key)}.png" alt="${esc(r.tier.name)} crest" loading="lazy" />
@@ -817,7 +822,7 @@ function statCell(label, value) {
   return `<div class="stat"><div class="stat-val">${esc(value)}</div><div class="stat-label">${esc(label)}</div></div>`;
 }
 /** One recap row: a link to /r/<matchId> showing W/L/T, opponent, course/date,
- *  to-par, and the ELO swing. Shared by the profile + the per-user recaps page. */
+ *  to-par, and the SR swing. Shared by the profile + the per-user recaps page. */
 function recapRow(rec) {
   const cls = rec.result; // win | loss | tie
   const letter = rec.result === 'win' ? 'W' : rec.result === 'loss' ? 'L' : 'T';
@@ -841,7 +846,7 @@ function renderProfile(data) {
   const losses = Math.max(0, data.totalMatches - data.totalWins - data.totalTies);
   const winRate = data.totalMatches > 0 ? Math.round((data.totalWins / data.totalMatches) * 100) : 0;
   const rankLine = r.isObsidian ? `Obsidian ${r.displayElo}` : r.label;
-  const sub = r.isObsidian ? `${r.displayElo} ELO` : `${r.lp} LP`;
+  const sub = r.isObsidian ? `${r.displayElo} SR` : `${r.lp} SR`;
 
   const recapRows = (data.recaps || []).map(recapRow).join('');
   const recapsPath = `/u/${encodeURIComponent(data.username)}/recaps`;
@@ -910,7 +915,7 @@ function renderUserRecaps(data) {
 
   return page({
     title: `${data.username} recaps · Sacari Golf`,
-    description: `Every round and match recap for ${data.username} on Sacari Golf, with results, scores, and ELO swings.`,
+    description: `Every round and match recap for ${data.username} on Sacari Golf, with results, scores, and SR swings.`,
     ogImage: data.siteUrl ? `${data.siteUrl}/crests/${r.tier.key}.png` : '',
     ogUrl: data.recapsUrl,
     canonical: data.recapsUrl,
@@ -1096,7 +1101,7 @@ function renderAppHome({ me, rank, matches }) {
       <img class="app-hero-crest" src="/crests/${esc(rank.tier.key)}.png" alt="" />
       <div>
         <div class="app-hello">Hey, ${esc(me.username)}</div>
-        <div class="app-rank" style="color:${esc(rank.color)}">${esc(rankLine)} · ${esc(me.elo)} ELO</div>
+        <div class="app-rank" style="color:${esc(rank.color)}">${esc(rankLine)} · ${esc(me.elo)} SR</div>
       </div>
     </div>
     <a class="cta app-play-cta" href="/app/play">Play a round</a>
@@ -1161,13 +1166,13 @@ function renderAppMatch({ me, match }) {
     const cls = tied ? 'tie' : won ? 'win' : 'loss';
     panel = `<div class="app-result ${cls}">
       <div class="app-result-big">${tied ? 'Tied' : won ? 'You won' : 'You lost'}</div>
-      ${typeof dl === 'number' && dl !== 0 ? `<div class="app-result-elo ${dl > 0 ? 'up' : 'down'}">${dl > 0 ? '+' : ''}${dl} ELO</div>` : ''}
+      ${typeof dl === 'number' && dl !== 0 ? `<div class="app-result-elo ${dl > 0 ? 'up' : 'down'}">${dl > 0 ? '+' : ''}${dl} SR</div>` : ''}
       <a class="cta" href="/r/${esc(match.match_id)}">View full recap</a>
     </div>`;
   } else if (mine && mine.completed) {
     panel = `<div class="app-result pending">
       <div class="app-result-big">Round submitted</div>
-      <p class="muted-note">Waiting for your opponent to finish. We settle the ELO once they are in.</p>
+      <p class="muted-note">Waiting for your opponent to finish. We settle the SR once they are in.</p>
     </div>`;
   } else {
     panel = `<div class="app-result active">
@@ -1440,7 +1445,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
   </style>
   <section class="card landing invite-card">
     <h1 class="hero-small">${safeName} invited you to Sacari Golf</h1>
-    <p class="lead">Ranked rounds, ELO ladder, satellite shot-tracking. Tap below to install, then enter the code on the sign-up screen.</p>
+    <p class="lead">Ranked rounds, SR ladder, satellite shot-tracking. Tap below to install, then enter the code on the sign-up screen.</p>
 
     <div class="invite-code-box" data-code="${safeCode}">
       <div class="invite-code-label">YOUR INVITE CODE</div>

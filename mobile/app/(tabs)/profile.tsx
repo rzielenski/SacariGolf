@@ -20,10 +20,29 @@ import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest, crestFootprint } from '../../components/RankCrest';
 import { rankForElo } from '../../lib/rank';
+import { accountLevel } from '../../lib/accountLevel';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { CosmeticBackground, CosmeticBorder, CosmeticUsername } from '../../components/Cosmetics';
 import { GlowCard } from '../../components/ui/GlowCard';
+
+/** Four-segment "pips" bar showing the climb through a tier's divisions. You
+ *  climb division 4 → 1, so the leftmost segment is division 4: each fills as you
+ *  clear that division, with the current one partly filled by your SR. */
+function RankPips({ division, lp, lpNeeded, color }: { division: number; lp: number; lpNeeded: number; color: string }) {
+  return (
+    <View style={styles.pipRow}>
+      {[4, 3, 2, 1].map((d) => {
+        const fill = d > division ? 1 : d === division ? Math.max(0, Math.min(1, lp / Math.max(1, lpNeeded))) : 0;
+        return (
+          <View key={d} style={styles.pipTrack}>
+            <View style={[styles.pipFill, { width: `${fill * 100}%`, backgroundColor: color }]} />
+          </View>
+        );
+      })}
+    </View>
+  );
+}
 
 function ProgressBar({ value, max, color }: { value: number; max: number; color: string }) {
   const pct = Math.min(value / max, 1);
@@ -436,6 +455,9 @@ export default function ProfileScreen() {
         <CosmeticUsername visual={usernameVisual} style={styles.username}>
           {censor(user.username)}
         </CosmeticUsername>
+        {user.equipped_title_name ? (
+          <Text style={styles.titleFlair}>{user.equipped_title_name}</Text>
+        ) : null}
         <View style={styles.usernameSubRow}>
           {isPremium(user as any) && (
             <View style={styles.premiumPill}>
@@ -580,25 +602,30 @@ export default function ProfileScreen() {
         </GlowCard>
       </PressableScale>
 
-      {/* Rank progress — rank + division and total ELO on the left, the big
-          number is your ELO within the current division (LP). */}
+      {/* Rank progress — rank + division and total SR on the left, the big
+          number is your SR within the current division. Pips show the climb
+          through the tier's four divisions; the LVL chip is your account level
+          (lifetime matches) — the long game that only ever goes up. */}
       <View style={styles.card}>
         <View style={styles.eloHeaderRow}>
           <View style={{ flexShrink: 1 }}>
-            <Text style={[styles.rankNameBig, { color: rank.color }]} numberOfLines={1}>{rank.label}</Text>
+            <View style={styles.rankNameRow}>
+              <Text style={[styles.rankNameBig, { color: rank.color }]} numberOfLines={1}>{rank.label}</Text>
+              <View style={styles.lvlChip}><Text style={styles.lvlChipText}>LVL {accountLevel(user.total_matches).level}</Text></View>
+            </View>
             <Text style={styles.eloLabel}>
-              {rank.isObsidian ? 'Top tier · no divisions' : `${user.elo} total ELO`}
+              {rank.isObsidian ? 'Top tier · no divisions' : `${user.elo} total SR`}
             </Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
             <Text style={styles.eloNum}>{rank.isObsidian ? user.elo : rank.lp}</Text>
-            <Text style={styles.eloLabel}>{rank.isObsidian ? 'ELO' : `/ ${rank.lpNeeded} LP`}</Text>
+            <Text style={styles.eloLabel}>{rank.isObsidian ? 'SR' : `/ ${rank.lpNeeded} SR`}</Text>
           </View>
         </View>
         {!rank.isObsidian && rank.next && (
           <>
-            <ProgressBar value={rank.lp} max={rank.lpNeeded ?? 50} color={rank.color} />
-            <Text style={styles.progressText}>{rank.lpToNext} LP → {rank.next.label}</Text>
+            <RankPips division={rank.division ?? 4} lp={rank.lp} lpNeeded={rank.lpNeeded ?? 50} color={rank.color} />
+            <Text style={styles.progressText}>{rank.lpToNext} SR → {rank.next.label}</Text>
           </>
         )}
       </View>
@@ -682,6 +709,8 @@ export default function ProfileScreen() {
       <MenuRow label="★  LEADERBOARD" onPress={() => router.push('/leaderboard' as any)} />
       <MenuRow label="♛  TOURNAMENTS" onPress={() => router.push('/tournaments' as any)} />
       <MenuRow label="🏆  SACARI CUP · THIS WEEK" onPress={() => router.push('/sacari-cup' as any)} />
+      <MenuRow label="◎  CLOSEST TO THE PIN · THIS WEEK" onPress={() => router.push('/closest-to-pin' as any)} />
+      <MenuRow label="🎖  TITLES" onPress={() => router.push('/titles' as any)} />
       <MenuRow label="▲  SEASON LADDER · DIVISIONS" onPress={() => router.push('/seasons' as any)} />
       <MenuRow label="◉  BALL COUNT · FOUND VS LOST" onPress={() => router.push('/balls' as any)} />
 
@@ -1629,6 +1658,13 @@ const styles = StyleSheet.create({
   eloNum: { fontSize: 40, fontWeight: '900', color: C.gold },
   eloLabel: { fontSize: 14, color: C.textMuted },
   progressText: { color: C.textMuted, fontSize: 11, marginTop: 4 },
+  rankNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  lvlChip: { backgroundColor: C.gold + '22', borderColor: C.gold + '88', borderWidth: 1, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 },
+  lvlChipText: { color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 0.5 },
+  titleFlair: { color: C.gold, fontSize: 13, fontWeight: '800', fontStyle: 'italic', marginTop: 2, letterSpacing: 0.3 },
+  pipRow: { flexDirection: 'row', gap: 5, marginTop: 6 },
+  pipTrack: { flex: 1, height: 7, backgroundColor: C.border, borderRadius: 4, overflow: 'hidden' },
+  pipFill: { height: '100%', borderRadius: 4 },
 
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 },
   perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },

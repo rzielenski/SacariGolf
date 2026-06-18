@@ -28,7 +28,8 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
             u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
             u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter, u.partial_swing_mode,
             u.equipped_border, u.equipped_background, u.equipped_username,
-            u.equipped_ball_trail, u.equipped_fx,
+            u.equipped_ball_trail, u.equipped_fx, u.equipped_title,
+            (SELECT name FROM titles WHERE title_id = u.equipped_title) AS equipped_title_name,
             (SELECT jsonb_build_object(
               'border',     (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_border),
               'background', (SELECT visual_data FROM cosmetics WHERE cosmetic_id = u.equipped_background),
@@ -1694,7 +1695,8 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
             u.avatar_url, u.created_at,
-            u.bio, u.home_course_id, u.drinks,
+            u.bio, u.home_course_id, u.drinks, u.equipped_title,
+            (SELECT name FROM titles WHERE title_id = u.equipped_title) AS equipped_title_name,
             ${equippedVisualSql('u')} AS equipped_visual,
             c.course_name AS home_course_name, c.city AS home_course_city, c.state AS home_course_state
      FROM users u

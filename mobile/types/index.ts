@@ -44,6 +44,9 @@ export interface User {
    *  in Profile the value persists on the server. Drives censorText()
    *  everywhere user-generated text from someone else is rendered. */
   censor_offensive_language?: boolean;
+  /** Equipped earned title's display name (e.g. "Giant Slayer"), or null. */
+  equipped_title_name?: string | null;
+  equipped_title?: string | null;
 }
 
 export interface ChatMessage {

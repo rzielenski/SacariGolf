@@ -123,7 +123,7 @@ function AuthGuard() {
   //                      directly on the spectatable scorecard rather than
   //                      having to tap through the friend's profile.
   //   • round_finished → same match page; now shows the completed scorecard.
-  //   • match_result   → match recap with ELO delta + win/loss banner.
+  //   • match_result   → match recap with SR delta + win/loss banner.
   //   • round_reaction → home feed (the round post carries the reactions).
   //   • round_comment  → home feed (the comment thread lives on the post).
   //   • dm             → that 1:1 chat thread
@@ -160,7 +160,7 @@ function AuthGuard() {
           }
           break;
         case 'match_result':
-          // Resolved match → recap with ELO delta + win/loss banner.
+          // Resolved match → recap with SR delta + win/loss banner.
           if (typeof data.matchId === 'string') router.push(`/match/${data.matchId}` as any);
           break;
         case 'round_reaction':
@@ -326,6 +326,8 @@ export default function RootLayout() {
         <Stack.Screen name="locker-room" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="sacari-cup"  options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="season-pass" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="closest-to-pin" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="titles"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="settings"    options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="invite"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="resume"      options={{ animation: 'slide_from_right', headerShown: true }} />

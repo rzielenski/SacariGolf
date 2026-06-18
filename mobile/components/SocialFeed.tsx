@@ -778,7 +778,7 @@ function RoundCardBody({ post }: { post: any }) {
   // 18-hole one.
   const holesSuffix = matchNumHoles ? ` · ${matchNumHoles} holes` : '';
 
-  // Win/loss is PER PERSON: this author gained ELO → win, lost → loss, 0 → tie.
+  // Win/loss is PER PERSON: this author gained SR → win, lost → loss, 0 → tie.
   // Essential for Arena (FFA), where everyone shares a side so winner_side
   // would otherwise mark the whole field a winner. Legacy posts without a
   // per-player delta fall back to the winner_side vs author_side comparison.
@@ -792,7 +792,7 @@ function RoundCardBody({ post }: { post: any }) {
   const tied = myDelta != null
     ? (!!post.match_completed && myDelta === 0)
     : (post.match_completed && post.winner_side == null);
-  // Show the author's own ELO swing when known, else the match headline delta.
+  // Show the author's own SR swing when known, else the match headline delta.
   const shownDelta = myDelta != null
     ? Math.abs(Math.round(myDelta))
     : (typeof post.delta_elo === 'number' ? post.delta_elo : null);
@@ -832,7 +832,7 @@ function RoundCardBody({ post }: { post: any }) {
         {post.match_type ? post.match_type.toUpperCase() : 'MATCH'}
         {post.format && post.format !== 'stroke' ? ` · ${post.format}` : ''}
         {shownDelta != null && post.match_completed
-          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${shownDelta} ELO`
+          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${shownDelta} SR`
           : ''}
       </Text>
     </TouchableOpacity>

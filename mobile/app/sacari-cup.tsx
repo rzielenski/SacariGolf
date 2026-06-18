@@ -193,7 +193,7 @@ function LBItem({ row }: { row: LBRow }) {
         <IdentityName visual={(row as any).equipped_visual} style={s.lbName}>
           {row.username}{row.is_me ? '  (You)' : ''}
         </IdentityName>
-        <Text style={s.lbMeta}>{row.elo} ELO</Text>
+        <Text style={s.lbMeta}>{row.elo} SR</Text>
       </View>
       <View style={s.lbScoreBox}>
         <Text style={s.lbScore}>{fmtToPar(row.best_to_par)}</Text>

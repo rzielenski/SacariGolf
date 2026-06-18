@@ -347,7 +347,7 @@ export default function ClanDetailScreen() {
         <View style={styles.statsRow}>
           <View style={styles.statBox}>
             <Text style={styles.statNum}>{clan.elo}</Text>
-            <Text style={styles.statLabel}>ELO</Text>
+            <Text style={styles.statLabel}>SR</Text>
           </View>
           <View style={[styles.statBox, styles.statBoxMid]}>
             <Text style={styles.statNum}>{clan.total_matches}</Text>
@@ -441,7 +441,7 @@ export default function ClanDetailScreen() {
                     />
                     <View style={{ flex: 1 }}>
                       <Text style={styles.memberName}>{c(f.username)}</Text>
-                      <Text style={styles.memberMeta}>{f.elo} ELO</Text>
+                      <Text style={styles.memberMeta}>{f.elo} SR</Text>
                     </View>
                     <TouchableOpacity
                       style={styles.inviteBtn}
@@ -561,7 +561,7 @@ function MemberRow({
           )}
         </View>
         <Text style={styles.memberMeta}>
-          <Text style={{ color: rank.color }}>{member.elo} ELO</Text>
+          <Text style={{ color: rank.color }}>{member.elo} SR</Text>
           {'  ·  '}
           {member.total_matches}M · {winRate}% WR
         </Text>

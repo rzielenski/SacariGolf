@@ -5,7 +5,7 @@
  *
  * What's here:
  *   • Greeting + rank badge
- *   • ELO card (rating / matches / wins / win %)
+ *   • SR card (rating / matches / wins / win %)
  *   • Resume / verify / open-beta / perk banners
  *   • Leaderboard + Tournaments shortcuts (2-wide grid)
  *   • Friend feed (auto-posted rounds + user posts, w/ FoF mixing)
@@ -74,7 +74,7 @@ export default function HomeScreen() {
 
   useEffect(() => { loadHomeData(); }, [loadHomeData]);
 
-  // Clean up the ELO-tap timer if the component unmounts mid-sequence so we
+  // Clean up the SR-tap timer if the component unmounts mid-sequence so we
   // don't fire setState on an unmounted screen.
   useEffect(() => {
     return () => { if (eloTapTimer.current) clearTimeout(eloTapTimer.current); };
@@ -133,7 +133,7 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
-      {/* ELO card — tap ELO number 5× to open Find Ranker (existing easter egg) */}
+      {/* SR card — tap SR number 5× to open Find Ranker (existing easter egg) */}
       <View style={styles.eloCard}>
         <TouchableOpacity
           style={styles.eloLeft}
@@ -154,8 +154,8 @@ export default function HomeScreen() {
           </Text>
           <Text style={styles.eloLabel}>
             {rank.isObsidian
-              ? `${user.elo} ELO`
-              : `${rank.lp}/${rank.lpNeeded} LP · ${rank.lpToNext} to ${rank.next?.label ?? 'next'}`}
+              ? `${user.elo} SR`
+              : `${rank.lp}/${rank.lpNeeded} SR · ${rank.lpToNext} to ${rank.next?.label ?? 'next'}`}
           </Text>
         </TouchableOpacity>
         <View style={styles.eloDivider} />
@@ -173,7 +173,7 @@ export default function HomeScreen() {
         </View>
       </View>
 
-      {/* Lucky Round — thin pulsing strip that hugs the bottom of the ELO
+      {/* Lucky Round — thin pulsing strip that hugs the bottom of the SR
           card. Reads as an "active perk tag" on your rating rather than a
           separate banner. Tap → alert explaining how it cashes in. */}
       {perkCount > 0 && (
@@ -329,7 +329,7 @@ const styles = StyleSheet.create({
   statusChipChev:  { color: C.gold, fontSize: 16, fontWeight: '700' },
 
   // Lucky Round strip — slim green bar that visually attaches to the bottom
-  // of the ELO card (via the negative top margin on the wrapping
+  // of the SR card (via the negative top margin on the wrapping
   // PressableScale). Designed to read as a "perk tag" on the rating rather
   // than a separate banner. Roughly half the visual weight of a status chip.
   luckyBar: {

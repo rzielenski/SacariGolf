@@ -44,6 +44,7 @@ const LOCK_ELO_RESET     = 42105;
 const LOCK_UNPAIR        = 42106;
 const LOCK_BOTS          = 42107;
 const LOCK_NORMALIZE     = 42108;
+const LOCK_TITLES        = 42109;
 
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
@@ -719,6 +720,7 @@ let feedBackfillHandle: ReturnType<typeof setInterval> | null = null;
 let weeklyCupHandle: ReturnType<typeof setInterval> | null = null;
 let seasonResetHandle: ReturnType<typeof setInterval> | null = null;
 let normalizeHandle: ReturnType<typeof setInterval> | null = null;
+let titlesHandle: ReturnType<typeof setInterval> | null = null;
 
 // ── Partial ELO reset at season rollover ──────────────────────────────
 // Anchor + retention for the soft reset: at each new competitive season,
@@ -878,6 +880,16 @@ export function startCleanupSchedule() {
   // 60s keeps new rounds ranked promptly.
   normalizeTick();
   normalizeHandle = setInterval(normalizeTick, 60 * 1000);
+
+  // Earned titles — backfill the whole base once on boot (all derivable from
+  // existing stats), then sweep recently-active players every 5 min.
+  import('./titles').then(({ backfillTitles }) => backfillTitles()).catch((e) => console.error('[titles] backfill error', e));
+  const titlesTick = () => withCronLock(LOCK_TITLES, async () => {
+    const { evaluateRecentTitles } = await import('./titles');
+    await evaluateRecentTitles();
+  });
+  titlesTick();
+  titlesHandle = setInterval(titlesTick, 5 * 60 * 1000);
 }
 
 async function weeklyCupTick(): Promise<void> {
@@ -911,4 +923,5 @@ export function stopCleanupSchedule() {
   if (weeklyCupHandle) { clearInterval(weeklyCupHandle); weeklyCupHandle = null; }
   if (seasonResetHandle) { clearInterval(seasonResetHandle); seasonResetHandle = null; }
   if (normalizeHandle) { clearInterval(normalizeHandle); normalizeHandle = null; }
+  if (titlesHandle) { clearInterval(titlesHandle); titlesHandle = null; }
 }

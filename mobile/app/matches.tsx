@@ -5,9 +5,9 @@
  *   1. ACTIVE / IN-PROGRESS — matches that have a scoring session started
  *      but haven't been completed yet. One tap resumes scoring.
  *   2. RECENT COMPLETED — finished matches newest-first, with result
- *      badge (WIN / LOSS / TIE) and ELO delta.
+ *      badge (WIN / LOSS / TIE) and SR delta.
  *   3. PRACTICE — rounds tagged is_practice = true. Separated because they
- *      don't affect ELO; the player may want to see them but not have
+ *      don't affect SR; the player may want to see them but not have
  *      them dominate the list.
  *
  * Uses the existing `GET /matches` endpoint (api.matches.list) which
@@ -250,21 +250,21 @@ function MatchRow({ match: m }: { match: ListedMatch }) {
         <Text style={s.rowDate}>{fmtDate(m.created_at)}</Text>
       </View>
 
-      {/* Result / ELO column */}
+      {/* Result / SR column */}
       <View style={s.rowResult}>
         {badge && (
           <View style={[s.badge, { borderColor: badge.color }]}>
             <Text style={[s.badgeText, { color: badge.color }]}>{badge.label}</Text>
           </View>
         )}
-        {/* ELO delta — only show for completed, non-practice matches.
+        {/* SR delta — only show for completed, non-practice matches.
             Tinted by sign so a glance reads as W/L. */}
         {m.completed && !m.is_practice && m.my_delta_elo != null && (
           <Text style={[
             s.elo,
             { color: m.my_delta_elo > 0 ? C.green : m.my_delta_elo < 0 ? C.red : C.textMuted },
           ]}>
-            {m.my_delta_elo > 0 ? '+' : ''}{m.my_delta_elo} ELO
+            {m.my_delta_elo > 0 ? '+' : ''}{m.my_delta_elo} SR
           </Text>
         )}
       </View>

@@ -145,7 +145,7 @@ function FindViewer({ find, onClose }: { find: any | null; onClose: () => void }
                 />
               </View>
               {find.description ? <Text style={{ color: '#fff', fontSize: 14, marginTop: 16, paddingHorizontal: 24, textAlign: 'center' }} pointerEvents="none">{c(find.description)}</Text> : null}
-              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {c(find.username)}  ·  {find.elo} ELO</Text>
+              <Text style={{ color: C.gold, fontSize: 13, marginTop: 8 }} pointerEvents="none">by {c(find.username)}  ·  {find.elo} SR</Text>
               <Text style={{ color: '#888', fontSize: 11, marginTop: 18 }} pointerEvents="none">Swipe or tap anywhere to dismiss</Text>
             </>
           )}
@@ -372,7 +372,7 @@ function VoteTab() {
               </View>
               <View style={styles.findEloBox}>
                 <Text style={styles.findElo}>{find.elo}</Text>
-                <Text style={styles.findEloLabel}>ELO</Text>
+                <Text style={styles.findEloLabel}>SR</Text>
               </View>
             </View>
             {isWinner && (
@@ -468,7 +468,7 @@ function MineTab({ userId, onSelectFind }: { userId: string; onSelectFind: (f: a
       {data.avgElo !== null && (
         <View style={styles.avgCard}>
           <Text style={styles.avgNum}>{data.avgElo}</Text>
-          <Text style={styles.avgLabel}>Average Find ELO</Text>
+          <Text style={styles.avgLabel}>Average Find SR</Text>
         </View>
       )}
       {data.finds.length === 0 ? (
@@ -525,7 +525,7 @@ function FindRow({ find, rank, onDelete, onPress }: { find: any; rank: number; o
       </View>
       <View style={styles.findRowEloBox}>
         <Text style={styles.findRowElo}>{find.elo}</Text>
-        <Text style={styles.findRowEloLabel}>ELO</Text>
+        <Text style={styles.findRowEloLabel}>SR</Text>
       </View>
       {onDelete ? (
         <TouchableOpacity onPress={onDelete} style={styles.deleteBtn}>

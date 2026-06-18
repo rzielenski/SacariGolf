@@ -1,7 +1,7 @@
 /**
  * Organizer scoring — one person keeps score for a whole group on one device.
  * Casual only (the match is created as practice), so nothing here touches
- * ranked ELO or handicap; an organizer typing the table's scores can't game
+ * ranked SR or handicap; an organizer typing the table's scores can't game
  * anything. Account players in the match get real (casual) rounds; everyone
  * else is a guest (name only). Each hole is committed to par by default and
  * adjusted as needed, then saved to the server, which drives the same live

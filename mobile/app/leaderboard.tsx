@@ -74,7 +74,7 @@ export default function LeaderboardScreen() {
         <Text style={styles.ballBannerChev}>›</Text>
       </TouchableOpacity>
 
-      {/* Mode selector — Overall ELO vs per-mode (ranked by wins). */}
+      {/* Mode selector — Overall SR vs per-mode (ranked by wins). */}
       <View style={styles.modeRow}>
         {MODES.map((m) => (
           <TouchableOpacity
@@ -136,8 +136,8 @@ export default function LeaderboardScreen() {
   );
 }
 
-// Individual board row (Overall / Solo). Every board ranks by ELO and
-// shows the raw ELO number as the headline stat (rank tier still drives
+// Individual board row (Overall / Solo). Every board ranks by SR and
+// shows the raw SR number as the headline stat (rank tier still drives
 // the accent color + the meta line for context).
 function PlayerRow({ player, rank, isMe }: {
   player: any; rank: number; isMe: boolean;
@@ -154,7 +154,7 @@ function PlayerRow({ player, rank, isMe }: {
   const winRate = player.total_matches > 0
     ? Math.round((player.total_wins / player.total_matches) * 100)
     : 0;
-  // Division + LP, e.g. "B III 23". Obsidian shows raw ELO ("OBS 1620").
+  // Division + SR, e.g. "B III 23". Obsidian shows raw SR ("OBS 1620").
   const badge = rankBadge(player.elo);
   const metaLine = `${player.total_matches}M · ${winRate}% WR`;
 
@@ -191,7 +191,7 @@ function PlayerRow({ player, rank, isMe }: {
   );
 }
 
-// Team board row (Duo / Squad). Shows the team name + its ELO (the
+// Team board row (Duo / Squad). Shows the team name + its SR (the
 // average of its members' ratings, computed server-side) and highlights
 // teams the current user belongs to. Tapping opens the clan screen.
 function TeamRow({ team, rank }: { team: any; rank: number }) {
@@ -223,7 +223,7 @@ function TeamRow({ team, rank }: { team: any; rank: number }) {
       </View>
       <View style={styles.eloBox}>
         <Text style={[styles.elo, { color: C.gold }]} numberOfLines={1}>{team.team_elo}</Text>
-        <Text style={styles.eloLabel}>TEAM ELO</Text>
+        <Text style={styles.eloLabel}>TEAM SR</Text>
       </View>
     </TouchableOpacity>
   );
@@ -262,7 +262,7 @@ const styles = StyleSheet.create({
   username: { color: C.text, fontWeight: '700', fontSize: 15 },
   meta: { color: C.textMuted, fontSize: 12, marginTop: 2 },
   // Right-side stat. flexShrink:0 + right-align so it never collides with
-  // a long name; wide enough for "B III 23" / "TEAM ELO".
+  // a long name; wide enough for "B III 23" / "TEAM SR".
   eloBox: { alignItems: 'flex-end', minWidth: 66, flexShrink: 0 },
   elo: { fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
   eloLabel: { color: C.textDim, fontSize: 9, marginTop: 1 },

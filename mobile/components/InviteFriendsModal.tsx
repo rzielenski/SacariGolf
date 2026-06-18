@@ -134,7 +134,7 @@ export function InviteFriendsModal({
         <UserAvatar username={item.username} avatarUrl={item.avatar_url} size={40} borderRadius={4} />
         <View style={{ flex: 1 }}>
           <Text style={s.name} numberOfLines={1}>{c(item.username)}</Text>
-          {item.elo != null && <Text style={s.meta}>{item.elo} ELO</Text>}
+          {item.elo != null && <Text style={s.meta}>{item.elo} SR</Text>}
         </View>
         <TouchableOpacity
           style={[s.btn, disabled && s.btnDisabled, invited && s.btnSent]}

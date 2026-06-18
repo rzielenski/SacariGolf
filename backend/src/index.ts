@@ -20,6 +20,8 @@ import postsRouter from './routes/posts';
 import seasonsRouter from './routes/seasons';
 import ballsRouter from './routes/balls';
 import cosmeticsRouter from './routes/cosmetics';
+import titlesRouter from './routes/titles';
+import closestToPinRouter from './routes/closestToPin';
 import { configRouter, adminRouter } from './routes/config';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
@@ -63,6 +65,8 @@ app.use('/tournaments', tournamentsRouter);
 app.use('/posts', postsRouter);
 app.use('/seasons', seasonsRouter);
 app.use('/balls', ballsRouter);
+app.use('/titles', titlesRouter);
+app.use('/closest-to-pin', closestToPinRouter);
 // Server-driven config (public) + admin ops (x-admin-token gated).
 app.use('/config', configRouter);
 app.use('/admin', adminRouter);

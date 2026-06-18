@@ -2094,6 +2094,49 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS rounds_normalized_to_par_idx ON rounds(normalized_to_par);
     `,
   },
+  {
+    // Earned titles — flexed under your name. Catalog + ownership + one equipped
+    // slot on users. Awarded by utils/titles.ts (all derivable from existing
+    // stats, so they backfill on boot).
+    name: 'titles.system',
+    sql: `
+      CREATE TABLE IF NOT EXISTS titles (
+        title_id     TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        rarity       TEXT NOT NULL DEFAULT 'common',
+        sort         INT  NOT NULL DEFAULT 0,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS user_titles (
+        user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        title_id    TEXT NOT NULL REFERENCES titles(title_id) ON DELETE CASCADE,
+        unlocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, title_id)
+      );
+      CREATE INDEX IF NOT EXISTS user_titles_user_idx ON user_titles(user_id);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS equipped_title TEXT REFERENCES titles(title_id) ON DELETE SET NULL;
+      INSERT INTO titles (title_id, name, description, rarity, sort) VALUES
+        ('first_blood',  'First Blood',  'Win your first ranked match.',             'common',    10),
+        ('dominating',   'Dominating',   'Win 3 ranked matches in a row.',           'rare',      20),
+        ('unstoppable',  'Unstoppable',  'Win 5 ranked matches in a row.',           'epic',      30),
+        ('godlike',      'Godlike',      'Win 8 ranked matches in a row.',           'epic',      40),
+        ('legendary',    'Legendary',    'Win 12 ranked matches in a row.',          'legendary', 50),
+        ('challenger',   'Challenger',   'Climb to Obsidian.',                        'legendary', 60),
+        ('prodigy',      'Prodigy',      'Reach Diamond in under 30 matches.',        'epic',      70),
+        ('veteran',      'Veteran',      'Play 50 ranked matches.',                   'rare',      80),
+        ('smurf',        'Smurf',        'Win 70% of your matches over 20+ played.',  'epic',      90),
+        ('eagle_hunter', 'Eagle Hunter', 'Card 5 career eagles.',                     'rare',      100),
+        ('albatross',    'Albatross',    'Card an albatross (3-under on a hole).',    'legendary', 110),
+        ('ace',          'Ace',          'Make a hole-in-one.',                       'epic',      120),
+        ('iron_tour',    'Iron Tour',    'Track 100 shots.',                          'rare',      130),
+        ('globetrotter', 'Globetrotter', 'Play 10 different courses.',                'rare',      140),
+        ('cup_champion', 'Cup Champion', 'Win the Sacari Cup.',                       'legendary', 150)
+      ON CONFLICT (title_id) DO UPDATE
+        SET name = EXCLUDED.name, description = EXCLUDED.description,
+            rarity = EXCLUDED.rarity, sort = EXCLUDED.sort;
+    `,
+  },
 ];
 
 export async function runMigrations() {

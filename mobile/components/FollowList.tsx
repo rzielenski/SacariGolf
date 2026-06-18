@@ -90,7 +90,7 @@ export function FollowList({
               )}
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={s.username} numberOfLines={1}>{censor(u.username)}</Text>
-                <Text style={s.elo}>{u.elo} ELO</Text>
+                <Text style={s.elo}>{u.elo} SR</Text>
               </View>
               <Text style={s.chev}>›</Text>
             </TouchableOpacity>
@@ -145,7 +145,7 @@ export function FollowList({
               )}
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={s.username} numberOfLines={1}>{censor(item.username)}</Text>
-                <Text style={s.elo}>{item.elo} ELO</Text>
+                <Text style={s.elo}>{item.elo} SR</Text>
               </View>
               <Text style={s.chev}>›</Text>
             </TouchableOpacity>

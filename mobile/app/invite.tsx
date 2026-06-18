@@ -41,7 +41,7 @@ export default function InviteScreen() {
   const onShare = useCallback(async () => {
     if (!data) return;
     const msg =
-      `Come play Sacari Golf with me — ranked rounds, ELO, shot-tracking and a Find Ranker for course discoveries. ` +
+      `Come play Sacari Golf with me — ranked rounds, SR, shot-tracking and a Find Ranker for course discoveries. ` +
       `Sign up with my code and I get a Lucky Round perk.\n\n` +
       `Code: ${data.code}\n` +
       `${data.share_url}`;

@@ -78,7 +78,7 @@ export default function BlockedUsersScreen() {
             >
               <Text style={s.name}>{c(u.username)}</Text>
               <Text style={s.meta}>
-                {u.elo} ELO · blocked {new Date(u.created_at).toLocaleDateString()}
+                {u.elo} SR · blocked {new Date(u.created_at).toLocaleDateString()}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity style={s.unblockBtn} onPress={() => unblock(u)}>

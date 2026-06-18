@@ -181,7 +181,7 @@ export default function TeamsBrowseScreen() {
                     <Text style={s.teamMeta} numberOfLines={1}>
                       {(item.clan_mode ?? '').toString().toUpperCase()}
                       {'  ·  '}{item.member_count ?? 0}/{item.max_players ?? '?'} members
-                      {item.elo != null ? `  ·  ${item.elo} ELO` : ''}
+                      {item.elo != null ? `  ·  ${item.elo} SR` : ''}
                     </Text>
                   </View>
                 </TouchableOpacity>

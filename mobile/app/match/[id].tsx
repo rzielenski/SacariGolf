@@ -82,8 +82,8 @@ export default function MatchLobbyScreen() {
 
   // Share-loop trigger. When a completed match the viewer played is a WIN or a
   // promotion, prompt them to share the recap — once per match. Promotion is
-  // derived from the current ELO and this match's signed swing, so no pre-match
-  // ELO needs to be stashed. Practice rounds and spectators never prompt.
+  // derived from the current SR and this match's signed swing, so no pre-match
+  // SR needs to be stashed. Practice rounds and spectators never prompt.
   useEffect(() => {
     if (!match || !match.completed || match.is_practice) return;
     const me = match.players?.find((p) => p.user_id === user?.user_id);
@@ -181,7 +181,7 @@ export default function MatchLobbyScreen() {
     lines.push(`${fmtName} · ${match.num_holes} holes`);
     if (me?.strokes != null) lines.push(`Score: ${me.strokes}${opp?.strokes != null ? `   vs   ${opp.strokes}` : ''}`);
     if (!match.is_practice && myDelta !== 0) {
-      lines.push(`ELO ${myDelta > 0 ? '+' : ''}${myDelta}`);
+      lines.push(`SR ${myDelta > 0 ? '+' : ''}${myDelta}`);
     }
     if (me?.hole_scores?.length && me.course_id) {
       try {
@@ -203,7 +203,7 @@ export default function MatchLobbyScreen() {
       } catch { /* skip best-moment if course fetch fails */ }
     }
     lines.push('');
-    // A no-install recap link: opens a rich preview (crests, scores, ELO swing)
+    // A no-install recap link: opens a rich preview (crests, scores, SR swing)
     // and a download CTA. Falls back to the bare domain line if id is missing.
     const recapUrl = id ? `https://sacarigolf.com/r/${id}` : 'https://sacarigolf.com';
     lines.push(won ? `Think you can beat me? ${recapUrl}` : `Full recap + rematch me → ${recapUrl}`);
@@ -269,7 +269,7 @@ export default function MatchLobbyScreen() {
     await Share.share({ message: `Join my Sacari Golf match! Match ID: ${id}` });
   };
 
-  /** Direct forfeit — counts as a loss, full ELO penalty. Used when the
+  /** Direct forfeit — counts as a loss, full SR penalty. Used when the
    *  Cancel path is blocked because an opponent has already submitted a
    *  score, AND when the user explicitly hits the Forfeit button. */
   const doForfeit = async () => {
@@ -288,7 +288,7 @@ export default function MatchLobbyScreen() {
   const handleForfeitMatch = () => {
     Alert.alert(
       'Forfeit Match',
-      "Your opponent has already submitted their round, so this match can't be cancelled. Forfeiting counts as a loss and takes the full ELO penalty.",
+      "Your opponent has already submitted their round, so this match can't be cancelled. Forfeiting counts as a loss and takes the full SR penalty.",
       [
         { text: 'Keep Playing', style: 'cancel' },
         { text: 'Forfeit', style: 'destructive', onPress: doForfeit },
@@ -299,7 +299,7 @@ export default function MatchLobbyScreen() {
   const handleCancelMatch = () => {
     Alert.alert(
       'Cancel Match',
-      'This match will be deleted with no ELO penalty for anyone. Continue?',
+      'This match will be deleted with no SR penalty for anyone. Continue?',
       [
         { text: 'Keep Match', style: 'cancel' },
         {
@@ -407,7 +407,7 @@ export default function MatchLobbyScreen() {
           }
         }
         // Spectators see "Side N wins" subline since they have no personal
-        // delta to display. Participants keep the ±ELO line as before.
+        // delta to display. Participants keep the ±SR line as before.
         const spectatorSubline = isSpectator && !tied
           ? `Side ${match.result.winner_side} wins`
           : null;
@@ -420,19 +420,19 @@ export default function MatchLobbyScreen() {
             {formatLine && (
               <Text style={styles.formatSummary}>{formatLine}</Text>
             )}
-            {/* ELO line is meaningless to a spectator (it's not their swing)
+            {/* SR line is meaningless to a spectator (it's not their swing)
                 so we hide it. Practice matches never had it. */}
             {!isPractice && !isSpectator && (
               <Text style={styles.eloChange}>
-                {myDelta > 0 ? '+' : ''}{myDelta} ELO
+                {myDelta > 0 ? '+' : ''}{myDelta} SR
               </Text>
             )}
             {myPerk && !isSpectator && (
               <Text style={styles.perkAppliedLine}>
                 Lucky Round perk applied — {myPerk.original < 0
-                  ? `loss of ${Math.abs(myPerk.original)} ELO prevented`
+                  ? `loss of ${Math.abs(myPerk.original)} SR prevented`
                   : myPerk.original > 0
-                    ? `${myPerk.original} ELO doubled to ${myPerk.adjusted}`
+                    ? `${myPerk.original} SR doubled to ${myPerk.adjusted}`
                     : 'perk consumed'}
               </Text>
             )}
@@ -520,7 +520,7 @@ export default function MatchLobbyScreen() {
             </Text>
             <Text style={styles.waitingSubText}>
               {!hasOpp
-                ? "You'll be matched to the closest ELO player in the queue."
+                ? "You'll be matched to the closest SR player in the queue."
                 : pending
                 ? 'Your round is locked in. The match resolves the moment they post their score.'
                 : 'Tallying it up — this only takes a moment.'}
@@ -535,7 +535,7 @@ export default function MatchLobbyScreen() {
           <ActivityIndicator color={C.gold} size="small" style={{ marginBottom: 8 }} />
           <Text style={styles.waitingText}>Waiting on the rest of the Arena</Text>
           <Text style={styles.waitingSubText}>
-            ELO settles once every invited player finishes their round. Invite more players any time before then.
+            SR settles once every invited player finishes their round. Invite more players any time before then.
           </Text>
         </View>
       )}
@@ -551,7 +551,7 @@ export default function MatchLobbyScreen() {
           {(isArena || isPractice) && (
             <Text style={styles.startHint}>
               {isArena
-                ? 'You can start whenever. Others join and play their own round; ELO settles once everyone finishes.'
+                ? 'You can start whenever. Others join and play their own round; SR settles once everyone finishes.'
                 : 'Invite friends below to play this round together.'}
             </Text>
           )}
@@ -716,7 +716,7 @@ export default function MatchLobbyScreen() {
 
       {/* Cancel OR Forfeit. We surface whichever exit is actually available:
             • Nobody has submitted yet     → Cancel Match (no penalty, deletes the match)
-            • Someone else has submitted   → Forfeit Match (counts as a loss, full ELO penalty)
+            • Someone else has submitted   → Forfeit Match (counts as a loss, full SR penalty)
             • I have already submitted     → button hidden, my round is locked in
             • Match is completed           → button hidden
           Without this split the button used to disappear the moment an
@@ -759,7 +759,7 @@ export default function MatchLobbyScreen() {
             </TouchableOpacity>
           </View>
           <Text style={{ color: C.textMuted, fontSize: 12, marginBottom: 16 }}>
-            For people without a Sacari account who played with you. Their scores show on the scorecard but don't affect ELO.
+            For people without a Sacari account who played with you. Their scores show on the scorecard but don't affect SR.
           </Text>
 
           {guestDraft.map((g, gi) => (
@@ -862,8 +862,8 @@ export default function MatchLobbyScreen() {
             </Text>
             <Text style={styles.sharePromptSub}>
               {sharePrompt?.rankUp
-                ? `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} ELO. ` : ''}New rank unlocked — show it off.`
-                : `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} ELO. ` : ''}Brag a little and call out your next challenger.`}
+                ? `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} SR. ` : ''}New rank unlocked — show it off.`
+                : `${(sharePrompt?.delta ?? 0) > 0 ? `+${sharePrompt?.delta} SR. ` : ''}Brag a little and call out your next challenger.`}
             </Text>
             <TouchableOpacity
               style={styles.sharePromptShareBtn}
@@ -909,7 +909,7 @@ function PlayerCard({ player, isMe, matchCompleted, onPress }: {
           </IdentityName>
           {isMe && <Text style={{ color: C.gold, fontWeight: '700' }}>(You)</Text>}
         </View>
-        <Text style={styles.playerElo}>{player.elo} ELO · Side {player.side}</Text>
+        <Text style={styles.playerElo}>{player.elo} SR · Side {player.side}</Text>
         {player.teebox_name ? (
           <Text style={styles.playerTeebox} numberOfLines={1}>
             {player.course_name ? `${player.course_name} · ` : ''}

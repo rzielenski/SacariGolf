@@ -578,6 +578,27 @@ export const api = {
       ),
   },
 
+  /** Weekly Closest to the Pin — per-distance-bucket boards. The first putt's
+   *  length is the proximity, and putting implies you're on the green. */
+  closestToPin: {
+    get: () => request<{
+      buckets: Array<{
+        key: string; label: string;
+        rows: Array<{ user_id: string; username: string; avatar_url: string | null; proximity_ft: number; approach_yds: number; rank: number; is_me: boolean }>;
+        my_best: { proximity_ft: number; approach_yds: number } | null;
+      }>;
+    }>('GET', '/closest-to-pin'),
+  },
+
+  /** Earned titles — catalog with ownership + the one equipped. */
+  titles: {
+    list: () => request<{
+      titles: Array<{ title_id: string; name: string; description: string; rarity: string; owned: boolean; equipped: boolean }>;
+    }>('GET', '/titles'),
+    equip: (titleId: string | null) =>
+      request<{ success: true; equipped_title: string | null }>('POST', '/titles/equip', { titleId }),
+  },
+
   balls: {
     /** Caller's running ball count (found, lost, net) + recent log entries. */
     me: () => request<{

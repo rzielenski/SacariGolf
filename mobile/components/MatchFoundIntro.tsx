@@ -157,7 +157,7 @@ export function MatchFoundIntro({
             )}
           </RankCrest>
           <Text style={s.clanName} numberOfLines={1}>{name}</Text>
-          {elo != null && <Text style={s.clanElo}>{elo} ELO</Text>}
+          {elo != null && <Text style={s.clanElo}>{elo} SR</Text>}
           {!isMe && opponentTheme && opponentThemeTitle && (
             <View style={s.themePill}>
               <Text style={s.themePillLabel}>♫ ANTHEM</Text>
@@ -188,7 +188,7 @@ export function MatchFoundIntro({
         ]}
       >
         <Text style={s.sideTag}>{isMe ? 'YOU' : 'OPPONENT'}</Text>
-        {/* Crest wraps the clan emblem and ranks by the clan's ELO so the
+        {/* Crest wraps the clan emblem and ranks by the clan's SR so the
             tier symbolises team strength, not any single member's grind. */}
         <RankCrest elo={clanElo ?? 0} size={72} avatarBorderRadius={8} style={s.crestSpacer}>
           {clanAvatar ? (
@@ -200,7 +200,7 @@ export function MatchFoundIntro({
           )}
         </RankCrest>
         <Text style={s.clanName} numberOfLines={1}>{clanName}</Text>
-        {clanElo != null && <Text style={s.clanElo}>{clanElo} ELO</Text>}
+        {clanElo != null && <Text style={s.clanElo}>{clanElo} SR</Text>}
         <View style={s.memberList}>
           {players.map((p) => (
             <View key={p.user_id} style={s.memberRow}>
@@ -213,7 +213,7 @@ export function MatchFoundIntro({
               )}
               <View style={{ flex: 1 }}>
                 <Text style={s.memberName} numberOfLines={1}>{c(p.username)}</Text>
-                <Text style={s.memberElo}>{p.elo ?? '—'} ELO</Text>
+                <Text style={s.memberElo}>{p.elo ?? '—'} SR</Text>
               </View>
             </View>
           ))}

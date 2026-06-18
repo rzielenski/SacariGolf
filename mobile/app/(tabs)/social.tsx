@@ -210,7 +210,7 @@ export default function SocialScreen() {
                   <Text style={styles.userElo} numberOfLines={1}>
                     {(inv.match_type ?? 'match').charAt(0).toUpperCase() + (inv.match_type ?? 'match').slice(1)}
                     {inv.match_name ? ` · ${censorText(inv.match_name, censor)}` : ''}
-                    {' · '}{inv.from_elo} ELO
+                    {' · '}{inv.from_elo} SR
                   </Text>
                 </View>
                 <TouchableOpacity

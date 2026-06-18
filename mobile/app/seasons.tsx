@@ -51,7 +51,7 @@ export default function SeasonsScreen() {
         : `${season.days_left} day${season.days_left === 1 ? '' : 's'} left`)
     : '';
 
-  // Sub-division rank (Wood 4 → Obsidian) derived from the raw ELO. The bar
+  // Sub-division rank (Wood 4 → Obsidian) derived from the raw SR. The bar
   // fills toward the next division (or sits full for Obsidian's open climb).
   const myRank = me ? rankForElo(me.elo) : null;
   const bandFill = myRank ? myRank.progress : 0;
@@ -90,7 +90,7 @@ export default function SeasonsScreen() {
                     {(myRank?.label ?? me.division.name).toUpperCase()}
                   </Text>
                   <Text style={styles.heroElo}>
-                    {myRank?.isObsidian ? `${me.elo} ELO` : `${myRank?.lp ?? 0} LP`}
+                    {myRank?.isObsidian ? `${me.elo} SR` : `${myRank?.lp ?? 0} SR`}
                   </Text>
                   <Text style={styles.heroRecord}>
                     {me.record.wins}–{me.record.losses}–{me.record.ties}
@@ -113,7 +113,7 @@ export default function SeasonsScreen() {
                   </View>
                   {myRank && !myRank.isObsidian && myRank.next ? (
                     <Text style={styles.heroNext}>
-                      {myRank.lpToNext} LP to{' '}
+                      {myRank.lpToNext} SR to{' '}
                       <Text style={{ color: myRank.next.color, fontWeight: '900' }}>
                         {myRank.next.label}
                       </Text>

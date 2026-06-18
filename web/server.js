@@ -349,7 +349,8 @@ app.get('/matches', async (_req, res) => {
       `SELECT m.match_id, mr.created_at AS resolved_at, mr.winner_side, m.num_holes, m.format,
               json_agg(json_build_object(
                 'side', mp.side, 'username', u.username, 'elo', u.elo, 'is_bot', u.is_bot,
-                'total_score', r.total_score, 'teebox_par', t.par, 'course_name', c.course_name
+                'total_score', r.total_score, 'teebox_par', t.par, 'course_name', c.course_name,
+                'normalized_to_par', r.normalized_to_par
               ) ORDER BY mp.side) AS players
          FROM match_results mr
          JOIN matches m ON m.match_id = mr.match_id AND m.is_practice = false
@@ -526,7 +527,7 @@ app.get('/r/:id', async (req, res) => {
 
     const { rows: pRows } = await pool.query(
       `SELECT mp.user_id, mp.side, u.username, u.elo, u.is_bot,
-              r.total_score, r.hole_scores, r.teebox_id, t.par AS teebox_par, t.name AS teebox_name, c.course_name
+              r.total_score, r.hole_scores, r.teebox_id, r.normalized_to_par, t.par AS teebox_par, t.name AS teebox_name, c.course_name
          FROM match_players mp
          JOIN users u ON u.user_id = mp.user_id
          LEFT JOIN rounds r ON r.match_id = mp.match_id AND r.user_id = mp.user_id
@@ -560,7 +561,11 @@ app.get('/r/:id', async (req, res) => {
         isBot: p.is_bot,
         rank: rankForElo(p.elo),
         gross: p.total_score,
-        toPar: p.total_score != null && p.teebox_par != null ? p.total_score - p.teebox_par : null,
+        // 18-hole-equivalent to-par from the stored column (same value the app +
+        // course board rank on); raw par-diff only as a fallback.
+        toPar: p.normalized_to_par != null
+          ? p.normalized_to_par
+          : (p.total_score != null && p.teebox_par != null ? p.total_score - p.teebox_par : null),
         delta: Math.round(Number(deltas[p.user_id] ?? 0)),
         courseName: p.course_name,
         teeName: p.teebox_name,
@@ -594,11 +599,11 @@ app.get('/r/:id', async (req, res) => {
 });
 
 // Pull a user's recent resolved (non-practice) matches as recap rows: result,
-// opponent, score, ELO swing, course, date. Shared by the profile + recaps page.
+// opponent, score, SR swing, course, date. Shared by the profile + recaps page.
 async function fetchUserRecaps(userId, limit) {
   const { rows } = await pool.query(
     `SELECT m.match_id, mr.created_at AS resolved_at, mr.winner_side, mr.details,
-            mp.side AS my_side, r.total_score, t.par AS teebox_par, c.course_name,
+            mp.side AS my_side, r.total_score, r.normalized_to_par, t.par AS teebox_par, c.course_name,
             opp.username AS opp_username, opp.is_bot AS opp_is_bot
        FROM match_players mp
        JOIN matches m ON m.match_id = mp.match_id AND m.is_practice = false
@@ -626,7 +631,9 @@ async function fetchUserRecaps(userId, limit) {
       result: tied ? 'tie' : (Number(row.my_side) === Number(row.winner_side) ? 'win' : 'loss'),
       oppName: row.opp_username,
       oppIsBot: row.opp_is_bot,
-      toPar: row.total_score != null && row.teebox_par != null ? row.total_score - row.teebox_par : null,
+      toPar: row.normalized_to_par != null
+        ? row.normalized_to_par
+        : (row.total_score != null && row.teebox_par != null ? row.total_score - row.teebox_par : null),
       courseName: row.course_name,
       delta: Math.round(Number(deltas[userId] ?? 0)),
     };
@@ -697,7 +704,7 @@ app.get('/u/:username', async (req, res) => {
 const PRIVACY_HTML = `
 <p>This policy covers the Sacari Golf app and this website. It is a plain-language summary; review it with your own counsel before launch.</p>
 <h2>What we collect</h2>
-<p>Account details you provide (username, email). Gameplay data (scores, rounds, shots, stats, ELO and rank). Your location only while you use GPS and shot-tracking features. Photos you choose to upload (avatar, finds).</p>
+<p>Account details you provide (username, email). Gameplay data (scores, rounds, shots, stats, SR and rank). Your location only while you use GPS and shot-tracking features. Photos you choose to upload (avatar, finds).</p>
 <h2>How we use it</h2>
 <p>To run matches and scoring, compute your stats and ranking, power leaderboards and public profiles, and improve crowd-sourced course data.</p>
 <h2>What is public</h2>

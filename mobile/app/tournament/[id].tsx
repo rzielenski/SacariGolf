@@ -192,7 +192,7 @@ export default function TournamentDetailScreen() {
             <UserAvatar username={p.username} avatarUrl={p.avatar_url} size={32} borderRadius={4} />
             <Text style={s.playerName}>{c(p.username)}</Text>
           </View>
-          <Text style={s.playerElo}>{p.elo} ELO</Text>
+          <Text style={s.playerElo}>{p.elo} SR</Text>
         </TouchableOpacity>
       ))}
 

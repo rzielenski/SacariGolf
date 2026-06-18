@@ -1,5 +1,5 @@
 /**
- * Rank crest — the heraldic frame around a player's avatar, keyed to their ELO
+ * Rank crest — the heraldic frame around a player's avatar, keyed to their SR
  * tier (Wood → Obsidian, see lib/rank.ts).
  *
  *   <RankCrest elo={user.elo} size={96}>

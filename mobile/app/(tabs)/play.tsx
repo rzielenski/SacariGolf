@@ -39,7 +39,7 @@ type Format = 'stroke' | 'scramble' | 'stableford' | 'match_play' | 'skins';
 // the Format union, add a row here, and (if it's a hole-by-hole format)
 // add the math to backend matches.ts computeFormatPerf().
 const FORMAT_CARDS: { id: Format; name: string; mark: string; desc: string; teamOnly?: boolean }[] = [
-  { id: 'stroke',     name: 'Stroke Play', mark: 'STK', desc: 'Lowest gross score wins. Standard scoring used by ELO and handicap math.' },
+  { id: 'stroke',     name: 'Stroke Play', mark: 'STK', desc: 'Lowest gross score wins. Standard scoring used by SR and handicap math.' },
   { id: 'stableford', name: 'Stableford',  mark: 'STB', desc: 'Modified Stableford points: eagle 5, birdie 2, par 0, bogey −1, double or worse −3. Highest points wins — perfect for casual rounds where blow-ups matter less.' },
   { id: 'match_play', name: 'Match Play',  mark: 'MP',  desc: 'Win each hole with the lowest score. Whoever wins more holes wins the match. Halved holes don\'t count.' },
   { id: 'skins',      name: 'Skins',       mark: 'SKN', desc: 'One skin per hole won. Halved holes carry the skin to the next hole, so a single great moment can pay off big.' },
@@ -274,7 +274,7 @@ export default function PlayScreen() {
         isPractice: matchType === 'practice' || matchType === 'group',
         teeboxId: teebox.teebox_id,
         clanId: selectedClanId ?? undefined,
-        // Practice/group ignore format (no ELO), team modes get their picked
+        // Practice/group ignore format (no SR), team modes get their picked
         // format, solo can pick stableford / match_play / skins for ranked play.
         format: matchType === 'practice' || matchType === 'group' ? 'stroke' : format,
         numHoles,
@@ -313,7 +313,7 @@ export default function PlayScreen() {
     if (matchType === 'duo' || matchType === 'squad') {
       setStep('clan');
     } else if (matchType === 'practice' || matchType === 'group') {
-      // Practice + group are casual (no ELO), so skip the format picker.
+      // Practice + group are casual (no SR), so skip the format picker.
       setStep('course');
     } else {
       // Solo + Arena: pick a format (Arena restricts to stroke/stableford —
@@ -390,12 +390,12 @@ export default function PlayScreen() {
                 {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'ffa' ? 'Arena' : t === 'group' ? 'Group' : 'Practice'}
               </Text>
               <Text style={styles.typeDesc}>
-                {t === 'solo' ? 'Ranked 1v1 — auto-matched by ELO'
+                {t === 'solo' ? 'Ranked 1v1 — auto-matched by SR'
                   : t === 'duo' ? 'Ranked 2v2 — stroke play or scramble'
                   : t === 'squad' ? 'Ranked 4v4 — stroke play or scramble'
                   : t === 'ffa' ? 'Ranked free-for-all — invite up to 15 friends, lowest score wins'
                   : t === 'group' ? 'You keep score for the whole group on one phone. Casual, with a live leaderboard.'
-                  : 'No ELO — just get the reps in'}
+                  : 'No SR — just get the reps in'}
               </Text>
             </View>
             {matchType === t && <Text style={styles.checkmark}>✓</Text>}
@@ -503,7 +503,7 @@ export default function PlayScreen() {
               >
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.clanName, selectedClanId === c.clan_id && { color: C.gold }]}>{c.name}</Text>
-                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.member_count}/{c.max_players} members · {c.elo} ELO</Text>
+                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.member_count}/{c.max_players} members · {c.elo} SR</Text>
                 </View>
                 {selectedClanId === c.clan_id && <Text style={{ color: C.gold, fontSize: 18 }}>✓</Text>}
               </TouchableOpacity>

@@ -25,7 +25,7 @@ const SLIDES: { mark: string; title: string; body: string; emphasis?: boolean }[
   {
     mark: 'I',
     title: 'Play Real Rounds',
-    body: 'Solo, duo, or full-team matches with ranked ELO. Pick a course, drop your tee, and your strokes flow into your handicap, club stats, and match history automatically.',
+    body: 'Solo, duo, or full-team matches with ranked SR. Pick a course, drop your tee, and your strokes flow into your handicap, club stats, and match history automatically.',
   },
   {
     mark: 'II',

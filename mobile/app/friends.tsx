@@ -212,7 +212,7 @@ function PeopleList({
             >
               {censor(item.username)}
             </IdentityName>
-            <Text style={s.elo}>{item.elo} ELO</Text>
+            <Text style={s.elo}>{item.elo} SR</Text>
           </View>
           <Text style={s.chev}>›</Text>
         </TouchableOpacity>
@@ -286,7 +286,7 @@ function AddFriendsTab({
               <Avatar person={p} censor={censor} />
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={s.username} numberOfLines={1}>{censor(p.username)}</Text>
-                <Text style={s.elo}>{p.elo} ELO · added you</Text>
+                <Text style={s.elo}>{p.elo} SR · added you</Text>
               </View>
             </TouchableOpacity>
             <TouchableOpacity
@@ -326,7 +326,7 @@ function AddFriendsTab({
               <Avatar person={p} censor={censor} />
               <View style={{ flex: 1, minWidth: 0 }}>
                 <Text style={s.username} numberOfLines={1}>{censor(p.username)}</Text>
-                <Text style={s.elo}>{p.elo} ELO</Text>
+                <Text style={s.elo}>{p.elo} SR</Text>
               </View>
             </TouchableOpacity>
             <TouchableOpacity
