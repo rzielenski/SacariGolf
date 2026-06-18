@@ -48,6 +48,7 @@ const sg_1 = require("../utils/sg");
 const openBeta_1 = require("../utils/openBeta");
 const cosmeticSql_1 = require("../utils/cosmeticSql");
 const handicap_1 = require("../utils/handicap");
+const clubs_1 = require("../utils/clubs");
 const messages_1 = require("./messages");
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const AVATARS_DIR = path.join(UPLOADS_DIR, 'avatars');
@@ -61,7 +62,7 @@ router.get('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) 
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
             u.theme_track_artwork, u.theme_track_preview, u.theme_song_max_volume,
-            u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter,
+            u.clubs_in_bag, u.censor_offensive_language, u.share_to_twitter, u.partial_swing_mode,
             u.equipped_border, u.equipped_background, u.equipped_username,
             u.equipped_ball_trail, u.equipped_fx,
             (SELECT jsonb_build_object(
@@ -96,7 +97,7 @@ router.get('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) 
     return res.json(row);
 }));
 router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume } = req.body;
+    const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode } = req.body;
     const updates = [];
     const values = [];
     // Opt-in for the automated @Sacari Twitter/X daily digest. Booleanish; the
@@ -121,6 +122,13 @@ router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
         const flag = !!censorOffensiveLanguage;
         values.push(flag);
         updates.push(`censor_offensive_language = $${values.length}`);
+    }
+    // Partial-swing entry mode: how the user dials a less-than-full swing —
+    // 'percentage' (75%, 80%) or 'clock' (9:00, 10:30). Anything else → percentage.
+    if (partialSwingMode !== undefined) {
+        const mode = partialSwingMode === 'clock' ? 'clock' : 'percentage';
+        values.push(mode);
+        updates.push(`partial_swing_mode = $${values.length}`);
     }
     if (pushToken !== undefined) {
         values.push(pushToken);
@@ -205,11 +213,6 @@ router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
             updates.push(`clubs_in_bag = NULL`);
         }
         else if (Array.isArray(clubsInBag)) {
-            const ALLOWED = new Set([
-                'driver', '3w', '5w', '7w', 'hybrid',
-                '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
-                'pw', 'gw', 'sw', 'lw', 'putter',
-            ]);
             const cleaned = [];
             for (const raw of clubsInBag) {
                 let code = null;
@@ -225,7 +228,7 @@ router.patch('/me', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res
                             label = trimmed;
                     }
                 }
-                if (!code || !ALLOWED.has(code))
+                if (!code || !clubs_1.ALLOWED_CLUBS.has(code))
                     continue;
                 cleaned.push(label ? { code, label } : { code });
             }
@@ -637,7 +640,7 @@ router.get('/:id/club-stats', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async
     // matches (match_id NULL) drop out of the inner join, which is fine:
     // we can't confirm they were solo.
     `SELECT s.shot_id, s.club, s.start_lat, s.start_lng, s.end_lat, s.end_lng,
-            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds
+            s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds, s.partial_value
        FROM shots s
        JOIN matches m ON m.match_id = s.match_id
       WHERE s.user_id = $1
@@ -750,6 +753,24 @@ router.get('/:id/club-stats', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async
     /** Distance for stat aggregation: plays-like if the client computed it
      *  at recording time, else raw GPS distance. */
     const ydsFor = (v) => v.plays_like_yds != null ? v.plays_like_yds : v.dist_m * M_TO_YDS;
+    // Per-club partial-swing distances (e.g. a 75% or 9:00 7-iron). Computed
+    // straight from the raw rows, independent of the full-swing dispersion math
+    // below so it can never perturb it. Distance is plays-like or frozen total.
+    const partialByClub = new Map();
+    for (const r of shotRows) {
+        if (!r.partial_value)
+            continue;
+        const yds = r.plays_like_yds != null ? Number(r.plays_like_yds)
+            : r.total_yds != null ? Number(r.total_yds) : null;
+        if (yds == null || !Number.isFinite(yds))
+            continue;
+        if (!partialByClub.has(r.club))
+            partialByClub.set(r.club, new Map());
+        const pmap = partialByClub.get(r.club);
+        if (!pmap.has(r.partial_value))
+            pmap.set(r.partial_value, []);
+        pmap.get(r.partial_value).push(yds);
+    }
     const clubs = [];
     for (const [club, vecs] of byClub.entries()) {
         const statYds = vecs.map(ydsFor);
@@ -789,11 +810,18 @@ router.get('/:id/club-stats', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async
             long_yds: Math.round(geom[i].forward - medForward),
             dist_yds: Math.round(geom[i].distAbs),
         }));
+        const pm = partialByClub.get(club);
+        const partials = pm
+            ? [...pm.entries()]
+                .map(([label, arr]) => ({ label, shots: arr.length, median_yds: Math.round(median(arr)) }))
+                .sort((a, b) => b.median_yds - a.median_yds)
+            : [];
         clubs.push({
             club,
             shots: vecs.length,
             avg_yds: Math.round(statYds.reduce((a, b) => a + b, 0) / statYds.length),
             median_yds: Math.round(medYds),
+            partials,
             dispersion,
         });
     }
@@ -1537,28 +1565,23 @@ router.get('/:id', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res)
     // Best round (lowest score-to-par across completed SOLO rounds). Scoped to
     // solo — same as the handicap, Sacari Cup, and cup-standings queries —
     // because team (duo/squad/scramble) scores are shared and Arena is multi-way,
-    // so they don't represent an individual's round. Par is pro-rated to the
-    // holes the player actually completed — without this, a 9-hole 41 on a par-72
-    // teebox looks like a -31 round and beats every legitimate 18-hole entry. The
-    // same expression is used in SELECT and ORDER BY so the lowest-differential
+    // so they don't represent an individual's round. to_par is the 18-hole-
+    // equivalent differential (shared helper, same basis as the Sacari Cup and
+    // every other cross-player board): par is pro-rated to the holes played,
+    // then scaled to a full 18 — so a 9-hole 41 doesn't look like a course
+    // record. The same expression is used in SELECT and ORDER BY so the best
     // round actually wins.
     const { rows: bestRows } = await pool_1.default.query(`SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores, r.hole_stats,
             t.teebox_id, t.name AS teebox_name, t.par AS teebox_par, t.num_holes,
             c.course_id, c.course_name,
-            (r.total_score
-              - ROUND(t.par::numeric
-                      * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                      / NULLIF(t.num_holes, 0)::numeric)::int) AS to_par
+            r.normalized_to_par AS to_par
      FROM rounds r
      JOIN matches m ON m.match_id = r.match_id
      LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
      LEFT JOIN courses c ON c.course_id = t.course_id
-     WHERE r.user_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND t.par IS NOT NULL
+     WHERE r.user_id = $1 AND r.normalized_to_par IS NOT NULL AND m.completed = true
        AND m.is_practice = false AND m.match_type = 'solo'
-     ORDER BY (r.total_score
-                - ROUND(t.par::numeric
-                        * COALESCE(array_length(r.hole_scores, 1), t.num_holes)::numeric
-                        / NULLIF(t.num_holes, 0)::numeric)::int) ASC
+     ORDER BY r.normalized_to_par ASC
      LIMIT 1`, [req.params.id]);
     // Follow counts. The "friends" table is directional with a single row per
     // pair (status flips 'pending' → 'accepted' after the recipient accepts).

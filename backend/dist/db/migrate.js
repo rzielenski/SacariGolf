@@ -2076,6 +2076,29 @@ const MIGRATIONS = [
             visual_data = EXCLUDED.visual_data;
     `,
     },
+    {
+        // Bag + partial-swing overhaul: a per-shot partial-swing tag (e.g. '75%' or
+        // '9:00'; NULL = a full swing) and the user's preferred entry mode for it.
+        name: 'shots.partial_value_and_user_mode',
+        sql: `
+      ALTER TABLE shots ADD COLUMN IF NOT EXISTS partial_value TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS partial_swing_mode TEXT NOT NULL DEFAULT 'percentage';
+    `,
+    },
+    {
+        // Stored per-round comparison score, computed in app code (utils/scoring.ts
+        // normalizedScore, via utils/roundScore.ts): an 18-hole-equivalent score
+        // that is rating/slope-adjusted (a USGA differential) when the teebox has a
+        // course rating + slope, else a par-based to-par. Every cross-player board
+        // ranks on this one integer instead of recomputing a formula in SQL. NULL
+        // until the submit hook / reconcile pass fills it (or forever if the teebox
+        // has no par). The index covers the reconcile scan + leaderboard ORDER BYs.
+        name: 'rounds.normalized_to_par',
+        sql: `
+      ALTER TABLE rounds ADD COLUMN IF NOT EXISTS normalized_to_par INTEGER;
+      CREATE INDEX IF NOT EXISTS rounds_normalized_to_par_idx ON rounds(normalized_to_par);
+    `,
+    },
 ];
 async function runMigrations() {
     // Ledger table first, outside the loop, so even a first-boot migration

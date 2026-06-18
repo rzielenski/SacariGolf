@@ -89,6 +89,7 @@ const LOCK_WEEKLY_CUP = 42104;
 const LOCK_ELO_RESET = 42105;
 const LOCK_UNPAIR = 42106;
 const LOCK_BOTS = 42107;
+const LOCK_NORMALIZE = 42108;
 /**
  * Background cleanup job: cancels in-progress matches that have been idle
  * for over 24 hours. "Idle" = no activity (round creation, shot tracking,
@@ -714,6 +715,7 @@ let pairingHandle = null;
 let feedBackfillHandle = null;
 let weeklyCupHandle = null;
 let seasonResetHandle = null;
+let normalizeHandle = null;
 // ── Partial ELO reset at season rollover ──────────────────────────────
 // Anchor + retention for the soft reset: at each new competitive season,
 // every rating is pulled halfway back toward the new-player baseline:
@@ -804,6 +806,10 @@ function startCleanupSchedule() {
     const feedTick = () => withCronLock(LOCK_FEED_BACKFILL, backfillRoundPosts);
     const cupTick = () => withCronLock(LOCK_WEEKLY_CUP, weeklyCupTick);
     const eloResetTick = () => withCronLock(LOCK_ELO_RESET, applySeasonEloReset);
+    const normalizeTick = () => withCronLock(LOCK_NORMALIZE, async () => {
+        const { reconcileNormalizedScores } = await Promise.resolve().then(() => __importStar(require('./roundScore')));
+        await reconcileNormalizedScores();
+    });
     staleTick();
     cleanupHandle = setInterval(staleTick, 60 * 60 * 1000);
     // Release stale linked pairs (3-day rule). Hourly is plenty — the window is
@@ -840,6 +846,12 @@ function startCleanupSchedule() {
     // (the queries hit a unique index + a tiny status='active' set).
     cupTick();
     weeklyCupHandle = setInterval(cupTick, 60 * 1000);
+    // Backfill rounds.normalized_to_par for any round the submit hook didn't set
+    // (bots, solo auto-play, organizer rounds — plus all history on first deploy).
+    // Computed in app code (utils/roundScore.ts). The boot run clears the backlog;
+    // 60s keeps new rounds ranked promptly.
+    normalizeTick();
+    normalizeHandle = setInterval(normalizeTick, 60 * 1000);
 }
 async function weeklyCupTick() {
     try {
@@ -892,5 +904,9 @@ function stopCleanupSchedule() {
     if (seasonResetHandle) {
         clearInterval(seasonResetHandle);
         seasonResetHandle = null;
+    }
+    if (normalizeHandle) {
+        clearInterval(normalizeHandle);
+        normalizeHandle = null;
     }
 }

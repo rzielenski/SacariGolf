@@ -42,6 +42,7 @@ exports.runBotTeamMatchPass = runBotTeamMatchPass;
 exports.backfillBotVsBotMatches = backfillBotVsBotMatches;
 const pool_1 = __importDefault(require("../db/pool"));
 const matches_1 = require("../routes/matches");
+const scoring_1 = require("../utils/scoring");
 const notifyFomo_1 = require("./notifyFomo");
 const DIAMOND_FLOOR = 1300; // ELO at which a bot plays scratch
 const ELO_PER_STROKE = 37.5; // ELO below Diamond per +1 handicap stroke
@@ -295,8 +296,8 @@ async function runBotMatchPass() {
             const subset = c.holes_subset;
             const overrideRating = subset === 'front' ? t.front_course_rating : subset === 'back' ? t.back_course_rating : null;
             const overrideSlope = subset === 'front' ? t.front_slope_rating : subset === 'back' ? t.back_slope_rating : null;
-            const humanDiff = (0, matches_1.diff18)(Number(hr.total_score), t.course_rating, t.slope_rating, holesPlayed, t.num_holes ?? holesPlayed, overrideRating, overrideSlope);
-            const botDiff = (0, matches_1.diff18)(botGross, bt.course_rating, bt.slope_rating, holesPlayed, bt.num_holes ?? holesPlayed, null, null);
+            const humanDiff = (0, scoring_1.diff18)(Number(hr.total_score), t.course_rating, t.slope_rating, holesPlayed, t.num_holes ?? holesPlayed, overrideRating, overrideSlope);
+            const botDiff = (0, scoring_1.diff18)(botGross, bt.course_rating, bt.slope_rating, holesPlayed, bt.num_holes ?? holesPlayed, null, null);
             const isTie = Math.abs(humanDiff - botDiff) < 0.05;
             const humanWins = !isTie && humanDiff < botDiff; // lower differential wins
             const expA = (0, matches_1.expectedScore)(humanElo, botElo);
@@ -512,7 +513,7 @@ async function runBotTeamMatchPass() {
                     return p.strokes;
                 const oR = subset === 'front' ? p.front_course_rating : subset === 'back' ? p.back_course_rating : null;
                 const oS = subset === 'front' ? p.front_slope_rating : subset === 'back' ? p.back_slope_rating : null;
-                return (0, matches_1.diff18)(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, oR, oS);
+                return (0, scoring_1.diff18)(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, oR, oS);
             };
             const teamDiff = (players, topN) => {
                 const ds = players.map(diffOf).sort((a, b) => a - b).slice(0, topN);
@@ -643,8 +644,8 @@ async function backfillBotVsBotMatches(perBot = 25) {
                 const ta = randOf(tees), tb = randOf(tees);
                 const ra = generateBotRound(ta.course_rating, ta.num_holes, 18, a.handicap);
                 const rb = generateBotRound(tb.course_rating, tb.num_holes, 18, b.handicap);
-                const da = (0, matches_1.diff18)(ra.total, ta.course_rating, ta.slope_rating, 18, ta.num_holes, null, null);
-                const db = (0, matches_1.diff18)(rb.total, tb.course_rating, tb.slope_rating, 18, tb.num_holes, null, null);
+                const da = (0, scoring_1.diff18)(ra.total, ta.course_rating, ta.slope_rating, 18, ta.num_holes, null, null);
+                const db = (0, scoring_1.diff18)(rb.total, tb.course_rating, tb.slope_rating, 18, tb.num_holes, null, null);
                 const tie = Math.abs(da - db) < 0.05;
                 const aWins = !tie && da < db;
                 const daysAgo = Math.floor(Math.random() * 60) + 1;

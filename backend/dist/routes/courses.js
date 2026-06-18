@@ -273,8 +273,13 @@ router.post('/scan-scorecard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(asyn
     }
 }));
 router.get('/:id/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (req, res) => {
-    const { rows } = await pool_1.default.query(`SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
+    const { rows } = await pool_1.default.query(
+    // Rank by the stored 18-hole-equivalent to-par so a 9-hole round can't top
+    // the board on raw strokes alone. to_par is returned so the client shows
+    // the same normalized figure it's ranked on.
+    `SELECT r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
             array_length(r.hole_scores, 1) AS holes_played,
+            r.normalized_to_par AS to_par,
             u.username, u.user_id, u.avatar_url,
             t.teebox_id, t.name AS teebox_name, t.par, t.num_holes,
             m.match_type, m.format
@@ -282,8 +287,8 @@ router.get('/:id/leaderboard', auth_1.requireAuth, (0, asyncHandler_1.wrap)(asyn
      JOIN users u ON u.user_id = r.user_id
      JOIN teeboxes t ON t.teebox_id = r.teebox_id
      JOIN matches m ON m.match_id = r.match_id
-     WHERE t.course_id = $1 AND r.total_score IS NOT NULL AND m.completed = true AND m.is_practice = false
-     ORDER BY r.total_score ASC
+     WHERE t.course_id = $1 AND r.normalized_to_par IS NOT NULL AND m.completed = true AND m.is_practice = false
+     ORDER BY to_par ASC
      LIMIT 50`, [req.params.id]);
     return res.json(rows);
 }));

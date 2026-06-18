@@ -40,7 +40,6 @@ exports.expectedScore = expectedScore;
 exports.kFactor = kFactor;
 exports.placementUserSet = placementUserSet;
 exports.shapeDelta = shapeDelta;
-exports.diff18 = diff18;
 exports.resolveLinkedPair = resolveLinkedPair;
 const express_1 = require("express");
 const pool_1 = __importDefault(require("../db/pool"));
@@ -50,6 +49,9 @@ const mentions_1 = require("../utils/mentions");
 const asyncHandler_1 = require("../utils/asyncHandler");
 const cosmeticSql_1 = require("../utils/cosmeticSql");
 const leaderboard_1 = require("../utils/leaderboard");
+const clubs_1 = require("../utils/clubs");
+const roundScore_1 = require("../utils/roundScore");
+const scoring_1 = require("../utils/scoring");
 const seasons_1 = require("./seasons");
 const router = (0, express_1.Router)();
 // ELO helpers
@@ -117,74 +119,10 @@ function shapeDelta(base, won, isPlacement) {
     }
     return d;
 }
-// Score differential scaled to an 18-hole equivalent so players on different
-// courses, teeboxes, and hole counts compare fairly.
-//
-// Instead of special-casing every combination, we convert ALL THREE inputs to
-// one common 18-hole, full-slope scale, then apply the single WHS formula:
-//
-//     diff = (113 / slopeFull) × (gross18 − ratingFull)
-//
-// The conversions are independent, so every (holes played) × (teebox scale)
-// combination falls out automatically — including the weird ones:
-//
-//   teebox scale (by num_holes — authoritative, never guessed from magnitude):
-//     • 9-hole teebox  → half-scale data: ratingFull = CR×2, slopeFull = slope×2
-//     • 18-hole teebox → full-scale: ratingFull = CR, slopeFull = slope
-//        - if only a NINE of an 18-hole course was played and the course has a
-//          dedicated front/back-9 rating, use that ×2 (its slope is full-scale)
-//   gross → 18-hole equivalent: gross × (18 / holesPlayed)
-//     • 9 played  → ×2     • 18 played → ×1     • any partial N → ×(18/N)
-//
-// Worked combos:
-//   18 on 18-hole     → ×1, CR, slope                      (standard)
-//   9  on 9-hole      → gross×2, CR×2, slope×2
-//   18 on 9-hole      → gross×1, CR×2, slope×2             (two loops)
-//   9  on 18-hole     → gross×2, (front/back×2 ?? CR), slope (or front/back)
-//   18 on 9-hole RATING but card says 18, etc.            → all covered
-function diff18(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18, overrideRating, overrideSlope) {
-    // Authoritative 9-vs-18 by the teebox's hole count, never by value magnitude
-    // (a 9-hole tee can legitimately have a slope in the 40-55 band).
-    const teeNine = teeboxHoles === 9;
-    const playedNine = holesPlayed === 9;
-    // Guard a missing/garbage hole count so the gross extrapolation can't divide
-    // by zero — default to the teebox's own size.
-    const hp = holesPlayed && holesPlayed > 0 ? holesPlayed : (teeNine ? 9 : 18);
-    // Full-scale (18-hole-equivalent) slope.
-    let slopeFull;
-    if (teeNine) {
-        slopeFull = slopeRating * 2; // half-scale → full
-    }
-    else if (playedNine && typeof overrideSlope === 'number' && overrideSlope > 0) {
-        slopeFull = overrideSlope; // front/back-9 slope (already full-scale)
-    }
-    else {
-        slopeFull = slopeRating;
-    }
-    if (!(slopeFull > 0))
-        slopeFull = 113; // never divide by 0/NaN
-    // Full 18-hole-equivalent course rating.
-    let ratingFull;
-    if (teeNine) {
-        ratingFull = courseRating * 2; // 9-hole rating → 18
-    }
-    else if (playedNine) {
-        ratingFull = (typeof overrideRating === 'number' && overrideRating > 0)
-            ? overrideRating * 2 // dedicated nine rating → 18
-            : courseRating; // else the full 18 rating
-    }
-    else {
-        ratingFull = courseRating;
-    }
-    // Gross extrapolated to an 18-hole equivalent.
-    const gross18 = gross * (18 / hp);
-    return (113 / slopeFull) * (gross18 - ratingFull);
-}
-// Kept for backwards compatibility / one place that still wants the un-doubled value
-function scoreDifferential(gross, courseRating, slopeRating, holesPlayed = 18, teeboxHoles = 18) {
-    const adjustedRating = courseRating * (holesPlayed / teeboxHoles);
-    return (gross - adjustedRating) * (113 / slopeRating);
-}
+// diff18 (the 18-hole-equivalent score differential used for ELO) now lives in
+// utils/scoring.ts — the single home for all round-scoring math — and is
+// imported at the top of this file. The old un-doubled scoreDifferential was
+// dead code (no call sites) and was removed.
 // Create match
 // Allowed match formats. `stroke` is the default (gross score wins). The new
 // formats only affect HOW the winner is decided + how the result UI reads —
@@ -626,7 +564,7 @@ async function resolveLinkedPair(client, matchAId, matchBId) {
             const overrideSlope = holesSubsetForCalc === 'front' ? p.front_slope_rating
                 : holesSubsetForCalc === 'back' ? p.back_slope_rating
                     : null;
-            return diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
+            return (0, scoring_1.diff18)(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
         }).sort((x, y) => x - y);
         const used = topN ? diffs.slice(0, topN) : diffs;
         return used.reduce((x, y) => x + y, 0) / used.length;
@@ -1205,10 +1143,17 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
             }
         }
         // Upsert round (only for the submitting player; scramble teammates share the same final score)
-        await client.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers, caption)
+        const { rows: submittedRound } = await client.query(`INSERT INTO rounds (match_id, user_id, course_id, teebox_id, hole_scores, hole_stats, total_score, round_type, beers, caption)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (match_id, user_id)
-       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10`, [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]);
+       DO UPDATE SET hole_scores = $5, hole_stats = $6, total_score = $7, teebox_id = $4, beers = $9, caption = $10
+       RETURNING round_id`, [req.params.id, req.userId, courseId || null, resolvedTeeboxId || null, holeScores, JSON.stringify(cleanStats), totalScore, matchRows[0].match_type, beerCount, roundCaption]);
+        // Store this round's 18-hole-equivalent to-par now, computed in app code
+        // (utils/roundScore.ts), so it ranks on the cup / course / profile boards
+        // immediately. The reconcile tick covers every other write path.
+        if (submittedRound[0]?.round_id) {
+            await (0, roundScore_1.syncRoundNormalized)(client, submittedRound[0].round_id);
+        }
         // Update match_players for the submitting player
         await client.query(`UPDATE match_players SET strokes = $1, completed = true, completed_at = NOW(), teebox_id = COALESCE($2, teebox_id)
        WHERE match_id = $3 AND user_id = $4`, [totalScore, resolvedTeeboxId, req.params.id, req.userId]);
@@ -1406,7 +1351,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                     const overrideSlope = subset === 'front' ? p.front_slope_rating
                         : subset === 'back' ? p.back_slope_rating
                             : null;
-                    return diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
+                    return (0, scoring_1.diff18)(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope);
                 }).sort((a, b) => a - b);
                 const used = topN ? diffs.slice(0, topN) : diffs;
                 return used.reduce((a, b) => a + b, 0) / used.length;
@@ -1589,7 +1534,7 @@ router.post('/:id/scores', auth_1.requireAuth, (0, asyncHandler_1.wrap)(async (r
                         : null;
                 return {
                     p,
-                    diff: diff18(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope),
+                    diff: (0, scoring_1.diff18)(p.strokes, p.course_rating, p.slope_rating, p.holes_played, p.teebox_num_holes || p.holes_played, overrideRating, overrideSlope),
                 };
             });
             // Per-player accumulators
@@ -2498,22 +2443,9 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
     const shots = req.body?.shots;
     if (!Array.isArray(shots))
         return res.status(400).json({ error: 'shots array required' });
-    // Allowed clubs and lies — keep these short, lower-cased identifiers.
-    // Front-end labels can be richer; here we just whitelist values to avoid
-    // free-text growing organically.
-    //
-    // 'chip' is a SPECIAL non-attributing club: the player wants to track
-    // the shot on the map but NOT have it counted toward any specific
-    // club's per-club stats (since "chip" isn't a single physical club —
-    // could be a 56°, 60°, or even a hybrid bump). The /club-stats query
-    // explicitly skips it. Kept in the allowed-set here so the shot save
-    // still records the chip tag rather than coercing it to "unknown".
-    const ALLOWED_CLUBS = new Set([
-        'driver', '3w', '5w', '7w', 'hybrid',
-        '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i',
-        'pw', 'gw', 'sw', 'lw', 'putter',
-        'chip',
-    ]);
+    // ALLOWED_CLUBS comes from the shared whitelist (utils/clubs) so the bag
+    // editor and shot tracking can never drift. It includes 'chip', a special
+    // non-attributing tag (skipped by /club-stats) for tracking-only shots.
     const ALLOWED_LIES = new Set(['tee', 'fairway', 'rough', 'bunker', 'recovery', 'green', 'fringe']);
     // Validate one Pt (used for start/end of segments AND for legacy points).
     const cleanPt = (p) => {
@@ -2538,11 +2470,18 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
             if (!start || !end)
                 return null;
             const out = { start, end };
-            if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+            if (typeof s.club === 'string' && clubs_1.ALLOWED_CLUBS_SHOT.has(s.club.toLowerCase())) {
                 out.club = s.club.toLowerCase();
             }
             else if (typeof s.club === 'string') {
                 out.club = 'unknown';
+            }
+            // Partial-swing tag: a percentage ('75%') or clock ('9:00') label, or
+            // absent for a full swing. Validated to exactly one of those two shapes.
+            if (typeof s.partial_value === 'string') {
+                const pv = s.partial_value.trim().slice(0, 8);
+                if (/^\d{1,3}%$/.test(pv) || /^\d{1,2}:\d{2}$/.test(pv))
+                    out.partial_value = pv;
             }
             if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
                 out.lie = s.lie.toLowerCase();
@@ -2584,8 +2523,13 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
         if (!pt)
             return null;
         const out = { ...pt };
-        if (typeof s.club === 'string' && ALLOWED_CLUBS.has(s.club.toLowerCase())) {
+        if (typeof s.club === 'string' && clubs_1.ALLOWED_CLUBS_SHOT.has(s.club.toLowerCase())) {
             out.club = s.club.toLowerCase();
+        }
+        if (typeof s.partial_value === 'string') {
+            const pv = s.partial_value.trim().slice(0, 8);
+            if (/^\d{1,3}%$/.test(pv) || /^\d{1,2}:\d{2}$/.test(pv))
+                out.partial_value = pv;
         }
         if (typeof s.lie === 'string' && ALLOWED_LIES.has(s.lie.toLowerCase())) {
             out.lie = s.lie.toLowerCase();
@@ -2617,8 +2561,8 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
            end_lat,   end_lng,   end_elevation_m,
            recorded_at, source, plays_like_yds,
            aim_lat, aim_lng,
-           total_yds, lateral_yds, lateral_ref
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19)`, [
+           total_yds, lateral_yds, lateral_ref, partial_value
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19,$20)`, [
                 req.userId, req.params.id, holeNum, i,
                 s.club ?? 'unknown', s.lie ?? null,
                 start.lat, start.lng, start.elevation_m ?? null,
@@ -2626,7 +2570,7 @@ router.put('/:id/shots/:holeNum', auth_1.requireAuth, (0, asyncHandler_1.wrap)(a
                 s.recorded_at ?? new Date().toISOString(),
                 s.plays_like_yds ?? null,
                 s.aim?.lat ?? null, s.aim?.lng ?? null,
-                s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null,
+                s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null, s.partial_value ?? null,
             ]);
         }
         await client.query('COMMIT');
