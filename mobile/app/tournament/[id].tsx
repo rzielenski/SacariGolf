@@ -438,7 +438,11 @@ function QrModal({ visible, onClose, code, name, accent }: {
   visible: boolean; onClose: () => void; code: string | null; name: string; accent: string;
 }) {
   if (!code) return null;
-  const link = `sacari://join/${code}`;
+  // THREE slashes (empty authority) is deliberate. `sacari://join/<code>` parses
+  // `join` as the URL host, which doesn't match Expo Router's production deep-link
+  // prefix (`sacari:///`), so a scanned QR lands on "unmatched route". With the
+  // empty authority, `join` is a real path segment and routes to app/join/[code].
+  const link = `sacari:///join/${code}`;
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
       <TouchableOpacity style={s.qrBackdrop} activeOpacity={1} onPress={onClose}>

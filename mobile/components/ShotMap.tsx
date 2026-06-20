@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import Svg, {
   Circle, Path, Defs, LinearGradient as SvgLinearGradient, Stop,
@@ -46,6 +47,13 @@ export function ShotMapModal({
   const [loading, setLoading] = useState(false);
   // The shooter's equipped ball-trail cosmetic (visual_data), if any.
   const [trailVisual, setTrailVisual] = useState<any>(null);
+  // Opt-in tilted "3D course view" (beta). Persisted so the choice sticks.
+  // Default OFF: the classic top-down 2D map is unchanged for everyone who
+  // never flips it on. Tilts the satellite camera + arcs the shot trails.
+  const [threeD, setThreeD] = useState(false);
+  useEffect(() => {
+    AsyncStorage.getItem('coc_shotmap_3d').then((v) => { if (v != null) setThreeD(v === '1'); }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!visible || !matchId || !userId || !holeNum) { setShots([]); setTrailVisual(null); return; }
@@ -92,7 +100,7 @@ export function ShotMapModal({
 
   const projectShots = useCallback(async () => {
     const map = mapRef.current;
-    if (!map || !shots.length || !trailVisual) { setPxSegs(null); return; }
+    if (!map || !shots.length || (!trailVisual && !threeD)) { setPxSegs(null); return; }
     const gen = ++projectGen.current;
     try {
       const pts = await Promise.all(shots.flatMap((s) => [
@@ -109,7 +117,38 @@ export function ShotMapModal({
       }
       setPxSegs(segs);
     } catch { /* projection unavailable (map tearing down) — keep overlay hidden */ }
-  }, [shots, trailVisual]);
+  }, [shots, trailVisual, threeD]);
+
+  // Aim the tilted camera down the hole (tee → pin) so the arc reads as a
+  // ball flight rising away from the viewer.
+  const holeHeading = useCallback(() => (
+    shots.length ? bearing(shots[0].start, shots[shots.length - 1].end) : 0
+  ), [shots]);
+
+  const applyCamera = useCallback((tilted: boolean) => {
+    const map = mapRef.current;
+    if (!map) return;
+    map.animateCamera(
+      tilted ? { pitch: 56, heading: holeHeading() } : { pitch: 0, heading: 0 },
+      { duration: tilted ? 650 : 450 },
+    );
+  }, [holeHeading]);
+
+  const toggle3D = useCallback(() => {
+    setThreeD((prev) => {
+      const next = !prev;
+      AsyncStorage.setItem('coc_shotmap_3d', next ? '1' : '0').catch(() => {});
+      applyCamera(next);
+      return next;
+    });
+  }, [applyCamera]);
+
+  // On first map paint, project the trails and, if 3D is already the saved
+  // preference, snap straight into the tilted camera.
+  const onMapReady = useCallback(() => {
+    projectShots();
+    if (threeD) applyCamera(true);
+  }, [projectShots, threeD, applyCamera]);
 
   // Compute initial map region from all shot endpoints
   const region: Region | undefined = shots.length > 0
@@ -143,6 +182,16 @@ export function ShotMapModal({
             <Text style={s.title}>Hole {holeNum}{par != null ? `  ·  Par ${par}` : ''}</Text>
             {username && <Text style={s.sub}>{username}</Text>}
           </View>
+          {shots.length > 0 && (
+            <TouchableOpacity
+              onPress={toggle3D}
+              style={[s.toggle3d, threeD && s.toggle3dOn]}
+              accessibilityRole="button"
+              accessibilityLabel={threeD ? 'Switch to 2D map view' : 'Switch to 3D course view'}
+            >
+              <Text style={[s.toggle3dText, threeD && s.toggle3dTextOn]}>{threeD ? '3D' : '2D'}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity onPress={onClose} style={s.doneBtn}>
             <Text style={s.doneText}>Done</Text>
           </TouchableOpacity>
@@ -169,9 +218,9 @@ export function ShotMapModal({
                 style={{ flex: 1 }}
                 initialRegion={region}
                 mapType="satellite"
-                pitchEnabled={false}
-                rotateEnabled={false}
-                onMapReady={projectShots}
+                pitchEnabled={threeD}
+                rotateEnabled={threeD}
+                onMapReady={onMapReady}
                 onRegionChange={() => { if (pxSegs) setPxSegs(null); }}
                 onRegionChangeComplete={projectShots}
               >
@@ -179,7 +228,10 @@ export function ShotMapModal({
                   // With a cosmetic trail equipped, the map polyline drops
                   // to a dim neutral underlay: it keeps the shot shape
                   // visible mid-gesture while the overlay paints the color.
-                  const color = trailVisual
+                  // In 3D (or with a cosmetic trail) the map polyline drops to
+                  // a dim ground-track underlay so the arced overlay is the hero.
+                  const dim = trailVisual || threeD;
+                  const color = dim
                     ? 'rgba(255,255,255,0.30)'
                     : SHOT_COLORS[i % SHOT_COLORS.length];
                   const markerColor = trailVisual
@@ -193,7 +245,7 @@ export function ShotMapModal({
                           { latitude: shot.end.lat,   longitude: shot.end.lng },
                         ]}
                         strokeColor={color}
-                        strokeWidth={trailVisual ? 2 : 4}
+                        strokeWidth={dim ? 2 : 4}
                       />
                       <Marker
                         coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
@@ -213,10 +265,15 @@ export function ShotMapModal({
                   );
                 })}
               </MapView>
-              {/* Cosmetic trail effect, pixel-pinned over the map. */}
-              {trailVisual && pxSegs && mapSize ? (
+              {/* Pixel-pinned overlay over the map: in 3D, arced ball-flight
+                  trails; in 2D with a cosmetic equipped, the cosmetic trail. */}
+              {pxSegs && mapSize ? (
                 <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-                  <TrailEffectOverlay segs={pxSegs} visual={trailVisual} w={mapSize.w} h={mapSize.h} />
+                  {threeD ? (
+                    <ArcTrailOverlay segs={pxSegs} color={trailVisual?.color ?? '#f0c95a'} w={mapSize.w} h={mapSize.h} />
+                  ) : trailVisual ? (
+                    <TrailEffectOverlay segs={pxSegs} visual={trailVisual} w={mapSize.w} h={mapSize.h} />
+                  ) : null}
                 </View>
               ) : null}
             </View>
@@ -253,6 +310,74 @@ export function ShotMapModal({
         )}
       </View>
     </Modal>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3D (tilted) view — arced ball-flight trails over the pitched satellite map
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Initial great-circle bearing (degrees) a → b, used to aim the tilted camera
+ *  down the hole so the arc reads as a ball flight away from the viewer. */
+function bearing(a: Pt, b: Pt): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const dLon = toRad(b.lng - a.lng);
+  const y = Math.sin(dLon) * Math.cos(toRad(b.lat));
+  const x = Math.cos(toRad(a.lat)) * Math.sin(toRad(b.lat)) -
+    Math.sin(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.cos(dLon);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+/** Arced shot trails in pixel space over the tilted map: each shot is a
+ *  quadratic curve rising above the straight ground track (a ball flight), with
+ *  a dot riding start → end on a loop. Reuses the same projected segments the
+ *  cosmetic overlay uses, so it stays pinned as the map pitches/pans. */
+function ArcTrailOverlay({ segs, color, w, h }: {
+  segs: PxSeg[]; color: string; w: number; h: number;
+}) {
+  return (
+    <Svg width={w} height={h}>
+      {segs.map((g, i) => <ArcTrail key={i} seg={g} index={i} color={color} />)}
+    </Svg>
+  );
+}
+
+function ArcTrail({ seg, index, color }: { seg: PxSeg; index: number; color: string }) {
+  const dx = seg.x2 - seg.x1;
+  const dy = seg.y2 - seg.y1;
+  const len = Math.max(1, Math.hypot(dx, dy));
+  // Apex scales with shot length (longer shots fly higher), clamped.
+  const apex = Math.min(130, Math.max(16, len * 0.34));
+  const cx = (seg.x1 + seg.x2) / 2;
+  const cy = (seg.y1 + seg.y2) / 2 - apex;
+  const d = `M ${seg.x1} ${seg.y1} Q ${cx} ${cy} ${seg.x2} ${seg.y2}`;
+
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = 0;
+    t.value = withDelay(
+      index * 240,
+      withRepeat(withTiming(1, { duration: 1500, easing: Easing.inOut(Easing.quad) }), -1, false),
+    );
+    return () => cancelAnimation(t);
+  }, [t, index, seg.x1, seg.y1, seg.x2, seg.y2]);
+
+  // Travelling ball position along the quadratic Bézier at t.
+  const ballProps = useAnimatedProps(() => {
+    const u = t.value, mt = 1 - u;
+    return {
+      cx: mt * mt * seg.x1 + 2 * mt * u * cx + u * u * seg.x2,
+      cy: mt * mt * seg.y1 + 2 * mt * u * cy + u * u * seg.y2,
+    };
+  });
+
+  return (
+    <>
+      <Path d={d} stroke={color} strokeWidth={9} strokeOpacity={0.2} strokeLinecap="round" fill="none" />
+      <Path d={d} stroke={color} strokeWidth={3.5} strokeLinecap="round" fill="none" />
+      <AnimatedCircle cx={seg.x1} cy={seg.y1} r={4} fill="#ffffff" animatedProps={ballProps} />
+    </>
   );
 }
 
@@ -445,6 +570,10 @@ const s = StyleSheet.create({
   },
   title: { color: C.text, fontSize: 20, fontWeight: '900', fontFamily: F.serif },
   sub: { color: C.textMuted, fontSize: 12, marginTop: 2 },
+  toggle3d: { borderWidth: 1, borderColor: C.border, borderRadius: 6, paddingHorizontal: 12, paddingVertical: 7, backgroundColor: C.card },
+  toggle3dOn: { borderColor: C.gold, backgroundColor: 'rgba(212,169,63,0.16)' },
+  toggle3dText: { color: C.textMuted, fontWeight: '900', fontSize: 13, letterSpacing: 0.5 },
+  toggle3dTextOn: { color: C.gold },
   doneBtn: { backgroundColor: C.gold, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 7 },
   doneText: { color: '#000', fontWeight: '800', fontSize: 14 },
 

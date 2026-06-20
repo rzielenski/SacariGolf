@@ -131,6 +131,8 @@ ${canon ? `<meta property="og:url" content="${esc(canon)}" />` : ''}
 <meta name="twitter:title" content="${esc(title)}" />
 <meta name="twitter:description" content="${esc(description)}" />
 ${img ? `<meta name="twitter:image" content="${esc(img)}" />` : ''}
+<link rel="preload" href="/fonts/fraunces-var-latin.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="/fonts/inter-var-latin.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="/styles.css?v=${ASSET_V}" />
 ${jsonLdTag(jsonLd)}
 </head>
@@ -649,11 +651,22 @@ function renderCourse({ course, teeboxes, topRounds, holeRows }) {
     }
   }
 
+  // Breadcrumb trail (Home › Courses › this course): a currently-supported
+  // rich result, and a clearer hierarchy signal to crawlers.
+  const courseCrumbs = SITE_URL ? {
+    '@context': 'https://schema.org', '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Home', item: SITE_URL },
+      { '@type': 'ListItem', position: 2, name: 'Courses', item: `${SITE_URL}/courses` },
+      { '@type': 'ListItem', position: 3, name: course.course_name, item: `${SITE_URL}/course/${course.course_id}` },
+    ],
+  } : null;
+
   return page({
     title: `${course.course_name}${loc ? ', ' + loc : ''}. Sacari Golf`,
     description: `${course.course_name} on Sacari Golf. Full scorecard, hole-by-hole satellite views, tee ratings, and the best rounds posted here.`,
     ogUrl: SITE_URL ? `${SITE_URL}/course/${course.course_id}` : '',
-    jsonLd: courseLd,
+    jsonLd: [courseLd, courseCrumbs],
     active: 'courses',
     body,
   });
@@ -883,12 +896,21 @@ function renderProfile(data) {
     },
   } : null;
 
+  const profileCrumbs = data.siteUrl ? {
+    '@context': 'https://schema.org', '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Home', item: data.siteUrl },
+      { '@type': 'ListItem', position: 2, name: 'Rankings', item: `${data.siteUrl}/leaderboard` },
+      { '@type': 'ListItem', position: 3, name: data.username, item: data.profileUrl },
+    ],
+  } : null;
+
   return page({
     title: `${data.username} · ${rankLine} on Sacari Golf`,
     description: `${data.username} is ${rankLine} on Sacari Golf with a ${data.totalWins}-${losses}-${data.totalTies} record. Track your rounds, climb the ranked ladder, and battle clans.`,
     ogImage: `${data.siteUrl}/crests/${r.tier.key}.png`,
     ogUrl: data.profileUrl,
-    jsonLd: profileLd,
+    jsonLd: [profileLd, profileCrumbs],
     active: '',
     body,
   });

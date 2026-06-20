@@ -1,8 +1,47 @@
 /* Sacari Golf website. Palette mirrors mobile/lib/colors.ts. */
+
+/* ===== Self-hosted variable fonts (latin subset, woff2) ===== */
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal; font-weight: 400 900; font-display: swap;
+  src: url('/fonts/fraunces-var-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal; font-weight: 400 700; font-display: swap;
+  src: url('/fonts/inter-var-latin.woff2') format('woff2');
+}
+
 :root {
-  --bg: #000; --card: #0a0a0d; --card-alt: #121216; --border: #1d1c18;
-  --gold: #d4a93f; --gold-light: #f0c95a; --text: #ebe9df; --muted: #9a978a;
-  --dim: #4a4740; --good: #7aab78; --bad: #b03434;
+  /* Neutrals (deep, refined). Names preserved so existing rules keep working. */
+  --bg: #000; --card: #0c0c10; --card-alt: #131318; --border: #26242b;
+  /* Champagne gold + warm silver text */
+  --gold: #cdaa62; --gold-light: #ecd49a; --text: #ece9e1; --muted: #9b988d;
+  --dim: #565049; --good: #7aab78; --bad: #b8463f;
+
+  /* ===== Design tokens (used progressively as pages are restyled) ===== */
+  /* Typography */
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  /* Fluid modular type scale */
+  --fs-100: 0.72rem; --fs-200: 0.82rem; --fs-300: 0.92rem; --fs-400: 1rem;
+  --fs-500: 1.15rem; --fs-600: clamp(1.3rem, 2.2vw, 1.6rem);
+  --fs-700: clamp(1.7rem, 3.4vw, 2.2rem); --fs-800: clamp(2.1rem, 5vw, 3rem);
+  --fs-900: clamp(2.6rem, 7vw, 4.2rem);
+  /* Spacing (8pt-based) */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --sp-6: 32px; --sp-7: 48px; --sp-8: 64px; --sp-9: 96px; --sp-10: 128px;
+  /* Radii */
+  --r-sm: 8px; --r-md: 12px; --r-lg: 18px; --r-xl: 26px; --r-pill: 999px;
+  /* Elevation + glow */
+  --shadow-sm: 0 2px 10px rgba(0,0,0,0.45);
+  --shadow-md: 0 16px 38px -20px rgba(0,0,0,0.7);
+  --shadow-lg: 0 36px 80px -34px rgba(0,0,0,0.82);
+  --glow-gold: 0 0 0 1px rgba(205,170,98,0.22), 0 22px 60px -28px rgba(205,170,98,0.5);
+  /* Motion */
+  --dur-1: 140ms; --dur-2: 240ms; --dur-3: 440ms; --dur-4: 760ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; } /* author display rules must not override the hidden attribute */
@@ -14,12 +53,14 @@ body {
     radial-gradient(720px 520px at 100% 0%, rgba(154,124,255,0.08), transparent 60%),
     #000;
   background-attachment: fixed;
-  color: var(--text); font-family: Georgia, 'Times New Roman', serif;
+  color: var(--text); font-family: var(--font-body);
+  font-size: 16px; line-height: 1.6; font-weight: 400; letter-spacing: -0.003em;
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   min-height: 100vh; display: flex; flex-direction: column;
 }
 a { color: var(--gold); text-decoration: none; }
-h1, h2, h3 { line-height: 1.15; }
+h1, h2 { font-family: var(--font-display); font-optical-sizing: auto; line-height: 1.06; letter-spacing: -0.02em; }
+h3 { line-height: 1.2; letter-spacing: -0.01em; }
 ::selection { background: rgba(212,169,63,0.28); color: #fff; }
 ::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: #0a0a0d; }
