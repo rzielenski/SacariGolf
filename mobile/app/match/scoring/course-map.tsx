@@ -44,6 +44,7 @@ export default function CourseMapScreen() {
   const [locLoading, setLocLoading] = useState(true);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const use3D = useCourseView3D();
+  useEffect(() => { console.warn('[course-map] 3D view =', use3D); }, [use3D]);
 
   // Request location permission and start watching
   useEffect(() => {
