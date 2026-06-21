@@ -59,7 +59,7 @@ export function Course3DView({ shots, pin, tee, style }: {
   return (
     <View style={[styles.fill, style]}>
       <WebView
-        source={{ uri: `${MAPBOX_EMBED_URL}/embed/hole-3d` }}
+        source={{ uri: `${MAPBOX_EMBED_URL}/embed/hole-3d?v=2` }}
         injectedJavaScriptBeforeContentLoaded={injected}
         originWhitelist={['*']}
         style={styles.fill}
@@ -72,7 +72,7 @@ export function Course3DView({ shots, pin, tee, style }: {
         onMessage={(e) => {
           try {
             const d = JSON.parse(e.nativeEvent.data);
-            if (d?.type === 'error' || d?.type === 'warn') console.warn('[Course3DView]', d.msg);
+            if (d?.msg) console.warn('[Course3DView]', d.type, d.msg);
           } catch { /* ignore */ }
         }}
         onError={(e) => console.warn('[Course3DView] webview error:', e.nativeEvent?.description)}

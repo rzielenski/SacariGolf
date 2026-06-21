@@ -1519,7 +1519,7 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
 function render3dEmbed() {
   return `<!doctype html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<link href="https://cdn.jsdelivr.net/npm/mapbox-gl@3/dist/mapbox-gl.css" rel="stylesheet" />
+<link href="https://cdn.jsdelivr.net/npm/mapbox-gl@2/dist/mapbox-gl.css" rel="stylesheet" />
 <style>
   html,body{margin:0;height:100%;width:100%;background:#0b0e14;overflow:hidden}
   #map{position:absolute;inset:0}
@@ -1534,23 +1534,32 @@ function post(o){try{if(window.ReactNativeWebView)window.ReactNativeWebView.post
 function setStatus(t,err){var s=document.getElementById('status');if(!s)return;if(t===null){s.style.display='none';return;}s.style.display='block';s.textContent=t;s.style.color=err?'#ff9a9a':'#cfd3c8';}
 function hx(h){h=(h||'#f0c95a').replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
 function load(src){return new Promise(function(res,rej){var el=document.createElement('script');el.src=src;el.onload=function(){res();};el.onerror=function(){rej(new Error('load failed: '+src));};document.head.appendChild(el);});}
+window.onerror=function(m){post({type:'error',msg:'js: '+m});};
+window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg:'reject: '+(ev&&ev.reason&&(ev.reason.message||ev.reason))});});
 (function(){
   var C=window.__CFG__||{};
+  post({type:'info',msg:'cfg token='+(C.token?('yes('+C.token.length+')'):'NO')+' shots='+((C.shots&&C.shots.length)||0)+' bounds='+(C.bounds?'yes':'no')});
   if(!C.token){setStatus('No Mapbox token was provided to the map.',true);post({type:'error',msg:'no token'});return;}
   var cv=document.createElement('canvas');
   if(!(cv.getContext('webgl2')||cv.getContext('webgl'))){setStatus('This device WebView has no WebGL.',true);post({type:'error',msg:'no webgl'});return;}
   setStatus('Loading map engine…');
-  load('https://cdn.jsdelivr.net/npm/mapbox-gl@3/dist/mapbox-gl.js')
-    .then(function(){return load('https://cdn.jsdelivr.net/npm/deck.gl@9/dist.min.js');})
+  load('https://cdn.jsdelivr.net/npm/mapbox-gl@2/dist/mapbox-gl.js')
+    .then(function(){return load('https://cdn.jsdelivr.net/npm/deck.gl@8.9/dist.min.js').catch(function(){post({type:'warn',msg:'deck load failed (arcs off)'});});})
     .then(function(){
       if(!window.mapboxgl){throw new Error('mapbox-gl missing after load');}
+      post({type:'info',msg:'mapbox-gl v'+(mapboxgl.version||'?')});
       setStatus('Starting map…');
       mapboxgl.accessToken=C.token;
-      var map=new mapboxgl.Map({container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',bounds:C.bounds,fitBoundsOptions:{padding:55},antialias:true,attributionControl:false});
-      var wd=setTimeout(function(){setStatus('Map did not finish loading (check network or token).',true);post({type:'error',msg:'load timeout'});},16000);
+      var opts={container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',antialias:true,attributionControl:false};
+      if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:55};}else{opts.center=[0,0];opts.zoom=1;}
+      var map=new mapboxgl.Map(opts);
+      post({type:'info',msg:'map created'});
+      map.on('styledata',function(){post({type:'info',msg:'styledata'});});
+      var wd=setTimeout(function(){setStatus('Map did not finish loading (check network or token).',true);post({type:'error',msg:'load timeout (see events above)'});},16000);
       map.on('idle',function(){setStatus(null);});
       map.on('load',function(){
         clearTimeout(wd);
+        post({type:'info',msg:'load fired'});
         try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.3});map.setFog({'color':'rgb(186,180,160)','horizon-blend':0.18,'high-color':'rgb(76,98,120)','space-color':'rgb(16,20,28)','star-intensity':0});}catch(e){}
         try{map.easeTo({pitch:66,bearing:C.bearing||0,duration:0});}catch(e){}
         try{
@@ -1564,7 +1573,7 @@ function load(src){return new Promise(function(res,rej){var el=document.createEl
         setStatus(null);
         post({type:'ready'});
       });
-      map.on('error',function(e){var m=(e&&e.error&&e.error.message)||'map error';setStatus('Map error: '+m,true);post({type:'error',msg:m});});
+      map.on('error',function(e){var er=(e&&e.error)||{};post({type:'error',msg:'maperr status='+(er.status||'?')+' '+(er.message||'')+(er.url?(' url='+er.url):'')});setStatus('Map error: '+(er.message||er.status||'unknown'),true);});
     })
     .catch(function(err){setStatus('Could not load the 3D map engine. ('+(err&&err.message||err)+')',true);post({type:'error',msg:String(err&&err.message||err)});});
 })();

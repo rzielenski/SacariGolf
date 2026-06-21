@@ -60,7 +60,7 @@ app.get('/healthz', (_req, res) => res.json({ ok: true }));
 // data + token via window.__CFG__. noindex so it never shows in search.
 app.get('/embed/hole-3d', (_req, res) => {
   res.type('html')
-    .set('Cache-Control', 'public, max-age=3600')
+    .set('Cache-Control', 'no-store')
     .set('X-Robots-Tag', 'noindex')
     .send(R.render3dEmbed());
 });
