@@ -1533,7 +1533,7 @@ function render3dEmbed() {
 function post(o){try{if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify(o));}catch(e){}}
 function setStatus(t,err){var s=document.getElementById('status');if(!s)return;if(t===null){s.style.display='none';return;}s.style.display='block';s.textContent=t;s.style.color=err?'#ff9a9a':'#cfd3c8';}
 function hx(h){h=(h||'#f0c95a').replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
-function load(src){return new Promise(function(res,rej){var el=document.createElement('script');el.src=src;el.onload=function(){res();};el.onerror=function(){rej(new Error('load failed: '+src));};document.head.appendChild(el);});}
+function load(src){return new Promise(function(res,rej){var el=document.createElement('script');el.src=src;el.crossOrigin='anonymous';el.onload=function(){res();};el.onerror=function(){rej(new Error('load failed: '+src));};document.head.appendChild(el);});}
 window.onerror=function(m){post({type:'error',msg:'js: '+m});};
 window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg:'reject: '+(ev&&ev.reason&&(ev.reason.message||ev.reason))});});
 (function(){
@@ -1544,7 +1544,7 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
   if(!(cv.getContext('webgl2')||cv.getContext('webgl'))){setStatus('This device WebView has no WebGL.',true);post({type:'error',msg:'no webgl'});return;}
   setStatus('Loading map engine…');
   load('https://cdn.jsdelivr.net/npm/mapbox-gl@2/dist/mapbox-gl.js')
-    .then(function(){return load('https://cdn.jsdelivr.net/npm/deck.gl@8.9/dist.min.js').catch(function(){post({type:'warn',msg:'deck load failed (arcs off)'});});})
+    .then(function(){return load('https://cdn.jsdelivr.net/npm/deck.gl@9/dist.min.js').catch(function(){post({type:'warn',msg:'deck load failed (arcs off)'});});})
     .then(function(){
       if(!window.mapboxgl){throw new Error('mapbox-gl missing after load');}
       post({type:'info',msg:'mapbox-gl v'+(mapboxgl.version||'?')});
