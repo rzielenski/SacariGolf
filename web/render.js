@@ -1550,7 +1550,7 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
       post({type:'info',msg:'mapbox-gl v'+(mapboxgl.version||'?')});
       setStatus('Starting map…');
       mapboxgl.accessToken=C.token;
-      var opts={container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',antialias:true,attributionControl:false};
+      var opts={container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',antialias:false,preserveDrawingBuffer:true,attributionControl:false};
       if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:70,maxZoom:16.5};}else{opts.center=[0,0];opts.zoom=1;}
       var map=new mapboxgl.Map(opts);
       post({type:'info',msg:'map created'});
@@ -1560,6 +1560,9 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
       map.on('load',function(){
         clearTimeout(wd);
         post({type:'info',msg:'load fired'});
+        map.resize();
+        setTimeout(function(){map.resize();},400);
+        setTimeout(function(){map.resize();post({type:'info',msg:'after-resize tiles='+map.areTilesLoaded()+' size='+map.getCanvas().width+'x'+map.getCanvas().height});},1300);
         try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.2});map.setFog({'color':'#dbe4f0','horizon-blend':0.25,'high-color':'#a3c4ea','space-color':'#86b0e0','star-intensity':0});}catch(e){}
         try{map.easeTo({pitch:52,bearing:C.bearing||0,duration:0});}catch(e){post({type:'warn',msg:'easeTo: '+(e&&e.message)});}
         post({type:'info',msg:'cam '+JSON.stringify(map.getCenter())+' z'+map.getZoom().toFixed(1)+' p'+map.getPitch().toFixed(0)});
