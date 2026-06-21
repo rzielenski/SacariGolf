@@ -12,7 +12,8 @@
  *   4. Danger  — delete account
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch,
   ActivityIndicator, Alert, Platform,
@@ -30,6 +31,17 @@ export default function SettingsScreen() {
   const [themePickerVisible, setThemePickerVisible] = useState(false);
   const [savingMaxVol, setSavingMaxVol] = useState(false);
   const [savingCensor, setSavingCensor] = useState(false);
+
+  // 3D course view (beta): a device-local preference (not server-synced) read by
+  // the live, preview, and recap map surfaces. Default off, so 2D is unchanged.
+  const [view3d, setView3d] = useState(false);
+  useEffect(() => {
+    AsyncStorage.getItem('coc_course_3d').then((v) => setView3d(v === '1')).catch(() => {});
+  }, []);
+  const onToggleView3d = useCallback((next: boolean) => {
+    setView3d(next);
+    AsyncStorage.setItem('coc_course_3d', next ? '1' : '0').catch(() => {});
+  }, []);
 
   const themeTitle = (user as any)?.theme_track_title as string | null | undefined;
   const themeArtist = (user as any)?.theme_track_artist as string | null | undefined;
@@ -200,6 +212,13 @@ export default function SettingsScreen() {
           options={[{ value: 'percentage', label: 'Percent' }, { value: 'clock', label: 'Clock' }]}
           onChange={(v) => onSetPartialMode(v as 'percentage' | 'clock')}
           busy={savingPartial}
+        />
+
+        <ToggleRow
+          label="3D course view (beta)"
+          hint="Show the live, preview, and recap maps as a 3D flyover with your shots drawn as arcs, instead of the flat 2D map. Needs a data connection."
+          value={view3d}
+          onChange={onToggleView3d}
         />
 
         {/* ── Account ──────────────────────────────────────────────── */}

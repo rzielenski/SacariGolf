@@ -12,6 +12,8 @@ import Animated, {
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { distYards, SHOT_COLORS } from '../lib/golfMath';
+import { Course3DView } from './Course3DView';
+import { HAS_MAPBOX } from '../lib/mapbox';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
@@ -52,7 +54,7 @@ export function ShotMapModal({
   // never flips it on. Tilts the satellite camera + arcs the shot trails.
   const [threeD, setThreeD] = useState(false);
   useEffect(() => {
-    AsyncStorage.getItem('coc_shotmap_3d').then((v) => { if (v != null) setThreeD(v === '1'); }).catch(() => {});
+    AsyncStorage.getItem('coc_course_3d').then((v) => { if (v != null) setThreeD(v === '1'); }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -137,7 +139,7 @@ export function ShotMapModal({
   const toggle3D = useCallback(() => {
     setThreeD((prev) => {
       const next = !prev;
-      AsyncStorage.setItem('coc_shotmap_3d', next ? '1' : '0').catch(() => {});
+      AsyncStorage.setItem('coc_course_3d', next ? '1' : '0').catch(() => {});
       applyCamera(next);
       return next;
     });
@@ -166,6 +168,13 @@ export function ShotMapModal({
         };
       })()
     : undefined;
+
+  // Shots mapped for the 3D arc renderer, coloured like the 2D markers.
+  const shots3d = shots.map((s, i) => ({
+    start: s.start,
+    end: s.end,
+    color: trailVisual?.color ?? SHOT_COLORS[i % SHOT_COLORS.length],
+  }));
 
   // Per-shot distances
   const segments = shots.map((s) => ({
@@ -213,6 +222,10 @@ export function ShotMapModal({
                 h: e.nativeEvent.layout.height,
               })}
             >
+              {threeD && HAS_MAPBOX ? (
+                <Course3DView shots={shots3d} />
+              ) : (
+              <>
               <MapView
                 ref={mapRef}
                 style={{ flex: 1 }}
@@ -276,6 +289,8 @@ export function ShotMapModal({
                   ) : null}
                 </View>
               ) : null}
+              </>
+              )}
             </View>
 
             {/* Distance summary */}
