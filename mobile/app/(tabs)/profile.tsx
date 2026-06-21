@@ -239,6 +239,24 @@ export default function ProfileScreen() {
 
   // Themed dark fill (not bare null) while the user is briefly absent — the Tabs
   // navigator's default scene is WHITE, so null here flashes a blank white page.
+  // Bump the lifetime drinks tally. Optimistic: update the number instantly,
+  // then reconcile with the server's clamped value. Declared BEFORE the early
+  // return below so the hook order is always stable (Rules of Hooks).
+  const adjustDrinks = useCallback(async (delta: 1 | -1) => {
+    if (drinksBusy.current) return;
+    if (delta < 0 && drinks <= 0) return;
+    drinksBusy.current = true;
+    setDrinks((d) => Math.max(0, d + delta));
+    try {
+      const { drinks: server } = await api.users.adjustDrinks(delta);
+      setDrinks(server);
+    } catch {
+      setDrinks((d) => Math.max(0, d - delta));
+    } finally {
+      drinksBusy.current = false;
+    }
+  }, [drinks]);
+
   if (!user) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
   const rank = rankForElo(user.elo);
@@ -252,25 +270,6 @@ export default function ProfileScreen() {
       { text: 'Log out', style: 'destructive', onPress: logout },
     ]);
   };
-
-  // Bump the lifetime drinks tally. Optimistic — update the number instantly,
-  // then reconcile with the server's clamped value. A short busy-gate keeps
-  // rapid taps from racing two writes; the count never goes below 0.
-  const adjustDrinks = useCallback(async (delta: 1 | -1) => {
-    if (drinksBusy.current) return;
-    if (delta < 0 && drinks <= 0) return;
-    drinksBusy.current = true;
-    setDrinks((d) => Math.max(0, d + delta));
-    try {
-      const { drinks: server } = await api.users.adjustDrinks(delta);
-      setDrinks(server);
-    } catch {
-      // Roll back the optimistic change on failure.
-      setDrinks((d) => Math.max(0, d - delta));
-    } finally {
-      drinksBusy.current = false;
-    }
-  }, [drinks]);
 
   const changeUsername = () => {
     Alert.prompt(

@@ -55,6 +55,16 @@ app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
+// 3D hole renderer for the mobile app's WebView. Public, no auth, no data: the
+// app loads it by URL (so Mapbox gets a real https origin) and injects the shot
+// data + token via window.__CFG__. noindex so it never shows in search.
+app.get('/embed/hole-3d', (_req, res) => {
+  res.type('html')
+    .set('Cache-Control', 'public, max-age=3600')
+    .set('X-Robots-Tag', 'noindex')
+    .send(R.render3dEmbed());
+});
+
 // ----- Auth: login / signup / logout ----------------------------------------
 app.get('/login', (req, res) => {
   if (req.cookies && req.cookies.sg_token) { res.redirect('/app'); return; }

@@ -1510,7 +1510,69 @@ function renderInvite({ inviter, code, appStoreUrl, siteUrl }) {
   });
 }
 
+// Standalone 3D hole renderer for the mobile app's WebView. Served over https
+// so Mapbox GL JS gets a REAL origin (an inline HTML string in a WebView has no
+// origin, so Mapbox's workers never start and the map hangs). The app injects
+// window.__CFG__ (token, style, shots, bounds, bearing, pin) via
+// injectedJavaScriptBeforeContentLoaded before this page's script runs. No
+// server-side data and no token here; it's a dumb renderer.
+function render3dEmbed() {
+  return `<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<link href="https://cdn.jsdelivr.net/npm/mapbox-gl@3/dist/mapbox-gl.css" rel="stylesheet" />
+<style>
+  html,body{margin:0;height:100%;width:100%;background:#0b0e14;overflow:hidden}
+  #map{position:absolute;inset:0}
+  .mapboxgl-canvas{width:100%!important;height:100%!important}
+  #status{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;color:#cfd3c8;font:600 14px -apple-system,Segoe UI,Roboto,sans-serif;padding:0 26px;line-height:1.5;z-index:5}
+</style>
+</head><body>
+<div id="map"></div>
+<div id="status">Loading 3D course…</div>
+<script>
+function post(o){try{if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify(o));}catch(e){}}
+function setStatus(t,err){var s=document.getElementById('status');if(!s)return;if(t===null){s.style.display='none';return;}s.style.display='block';s.textContent=t;s.style.color=err?'#ff9a9a':'#cfd3c8';}
+function hx(h){h=(h||'#f0c95a').replace('#','');return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function load(src){return new Promise(function(res,rej){var el=document.createElement('script');el.src=src;el.onload=function(){res();};el.onerror=function(){rej(new Error('load failed: '+src));};document.head.appendChild(el);});}
+(function(){
+  var C=window.__CFG__||{};
+  if(!C.token){setStatus('No Mapbox token was provided to the map.',true);post({type:'error',msg:'no token'});return;}
+  var cv=document.createElement('canvas');
+  if(!(cv.getContext('webgl2')||cv.getContext('webgl'))){setStatus('This device WebView has no WebGL.',true);post({type:'error',msg:'no webgl'});return;}
+  setStatus('Loading map engine…');
+  load('https://cdn.jsdelivr.net/npm/mapbox-gl@3/dist/mapbox-gl.js')
+    .then(function(){return load('https://cdn.jsdelivr.net/npm/deck.gl@9/dist.min.js');})
+    .then(function(){
+      if(!window.mapboxgl){throw new Error('mapbox-gl missing after load');}
+      setStatus('Starting map…');
+      mapboxgl.accessToken=C.token;
+      var map=new mapboxgl.Map({container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',bounds:C.bounds,fitBoundsOptions:{padding:55},antialias:true,attributionControl:false});
+      var wd=setTimeout(function(){setStatus('Map did not finish loading (check network or token).',true);post({type:'error',msg:'load timeout'});},16000);
+      map.on('idle',function(){setStatus(null);});
+      map.on('load',function(){
+        clearTimeout(wd);
+        try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.3});map.setFog({'color':'rgb(186,180,160)','horizon-blend':0.18,'high-color':'rgb(76,98,120)','space-color':'rgb(16,20,28)','star-intensity':0});}catch(e){}
+        try{map.easeTo({pitch:66,bearing:C.bearing||0,duration:0});}catch(e){}
+        try{
+          if(window.deck&&deck.MapboxOverlay&&C.shots&&C.shots.length){
+            var arcs=new deck.ArcLayer({id:'arcs',data:C.shots,getSourcePosition:function(d){return [d.start.lng,d.start.lat];},getTargetPosition:function(d){return [d.end.lng,d.end.lat];},getSourceColor:function(d){return hx(d.color).concat([240]);},getTargetColor:function(){return [255,255,255,240];},getWidth:4,getHeight:0.5});
+            var dots=new deck.ScatterplotLayer({id:'dots',data:C.shots,getPosition:function(d){return [d.start.lng,d.start.lat];},getFillColor:function(d){return hx(d.color).concat([255]);},radiusUnits:'pixels',getRadius:4,stroked:true,getLineColor:[255,255,255,255],lineWidthMinPixels:1.5});
+            map.addControl(new deck.MapboxOverlay({layers:[arcs,dots]}));
+          }
+        }catch(e){post({type:'warn',msg:'arcs failed: '+(e&&e.message)});}
+        if(C.pin){try{var pole=document.createElement('div');pole.style.cssText='position:absolute;left:0;bottom:0;width:2px;height:22px;background:#eee';var fl=document.createElement('div');fl.style.cssText='position:absolute;left:2px;top:0;width:0;height:0;border-top:6px solid transparent;border-bottom:6px solid transparent;border-left:11px solid #e8772f';var w=document.createElement('div');w.style.cssText='position:relative;width:13px;height:22px';w.appendChild(pole);w.appendChild(fl);new mapboxgl.Marker({element:w,anchor:'bottom'}).setLngLat([C.pin.lng,C.pin.lat]).addTo(map);}catch(e){}}
+        setStatus(null);
+        post({type:'ready'});
+      });
+      map.on('error',function(e){var m=(e&&e.error&&e.error.message)||'map error';setStatus('Map error: '+m,true);post({type:'error',msg:m});});
+    })
+    .catch(function(err){setStatus('Could not load the 3D map engine. ('+(err&&err.message||err)+')',true);post({type:'error',msg:String(err&&err.message||err)});});
+})();
+</script></body></html>`;
+}
+
 module.exports = {
+  render3dEmbed,
   renderHome, renderHowTo, renderLeaderboard, renderMatchesFeed, renderCoursesIndex, renderCourse,
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderSignup, renderVerifyEmail,
