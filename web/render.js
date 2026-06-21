@@ -1551,7 +1551,7 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
       setStatus('Starting map…');
       mapboxgl.accessToken=C.token;
       var opts={container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',antialias:true,attributionControl:false};
-      if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:55};}else{opts.center=[0,0];opts.zoom=1;}
+      if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:70,maxZoom:16.5};}else{opts.center=[0,0];opts.zoom=1;}
       var map=new mapboxgl.Map(opts);
       post({type:'info',msg:'map created'});
       map.on('styledata',function(){post({type:'info',msg:'styledata'});});
@@ -1560,8 +1560,9 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
       map.on('load',function(){
         clearTimeout(wd);
         post({type:'info',msg:'load fired'});
-        try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.3});map.setFog({'color':'rgb(186,180,160)','horizon-blend':0.18,'high-color':'rgb(76,98,120)','space-color':'rgb(16,20,28)','star-intensity':0});}catch(e){}
-        try{map.easeTo({pitch:66,bearing:C.bearing||0,duration:0});}catch(e){}
+        try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.2});map.setFog({'color':'#dbe4f0','horizon-blend':0.25,'high-color':'#a3c4ea','space-color':'#86b0e0','star-intensity':0});}catch(e){}
+        try{map.easeTo({pitch:52,bearing:C.bearing||0,duration:0});}catch(e){post({type:'warn',msg:'easeTo: '+(e&&e.message)});}
+        post({type:'info',msg:'cam '+JSON.stringify(map.getCenter())+' z'+map.getZoom().toFixed(1)+' p'+map.getPitch().toFixed(0)});
         try{
           if(window.deck&&deck.MapboxOverlay&&C.shots&&C.shots.length){
             var arcs=new deck.ArcLayer({id:'arcs',data:C.shots,getSourcePosition:function(d){return [d.start.lng,d.start.lat];},getTargetPosition:function(d){return [d.end.lng,d.end.lat];},getSourceColor:function(d){return hx(d.color).concat([240]);},getTargetColor:function(){return [255,255,255,240];},getWidth:4,getHeight:0.5});
