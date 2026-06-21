@@ -68,7 +68,10 @@ function load(src){return new Promise(function(res,rej){var el=document.createEl
       setStatus('Starting map…');
       mapboxgl.accessToken=C.token;
       var map=new mapboxgl.Map({container:'map',style:C.style,bounds:C.bounds,fitBoundsOptions:{padding:55},antialias:true,attributionControl:false});
+      var wd=setTimeout(function(){setStatus('Map did not finish loading. Usually a WebView origin/worker limit in Expo Go; a dev build fixes it.',true);post({type:'error',msg:'load timeout'});},14000);
+      map.on('idle',function(){setStatus(null);});
       map.on('load',function(){
+        clearTimeout(wd);
         try{map.addSource('dem',{type:'raster-dem',url:'mapbox://mapbox.mapbox-terrain-dem-v1',tileSize:512,maxzoom:14});map.setTerrain({source:'dem',exaggeration:1.3});map.setFog({'color':'rgb(186,180,160)','horizon-blend':0.18,'high-color':'rgb(76,98,120)','space-color':'rgb(16,20,28)','star-intensity':0});}catch(e){}
         try{map.easeTo({pitch:66,bearing:C.bearing,duration:0});}catch(e){}
         try{
@@ -100,7 +103,11 @@ export function Course3DView({ shots, pin, tee, style }: {
     <View style={[styles.fill, style]}>
       <WebView
         originWhitelist={['*']}
-        source={{ html }}
+        // A real https origin is REQUIRED: with raw `{ html }` the document
+        // origin is null, and Mapbox's tile/style web workers silently fail to
+        // start, so the map hangs forever at "Starting map" with no error.
+        // Using the site's own origin also lets a URL-restricted token work.
+        source={{ html, baseUrl: 'https://sacarigolf.com' }}
         style={styles.fill}
         javaScriptEnabled
         domStorageEnabled
