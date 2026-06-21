@@ -29,7 +29,7 @@ function bearing(a: LL, b: LL): number {
   return (g(Math.atan2(y, x)) + 360) % 360;
 }
 
-function buildCfg(shots: Shot3D[], pin: LL | null, tee: LL | null) {
+function buildCfg(shots: Shot3D[], pin: LL | null, tee: LL | null, center: LL | null) {
   const pts: LL[] = shots.flatMap((s) => [s.start, s.end]);
   if (pin) pts.push(pin);
   if (tee) pts.push(tee);
@@ -41,20 +41,24 @@ function buildCfg(shots: Shot3D[], pin: LL | null, tee: LL | null) {
     : undefined;
   const head = (tee && pin) ? bearing(tee, pin)
     : (shots.length ? bearing(shots[0].start, shots[shots.length - 1].end) : 0);
-  return { token: MAPBOX_TOKEN, style: MAPBOX_STYLE, shots, pin, bounds, bearing: head };
+  const cfg: Record<string, unknown> = { token: MAPBOX_TOKEN, style: MAPBOX_STYLE, shots, pin, bounds, bearing: head };
+  // No shots (course/hole preview): frame on a center point instead of bounds.
+  if (!bounds && center) { cfg.center = [center.lng, center.lat]; cfg.zoom = 16; }
+  return cfg;
 }
 
-export function Course3DView({ shots, pin, tee, style }: {
-  shots: Shot3D[];
+export function Course3DView({ shots, pin, tee, center, style }: {
+  shots?: Shot3D[];
   pin?: LL | null;
   tee?: LL | null;
+  center?: LL | null;
   style?: StyleProp<ViewStyle>;
 }) {
   // Injected at document-start, so window.__CFG__ exists before the page runs.
   // The trailing `true;` avoids a known iOS injection quirk.
   const injected = useMemo(
-    () => `window.__CFG__=${JSON.stringify(buildCfg(shots, pin ?? null, tee ?? null))};true;`,
-    [shots, pin, tee],
+    () => `window.__CFG__=${JSON.stringify(buildCfg(shots ?? [], pin ?? null, tee ?? null, center ?? null))};true;`,
+    [shots, pin, tee, center],
   );
   return (
     <View style={[styles.fill, style]}>

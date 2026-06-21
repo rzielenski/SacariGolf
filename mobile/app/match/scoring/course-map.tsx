@@ -7,6 +7,8 @@ import * as Location from 'expo-location';
 import { useLocalSearchParams, router } from 'expo-router';
 import { C, F } from '../../../lib/colors';
 import { distMetres, distYards } from '../../../lib/golfMath';
+import { Course3DView } from '../../../components/Course3DView';
+import { useCourseView3D } from '../../../lib/courseView';
 
 const ON_COURSE_MILES = 3;
 const ON_COURSE_METRES = ON_COURSE_MILES * 1609.34;
@@ -41,6 +43,7 @@ export default function CourseMapScreen() {
   const [locGranted, setLocGranted] = useState(false);
   const [locLoading, setLocLoading] = useState(true);
   const watchRef = useRef<Location.LocationSubscription | null>(null);
+  const use3D = useCourseView3D();
 
   // Request location permission and start watching
   useEffect(() => {
@@ -168,6 +171,9 @@ export default function CourseMapScreen() {
       </View>
 
       {/* Map */}
+      {use3D ? (
+        <Course3DView center={{ lat: cLat, lng: cLng }} style={styles.map} />
+      ) : (
       <MapView
         ref={mapRef}
         style={styles.map}
@@ -207,6 +213,7 @@ export default function CourseMapScreen() {
           </>
         )}
       </MapView>
+      )}
 
       {/* Distance banner */}
       {distance !== null && (

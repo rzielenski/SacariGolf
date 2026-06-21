@@ -1551,7 +1551,7 @@ window.addEventListener('unhandledrejection',function(ev){post({type:'error',msg
       setStatus('Starting map…');
       mapboxgl.accessToken=C.token;
       var opts={container:'map',style:C.style||'mapbox://styles/mapbox/satellite-streets-v12',attributionControl:false};
-      if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:70,maxZoom:16.5};}else{opts.center=[0,0];opts.zoom=1;}
+      if(C.bounds){opts.bounds=C.bounds;opts.fitBoundsOptions={padding:70,maxZoom:16.5};}else if(C.center){opts.center=C.center;opts.zoom=C.zoom||16;}else{opts.center=[0,0];opts.zoom=1;}
       var map=new mapboxgl.Map(opts);
       post({type:'info',msg:'map created'});
       map.on('styledata',function(){post({type:'info',msg:'styledata'});});
