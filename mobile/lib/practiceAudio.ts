@@ -99,6 +99,9 @@ export function useShotDetector(opts: {
   onHitRef.current = onHit;
   const sensRef = useRef(sensitivity);
   sensRef.current = sensitivity;
+  // Rolling ambient floor + previous sample, for adaptive transient detection.
+  const bgRef = useRef(-55);
+  const prevRef = useRef(-60);
   const [permission, setPermission] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -115,16 +118,34 @@ export function useShotDetector(opts: {
           ...Audio.RecordingOptionsPresets.LOW_QUALITY,
           isMeteringEnabled: true,
         });
-        rec.setProgressUpdateInterval(80);
+        rec.setProgressUpdateInterval(50);
         rec.setOnRecordingStatusUpdate((status) => {
           if (!status.isRecording || status.metering == null) return;
-          // metering is dBFS (~-160 silence .. 0 max). Higher sensitivity →
-          // lower (easier-to-cross) threshold. Putts are quiet, so the slider
-          // matters most there.
-          const threshold = -3 - sensRef.current * 30; // sens 0 → -3dB, sens 1 → -33dB
+          const m = status.metering;            // dBFS (~-160 silence .. 0 max)
           const now = Date.now();
-          if (muteUntilRef && now < muteUntilRef.current) return;     // skip the metronome click
-          if (status.metering > threshold && now - lastHitRef.current > 350) {
+          const prev = prevRef.current;
+          const bg = bgRef.current;
+          const prominence = m - bg;            // how far above the ambient floor
+          const rise = m - prev;                // onset sharpness vs the last frame
+          // Update trackers for next frame. The ambient floor eases UP slowly
+          // (so a strike isn't absorbed before we spot it) and DOWN fast (so it
+          // tracks real quiet). Sustained noise — talking, wind, a mower —
+          // gradually lifts the floor and stops crossing the prominence gate, so
+          // only sudden impulses fire. Everything is RELATIVE to ambient, which
+          // is why a muffled in-pocket strike still counts where a fixed dB
+          // threshold missed it.
+          prevRef.current = m;
+          bgRef.current = bg + (m > bg ? 0.04 : 0.30) * (m - bg);
+          if (muteUntilRef && now < muteUntilRef.current) return;   // skip the metronome click
+          const sens = sensRef.current;
+          const needProm = 12 - sens * 7;       // sens 0 → 12 dB above floor, sens 1 → 5 dB
+          const needRise = 9 - sens * 5;        // sens 0 → 9 dB jump, sens 1 → 4 dB
+          // A real strike is a sharp impulse: well above ambient AND a fast
+          // onset. The OR-path (a clearly prominent spike with a softer onset)
+          // catches muffled, in-pocket strikes whose crisp transient is damped
+          // by cloth. The absolute gate ignores noise-floor jitter.
+          const hit = (prominence > needProm && rise > needRise) || prominence > needProm + 6;
+          if (m > -58 && hit && now - lastHitRef.current > 320) {
             lastHitRef.current = now;
             onHitRef.current();
           }
