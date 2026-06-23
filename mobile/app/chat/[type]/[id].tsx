@@ -19,6 +19,7 @@ import { MentionInput } from '../../../components/MentionInput';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { censorText } from '../../../lib/censor';
 import { Ionicons } from '@expo/vector-icons';
+import { compressForUpload } from '../../../lib/imageUpload';
 
 /** Horizontal distance the user has to drag the mic LEFT, in pixels, before
  *  the gesture is interpreted as "cancel this recording" instead of "send". */
@@ -296,6 +297,7 @@ export default function ChatScreen() {
     const asset = result.assets[0];
     setSending(true);
     try {
+      const img = await compressForUpload(asset);
       const base = type === 'match'
         ? { matchId: id }
         : type === 'clan'
@@ -305,8 +307,8 @@ export default function ChatScreen() {
         : { toUserId: id };
       const msg = await api.messages.send({
         ...base,
-        imageBase64: asset.base64!,
-        imageMime: asset.mimeType ?? 'image/jpeg',
+        imageBase64: img.base64,
+        imageMime: img.mime,
         clientId: genClientId(),
       });
       setMessages((prev) => (

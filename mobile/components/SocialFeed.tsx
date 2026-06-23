@@ -36,6 +36,7 @@ import { censorText } from '../lib/censor';
 import { MentionInput } from './MentionInput';
 import { IdentityAvatar, IdentityName } from './UserIdentity';
 import { Ionicons } from '@expo/vector-icons';
+import { compressForUpload } from '../lib/imageUpload';
 
 interface Props {
   /** Anything that should render above the feed items inside the same
@@ -589,8 +590,8 @@ function CommentsModal({
       mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6, base64: true,
     });
     if (result.canceled || !result.assets?.[0]?.base64) return;
-    const a = result.assets[0];
-    setPendingImage({ uri: a.uri, base64: a.base64!, mime: a.mimeType ?? 'image/jpeg' });
+    const img = await compressForUpload(result.assets[0]);
+    setPendingImage({ uri: img.uri, base64: img.base64, mime: img.mime });
   }, []);
 
   const submit = () => {
@@ -965,10 +966,10 @@ function ComposeModal({
       base64: true,
     });
     if (result.canceled || !result.assets?.[0]?.base64) return;
-    const asset = result.assets[0];
-    setImageBase64(asset.base64!);
-    setImageMime(asset.mimeType ?? 'image/jpeg');
-    setImagePreviewUri(asset.uri);
+    const img = await compressForUpload(result.assets[0]);
+    setImageBase64(img.base64);
+    setImageMime(img.mime);
+    setImagePreviewUri(img.uri);
   };
 
   const submit = async () => {

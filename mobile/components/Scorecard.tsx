@@ -3,6 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput,
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { api, API_BASE } from '../lib/api';
+import { compressForUpload } from '../lib/imageUpload';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { scoreColor } from '../lib/golfMath';
@@ -458,8 +459,8 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
       mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6, base64: true,
     });
     if (result.canceled || !result.assets?.[0]?.base64) return;
-    const a = result.assets[0];
-    setPendingImage({ uri: a.uri, base64: a.base64!, mime: a.mimeType ?? 'image/jpeg' });
+    const img = await compressForUpload(result.assets[0]);
+    setPendingImage({ uri: img.uri, base64: img.base64, mime: img.mime });
   }, []);
 
   const submitComment = () => {

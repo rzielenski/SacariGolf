@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { compressForUpload } from '../../lib/imageUpload';
 import { router } from 'expo-router';
 import { api, API_BASE } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -212,7 +213,7 @@ function UploadButton() {
       aspect: [4, 3],
     });
     if (result.canceled || !result.assets[0]) return;
-    const asset = result.assets[0];
+    const img = await compressForUpload(result.assets[0]);
 
     Alert.prompt(
       'Describe your find',
@@ -221,8 +222,8 @@ function UploadButton() {
         setUploading(true);
         try {
           await api.finds.upload(
-            asset.base64!,
-            asset.mimeType ?? 'image/jpeg',
+            img.base64,
+            img.mime,
             description ?? ''
           );
           Alert.alert('Uploaded!', 'Your find is in the ranker.');

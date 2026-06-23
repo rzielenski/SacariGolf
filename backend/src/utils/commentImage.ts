@@ -12,8 +12,9 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const COMMENT_IMG_DIR = path.join(UPLOADS_DIR, 'comments');
 if (!fs.existsSync(COMMENT_IMG_DIR)) fs.mkdirSync(COMMENT_IMG_DIR, { recursive: true });
 
-/** 4 MB after base64 decode — matches the chat-image cap. */
-const MAX_COMMENT_IMG_BYTES = 4 * 1024 * 1024;
+/** 10 MB after base64 decode — matches the chat-image cap. The app downscales
+ *  most uploads well under 1 MB before sending; this is just headroom. */
+const MAX_COMMENT_IMG_BYTES = 10 * 1024 * 1024;
 const COMMENT_IMG_MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/jpg':  'jpg',
@@ -30,7 +31,7 @@ export function persistCommentImage(
   if (!ext) return { error: 'Unsupported image format (use JPEG, PNG, or WebP)' };
   const buffer = Buffer.from(base64, 'base64');
   if (buffer.length === 0) return { error: 'Invalid image data' };
-  if (buffer.length > MAX_COMMENT_IMG_BYTES) return { error: 'Image too large (max 4 MB)' };
+  if (buffer.length > MAX_COMMENT_IMG_BYTES) return { error: 'Image too large (max 10 MB)' };
   const filename = `${randomUUID()}.${ext}`;
   fs.writeFileSync(path.join(COMMENT_IMG_DIR, filename), buffer);
   return { url: `/uploads/comments/${filename}` };

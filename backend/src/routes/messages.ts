@@ -16,9 +16,9 @@ if (!fs.existsSync(VOICE_DIR)) fs.mkdirSync(VOICE_DIR, { recursive: true });
 const CHAT_IMG_DIR = path.join(UPLOADS_DIR, 'chat');
 if (!fs.existsSync(CHAT_IMG_DIR)) fs.mkdirSync(CHAT_IMG_DIR, { recursive: true });
 
-/** Max raw image size after base64 decode. Mirrors the 4 MB feed-photo cap
- *  in posts.ts — generous for a phone photo at quality 0.6-0.75. */
-const MAX_CHAT_IMG_BYTES = 4 * 1024 * 1024;
+/** Max raw image size after base64 decode. Headroom for an uncompressed phone
+ *  photo; the app downscales most uploads well under 1 MB before sending. */
+const MAX_CHAT_IMG_BYTES = 10 * 1024 * 1024;
 const CHAT_IMG_MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/jpg':  'jpg',
@@ -85,7 +85,7 @@ function persistChatImage(
   if (!ext) return { error: 'Unsupported image format (use JPEG, PNG, or WebP)' };
   const buffer = Buffer.from(base64, 'base64');
   if (buffer.length === 0) return { error: 'Invalid image data' };
-  if (buffer.length > MAX_CHAT_IMG_BYTES) return { error: 'Image too large (max 4 MB)' };
+  if (buffer.length > MAX_CHAT_IMG_BYTES) return { error: 'Image too large (max 10 MB)' };
   const filename = `${randomUUID()}.${ext}`;
   fs.writeFileSync(path.join(CHAT_IMG_DIR, filename), buffer);
   return { url: `/uploads/chat/${filename}` };
