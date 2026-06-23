@@ -35,6 +35,7 @@ import { C, F } from '../lib/colors';
 import { censorText } from '../lib/censor';
 import { MentionInput } from './MentionInput';
 import { IdentityAvatar, IdentityName } from './UserIdentity';
+import { Ionicons } from '@expo/vector-icons';
 
 interface Props {
   /** Anything that should render above the feed items inside the same
@@ -449,6 +450,10 @@ function CommentsModal({
   const { user } = useAuth();
   const [comments, setComments] = useState<any[] | null>(null);
   const [draft, setDraft] = useState('');
+  // One-level reply target (the top-level comment being replied to) + a staged
+  // camera-roll image; both clear after a successful submit.
+  const [replyTo, setReplyTo] = useState<{ topId: string; username: string } | null>(null);
+  const [pendingImage, setPendingImage] = useState<{ uri: string; base64: string; mime: string } | null>(null);
   // Mirror of `comments` so transitions (optimistic append, confirm swap,
   // retry, discard) can compute the next array without functional-updater
   // gymnastics, and so the badge count can be derived in one place.
@@ -509,9 +514,16 @@ function CommentsModal({
   /** POST one comment. On success the optimistic row is swapped for the
    *  confirmed row; on failure it flips to 'failed' (tap to retry).
    *  Retries reuse the same clientId, so duplicates are impossible. */
-  const postComment = useCallback(async (clientId: string, body: string) => {
+  const postComment = useCallback(async (
+    clientId: string, body: string,
+    parentId: string | null,
+    image: { base64: string; mime: string } | null,
+  ) => {
     try {
-      const r = await api.posts.addComment(postId, body, clientId);
+      const r = await api.posts.addComment(postId, body, {
+        clientId, parentCommentId: parentId ?? undefined,
+        imageBase64: image?.base64, imageMime: image?.mime,
+      });
       const cur = localsRef.current.get(clientId);
       localsRef.current.delete(clientId);
       const confirmed = {
@@ -519,8 +531,12 @@ function CommentsModal({
         comment_id: r.comment_id,
         created_at: r.created_at,
         client_id: r.client_id ?? clientId,
+        parent_comment_id: r.parent_comment_id ?? parentId ?? null,
+        image_url: r.image_url ?? cur?.image_url ?? null,
         _status: undefined,
         _failReason: undefined,
+        _imageBase64: undefined,
+        _imageMime: undefined,
       };
       const without = (commentsRef.current ?? []).filter((c) =>
         (c.client_id ?? c.comment_id) !== clientId && c.comment_id !== confirmed.comment_id);
@@ -552,7 +568,8 @@ function CommentsModal({
     localsRef.current.set(clientId, again);
     apply((commentsRef.current ?? []).map((c) =>
       (c.client_id ?? c.comment_id) === clientId ? again : c));
-    void postComment(clientId, again.body);
+    void postComment(clientId, again.body, again.parent_comment_id ?? null,
+      again._imageBase64 ? { base64: again._imageBase64, mime: again._imageMime } : null);
   }, [apply, postComment]);
 
   /** Remove a failed local comment that never reached the server. */
@@ -562,10 +579,28 @@ function CommentsModal({
       (c.client_id ?? c.comment_id) !== clientId));
   }, [apply]);
 
+  const pickImage = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Allow photo access to attach an image.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6, base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    const a = result.assets[0];
+    setPendingImage({ uri: a.uri, base64: a.base64!, mime: a.mimeType ?? 'image/jpeg' });
+  }, []);
+
   const submit = () => {
     const body = draft.trim();
-    if (!body || !user) return;
+    if ((!body && !pendingImage) || !user) return;
     setDraft('');
+    const img = pendingImage;
+    const parent = replyTo;
+    setPendingImage(null);
+    setReplyTo(null);
     // Optimistic: the comment appears instantly in 'sending' state and the
     // POST happens behind it — same flow as chat bubbles. Failures show an
     // explicit tap-to-retry row instead of silently eating the text.
@@ -580,10 +615,15 @@ function CommentsModal({
       avatar_url: user.avatar_url ?? null,
       mine: true,
       _status: 'sending',
+      parent_comment_id: parent?.topId ?? null,
+      image_url: img?.uri ?? null,
+      _imageBase64: img?.base64,
+      _imageMime: img?.mime,
     };
     localsRef.current.set(clientId, local);
     apply([...(commentsRef.current ?? []), local]);
-    void postComment(clientId, body);
+    void postComment(clientId, body, parent?.topId ?? null,
+      img ? { base64: img.base64, mime: img.mime } : null);
   };
 
   const remove = (commentId: string) => {
@@ -600,6 +640,80 @@ function CommentsModal({
       },
     ]);
   };
+
+  // Comment image URLs from the server are root-relative (/uploads/...); a
+  // staged local pick is a file:// uri. Prefix only the server ones.
+  const imgUri = (u: string) => (u.startsWith('/') ? `${API_BASE}${u}` : u);
+
+  // Replying to a reply still threads under the top-level ancestor (one level).
+  const startReply = (cm: any) =>
+    setReplyTo({ topId: cm.parent_comment_id ?? cm.comment_id, username: cm.username });
+
+  // Shared row renderer for both top-level comments and their indented replies.
+  const renderRow = (cm: any, isReply: boolean) => (
+    <TouchableOpacity
+      key={cm.client_id ?? cm.comment_id}
+      style={[s.commentRow, isReply && s.commentReplyRow, cm._status === 'sending' && { opacity: 0.55 }]}
+      disabled={cm._status !== 'failed'}
+      onPress={() => cm.client_id && retryLocal(cm.client_id)}
+      activeOpacity={0.7}
+    >
+      <TouchableOpacity onPress={() => router.push(`/user/${cm.user_id}` as any)}>
+        {cm.avatar_url ? (
+          <Image
+            source={{ uri: cm.avatar_url.startsWith('http') ? cm.avatar_url : `${API_BASE}${cm.avatar_url}` }}
+            style={[s.commentAvatar, isReply && s.commentAvatarSmall]}
+          />
+        ) : (
+          <View style={[s.commentAvatar, isReply && s.commentAvatarSmall, s.avatarFallback]}>
+            <Text style={s.avatarFallbackText}>{censorText(cm.username ?? '?', censor)[0]?.toUpperCase()}</Text>
+          </View>
+        )}
+      </TouchableOpacity>
+      <View style={{ flex: 1 }}>
+        <IdentityName visual={(cm as any).equipped_visual} style={s.commentAuthor}>
+          {censorText(cm.username, censor)}
+        </IdentityName>
+        {!!cm.body && <Text style={s.commentBody}>{censorText(cm.body, censor)}</Text>}
+        {cm.image_url ? (
+          <Image source={{ uri: imgUri(cm.image_url) }} style={s.commentImage} resizeMode="cover" />
+        ) : null}
+        {cm._status === 'sending' ? (
+          <Text style={s.commentTime}>Sending…</Text>
+        ) : cm._status === 'failed' ? (
+          <Text style={s.commentFailed}>
+            {cm._failReason ? `${cm._failReason} · tap to retry` : 'Not sent · tap to retry'}
+          </Text>
+        ) : (
+          <View style={s.commentMetaRow}>
+            <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
+            <TouchableOpacity onPress={() => startReply(cm)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+              <Text style={s.replyBtn}>Reply</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+      {cm._status === 'failed' && cm.client_id ? (
+        <TouchableOpacity onPress={() => discardLocal(cm.client_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Text style={s.deleteX}>×</Text>
+        </TouchableOpacity>
+      ) : cm.mine && !cm._status ? (
+        <TouchableOpacity onPress={() => remove(cm.comment_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <Text style={s.deleteX}>×</Text>
+        </TouchableOpacity>
+      ) : null}
+    </TouchableOpacity>
+  );
+
+  // Group into one level: top-level comments, each followed by its replies.
+  const tops = (comments ?? []).filter((c) => !c.parent_comment_id);
+  const repliesByParent = new Map<string, any[]>();
+  for (const c of comments ?? []) {
+    if (!c.parent_comment_id) continue;
+    const arr = repliesByParent.get(c.parent_comment_id) ?? [];
+    arr.push(c);
+    repliesByParent.set(c.parent_comment_id, arr);
+  }
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -618,74 +732,50 @@ function CommentsModal({
           ) : comments.length === 0 ? (
             <Text style={s.commentsEmpty}>No comments yet — be the first.</Text>
           ) : (
-            comments.map((cm) => (
-              // Tap a failed row to retry the send; sending rows render dimmed.
-              <TouchableOpacity
-                key={cm.client_id ?? cm.comment_id}
-                style={[s.commentRow, cm._status === 'sending' && { opacity: 0.55 }]}
-                disabled={cm._status !== 'failed'}
-                onPress={() => cm.client_id && retryLocal(cm.client_id)}
-                activeOpacity={0.7}
-              >
-                <TouchableOpacity onPress={() => router.push(`/user/${cm.user_id}` as any)}>
-                  {cm.avatar_url ? (
-                    <Image
-                      source={{ uri: cm.avatar_url.startsWith('http') ? cm.avatar_url : `${API_BASE}${cm.avatar_url}` }}
-                      style={s.commentAvatar}
-                    />
-                  ) : (
-                    <View style={[s.commentAvatar, s.avatarFallback]}>
-                      <Text style={s.avatarFallbackText}>{censorText(cm.username ?? '?', censor)[0]?.toUpperCase()}</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-                <View style={{ flex: 1 }}>
-                  <IdentityName visual={(cm as any).equipped_visual} style={s.commentAuthor}>
-                    {censorText(cm.username, censor)}
-                  </IdentityName>
-                  <Text style={s.commentBody}>{censorText(cm.body, censor)}</Text>
-                  {cm._status === 'sending' ? (
-                    <Text style={s.commentTime}>Sending…</Text>
-                  ) : cm._status === 'failed' ? (
-                    <Text style={s.commentFailed}>
-                      {cm._failReason ? `${cm._failReason} · tap to retry` : 'Not sent · tap to retry'}
-                    </Text>
-                  ) : (
-                    <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
-                  )}
-                </View>
-                {/* Failed locals get × to discard the unsent text; confirmed
-                    own comments keep the server delete. Hidden mid-send. */}
-                {cm._status === 'failed' && cm.client_id ? (
-                  <TouchableOpacity onPress={() => discardLocal(cm.client_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={s.deleteX}>×</Text>
-                  </TouchableOpacity>
-                ) : cm.mine && !cm._status ? (
-                  <TouchableOpacity onPress={() => remove(cm.comment_id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={s.deleteX}>×</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </TouchableOpacity>
+            tops.map((top) => (
+              <View key={top.client_id ?? top.comment_id}>
+                {renderRow(top, false)}
+                {(repliesByParent.get(top.comment_id) ?? []).map((rep) => renderRow(rep, true))}
+              </View>
             ))
           )}
         </ScrollView>
 
+        {replyTo && (
+          <View style={s.replyChip}>
+            <Text style={s.replyChipText} numberOfLines={1}>Replying to @{censorText(replyTo.username, censor)}</Text>
+            <TouchableOpacity onPress={() => setReplyTo(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="close" size={16} color={C.textMuted} />
+            </TouchableOpacity>
+          </View>
+        )}
+        {pendingImage && (
+          <View style={s.pendingImageWrap}>
+            <Image source={{ uri: pendingImage.uri }} style={s.pendingImage} />
+            <TouchableOpacity style={s.pendingImageX} onPress={() => setPendingImage(null)}>
+              <Ionicons name="close-circle" size={22} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
         <View style={s.commentComposer}>
+          <TouchableOpacity onPress={pickImage} style={s.commentImgBtn} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+            <Ionicons name="image-outline" size={24} color={C.gold} />
+          </TouchableOpacity>
           <MentionInput
             style={s.commentInput}
             containerStyle={{ flex: 1 }}
             dropdownAbove
             value={draft}
             onChangeText={setDraft}
-            placeholder="Add a comment… @ to tag"
+            placeholder={replyTo ? `Reply to @${replyTo.username}…` : 'Add a comment… @ to tag'}
             placeholderTextColor={C.textMuted}
             maxLength={280}
             multiline
           />
           <TouchableOpacity
-            style={[s.commentSendBtn, !draft.trim() && { opacity: 0.4 }]}
+            style={[s.commentSendBtn, (!draft.trim() && !pendingImage) && { opacity: 0.4 }]}
             onPress={submit}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() && !pendingImage}
             activeOpacity={0.7}
           >
             <Text style={s.commentSendText}>Post</Text>
@@ -1115,4 +1205,20 @@ const s = StyleSheet.create({
     paddingHorizontal: 16, paddingVertical: 10, minWidth: 56, alignItems: 'center',
   },
   commentSendText: { color: C.bg, fontWeight: '900', fontSize: 13 },
+  commentReplyRow: { marginLeft: 38, paddingVertical: 8 },
+  commentAvatarSmall: { width: 26, height: 26, borderRadius: 13 },
+  commentImage: { width: 180, height: 180, borderRadius: 12, marginTop: 6, backgroundColor: C.card },
+  commentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 3 },
+  replyBtn: { color: C.textMuted, fontSize: 11, fontWeight: '800' },
+  commentImgBtn: { paddingHorizontal: 4, paddingBottom: 8, alignSelf: 'flex-end' },
+  replyChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginHorizontal: 12, paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: C.card, borderTopLeftRadius: 10, borderTopRightRadius: 10,
+    borderWidth: 1, borderColor: C.border,
+  },
+  replyChipText: { color: C.textMuted, fontSize: 12, flex: 1 },
+  pendingImageWrap: { marginHorizontal: 12, marginTop: 8, alignSelf: 'flex-start' },
+  pendingImage: { width: 84, height: 84, borderRadius: 10, backgroundColor: C.card },
+  pendingImageX: { position: 'absolute', top: -8, right: -8 },
 });

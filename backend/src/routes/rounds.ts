@@ -3,6 +3,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { sendPush } from '../utils/notify';
+import { persistCommentImage, unlinkCommentImage } from '../utils/commentImage';
 
 const router = Router();
 
@@ -60,6 +61,7 @@ router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: R
   );
   const { rows: cmRows } = await pool.query(
     `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at, c.client_id,
+            c.parent_comment_id, c.image_url,
             (c.user_id = $2) AS mine
      FROM round_comments c
      JOIN users u ON u.user_id = c.user_id
@@ -124,7 +126,10 @@ router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, re
 //   body: { body: 'nice round', clientId?: '...' }
 router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
-  if (!body) return res.status(400).json({ error: 'body required' });
+  // Optional image attachment (camera roll). A comment needs text OR an image.
+  const imageBase64 = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64 : '';
+  const imageMime = typeof req.body?.imageMime === 'string' ? req.body.imageMime : 'image/jpeg';
+  if (!body && !imageBase64) return res.status(400).json({ error: 'body or image required' });
   // Client-generated idempotency key — same contract as chat sends. A retry
   // after an ambiguous network failure (request landed, response lost)
   // carries the same clientId; the partial unique index collapses it onto
@@ -132,22 +137,52 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
   const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
     ? req.body.clientId.slice(0, 64)
     : null;
+  // One-level threading: a reply targets a top-level comment. Resolved below.
+  const rawParentId = typeof req.body?.parentCommentId === 'string' && req.body.parentCommentId.length > 0
+    ? req.body.parentCommentId
+    : null;
 
   const { rows: rd } = await pool.query(`SELECT 1 FROM rounds WHERE round_id = $1`, [req.params.roundId]);
   if (!rd.length) return res.status(404).json({ error: 'round not found' });
 
-  const { rows } = await pool.query(
-    `INSERT INTO round_comments (user_id, round_id, body, client_id)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
-     RETURNING comment_id, created_at, client_id`,
-    [req.userId, req.params.roundId, body, clientId]
-  );
+  // Normalize the reply target to a TOP-LEVEL comment on this round so threads
+  // never nest past one level. Unknown/foreign parent degrades to top-level.
+  let parentId: string | null = null;
+  if (rawParentId) {
+    const { rows: pc } = await pool.query(
+      `SELECT comment_id, parent_comment_id FROM round_comments WHERE comment_id = $1 AND round_id = $2`,
+      [rawParentId, req.params.roundId]
+    );
+    if (pc.length) parentId = pc[0].parent_comment_id ?? pc[0].comment_id;
+  }
+
+  // Persist the image before the INSERT; unlink it if the row never lands.
+  let image: { url: string } | null = null;
+  if (imageBase64) {
+    const result = persistCommentImage(imageBase64, imageMime);
+    if ('error' in result) return res.status(400).json({ error: result.error });
+    image = result;
+  }
+
+  let rows: any[];
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO round_comments (user_id, round_id, body, client_id, parent_comment_id, image_url)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+       RETURNING comment_id, created_at, client_id, parent_comment_id, image_url`,
+      [req.userId, req.params.roundId, body, clientId, parentId, image?.url ?? null]
+    ));
+  } catch (err) {
+    if (image) unlinkCommentImage(image.url);
+    throw err;
+  }
   if (!rows.length && clientId) {
-    // Duplicate retry — the original comment already landed. Return it and
-    // skip the push (the round owner was already notified).
+    // Duplicate retry — the original comment already landed. Drop the freshly
+    // written (now-orphan) image, return the original, skip the push.
+    if (image) unlinkCommentImage(image.url);
     const { rows: existing } = await pool.query(
-      `SELECT comment_id, created_at, client_id FROM round_comments
+      `SELECT comment_id, created_at, client_id, parent_comment_id, image_url FROM round_comments
        WHERE user_id = $1 AND client_id = $2`,
       [req.userId, clientId]
     );
@@ -157,6 +192,8 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
         comment_id: existing[0].comment_id,
         created_at: existing[0].created_at,
         client_id: existing[0].client_id,
+        parent_comment_id: existing[0].parent_comment_id,
+        image_url: existing[0].image_url,
       });
     }
     return res.status(409).json({ error: 'Duplicate send' });
@@ -166,7 +203,9 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
   // long comment doesn't make the notification overflow on lock screens.
   pushTargetFor(req.params.roundId, req.userId!).then((tgt) => {
     if (!tgt) return;
-    const preview = body.length > 100 ? body.slice(0, 97) + '…' : body;
+    const preview = body
+      ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
+      : 'Sent a photo';
     return sendPush(
       [tgt.push_token],
       `${tgt.actor_name} commented on your round`,
@@ -180,6 +219,8 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
     comment_id: rows[0].comment_id,
     created_at: rows[0].created_at,
     client_id: rows[0].client_id,
+    parent_comment_id: rows[0].parent_comment_id,
+    image_url: rows[0].image_url,
   });
 }));
 

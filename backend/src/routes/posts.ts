@@ -25,6 +25,7 @@ import { sendPush } from '../utils/notify';
 import { processMentions, hasEveryoneTag, broadcastToEveryone } from '../utils/mentions';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { isOwner } from '../utils/owner';
+import { persistCommentImage, unlinkCommentImage } from '../utils/commentImage';
 
 const router = Router();
 
@@ -435,6 +436,7 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
+            c.parent_comment_id, c.image_url,
             (c.user_id = $2) AS mine,
             ${equippedVisualSql('u')} AS equipped_visual
        FROM post_comments c
@@ -449,13 +451,20 @@ router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Resp
 // POST /posts/:id/comments  body: { body, clientId? }
 router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
-  if (!body) return res.status(400).json({ error: 'body required' });
+  // Optional image attachment (camera roll). A comment needs text OR an image.
+  const imageBase64 = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64 : '';
+  const imageMime = typeof req.body?.imageMime === 'string' ? req.body.imageMime : 'image/jpeg';
+  if (!body && !imageBase64) return res.status(400).json({ error: 'body or image required' });
   // Client-generated idempotency key — same contract as chat sends. A retry
   // after an ambiguous network failure (request landed, response lost)
   // carries the same clientId; the partial unique index collapses it onto
   // the original row and we return that row instead of double-posting.
   const clientId = typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
     ? req.body.clientId.slice(0, 64)
+    : null;
+  // One-level threading: a reply targets a top-level comment. Resolved below.
+  const rawParentId = typeof req.body?.parentCommentId === 'string' && req.body.parentCommentId.length > 0
+    ? req.body.parentCommentId
     : null;
 
   // Verify the post exists + grab the owner for the push.
@@ -471,18 +480,45 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
   if (!postRows.length) return res.status(404).json({ error: 'post not found' });
   const post = postRows[0];
 
-  const { rows } = await pool.query(
-    `INSERT INTO post_comments (post_id, user_id, body, client_id)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
-     RETURNING comment_id, created_at, client_id`,
-    [req.params.id, req.userId, body, clientId]
-  );
+  // Normalize the reply target to a TOP-LEVEL comment on this post so threads
+  // never nest past one level: replying to a reply attaches to that reply's
+  // parent. An unknown/foreign parent silently degrades to a top-level comment.
+  let parentId: string | null = null;
+  if (rawParentId) {
+    const { rows: pc } = await pool.query(
+      `SELECT comment_id, parent_comment_id FROM post_comments WHERE comment_id = $1 AND post_id = $2`,
+      [rawParentId, req.params.id]
+    );
+    if (pc.length) parentId = pc[0].parent_comment_id ?? pc[0].comment_id;
+  }
+
+  // Persist the image before the INSERT; unlink it if the row never lands.
+  let image: { url: string } | null = null;
+  if (imageBase64) {
+    const result = persistCommentImage(imageBase64, imageMime);
+    if ('error' in result) return res.status(400).json({ error: result.error });
+    image = result;
+  }
+
+  let rows: any[];
+  try {
+    ({ rows } = await pool.query(
+      `INSERT INTO post_comments (post_id, user_id, body, client_id, parent_comment_id, image_url)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+       RETURNING comment_id, created_at, client_id, parent_comment_id, image_url`,
+      [req.params.id, req.userId, body, clientId, parentId, image?.url ?? null]
+    ));
+  } catch (err) {
+    if (image) unlinkCommentImage(image.url);
+    throw err;
+  }
   if (!rows.length && clientId) {
-    // Duplicate retry — the original comment already landed. Return it and
-    // skip the push + mention processing (both fired on the original send).
+    // Duplicate retry — the original comment already landed. Drop the freshly
+    // written (now-orphan) image, return the original, skip push + mentions.
+    if (image) unlinkCommentImage(image.url);
     const { rows: existing } = await pool.query(
-      `SELECT comment_id, created_at, client_id FROM post_comments
+      `SELECT comment_id, created_at, client_id, parent_comment_id, image_url FROM post_comments
        WHERE user_id = $1 AND client_id = $2`,
       [req.userId, clientId]
     );
@@ -492,6 +528,8 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
         comment_id: existing[0].comment_id,
         created_at: existing[0].created_at,
         client_id: existing[0].client_id,
+        parent_comment_id: existing[0].parent_comment_id,
+        image_url: existing[0].image_url,
       });
     }
     return res.status(409).json({ error: 'Duplicate send' });
@@ -500,7 +538,9 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
   // Notify the post owner (fire-and-forget). Skip if commenting on your
   // own post or the owner has no push token.
   if (post.owner_id !== req.userId && post.push_token) {
-    const preview = body.length > 100 ? body.slice(0, 97) + '…' : body;
+    const preview = body
+      ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
+      : 'Sent a photo';
     sendPush(
       [post.push_token],
       `${post.actor_name} commented on your post`,
@@ -511,14 +551,17 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
 
   // Tag anyone @mentioned in the comment. Records the mention + pushes them a
   // "tagged you" notification that routes to the feed (the post is publicly
-  // viewable, so anyone can be mentioned). Fire-and-forget.
-  processMentions(req.params.id, req.userId!, body);
+  // viewable, so anyone can be mentioned). Fire-and-forget. Image-only comments
+  // have no text to scan.
+  if (body) processMentions(req.params.id, req.userId!, body);
 
   return res.json({
     success: true,
     comment_id: rows[0].comment_id,
     created_at: rows[0].created_at,
     client_id: rows[0].client_id,
+    parent_comment_id: rows[0].parent_comment_id,
+    image_url: rows[0].image_url,
   });
 }));
 

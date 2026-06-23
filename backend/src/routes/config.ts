@@ -99,7 +99,7 @@ adminRouter.post('/restore-elo', wrap(async (req: Request, res: Response) => {
  * Recompute every player's stored handicap_index from their last 20 solo
  * rated rounds using the slope-guarded WHS formula, so the profile value
  * matches the live handicap view. Idempotent — safe to re-run. Overwrites a
- * manually-entered handicap for anyone with 3+ rated solo rounds.
+ * manually-entered handicap for anyone with at least one rated solo round.
  */
 adminRouter.post('/backfill-handicaps', wrap(async (req: Request, res: Response) => {
   if (!isAdminAuthed(req, res)) return;

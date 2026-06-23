@@ -990,13 +990,17 @@ export const api = {
     comments: (id: string) => request<{
       comment_id: string; user_id: string; username: string;
       avatar_url: string | null; body: string; created_at: string; mine: boolean;
-      client_id?: string | null;
+      client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null;
     }[]>('GET', `/posts/${id}/comments`),
     /** `clientId` makes the send idempotent — retrying with the same id
-     *  returns the original comment instead of double-posting. */
-    addComment: (id: string, body: string, clientId?: string) =>
-      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null }>(
-        'POST', `/posts/${id}/comments`, { body, clientId },
+     *  returns the original comment instead of double-posting. `parentCommentId`
+     *  makes it a one-level reply; `imageBase64`/`imageMime` attach a photo. */
+    addComment: (id: string, body: string, opts?: {
+      clientId?: string; parentCommentId?: string | null; imageBase64?: string; imageMime?: string;
+    }) =>
+      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null }>(
+        'POST', `/posts/${id}/comments`,
+        { body, clientId: opts?.clientId, parentCommentId: opts?.parentCommentId ?? undefined, imageBase64: opts?.imageBase64, imageMime: opts?.imageMime },
       ),
     deleteComment: (id: string, commentId: string) =>
       request<{ success: true }>('DELETE', `/posts/${id}/comments/${commentId}`),
@@ -1054,14 +1058,19 @@ export const api = {
   rounds: {
     social: (roundId: string) => request<{
       reactions: { reaction: string; count: number; mine: boolean }[];
-      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean; client_id?: string | null }[];
+      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean; client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null }[];
     }>('GET', `/rounds/${roundId}/social`),
     toggleReaction: (roundId: string, reaction: string) =>
       request<{ added: boolean }>('POST', `/rounds/${roundId}/reactions`, { reaction }),
     /** `clientId` makes the send idempotent — retrying with the same id
-     *  returns the original comment instead of double-posting. */
-    addComment: (roundId: string, body: string, clientId?: string) =>
-      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null }>('POST', `/rounds/${roundId}/comments`, { body, clientId }),
+     *  returns the original comment instead of double-posting. `parentCommentId`
+     *  makes it a one-level reply; `imageBase64`/`imageMime` attach a photo. */
+    addComment: (roundId: string, body: string, opts?: {
+      clientId?: string; parentCommentId?: string | null; imageBase64?: string; imageMime?: string;
+    }) =>
+      request<{ success: true; comment_id: string; created_at: string; client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null }>(
+        'POST', `/rounds/${roundId}/comments`,
+        { body, clientId: opts?.clientId, parentCommentId: opts?.parentCommentId ?? undefined, imageBase64: opts?.imageBase64, imageMime: opts?.imageMime }),
     deleteComment: (roundId: string, commentId: string) =>
       request<any>('DELETE', `/rounds/${roundId}/comments/${commentId}`),
   },

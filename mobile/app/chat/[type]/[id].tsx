@@ -18,6 +18,7 @@ import { IdentityName } from '../../../components/UserIdentity';
 import { MentionInput } from '../../../components/MentionInput';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { censorText } from '../../../lib/censor';
+import { Ionicons } from '@expo/vector-icons';
 
 /** Horizontal distance the user has to drag the mic LEFT, in pixels, before
  *  the gesture is interpreted as "cancel this recording" instead of "send". */
@@ -567,7 +568,7 @@ export default function ChatScreen() {
                 onPress={sendImage}
                 disabled={sending}
               >
-                <Text style={styles.imgGlyph}>📷</Text>
+                <Ionicons name="image-outline" size={22} color={C.text} />
               </TouchableOpacity>
             )}
           </>
@@ -579,7 +580,7 @@ export default function ChatScreen() {
           style={[styles.micBtn, recording && styles.micBtnActive]}
           {...micPan.panHandlers}
         >
-          <Text style={styles.micGlyph}>{recording ? '■' : '🎤'}</Text>
+          <Ionicons name={recording ? 'stop' : 'mic-outline'} size={recording ? 20 : 22} color={recording ? '#fff' : C.text} />
         </View>
       </View>
     </KeyboardAvoidingView>

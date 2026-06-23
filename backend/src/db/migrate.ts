@@ -2261,6 +2261,26 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         WHERE is_creator_league = TRUE AND season_started_at IS NULL;
     `,
   },
+  {
+    // Comment replies (one level) + image attachments, on both comment
+    // surfaces. parent_comment_id points at a TOP-LEVEL comment; the routes
+    // normalize a reply-to-a-reply back to its top-level ancestor so threads
+    // never nest deeper than one level. image_url is a /uploads/comments/ path.
+    // Pure DDL (ADD COLUMN IF NOT EXISTS) so it's a safe, re-runnable no-op.
+    name: 'comments.replies_and_images',
+    sql: `
+      ALTER TABLE post_comments
+        ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES post_comments(comment_id) ON DELETE CASCADE,
+        ADD COLUMN IF NOT EXISTS image_url TEXT;
+      ALTER TABLE round_comments
+        ADD COLUMN IF NOT EXISTS parent_comment_id UUID REFERENCES round_comments(comment_id) ON DELETE CASCADE,
+        ADD COLUMN IF NOT EXISTS image_url TEXT;
+      CREATE INDEX IF NOT EXISTS post_comments_parent_idx
+        ON post_comments(parent_comment_id) WHERE parent_comment_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS round_comments_parent_idx
+        ON round_comments(parent_comment_id) WHERE parent_comment_id IS NOT NULL;
+    `,
+  },
 ];
 
 export async function runMigrations() {

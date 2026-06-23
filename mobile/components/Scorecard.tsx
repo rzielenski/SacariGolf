@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert } from 'react-native';
-import { api } from '../lib/api';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Modal, TextInput, Alert, Image } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { Ionicons } from '@expo/vector-icons';
+import { api, API_BASE } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { C, F } from '../lib/colors';
 import { scoreColor } from '../lib/golfMath';
@@ -29,6 +31,12 @@ type RoundComment = {
   client_id?: string | null;
   _status?: 'sending' | 'failed';
   _failReason?: string;
+  // One-level reply (points at a top-level comment) + optional image. The
+  // _image* fields are local-only, kept so a failed send can be retried.
+  parent_comment_id?: string | null;
+  image_url?: string | null;
+  _imageBase64?: string;
+  _imageMime?: string;
 };
 
 // Re-export so existing importers of HoleStat from Scorecard keep working.
@@ -325,6 +333,9 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
   const [reactions, setReactions] = useState<{ reaction: string; count: number; mine: boolean }[]>([]);
   const [comments, setComments] = useState<RoundComment[]>([]);
   const [commentDraft, setCommentDraft] = useState('');
+  // One-level reply target + a staged camera-roll image; both clear on submit.
+  const [replyTo, setReplyTo] = useState<{ topId: string; username: string } | null>(null);
+  const [pendingImage, setPendingImage] = useState<{ uri: string; base64: string; mime: string } | null>(null);
 
   // Local comments that haven't been confirmed by the server yet, keyed by
   // client_id. The merged view = server rows + these, with any local whose
@@ -370,10 +381,17 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
   /** POST one comment. On success the optimistic row is swapped for the
    *  confirmed row; on failure it flips to 'failed' (tap to retry).
    *  Retries reuse the same clientId, so duplicates are impossible. */
-  const postComment = useCallback(async (clientId: string, bodyText: string) => {
+  const postComment = useCallback(async (
+    clientId: string, bodyText: string,
+    parentId: string | null,
+    image: { base64: string; mime: string } | null,
+  ) => {
     if (!entry.round_id) return;
     try {
-      const r = await api.rounds.addComment(entry.round_id, bodyText, clientId);
+      const r = await api.rounds.addComment(entry.round_id, bodyText, {
+        clientId, parentCommentId: parentId ?? undefined,
+        imageBase64: image?.base64, imageMime: image?.mime,
+      });
       const cur = localsRef.current.get(clientId);
       localsRef.current.delete(clientId);
       const confirmed: RoundComment = {
@@ -381,8 +399,12 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
         comment_id: r.comment_id,
         created_at: r.created_at,
         client_id: r.client_id ?? clientId,
+        parent_comment_id: r.parent_comment_id ?? parentId ?? null,
+        image_url: r.image_url ?? cur?.image_url ?? null,
         _status: undefined,
         _failReason: undefined,
+        _imageBase64: undefined,
+        _imageMime: undefined,
       };
       setComments((prev) => {
         const without = prev.filter((c) =>
@@ -416,7 +438,8 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
     localsRef.current.set(clientId, again);
     setComments((prev) => prev.map((c) =>
       (c.client_id ?? c.comment_id) === clientId ? again : c));
-    void postComment(clientId, again.body);
+    void postComment(clientId, again.body, again.parent_comment_id ?? null,
+      again._imageBase64 ? { base64: again._imageBase64, mime: again._imageMime ?? 'image/jpeg' } : null);
   }, [postComment]);
 
   /** Remove a failed local comment that never reached the server. */
@@ -425,10 +448,28 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
     setComments((prev) => prev.filter((c) => (c.client_id ?? c.comment_id) !== clientId));
   }, []);
 
+  const pickImage = useCallback(async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Allow photo access to attach an image.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.6, base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]?.base64) return;
+    const a = result.assets[0];
+    setPendingImage({ uri: a.uri, base64: a.base64!, mime: a.mimeType ?? 'image/jpeg' });
+  }, []);
+
   const submitComment = () => {
     const text = commentDraft.trim();
-    if (!text || !entry.round_id || !user) return;
+    if ((!text && !pendingImage) || !entry.round_id || !user) return;
     setCommentDraft('');
+    const img = pendingImage;
+    const parent = replyTo;
+    setPendingImage(null);
+    setReplyTo(null);
     // Optimistic: the comment appears instantly in 'sending' state and the
     // POST happens behind it — same flow as chat bubbles. Failures show an
     // explicit tap-to-retry row instead of silently eating the text.
@@ -442,10 +483,15 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
       username: user.username,
       mine: true,
       _status: 'sending',
+      parent_comment_id: parent?.topId ?? null,
+      image_url: img?.uri ?? null,
+      _imageBase64: img?.base64,
+      _imageMime: img?.mime,
     };
     localsRef.current.set(clientId, local);
     setComments((prev) => [...prev, local]);
-    void postComment(clientId, text);
+    void postComment(clientId, text, parent?.topId ?? null,
+      img ? { base64: img.base64, mime: img.mime } : null);
   };
 
   const deleteComment = (commentId: string) => {
@@ -460,6 +506,63 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
       }
     ]);
   };
+
+  // Server image URLs are root-relative (/uploads/...); a staged local pick is
+  // a file:// uri. Prefix only the server ones.
+  const imgUri = (u: string) => (u.startsWith('/') ? `${API_BASE}${u}` : u);
+  const startReply = (c: RoundComment) =>
+    setReplyTo({ topId: c.parent_comment_id ?? c.comment_id, username: c.username });
+
+  const renderComment = (c: RoundComment, isReply: boolean) => (
+    <TouchableOpacity
+      key={c.client_id ?? c.comment_id}
+      style={[s.commentRow, isReply && s.commentReplyRow, c._status === 'sending' && { opacity: 0.55 }]}
+      disabled={c._status !== 'failed'}
+      onPress={() => c.client_id && retryComment(c.client_id)}
+      activeOpacity={0.7}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={s.commentAuthor}>{censor(c.username)}</Text>
+        {!!c.body && <Text style={s.commentBody}>{censor(c.body)}</Text>}
+        {c.image_url ? (
+          <Image source={{ uri: imgUri(c.image_url) }} style={s.commentImage} resizeMode="cover" />
+        ) : null}
+        {c._status === 'sending' ? (
+          <Text style={s.commentTime}>Sending…</Text>
+        ) : c._status === 'failed' ? (
+          <Text style={s.commentFailed}>
+            {c._failReason ? `${c._failReason} · tap to retry` : 'Not sent · tap to retry'}
+          </Text>
+        ) : (
+          <View style={s.commentMetaRow}>
+            <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
+            <TouchableOpacity onPress={() => startReply(c)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
+              <Text style={s.replyBtn}>Reply</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+      {c._status === 'failed' && c.client_id ? (
+        <TouchableOpacity onPress={() => discardComment(c.client_id!)}>
+          <Text style={s.commentDelete}>Discard</Text>
+        </TouchableOpacity>
+      ) : c.mine && !c._status ? (
+        <TouchableOpacity onPress={() => deleteComment(c.comment_id)}>
+          <Text style={s.commentDelete}>Delete</Text>
+        </TouchableOpacity>
+      ) : null}
+    </TouchableOpacity>
+  );
+
+  // One level: top-level comments, each followed by its replies.
+  const topComments = comments.filter((c) => !c.parent_comment_id);
+  const repliesByParent = new Map<string, RoundComment[]>();
+  for (const c of comments) {
+    if (!c.parent_comment_id) continue;
+    const arr = repliesByParent.get(c.parent_comment_id) ?? [];
+    arr.push(c);
+    repliesByParent.set(c.parent_comment_id, arr);
+  }
 
   return (
     <View style={s.modalContainer}>
@@ -532,56 +635,46 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
             <Text style={s.shotsTitle}>COMMENTS</Text>
             {comments.length === 0 ? (
               <Text style={s.emptyComment}>Be the first to comment.</Text>
-            ) : comments.map((c) => (
-              // Tap a failed row to retry the send; sending rows render dimmed.
-              <TouchableOpacity
-                key={c.client_id ?? c.comment_id}
-                style={[s.commentRow, c._status === 'sending' && { opacity: 0.55 }]}
-                disabled={c._status !== 'failed'}
-                onPress={() => c.client_id && retryComment(c.client_id)}
-                activeOpacity={0.7}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={s.commentAuthor}>{censor(c.username)}</Text>
-                  <Text style={s.commentBody}>{censor(c.body)}</Text>
-                  {c._status === 'sending' ? (
-                    <Text style={s.commentTime}>Sending…</Text>
-                  ) : c._status === 'failed' ? (
-                    <Text style={s.commentFailed}>
-                      {c._failReason ? `${c._failReason} · tap to retry` : 'Not sent · tap to retry'}
-                    </Text>
-                  ) : (
-                    <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
-                  )}
-                </View>
-                {/* Failed locals get Discard (drop the unsent text); confirmed
-                    own comments keep the server Delete. Hidden mid-send. */}
-                {c._status === 'failed' && c.client_id ? (
-                  <TouchableOpacity onPress={() => discardComment(c.client_id!)}>
-                    <Text style={s.commentDelete}>Discard</Text>
-                  </TouchableOpacity>
-                ) : c.mine && !c._status ? (
-                  <TouchableOpacity onPress={() => deleteComment(c.comment_id)}>
-                    <Text style={s.commentDelete}>Delete</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </TouchableOpacity>
+            ) : topComments.map((top) => (
+              <View key={top.client_id ?? top.comment_id}>
+                {renderComment(top, false)}
+                {(repliesByParent.get(top.comment_id) ?? []).map((rep) => renderComment(rep, true))}
+              </View>
             ))}
 
+            {replyTo && (
+              <View style={s.replyChip}>
+                <Text style={s.replyChipText} numberOfLines={1}>Replying to @{censor(replyTo.username)}</Text>
+                <TouchableOpacity onPress={() => setReplyTo(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="close" size={16} color={C.textMuted} />
+                </TouchableOpacity>
+              </View>
+            )}
+            {pendingImage && (
+              <View style={s.pendingImageWrap}>
+                <Image source={{ uri: pendingImage.uri }} style={s.pendingImage} />
+                <TouchableOpacity style={s.pendingImageX} onPress={() => setPendingImage(null)}>
+                  <Ionicons name="close-circle" size={22} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            )}
             <View style={s.commentInputRow}>
+              <TouchableOpacity onPress={pickImage} style={s.commentImgBtn} hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}>
+                <Ionicons name="image-outline" size={24} color={C.gold} />
+              </TouchableOpacity>
               <TextInput
                 style={s.commentInput}
                 value={commentDraft}
                 onChangeText={(t) => setCommentDraft(t.slice(0, 280))}
-                placeholder="Write a comment..."
+                placeholder={replyTo ? `Reply to @${replyTo.username}...` : 'Write a comment...'}
                 placeholderTextColor={C.textMuted}
                 multiline
                 maxLength={280}
               />
               <TouchableOpacity
-                style={[s.commentSendBtn, !commentDraft.trim() && { opacity: 0.4 }]}
+                style={[s.commentSendBtn, (!commentDraft.trim() && !pendingImage) && { opacity: 0.4 }]}
                 onPress={submitComment}
-                disabled={!commentDraft.trim()}
+                disabled={!commentDraft.trim() && !pendingImage}
               >
                 <Text style={s.commentSendText}>Post</Text>
               </TouchableOpacity>
@@ -824,4 +917,18 @@ const s = StyleSheet.create({
     backgroundColor: C.gold, borderRadius: 6, paddingHorizontal: 14, paddingVertical: 10,
   },
   commentSendText: { color: '#000', fontWeight: '800', fontSize: 13 },
+  commentReplyRow: { marginLeft: 24 },
+  commentImage: { width: 160, height: 160, borderRadius: 10, marginTop: 6, backgroundColor: C.bg },
+  commentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 4 },
+  replyBtn: { color: C.textMuted, fontSize: 11, fontWeight: '800' },
+  commentImgBtn: { paddingHorizontal: 2, paddingBottom: 8, alignSelf: 'flex-end' },
+  replyChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8,
+    paddingHorizontal: 12, paddingVertical: 8,
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+  },
+  replyChipText: { color: C.textMuted, fontSize: 12, flex: 1 },
+  pendingImageWrap: { marginTop: 8, alignSelf: 'flex-start' },
+  pendingImage: { width: 80, height: 80, borderRadius: 8, backgroundColor: C.card },
+  pendingImageX: { position: 'absolute', top: -8, right: -8 },
 });

@@ -14,7 +14,6 @@
  *   /healthz          health check
  */
 'use strict';
-require('dotenv').config();
 
 const path = require('path');
 const express = require('express');
@@ -54,16 +53,6 @@ app.use(express.json()); // pin editor AJAX posts
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h' }));
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
-
-// 3D hole renderer for the mobile app's WebView. Public, no auth, no data: the
-// app loads it by URL (so Mapbox gets a real https origin) and injects the shot
-// data + token via window.__CFG__. noindex so it never shows in search.
-app.get('/embed/hole-3d', (_req, res) => {
-  res.type('html')
-    .set('Cache-Control', 'no-store')
-    .set('X-Robots-Tag', 'noindex')
-    .send(R.render3dEmbed());
-});
 
 // ----- Auth: login / signup / logout ----------------------------------------
 app.get('/login', (req, res) => {

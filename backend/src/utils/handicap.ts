@@ -15,38 +15,36 @@ import { roundDifferential, type HandicapRound } from './scoring';
 export { roundDifferential };
 export type { HandicapRound };
 
-/** WHS lookup: how many of the lowest differentials to average + the
- *  small-sample adjustment, then the resulting index (or null if too few
- *  rounds). Input is the raw differential list (any order). */
+/**
+ * Handicap index = the average of the BEST 8 (lowest) differentials of the last
+ * 20 rounds. With fewer than 8 rounds in the window, average all of them EXCEPT
+ * the single worst, so one blow-up round doesn't anchor a new player's handicap.
+ * With a single round there's nothing to drop, so that round is used as-is.
+ * Returns null only when there are no rounds.
+ *
+ * The caller passes the last-20 differentials (any order), already scaled to
+ * 18-hole equivalents. The 20-round window is enforced by the caller's query.
+ */
 export function whsHandicapIndex(differentials: number[]): { handicapIndex: number | null; useCount: number } {
   const N = differentials.length;
-  let useCount = 0;
-  let adjustment = 0;
-  if (N >= 20) { useCount = 8; }
-  else if (N >= 19) { useCount = 7; }
-  else if (N >= 17) { useCount = 6; }
-  else if (N >= 15) { useCount = 5; }
-  else if (N >= 12) { useCount = 4; }
-  else if (N >= 9)  { useCount = 3; }
-  else if (N >= 7)  { useCount = 2; }
-  else if (N >= 6)  { useCount = 2; adjustment = -1; }
-  else if (N >= 5)  { useCount = 1; }
-  else if (N >= 4)  { useCount = 1; adjustment = -1; }
-  else if (N >= 3)  { useCount = 1; adjustment = -2; }
-
-  if (useCount === 0) return { handicapIndex: null, useCount };
-  const best = [...differentials].sort((a, b) => a - b).slice(0, useCount);
-  const avg = best.reduce((a, b) => a + b, 0) / best.length;
-  return { handicapIndex: Math.round((avg + adjustment) * 10) / 10, useCount };
+  if (N === 0) return { handicapIndex: null, useCount: 0 };
+  const sorted = [...differentials].sort((a, b) => a - b); // best (lowest) first
+  const chosen = N >= 8
+    ? sorted.slice(0, 8)        // best 8 of the last 20
+    : N === 1
+      ? sorted                  // one round: nothing to drop
+      : sorted.slice(0, N - 1); // drop only the single worst
+  const avg = chosen.reduce((a, b) => a + b, 0) / chosen.length;
+  return { handicapIndex: Math.round(avg * 10) / 10, useCount: chosen.length };
 }
 
 /**
  * One-off: recompute every player's stored handicap_index from their last
  * 20 SOLO rated rounds using the formula above, so the stored value (used on
  * the profile + strokes-gained baseline) matches the live handicap view.
- * Only writes users with enough rated solo rounds for an index — fewer than 3
- * keeps whatever they had. This DOES overwrite a manually-entered handicap
- * for anyone with 3+ solo rated rounds.
+ * Only writes users with at least one rated solo round; with none, it keeps
+ * whatever they had. This DOES overwrite a manually-entered handicap for
+ * anyone with rated solo rounds.
  */
 export async function backfillHandicaps(): Promise<{ usersUpdated: number }> {
   const { rows } = await pool.query(`
