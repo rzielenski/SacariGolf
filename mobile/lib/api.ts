@@ -991,6 +991,7 @@ export const api = {
       comment_id: string; user_id: string; username: string;
       avatar_url: string | null; body: string; created_at: string; mine: boolean;
       client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null;
+      like_count?: number; liked?: boolean;
     }[]>('GET', `/posts/${id}/comments`),
     /** `clientId` makes the send idempotent — retrying with the same id
      *  returns the original comment instead of double-posting. `parentCommentId`
@@ -1004,6 +1005,12 @@ export const api = {
       ),
     deleteComment: (id: string, commentId: string) =>
       request<{ success: true }>('DELETE', `/posts/${id}/comments/${commentId}`),
+    /** Toggle the viewer's like on a post; returns the new state + fresh count. */
+    toggleLike: (id: string) =>
+      request<{ liked: boolean; like_count: number }>('POST', `/posts/${id}/like`),
+    /** Toggle the viewer's like on a post comment. */
+    toggleCommentLike: (id: string, commentId: string) =>
+      request<{ liked: boolean; like_count: number }>('POST', `/posts/${id}/comments/${commentId}/like`),
   },
 
   tournaments: {
@@ -1058,7 +1065,7 @@ export const api = {
   rounds: {
     social: (roundId: string) => request<{
       reactions: { reaction: string; count: number; mine: boolean }[];
-      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean; client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null }[];
+      comments: { comment_id: string; user_id: string; username: string; body: string; created_at: string; mine: boolean; client_id?: string | null; parent_comment_id?: string | null; image_url?: string | null; like_count?: number; liked?: boolean }[];
     }>('GET', `/rounds/${roundId}/social`),
     toggleReaction: (roundId: string, reaction: string) =>
       request<{ added: boolean }>('POST', `/rounds/${roundId}/reactions`, { reaction }),
@@ -1073,6 +1080,9 @@ export const api = {
         { body, clientId: opts?.clientId, parentCommentId: opts?.parentCommentId ?? undefined, imageBase64: opts?.imageBase64, imageMime: opts?.imageMime }),
     deleteComment: (roundId: string, commentId: string) =>
       request<any>('DELETE', `/rounds/${roundId}/comments/${commentId}`),
+    /** Toggle the viewer's like on a round comment. */
+    toggleCommentLike: (roundId: string, commentId: string) =>
+      request<{ liked: boolean; like_count: number }>('POST', `/rounds/${roundId}/comments/${commentId}/like`),
   },
 
   dm: {
@@ -1100,5 +1110,19 @@ export const api = {
     clanInvites: () => request<any[]>('GET', '/clans/invites'),
     acceptClanInvite: (inviteId: string) => request<any>('POST', `/clans/invites/${inviteId}/accept`),
     declineClanInvite: (inviteId: string) => request<any>('POST', `/clans/invites/${inviteId}/decline`),
+  },
+
+  practice: {
+    /** Log a completed practice session. The server skips empty (0-shot) ones. */
+    logSession: (body: { kind: 'range' | 'putting'; shots: number; durationS: number; bpm?: number | null }) =>
+      request<any>('POST', '/practice/sessions', body),
+    /** Recent sessions for The Grind history. */
+    sessions: () => request<{
+      session_id: string; kind: 'range' | 'putting'; shots: number;
+      duration_s: number; bpm: number | null; created_at: string;
+    }[]>('GET', '/practice/sessions'),
+    /** Lifetime totals for the hub banner + profile stat. */
+    summary: () => request<{ total_shots: number; range_shots: number; putting_shots: number; session_count: number }>(
+      'GET', '/practice/summary'),
   },
 };

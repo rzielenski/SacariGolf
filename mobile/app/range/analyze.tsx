@@ -40,8 +40,15 @@ import {
 import { SwingPoseOverlay } from '../../components/SwingPoseOverlay';
 import { ClubheadTracer } from '../../components/ClubheadTracer';
 import { SwingAnnotator } from '../../components/SwingAnnotator';
+import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_W } = Dimensions.get('window');
+
+/** ms → m:ss for the scrubber readout. */
+function fmtTime(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
 
 type Keyframe = 'address' | 'top' | 'impact' | 'followThrough';
 const KEYFRAME_LABELS: Record<Keyframe, string> = {
@@ -85,12 +92,18 @@ export default function RangeAnalyze() {
   // < 1.0 as slow-motion, pitch-correcting the audio track (we have no
   // audio that matters so this just slows the frames).
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  // Custom playback controls (native controls reset rate to 1× on play, which
+  // is why slo-mo did nothing). We drive play/pause + seek ourselves.
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [durationMs, setDurationMs] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
+  const scrubWidthRef = useRef(1);
 
   // ── Drawing / annotation ──────────────────────────────────────────
   // Strokes are kept in component state during the session and persisted
   // to the saved RangeSwing whenever they change so a reload restores
   // the drawing.
-  const [drawingMode, setDrawingMode] = useState<'pen' | 'eraser'>('pen');
+  const [drawingMode, setDrawingMode] = useState<'pen' | 'eraser' | 'line' | 'circle'>('pen');
   const [drawingEnabled, setDrawingEnabled] = useState(false);
   const [penColor, setPenColor] = useState<string>(PEN_COLORS[0]);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
@@ -135,16 +148,38 @@ export default function RangeAnalyze() {
   const onPlaybackStatusUpdate = (s: AVPlaybackStatus) => {
     if (!s.isLoaded) return;
     setPlaybackTimeSec(s.positionMillis / 1000);
-    // expo-av resets the playback rate to 1.0 on every loop (and the `rate`
-    // prop doesn't reliably re-apply on the new architecture). Swing clips
-    // are short and loop constantly, so without re-applying here the slo-mo
-    // snaps back to full speed almost immediately and looks like it does
-    // nothing. The guard makes this a no-op once the live rate already
-    // matches the chosen rate, so it isn't spamming setRateAsync per frame.
+    setPositionMs(s.positionMillis);
+    setIsPlaying(s.isPlaying);
+    if (s.durationMillis != null) setDurationMs(s.durationMillis);
+    // expo-av resets the playback rate to 1.0 on every loop, so re-apply the
+    // chosen slo-mo rate. The guard makes this a no-op once it already matches.
     if (s.isPlaying && Math.abs((s.rate ?? 1) - playbackRate) > 0.01) {
       videoRef.current?.setRateAsync(playbackRate, true).catch(() => { });
     }
   };
+
+  // Custom play/pause — enforces the slo-mo rate right after play so it sticks
+  // (native controls would resume at 1×, which is why slo-mo "did nothing").
+  const togglePlay = useCallback(async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (isPlaying) { await v.pauseAsync().catch(() => { }); return; }
+    await v.playAsync().catch(() => { });
+    await v.setRateAsync(playbackRate, true).catch(() => { });
+  }, [isPlaying, playbackRate]);
+
+  // Scrubber: map a touch x within the track to a seek position.
+  const seekToX = useCallback((x: number) => {
+    if (durationMs <= 0) return;
+    const frac = Math.max(0, Math.min(1, x / (scrubWidthRef.current || 1)));
+    videoRef.current?.setPositionAsync(frac * durationMs).catch(() => { });
+  }, [durationMs]);
+  const scrubPan = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e) => seekToX(e.nativeEvent.locationX),
+    onPanResponderMove: (e) => seekToX(e.nativeEvent.locationX),
+  }), [seekToX]);
 
   if (swing === undefined) {
     return (
@@ -189,10 +224,9 @@ export default function RangeAnalyze() {
             ref={videoRef}
             source={{ uri: swing.video_uri }}
             style={styles.video}
-            // Disable native controls while drawing so seek-bar taps
-            // don't intercept stroke touches. Reinstated when the user
-            // toggles drawing off.
-            useNativeControls={!drawingEnabled}
+            // Custom controls below: native controls reset the rate to 1× on
+            // play (defeating slo-mo), so we drive play/pause + seek ourselves.
+            useNativeControls={false}
             resizeMode={ResizeMode.CONTAIN}
             isLooping
             rate={playbackRate}
@@ -218,6 +252,24 @@ export default function RangeAnalyze() {
             penColor={penColor}
             onStrokesChange={persistStrokes}
           />
+        </View>
+
+        {/* Custom playback bar — play/pause enforces the slo-mo rate, and the
+            scrubber seeks. Replaces native controls so slo-mo actually sticks. */}
+        <View style={styles.playbar}>
+          <TouchableOpacity style={styles.playBtn} onPress={togglePlay} activeOpacity={0.8}>
+            <Ionicons name={isPlaying ? 'pause' : 'play'} size={20} color={C.bg} />
+          </TouchableOpacity>
+          <View
+            style={styles.scrubTrack}
+            onLayout={(e) => { scrubWidthRef.current = e.nativeEvent.layout.width || 1; }}
+            {...scrubPan.panHandlers}
+          >
+            <View style={styles.scrubRail}>
+              <View style={[styles.scrubFill, { width: `${durationMs > 0 ? Math.min(100, (positionMs / durationMs) * 100) : 0}%` }]} />
+            </View>
+          </View>
+          <Text style={styles.timeText}>{fmtTime(positionMs)} / {fmtTime(durationMs)}</Text>
         </View>
 
         {/* ── Slo-mo playback chips ────────────────────────────────────
@@ -291,6 +343,20 @@ export default function RangeAnalyze() {
                 drawingEnabled && drawingMode === 'eraser' && styles.toolBtnLabelActive,
               ]}>⌫ Erase</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolBtn, drawingEnabled && drawingMode === 'line' && styles.toolBtnActive]}
+              onPress={() => { if (!drawingEnabled) setDrawingEnabled(true); setDrawingMode('line'); }}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.toolBtnLabel, drawingEnabled && drawingMode === 'line' && styles.toolBtnLabelActive]}>╱ Line</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.toolBtn, drawingEnabled && drawingMode === 'circle' && styles.toolBtnActive]}
+              onPress={() => { if (!drawingEnabled) setDrawingEnabled(true); setDrawingMode('circle'); }}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.toolBtnLabel, drawingEnabled && drawingMode === 'circle' && styles.toolBtnLabelActive]}>○ Circle</Text>
+            </TouchableOpacity>
             {/* The Pen / Erase chips above implicitly enable drawing —
                 this button only appears once drawing is on, as the
                 explicit off-switch (also re-enables scroll). */}
@@ -317,7 +383,7 @@ export default function RangeAnalyze() {
 
         {/* Color picker — only in pen mode. Five high-saturation colors
             tuned to read against grass / sky / netting backgrounds. */}
-        {drawingEnabled && drawingMode === 'pen' && (
+        {drawingEnabled && drawingMode !== 'eraser' && (
           <View style={styles.colorRow}>
             {PEN_COLORS.map((c) => (
               <TouchableOpacity
@@ -1059,6 +1125,12 @@ const styles = StyleSheet.create({
   toolBtnActive: { backgroundColor: C.gold, borderColor: C.gold },
   toolBtnLabel: { color: C.textMuted, fontSize: 12, fontWeight: '800' },
   toolBtnLabelActive: { color: C.bg },
+  playbar: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 14 },
+  playBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' },
+  scrubTrack: { flex: 1, height: 28, justifyContent: 'center' },
+  scrubRail: { height: 6, borderRadius: 3, backgroundColor: C.border, overflow: 'hidden' },
+  scrubFill: { height: 6, borderRadius: 3, backgroundColor: C.gold },
+  timeText: { color: C.textMuted, fontSize: 11, fontWeight: '700', minWidth: 78, textAlign: 'right' },
 
   colorRow: {
     flexDirection: 'row', gap: 10,

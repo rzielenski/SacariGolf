@@ -80,6 +80,8 @@ export default function ProfileScreen() {
   // by hand with the +/- on the profile tile. `drinksBusy` debounces taps
   // so a fast double-tap can't race two writes out of order.
   const [drinks, setDrinks] = useState(0);
+  // Lifetime practice shots from The Grind (server-summed across sessions).
+  const [grindShots, setGrindShots] = useState<number | null>(null);
   const drinksBusy = useRef(false);
   // The user's teams (clans). Surfaced on the profile so the Teams sub-tab
   // didn't have to keep haunting the Social area after that tab was
@@ -189,6 +191,7 @@ export default function ProfileScreen() {
         setDrinks(data.drinks ?? 0);
       })
       .catch(() => { });
+    api.practice.summary().then((sm) => setGrindShots(sm.total_shots)).catch(() => { });
     // Teams the user belongs to. Cheap call, runs alongside the profile
     // hydrate so the My Teams section is populated by the time the user
     // scrolls down to it.
@@ -593,10 +596,11 @@ export default function ProfileScreen() {
             <Text style={styles.rangeCtaIconText}>⛳︎</Text>
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.rangeCtaLabel}>RANGE SESSION</Text>
+            <Text style={styles.rangeCtaLabel}>THE GRIND</Text>
             <Text style={styles.rangeCtaBody}>
-              Record a swing — body-pose analysis, clubhead trace, full
-              comparison to pro and rec-player baselines.
+              {grindShots != null
+                ? `${grindShots.toLocaleString()} shots logged. Range, putting + swing review.`
+                : 'Range, putting + swing review sessions.'}
             </Text>
           </View>
           <Text style={styles.rangeCtaChev}>›</Text>

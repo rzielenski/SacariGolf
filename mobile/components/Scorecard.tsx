@@ -36,6 +36,8 @@ type RoundComment = {
   // _image* fields are local-only, kept so a failed send can be retried.
   parent_comment_id?: string | null;
   image_url?: string | null;
+  like_count?: number;
+  liked?: boolean;
   _imageBase64?: string;
   _imageMime?: string;
 };
@@ -514,6 +516,19 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
   const startReply = (c: RoundComment) =>
     setReplyTo({ topId: c.parent_comment_id ?? c.comment_id, username: c.username });
 
+  // Optimistic like toggle on a confirmed round comment.
+  const toggleCommentLike = (c: RoundComment) => {
+    if (c._status || !entry.round_id) return;
+    const liked = !c.liked;
+    const like_count = Math.max(0, (c.like_count ?? 0) + (liked ? 1 : -1));
+    const set = (l: boolean, n: number) => setComments((prev) => prev.map((x) =>
+      x.comment_id === c.comment_id ? { ...x, liked: l, like_count: n } : x));
+    set(liked, like_count);
+    api.rounds.toggleCommentLike(entry.round_id, c.comment_id)
+      .then((r) => set(r.liked, r.like_count))
+      .catch(() => set(!!c.liked, c.like_count ?? 0));
+  };
+
   const renderComment = (c: RoundComment, isReply: boolean) => (
     <TouchableOpacity
       key={c.client_id ?? c.comment_id}
@@ -539,6 +554,10 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
             <Text style={s.commentTime}>{new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</Text>
             <TouchableOpacity onPress={() => startReply(c)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
               <Text style={s.replyBtn}>Reply</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => toggleCommentLike(c)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} style={s.likeBtn}>
+              <Ionicons name={c.liked ? 'heart' : 'heart-outline'} size={14} color={c.liked ? C.red : C.textMuted} />
+              {c.like_count ? <Text style={s.likeCount}>{c.like_count}</Text> : null}
             </TouchableOpacity>
           </View>
         )}
@@ -922,6 +941,8 @@ const s = StyleSheet.create({
   commentImage: { width: 160, height: 160, borderRadius: 10, marginTop: 6, backgroundColor: C.bg },
   commentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 4 },
   replyBtn: { color: C.textMuted, fontSize: 11, fontWeight: '800' },
+  likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  likeCount: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
   commentImgBtn: { paddingHorizontal: 2, paddingBottom: 8, alignSelf: 'flex-end' },
   replyChip: {
     flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8,

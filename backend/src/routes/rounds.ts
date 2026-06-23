@@ -62,7 +62,9 @@ router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: R
   const { rows: cmRows } = await pool.query(
     `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at, c.client_id,
             c.parent_comment_id, c.image_url,
-            (c.user_id = $2) AS mine
+            (c.user_id = $2) AS mine,
+            (SELECT COUNT(*)::int FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id) AS like_count,
+            EXISTS(SELECT 1 FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id AND rcl.user_id = $2) AS liked
      FROM round_comments c
      JOIN users u ON u.user_id = c.user_id
      WHERE c.round_id = $1
@@ -232,6 +234,28 @@ router.delete('/:roundId/comments/:commentId', requireAuth, wrap(async (req: Aut
   );
   if (!rowCount) return res.status(404).json({ error: 'not found or not yours' });
   return res.json({ success: true });
+}));
+
+// POST /rounds/:roundId/comments/:commentId/like — toggle the viewer's like.
+// Returns the new liked state + fresh count for the client's optimistic flip.
+router.post('/:roundId/comments/:commentId/like', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const del = await pool.query(
+    `DELETE FROM round_comment_likes WHERE comment_id = $1 AND user_id = $2`,
+    [req.params.commentId, req.userId]
+  );
+  let liked = false;
+  if (del.rowCount === 0) {
+    await pool.query(
+      `INSERT INTO round_comment_likes (comment_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [req.params.commentId, req.userId]
+    );
+    liked = true;
+  }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS like_count FROM round_comment_likes WHERE comment_id = $1`,
+    [req.params.commentId]
+  );
+  return res.json({ liked, like_count: rows[0].like_count });
 }));
 
 export default router;

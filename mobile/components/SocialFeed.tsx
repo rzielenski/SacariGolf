@@ -341,6 +341,19 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
   // live after you add/delete without re-fetching the whole feed.
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [commentCount, setCommentCount] = useState<number>(post.comment_count ?? 0);
+  const [liked, setLiked] = useState<boolean>(!!post.liked);
+  const [likeCount, setLikeCount] = useState<number>(post.like_count ?? 0);
+  // Optimistic like toggle: flip immediately, reconcile with the server count,
+  // revert to the captured state on failure.
+  const toggleLike = () => {
+    const prevLiked = liked, prevCount = likeCount;
+    const nextLiked = !prevLiked;
+    setLiked(nextLiked);
+    setLikeCount(Math.max(0, prevCount + (nextLiked ? 1 : -1)));
+    api.posts.toggleLike(post.post_id)
+      .then((r) => { setLiked(r.liked); setLikeCount(r.like_count); })
+      .catch(() => { setLiked(prevLiked); setLikeCount(prevCount); });
+  };
   const when = relativeTime(post.created_at);
   return (
     <TouchableOpacity
@@ -410,19 +423,23 @@ function PostCard({ post, isOwn, onDelete, onReport }: {
         </>
       )}
 
-      {/* Comment bar — opens the thread for ANY post (yours or others').
-          Shows a live count once there are comments. */}
-      <TouchableOpacity
-        style={s.commentBar}
-        onPress={() => setCommentsOpen(true)}
-        activeOpacity={0.7}
-      >
-        <Text style={s.commentBarText}>
-          💬 {commentCount > 0
-            ? `${commentCount} comment${commentCount === 1 ? '' : 's'}`
-            : 'Comment'}
-        </Text>
-      </TouchableOpacity>
+      {/* Action bar — like + comment, for ANY post (yours or others').
+          Both show a live count once there's at least one. */}
+      <View style={s.actionBar}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={toggleLike}
+          activeOpacity={0.7}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+        >
+          <Ionicons name={liked ? 'heart' : 'heart-outline'} size={18} color={liked ? C.red : C.textMuted} />
+          <Text style={[s.actionText, liked && { color: C.red }]}>{likeCount > 0 ? likeCount : 'Like'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={s.actionBtn} onPress={() => setCommentsOpen(true)} activeOpacity={0.7}>
+          <Ionicons name="chatbubble-outline" size={16} color={C.textMuted} />
+          <Text style={s.actionText}>{commentCount > 0 ? `${commentCount}` : 'Comment'}</Text>
+        </TouchableOpacity>
+      </View>
 
       <CommentsModal
         visible={commentsOpen}
@@ -650,6 +667,20 @@ function CommentsModal({
   const startReply = (cm: any) =>
     setReplyTo({ topId: cm.parent_comment_id ?? cm.comment_id, username: cm.username });
 
+  // Optimistic like toggle on a confirmed comment; reconciles with the server
+  // count and reverts on failure.
+  const toggleCommentLike = (cm: any) => {
+    if (cm._status) return;
+    const liked = !cm.liked;
+    const like_count = Math.max(0, (cm.like_count ?? 0) + (liked ? 1 : -1));
+    const set = (l: boolean, n: number) => apply((commentsRef.current ?? []).map((c) =>
+      c.comment_id === cm.comment_id ? { ...c, liked: l, like_count: n } : c));
+    set(liked, like_count);
+    api.posts.toggleCommentLike(postId, cm.comment_id)
+      .then((r) => set(r.liked, r.like_count))
+      .catch(() => set(!!cm.liked, cm.like_count ?? 0));
+  };
+
   // Shared row renderer for both top-level comments and their indented replies.
   const renderRow = (cm: any, isReply: boolean) => (
     <TouchableOpacity
@@ -690,6 +721,10 @@ function CommentsModal({
             <Text style={s.commentTime}>{relativeTime(cm.created_at)}</Text>
             <TouchableOpacity onPress={() => startReply(cm)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
               <Text style={s.replyBtn}>Reply</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => toggleCommentLike(cm)} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }} style={s.likeBtn}>
+              <Ionicons name={cm.liked ? 'heart' : 'heart-outline'} size={14} color={cm.liked ? C.red : C.textMuted} />
+              {cm.like_count ? <Text style={s.likeCount}>{cm.like_count}</Text> : null}
             </TouchableOpacity>
           </View>
         )}
@@ -1181,6 +1216,13 @@ const s = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: C.border + '88',
   },
   commentBarText: { color: C.textMuted, fontSize: 13, fontWeight: '700' },
+  actionBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 22,
+    marginTop: 12, paddingTop: 10,
+    borderTopWidth: 1, borderTopColor: C.border + '88',
+  },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  actionText: { color: C.textMuted, fontSize: 13, fontWeight: '700' },
   commentsEmpty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 24, fontStyle: 'italic' },
   commentRow: {
     flexDirection: 'row', gap: 10, alignItems: 'flex-start',
@@ -1211,6 +1253,8 @@ const s = StyleSheet.create({
   commentImage: { width: 180, height: 180, borderRadius: 12, marginTop: 6, backgroundColor: C.card },
   commentMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 3 },
   replyBtn: { color: C.textMuted, fontSize: 11, fontWeight: '800' },
+  likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  likeCount: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
   commentImgBtn: { paddingHorizontal: 4, paddingBottom: 8, alignSelf: 'flex-end' },
   replyChip: {
     flexDirection: 'row', alignItems: 'center', gap: 10,

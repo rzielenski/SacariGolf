@@ -2281,6 +2281,52 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON round_comments(parent_comment_id) WHERE parent_comment_id IS NOT NULL;
     `,
   },
+  {
+    // Likes on posts and on both comment surfaces. Each is a (target, user)
+    // join table with a cascade so likes vanish with their target. A like count
+    // is COUNT(*) over the PK prefix, so no extra index is needed. Pure DDL —
+    // safe, re-runnable no-op.
+    name: 'likes.posts_and_comments',
+    sql: `
+      CREATE TABLE IF NOT EXISTS post_likes (
+        post_id    UUID NOT NULL REFERENCES posts(post_id) ON DELETE CASCADE,
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, user_id)
+      );
+      CREATE TABLE IF NOT EXISTS post_comment_likes (
+        comment_id UUID NOT NULL REFERENCES post_comments(comment_id) ON DELETE CASCADE,
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (comment_id, user_id)
+      );
+      CREATE TABLE IF NOT EXISTS round_comment_likes (
+        comment_id UUID NOT NULL REFERENCES round_comments(comment_id) ON DELETE CASCADE,
+        user_id    UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (comment_id, user_id)
+      );
+    `,
+  },
+  {
+    // Practice sessions for "The Grind" — range + putting reps logged from the
+    // session screens. Lifetime shot totals (summed here) drive the profile
+    // stat. Pure DDL, safe re-runnable no-op.
+    name: 'practice_sessions.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS practice_sessions (
+        session_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        kind        TEXT NOT NULL,            -- 'range' | 'putting'
+        shots       INTEGER NOT NULL DEFAULT 0,
+        duration_s  INTEGER NOT NULL DEFAULT 0,
+        bpm         INTEGER,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS practice_sessions_user_idx
+        ON practice_sessions(user_id, created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

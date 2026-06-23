@@ -43,8 +43,8 @@ interface Props {
    *  layer is purely visual (pointerEvents="none") and the video player
    *  controls underneath remain interactive. */
   drawing: boolean;
-  /** Pen mode draws a new stroke; eraser mode removes existing strokes. */
-  mode: 'pen' | 'eraser';
+  /** pen = freehand, line = straight 2-point, circle = round, eraser = remove. */
+  mode: 'pen' | 'eraser' | 'line' | 'circle';
   /** Hex color for new pen strokes. */
   penColor: string;
   /** Width in px (at the overlay's natural size) for new pen strokes. */
@@ -64,6 +64,8 @@ export function SwingAnnotator({
   const [active, setActive] = useState<Stroke | null>(null);
   const activeRef = useRef<Stroke | null>(null);
   activeRef.current = active;
+  // Start point for the line / circle tools (the drag anchor).
+  const anchorRef = useRef<{ x: number; y: number } | null>(null);
 
   // Re-create the PanResponder whenever the mode / dimensions / pen-color
   // change so the closure captures the right values. Otherwise an
@@ -91,7 +93,9 @@ export function SwingAnnotator({
         }
         return;
       }
-      // Pen: start a new stroke at the touch point.
+      // Pen / line / circle all begin a stroke here; the anchor seeds the
+      // straight-line + circle geometry computed on move.
+      anchorRef.current = { x, y };
       setActive({
         id: `s-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
         color: penColor,
@@ -113,6 +117,17 @@ export function SwingAnnotator({
           next.splice(idx, 1);
           onStrokesChange(next);
         }
+        return;
+      }
+      const anchor = anchorRef.current;
+      if (mode === 'line' && anchor) {
+        // Straight line: just the two endpoints, replaced live as you drag.
+        setActive((prev) => (prev ? { ...prev, points: [anchor, { x, y }] } : prev));
+        return;
+      }
+      if (mode === 'circle' && anchor) {
+        // Round circle: anchor is the centre, the drag sets the radius.
+        setActive((prev) => (prev ? { ...prev, points: circlePoints(anchor, { x, y }, width, height) } : prev));
         return;
       }
       // Pen: append the new sample to the active stroke. Skip a sample if
@@ -311,6 +326,24 @@ function segmentDistancePx(
   const cy = ay + t * dy;
   const ddx = px - cx, ddy = py - cy;
   return Math.sqrt(ddx * ddx + ddy * ddy);
+}
+
+/** N-point polyline approximating a round circle in PIXEL space (so it stays
+ *  round despite the anisotropic normalized coords), centred on `center` with
+ *  radius = distance to `edge`. Returned in normalized 0..1 coords. */
+function circlePoints(
+  center: { x: number; y: number }, edge: { x: number; y: number },
+  width: number, height: number,
+): { x: number; y: number }[] {
+  const cx = center.x * width, cy = center.y * height;
+  const r = Math.hypot(edge.x * width - cx, edge.y * height - cy);
+  const N = 48;
+  const pts: { x: number; y: number }[] = [];
+  for (let i = 0; i <= N; i++) {
+    const a = (2 * Math.PI * i) / N;
+    pts.push({ x: clamp01((cx + r * Math.cos(a)) / width), y: clamp01((cy + r * Math.sin(a)) / height) });
+  }
+  return pts;
 }
 
 function clamp01(v: number): number {

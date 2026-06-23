@@ -1138,7 +1138,8 @@ router.post('/:id/organizer-scores', requireAuth, wrap(async (req: AuthRequest, 
 
 // Sanitise a hole_stats array — same length as scores, each entry has
 // putts (0–10), chips (0–10), gir (bool), fairwayHit (bool|null) plus the
-// optional advanced fields fairwayMiss / greenMiss / puttDistances. Bad input
+// optional advanced fields fairwayMiss / greenMiss / puttDistances and the
+// balls-lost / balls-found counts logged from the hole-detail sheet. Bad input
 // is silently dropped rather than failing the whole submission.
 const FAIRWAY_MISS_VALUES = new Set(['left', 'right']);
 const GREEN_MISS_VALUES = new Set(['left', 'right', 'short', 'long']);
@@ -1170,6 +1171,12 @@ function cleanHoleStats(input: any, expectedLength: number): any[] {
         .map((d: any) => Math.round(Number(d)))
         .filter((d: number) => Number.isFinite(d) && d >= 0 && d <= PUTT_DIST_MAX_FT);
       if (dists.length) cleaned.puttDistances = dists;
+    }
+    if (typeof h.ballsLost === 'number' && h.ballsLost >= 0 && h.ballsLost <= 50) {
+      cleaned.ballsLost = Math.floor(h.ballsLost);
+    }
+    if (typeof h.ballsFound === 'number' && h.ballsFound >= 0 && h.ballsFound <= 50) {
+      cleaned.ballsFound = Math.floor(h.ballsFound);
     }
     return cleaned;
   });

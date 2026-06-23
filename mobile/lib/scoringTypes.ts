@@ -89,6 +89,9 @@ export interface HoleStat {
   greenMiss?: 'left' | 'right' | 'short' | 'long' | null;
   /** Distance per putt in feet. Length should match `putts`. */
   puttDistances?: number[];
+  /** Balls lost / found on this hole, logged from the Hole Detail sheet. */
+  ballsLost?: number;
+  ballsFound?: number;
 }
 
 /** Cached pin location for a hole — either from the server (`holes.pin_lat`)

@@ -383,6 +383,9 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        -- round-trip per post. Cheap correlated subquery; the
        -- (post_id, created_at) index covers it.
        (SELECT COUNT(*)::int FROM post_comments pc WHERE pc.post_id = p.post_id) AS comment_count,
+       -- Like count + whether the viewer has liked, same cheap-subquery pattern.
+       (SELECT COUNT(*)::int FROM post_likes pl WHERE pl.post_id = p.post_id) AS like_count,
+       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.post_id AND pl.user_id = $1) AS liked,
        CASE
          WHEN p.user_id = $1                       THEN 'self'
          WHEN p.user_id IN (SELECT uid FROM my_friends) THEN 'friend'
@@ -438,6 +441,8 @@ router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Resp
     `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
             c.parent_comment_id, c.image_url,
             (c.user_id = $2) AS mine,
+            (SELECT COUNT(*)::int FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id) AS like_count,
+            EXISTS(SELECT 1 FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id AND pcl.user_id = $2) AS liked,
             ${equippedVisualSql('u')} AS equipped_visual
        FROM post_comments c
        JOIN users u ON u.user_id = c.user_id
@@ -579,6 +584,49 @@ router.delete('/:id/comments/:commentId', requireAuth, wrap(async (req: AuthRequ
   );
   if (!rowCount) return res.status(404).json({ error: 'not found or not yours' });
   return res.json({ success: true });
+}));
+
+// POST /posts/:id/like — toggle the viewer's like on a post. Returns the new
+// liked state + the fresh count so the client can reconcile its optimistic flip.
+router.post('/:id/like', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const del = await pool.query(
+    `DELETE FROM post_likes WHERE post_id = $1 AND user_id = $2`,
+    [req.params.id, req.userId]
+  );
+  let liked = false;
+  if (del.rowCount === 0) {
+    await pool.query(
+      `INSERT INTO post_likes (post_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [req.params.id, req.userId]
+    );
+    liked = true;
+  }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS like_count FROM post_likes WHERE post_id = $1`,
+    [req.params.id]
+  );
+  return res.json({ liked, like_count: rows[0].like_count });
+}));
+
+// POST /posts/:id/comments/:commentId/like — toggle the viewer's like on a comment.
+router.post('/:id/comments/:commentId/like', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const del = await pool.query(
+    `DELETE FROM post_comment_likes WHERE comment_id = $1 AND user_id = $2`,
+    [req.params.commentId, req.userId]
+  );
+  let liked = false;
+  if (del.rowCount === 0) {
+    await pool.query(
+      `INSERT INTO post_comment_likes (comment_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [req.params.commentId, req.userId]
+    );
+    liked = true;
+  }
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS like_count FROM post_comment_likes WHERE comment_id = $1`,
+    [req.params.commentId]
+  );
+  return res.json({ liked, like_count: rows[0].like_count });
 }));
 
 export default router;

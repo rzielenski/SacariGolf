@@ -185,6 +185,9 @@ export default function ScoringScreen() {
     // One distance entry per putt taken (in feet). Length should match `putts`.
     // Allowed stops: 3, 6, 10, 15, 20, 30, 40, 50.
     puttDistances?: number[];
+    // Balls lost / found on this hole — logged from the Hole Detail sheet.
+    ballsLost?: number;
+    ballsFound?: number;
   };
   const [holeStats, setHoleStats] = useState<HoleStat[]>([]);
   // Per-hole record of which fields the user manually set. Auto-derivation
@@ -3484,6 +3487,8 @@ export default function ScoringScreen() {
                 if (hs?.fairwayHit === false) bits.push(`FW ${hs.fairwayMiss ?? 'miss'}`);
                 if (hs?.gir === true) bits.push('GIR');
                 if (hs?.gir === false) bits.push(`grn ${hs.greenMiss ?? 'miss'}`);
+                if (hs?.ballsLost) bits.push(`${hs.ballsLost} lost`);
+                if (hs?.ballsFound) bits.push(`${hs.ballsFound} found`);
                 const hasAuto = ['fairwayHit','fairwayMiss','gir','greenMiss','putts','chips']
                   .some(k => (hs as any)?.[k] !== undefined && !manual.has(k));
                 if (!bits.length) {
@@ -4480,6 +4485,21 @@ function AdvancedEntryModal({
                 label="Chips"
                 value={stat?.chips ?? null}
                 onChange={(v) => onChange({ chips: v })}
+              />
+            </View>
+
+            {/* Balls lost / found this hole — logged without leaving the round. */}
+            <Text style={styles.advSection}>BALLS</Text>
+            <View style={styles.advCountsRow}>
+              <StatStepper
+                label="Lost"
+                value={stat?.ballsLost ?? null}
+                onChange={(v) => onChange({ ballsLost: v })}
+              />
+              <StatStepper
+                label="Found"
+                value={stat?.ballsFound ?? null}
+                onChange={(v) => onChange({ ballsFound: v })}
               />
             </View>
 
