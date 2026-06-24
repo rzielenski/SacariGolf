@@ -14,6 +14,27 @@ import pool from '../db/pool';
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const CHUNK_SIZE = 100;
 
+/**
+ * Social-media-style like-notification throttle. The owner is pinged on each of
+ * the first few likes, then progressively less often as the count climbs, so a
+ * post that takes off doesn't bury them in pings. Returns true only on
+ * "milestone" counts (pass the NEW total after the like):
+ *
+ *   1,2,3,4,5            every one of the first five
+ *   10,20,30,…,100       then every ten
+ *   200,300,…,1000       then every hundred
+ *   2000,3000,…          then every thousand
+ *
+ * So 100 likes ⇒ 15 pings, 1000 likes ⇒ 24 pings — not 100 or 1000.
+ */
+export function isLikeNotifyMilestone(count: number): boolean {
+  if (count <= 0) return false;
+  if (count <= 5) return true;
+  if (count <= 100) return count % 10 === 0;
+  if (count <= 1000) return count % 100 === 0;
+  return count % 1000 === 0;
+}
+
 async function pruneDeadToken(token: string) {
   try {
     await pool.query(

@@ -201,20 +201,42 @@ router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res
     return res.status(409).json({ error: 'Duplicate send' });
   }
 
-  // Push to round owner (fire-and-forget). Truncate body in the push so a
-  // long comment doesn't make the notification overflow on lock screens.
-  pushTargetFor(req.params.roundId, req.userId!).then((tgt) => {
-    if (!tgt) return;
-    const preview = body
-      ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
-      : 'Sent a photo';
-    return sendPush(
-      [tgt.push_token],
-      `${tgt.actor_name} commented on your round`,
-      preview,
-      { type: 'round_comment', roundId: req.params.roundId, commentId: rows[0].comment_id, fromUserId: req.userId }
-    );
-  }).catch(() => { /* swallow */ });
+  // Push (fire-and-forget). A reply pings the PARENT comment's author
+  // ("replied to your comment"); a top-level comment pings the round owner
+  // ("commented on your round"). Body is truncated so a long comment doesn't
+  // overflow the lock screen.
+  const preview = body
+    ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
+    : 'Sent a photo';
+  if (parentId) {
+    pool.query(
+      `SELECT c.user_id AS author_id, u.push_token, actor.username AS actor_name
+         FROM round_comments c
+         JOIN users u ON u.user_id = c.user_id
+         JOIN users actor ON actor.user_id = $2
+        WHERE c.comment_id = $1`,
+      [parentId, req.userId]
+    ).then(({ rows: pr }) => {
+      const pa = pr[0];
+      if (!pa || pa.author_id === req.userId || !pa.push_token) return;
+      return sendPush(
+        [pa.push_token],
+        `${pa.actor_name} replied to your comment`,
+        preview,
+        { type: 'round_comment_reply', roundId: req.params.roundId, commentId: rows[0].comment_id, parentCommentId: parentId, fromUserId: req.userId }
+      );
+    }).catch(() => { /* swallow */ });
+  } else {
+    pushTargetFor(req.params.roundId, req.userId!).then((tgt) => {
+      if (!tgt) return;
+      return sendPush(
+        [tgt.push_token],
+        `${tgt.actor_name} commented on your round`,
+        preview,
+        { type: 'round_comment', roundId: req.params.roundId, commentId: rows[0].comment_id, fromUserId: req.userId }
+      );
+    }).catch(() => { /* swallow */ });
+  }
 
   return res.json({
     success: true,

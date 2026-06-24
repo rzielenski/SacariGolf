@@ -365,8 +365,13 @@ export default function ProfileScreen() {
     setNotifVisible(false);
     if (notif.type === 'match_result' || notif.type === 'match_invite') {
       router.push(`/match/${notif.data.matchId}` as any);
-    } else if (notif.type === 'mention') {
-      // Tagged in a post → open the feed (home tab). No per-post screen.
+    } else if (
+      notif.type === 'mention' ||
+      notif.type === 'post_like' ||
+      notif.type === 'post_comment_reply' ||
+      notif.type === 'round_comment_reply'
+    ) {
+      // Tagged, liked, or replied to → open the feed (home tab). No per-post screen.
       router.push('/(tabs)/' as any);
     }
     // friend_request and clan_invite handled in social tab
@@ -378,6 +383,8 @@ export default function ProfileScreen() {
     if (type === 'clan_invite') return 'CL';
     if (type === 'match_result') return 'RS';
     if (type === 'mention') return '@';
+    if (type === 'post_like') return '♥';
+    if (type === 'post_comment_reply' || type === 'round_comment_reply') return '↩';
     return '·';
   };
 

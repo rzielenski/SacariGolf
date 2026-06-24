@@ -83,6 +83,14 @@ const CRACK_MATCH_MS = 400;    // a crack this close to a swing peak corroborate
 // lag / screen echo, not a new shot. Kept below ARM_REFRACTORY_MS so a genuine
 // second shot's crack (which can't arrive sooner than a re-arm) is never eaten.
 const CRACK_CONSUME_MS = 300;
+// Hard floor between counted shots. You can't physically hit two golf shots this
+// close together, so this is a simple, robust backstop: no matter how many
+// spikes one motion makes — or how many stray listeners are firing — a count can
+// only land once per this window. Tunable.
+const COUNT_MIN_INTERVAL_MS = 3000;
+// Same idea for calibration captures, but shorter so a brisk calibration pace
+// still registers every swing (the duplicate-spike problem is sub-second).
+const CAL_MIN_INTERVAL_MS = 1500;
 
 /** True where the IMU gate can run as pure OTA (50Hz sensors). */
 export const swingGateAvailable = Platform.OS === 'ios';
@@ -221,6 +229,7 @@ export function useSwingShotGate(opts: {
   const lastCrackRef = useRef(0);                 // ms of the last prominent mic transient
   const resolvedRef = useRef(0);                  // peak time already counted (dedupe)
   const resolvedAtRef = useRef(0);                // ms the count actually fired (echo-consume anchor)
+  const lastCountAtRef = useRef(0);               // ms of the last actual count (hard min-interval floor)
   const pendingRef = useRef<{ at: number } | null>(null);  // swing awaiting a late crack
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSwing, setLastSwing] = useState<{ peak: number; impact: boolean } | null>(null);
@@ -232,8 +241,11 @@ export function useSwingShotGate(opts: {
   // Count a swing once, consuming its crack so it can't credit another swing.
   const credit = (peakAt: number) => {
     if (!enabledRef.current || resolvedRef.current === peakAt) return;
+    const now = Date.now();
+    if (now - lastCountAtRef.current < COUNT_MIN_INTERVAL_MS) return;  // hard floor: one shot per window
+    lastCountAtRef.current = now;
     resolvedRef.current = peakAt;
-    resolvedAtRef.current = Date.now();   // anchor the echo-consume window to the count, not the peak
+    resolvedAtRef.current = now;          // anchor the echo-consume window to the count, not the peak
     lastCrackRef.current = 0;
     pendingRef.current = null;
     clearPendingTimer();
@@ -289,7 +301,7 @@ export function useSwingShotGate(opts: {
     if (enabled) return;
     clearPendingTimer();
     swingAtRef.current = 0; lastCrackRef.current = 0; resolvedRef.current = 0;
-    resolvedAtRef.current = 0; pendingRef.current = null;
+    resolvedAtRef.current = 0; lastCountAtRef.current = 0; pendingRef.current = null;
   }, [enabled]);
   useEffect(() => () => clearPendingTimer(), []);
 
@@ -330,6 +342,7 @@ export function useSwingCalibrator(opts: {
   const [captured, setCaptured] = useState(0);
   const [failed, setFailed] = useState(false);
   const peaksRef = useRef<{ gyro: number; accel: number }[]>([]);
+  const lastCaptureAtRef = useRef(0);   // shared hard-floor anchor (across any listeners)
 
   useEffect(() => {
     if (!active || !swingGateAvailable) return;
@@ -390,14 +403,19 @@ export function useSwingCalibrator(opts: {
           if (a != null && a > peakAccel && now - peakAt <= IMPACT_WINDOW_MS) peakAccel = a;
           if (g < BOOT_RELEASE || now - peakAt > STUCK_MS) {
             phase = 'idle';
-            peaksRef.current.push({ gyro: peakGyro, accel: peakAccel });
-            lastProgressAt = now;
-            const n = peaksRef.current.length;
-            setCaptured(n);
-            if (n >= needed) {
-              finished = true;
-              onDoneRef.current(deriveCalibration(peaksRef.current));
-              setActive(false);
+            // Shared hard floor: at most one capture per window, no matter how
+            // many spikes one motion makes or how many listeners are firing.
+            if (now - lastCaptureAtRef.current >= CAL_MIN_INTERVAL_MS) {
+              lastCaptureAtRef.current = now;
+              peaksRef.current.push({ gyro: peakGyro, accel: peakAccel });
+              lastProgressAt = now;
+              const n = peaksRef.current.length;
+              setCaptured(n);
+              if (n >= needed) {
+                finished = true;
+                onDoneRef.current(deriveCalibration(peaksRef.current));
+                setActive(false);
+              }
             }
           }
         }
@@ -409,8 +427,12 @@ export function useSwingCalibrator(opts: {
     return () => { alive = false; sub?.remove(); };
   }, [active, needed]);
 
-  const start = useCallback(() => { peaksRef.current = []; setCaptured(0); setFailed(false); setActive(true); }, []);
-  const cancel = useCallback(() => { setActive(false); peaksRef.current = []; setCaptured(0); setFailed(false); }, []);
+  const start = useCallback(() => {
+    peaksRef.current = []; lastCaptureAtRef.current = 0; setCaptured(0); setFailed(false); setActive(true);
+  }, []);
+  const cancel = useCallback(() => {
+    setActive(false); peaksRef.current = []; lastCaptureAtRef.current = 0; setCaptured(0); setFailed(false);
+  }, []);
 
   return { active, captured, needed, failed, start, cancel };
 }

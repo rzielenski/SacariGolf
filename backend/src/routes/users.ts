@@ -1819,6 +1819,14 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     drinks = (userInfo as any).drinks ?? 0;
   }
 
+  // Lifetime practice reps from The Grind (range + putting combined). Public —
+  // it's an effort/dedication stat shown on every profile, not sensitive.
+  const { rows: practiceRows } = await pool.query(
+    `SELECT COALESCE(SUM(shots), 0)::int AS practice_shots
+       FROM practice_sessions WHERE user_id = $1`,
+    [req.params.id]
+  );
+
   return res.json({
     ...userInfo,
     recent_rounds: recentRounds,
@@ -1827,6 +1835,7 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     followers_count: followCounts[0]?.followers_count ?? 0,
     friendship_status: friendshipStatus,
     drinks,
+    practice_shots: practiceRows[0]?.practice_shots ?? 0,
   });
 }));
 
@@ -2321,6 +2330,63 @@ router.get('/me/notifications', requireAuth, wrap(async (req: AuthRequest, res: 
     );
     for (const r of mentions) notes.push({ type: 'mention', title: 'You were tagged', body: `${r.from_name} tagged you in a post`, data: { postId: r.post_id }, created_at: r.created_at });
   } catch { /* table may not exist on older deployments */ }
+
+  // Post likes (3-day window). AGGREGATED per post so a popular post is ONE
+  // bell row ("X and N others liked your post") instead of a flood — the bell
+  // equivalent of the throttled push.
+  try {
+    const { rows: likes } = await pool.query(
+      `SELECT p.post_id,
+              COUNT(*)::int AS like_count,
+              MAX(pl.created_at) AS created_at,
+              (ARRAY_AGG(lu.username ORDER BY pl.created_at DESC))[1] AS last_liker
+         FROM post_likes pl
+         JOIN posts p  ON p.post_id = pl.post_id
+         JOIN users lu ON lu.user_id = pl.user_id
+        WHERE p.user_id = $1 AND pl.user_id != $1
+          AND pl.created_at > NOW() - INTERVAL '3 days'
+        GROUP BY p.post_id
+        ORDER BY MAX(pl.created_at) DESC LIMIT 10`,
+      [req.userId]
+    );
+    for (const r of likes) {
+      const others = r.like_count - 1;
+      const body = others > 0
+        ? `${r.last_liker} and ${others} other${others === 1 ? '' : 's'} liked your post`
+        : `${r.last_liker} liked your post`;
+      notes.push({ type: 'post_like', title: 'New like', body, data: { postId: r.post_id }, created_at: r.created_at });
+    }
+  } catch { /* post_likes may not exist on older deployments */ }
+
+  // Replies to your comments — on a feed post (3-day window).
+  try {
+    const { rows: replies } = await pool.query(
+      `SELECT child.post_id, child.created_at, au.username AS from_name
+         FROM post_comments child
+         JOIN post_comments parent ON parent.comment_id = child.parent_comment_id
+         JOIN users au ON au.user_id = child.user_id
+        WHERE parent.user_id = $1 AND child.user_id != $1
+          AND child.created_at > NOW() - INTERVAL '3 days'
+        ORDER BY child.created_at DESC LIMIT 10`,
+      [req.userId]
+    );
+    for (const r of replies) notes.push({ type: 'post_comment_reply', title: 'New reply', body: `${r.from_name} replied to your comment`, data: { postId: r.post_id }, created_at: r.created_at });
+  } catch { /* parent_comment_id may not exist on older deployments */ }
+
+  // Replies to your comments — on a round recap (3-day window).
+  try {
+    const { rows: rReplies } = await pool.query(
+      `SELECT child.round_id, child.created_at, au.username AS from_name
+         FROM round_comments child
+         JOIN round_comments parent ON parent.comment_id = child.parent_comment_id
+         JOIN users au ON au.user_id = child.user_id
+        WHERE parent.user_id = $1 AND child.user_id != $1
+          AND child.created_at > NOW() - INTERVAL '3 days'
+        ORDER BY child.created_at DESC LIMIT 10`,
+      [req.userId]
+    );
+    for (const r of rReplies) notes.push({ type: 'round_comment_reply', title: 'New reply', body: `${r.from_name} replied to your comment`, data: { roundId: r.round_id }, created_at: r.created_at });
+  } catch { /* round_comments.parent_comment_id may not exist on older deployments */ }
 
   notes.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 

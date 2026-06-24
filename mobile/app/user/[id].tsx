@@ -242,6 +242,9 @@ export default function UserProfileScreen() {
           value={fmtHandicap(handicap?.handicap_index ?? null)}
         />
         <Stat label="Course Records" value={courseRecords.length} />
+        {/* Lifetime range + putting reps from The Grind. Public, shown on every
+            profile (even at 0) so it's a consistent dedication stat. */}
+        <Stat label="Practice Shots" value={(profile.practice_shots ?? 0).toLocaleString()} />
         {/* Drinks — only present in the API response for yourself + accepted
             friends (server gates it to null otherwise), and only shown once
             they've logged at least one. Read-only here; the owner adjusts it

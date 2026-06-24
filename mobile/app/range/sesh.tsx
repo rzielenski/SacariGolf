@@ -158,8 +158,8 @@ export default function PracticeSesh() {
                 <>
                   <Text style={s.gateBig}>{calibrator.captured} / {calibrator.needed}</Text>
                   <Text style={s.hint}>
-                    Put the phone in your pocket, then take {calibrator.needed} normal swings, pausing a moment between
-                    each so it can tell them apart.
+                    Put the phone in your pocket, then take {calibrator.needed} normal swings, pausing a couple seconds
+                    between each so it counts them one at a time.
                   </Text>
                   <TouchableOpacity style={s.gateCancel} onPress={calibrator.cancel}>
                     <Text style={s.gateCancelText}>Cancel</Text>

@@ -21,7 +21,7 @@ import { randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
-import { sendPush } from '../utils/notify';
+import { sendPush, isLikeNotifyMilestone } from '../utils/notify';
 import { processMentions, hasEveryoneTag, broadcastToEveryone } from '../utils/mentions';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { isOwner } from '../utils/owner';
@@ -540,12 +540,30 @@ router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Res
     return res.status(409).json({ error: 'Duplicate send' });
   }
 
-  // Notify the post owner (fire-and-forget). Skip if commenting on your
-  // own post or the owner has no push token.
-  if (post.owner_id !== req.userId && post.push_token) {
-    const preview = body
-      ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
-      : 'Sent a photo';
+  // Notify (fire-and-forget). A reply pings the PARENT comment's author
+  // ("replied to your comment"); a top-level comment pings the post owner
+  // ("commented on your post"). Either is skipped when it would notify
+  // yourself or the recipient has no push token.
+  const preview = body
+    ? (body.length > 100 ? body.slice(0, 97) + '…' : body)
+    : 'Sent a photo';
+  if (parentId) {
+    pool.query(
+      `SELECT c.user_id AS author_id, u.push_token
+         FROM post_comments c JOIN users u ON u.user_id = c.user_id
+        WHERE c.comment_id = $1`,
+      [parentId]
+    ).then(({ rows: pr }) => {
+      const pa = pr[0];
+      if (!pa || pa.author_id === req.userId || !pa.push_token) return;
+      return sendPush(
+        [pa.push_token],
+        `${post.actor_name} replied to your comment`,
+        preview,
+        { type: 'post_comment_reply', postId: req.params.id, commentId: rows[0].comment_id, parentCommentId: parentId, fromUserId: req.userId },
+      );
+    }).catch(() => { /* push is best-effort */ });
+  } else if (post.owner_id !== req.userId && post.push_token) {
     sendPush(
       [post.push_token],
       `${post.actor_name} commented on your post`,
@@ -605,7 +623,36 @@ router.post('/:id/like', requireAuth, wrap(async (req: AuthRequest, res: Respons
     `SELECT COUNT(*)::int AS like_count FROM post_likes WHERE post_id = $1`,
     [req.params.id]
   );
-  return res.json({ liked, like_count: rows[0].like_count });
+  const likeCount = rows[0].like_count;
+
+  // Notify the owner that their post was liked — fire-and-forget, and only on
+  // a NEW like (not an unlike). Throttled social-media style: every one of the
+  // first few likes, then less and less often as the post takes off, so a
+  // popular post doesn't spam the owner. Skipped when you like your own post.
+  if (liked && isLikeNotifyMilestone(likeCount)) {
+    pool.query(
+      `SELECT p.user_id AS owner_id, owner.push_token, actor.username AS actor_name
+         FROM posts p
+         JOIN users owner ON owner.user_id = p.user_id
+         JOIN users actor ON actor.user_id = $2
+        WHERE p.post_id = $1`,
+      [req.params.id, req.userId]
+    ).then(({ rows: r }) => {
+      const o = r[0];
+      if (!o || o.owner_id === req.userId || !o.push_token) return;
+      const title = likeCount <= 5
+        ? `${o.actor_name} liked your post`
+        : `${o.actor_name} and ${likeCount - 1} others liked your post`;
+      return sendPush(
+        [o.push_token],
+        title,
+        '',
+        { type: 'post_like', postId: req.params.id, fromUserId: req.userId, likeCount },
+      );
+    }).catch(() => { /* push is best-effort */ });
+  }
+
+  return res.json({ liked, like_count: likeCount });
 }));
 
 // POST /posts/:id/comments/:commentId/like — toggle the viewer's like on a comment.

@@ -165,8 +165,9 @@ function AuthGuard() {
           break;
         case 'round_reaction':
         case 'round_comment':
-          // Reaction or comment on your round → the home feed, where the
-          // round post carries the inline thread. There's no per-round
+        case 'round_comment_reply':
+          // Reaction, comment, or reply on your round → the home feed, where
+          // the round post carries the inline thread. There's no per-round
           // standalone route to deep-link to (the scorecard is a modal).
           router.push('/(tabs)/' as any);
           break;
@@ -191,9 +192,11 @@ function AuthGuard() {
         case 'post':
         case 'mention':
         case 'post_comment':
-          // Tagged in a post/comment, or someone commented on your post →
-          // open the feed (home tab). There's no per-post screen, so we land
-          // the user on the feed where the post + comments appear.
+        case 'post_comment_reply':
+        case 'post_like':
+          // Tagged in a post/comment, someone commented/replied, or liked your
+          // post → open the feed (home tab). There's no per-post screen, so we
+          // land the user on the feed where the post + comments appear.
           router.push('/(tabs)/' as any);
           break;
         default:
