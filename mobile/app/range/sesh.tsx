@@ -156,8 +156,11 @@ export default function PracticeSesh() {
               </Text>
               {calibrator.active ? (
                 <>
-                  <Text style={s.gateBig}>Swing now · {calibrator.captured}/{calibrator.needed}</Text>
-                  <Text style={s.hint}>Hit {calibrator.needed} normal shots so it learns your motion.</Text>
+                  <Text style={s.gateBig}>{calibrator.captured} / {calibrator.needed}</Text>
+                  <Text style={s.hint}>
+                    Put the phone in your pocket, then take {calibrator.needed} normal swings, pausing a moment between
+                    each so it can tell them apart.
+                  </Text>
                   <TouchableOpacity style={s.gateCancel} onPress={calibrator.cancel}>
                     <Text style={s.gateCancelText}>Cancel</Text>
                   </TouchableOpacity>
@@ -169,9 +172,11 @@ export default function PracticeSesh() {
                     <Text style={s.gateBtnText}>Calibrate to my swing</Text>
                   </TouchableOpacity>
                   <Text style={s.hint}>
-                    {calibration.impactReliable
-                      ? `Calibrated · swing peak ~${calibration.measuredPeakGyro}°/s`
-                      : 'Using defaults. Calibrate in your bay for best accuracy.'}
+                    {calibrator.failed
+                      ? "Didn't catch enough swings. Keep the phone in your pocket and swing normally, then try again."
+                      : calibration.impactReliable
+                        ? `Calibrated · swing peak ~${calibration.measuredPeakGyro}°/s`
+                        : 'Using defaults. Calibrate in your bay for best accuracy.'}
                   </Text>
                 </>
               )}

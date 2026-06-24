@@ -220,6 +220,7 @@ export function useSwingShotGate(opts: {
   const swingAtRef = useRef(0);
   const lastCrackRef = useRef(0);                 // ms of the last prominent mic transient
   const resolvedRef = useRef(0);                  // peak time already counted (dedupe)
+  const resolvedAtRef = useRef(0);                // ms the count actually fired (echo-consume anchor)
   const pendingRef = useRef<{ at: number } | null>(null);  // swing awaiting a late crack
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSwing, setLastSwing] = useState<{ peak: number; impact: boolean } | null>(null);
@@ -232,6 +233,7 @@ export function useSwingShotGate(opts: {
   const credit = (peakAt: number) => {
     if (!enabledRef.current || resolvedRef.current === peakAt) return;
     resolvedRef.current = peakAt;
+    resolvedAtRef.current = Date.now();   // anchor the echo-consume window to the count, not the peak
     lastCrackRef.current = 0;
     pendingRef.current = null;
     clearPendingTimer();
@@ -273,7 +275,9 @@ export function useSwingShotGate(opts: {
     const now = Date.now();
     // Ignore the late crack of a shot we just counted (its own lag / the ball
     // hitting the screen) so it can't linger and corroborate a later air swing.
-    if (resolvedRef.current > 0 && now - resolvedRef.current <= CRACK_CONSUME_MS) return;
+    // Measured from when the count FIRED (falling edge), not the earlier peak,
+    // or the window would be short by the peak-to-release gap.
+    if (resolvedAtRef.current > 0 && now - resolvedAtRef.current <= CRACK_CONSUME_MS) return;
     lastCrackRef.current = now;
     const p = pendingRef.current;
     if (p && Math.abs(now - p.at) <= CRACK_MATCH_MS) credit(p.at);
@@ -285,7 +289,7 @@ export function useSwingShotGate(opts: {
     if (enabled) return;
     clearPendingTimer();
     swingAtRef.current = 0; lastCrackRef.current = 0; resolvedRef.current = 0;
-    pendingRef.current = null;
+    resolvedAtRef.current = 0; pendingRef.current = null;
   }, [enabled]);
   useEffect(() => () => clearPendingTimer(), []);
 
@@ -296,15 +300,25 @@ export type CalibratorState = {
   active: boolean;
   captured: number;
   needed: number;
+  /** True after a run ended without enough swings detected — the UI prompts a retry. */
+  failed: boolean;
   start: () => void;
   cancel: () => void;
 };
 
 /**
- * Calibration flow: the user taps start and hits ~`needed` balls. We bootstrap
- * swing detection with a generous fixed floor (a real pocket swing clears it
- * easily; walking / fidgeting does not), record each swing's peak gyro + peak
- * contact accel, then derive personal thresholds from the medians.
+ * Calibration flow: the user pockets the phone and takes ~`needed` swings. We
+ * record each swing's peak gyro + peak contact accel, then derive personal
+ * thresholds from the medians.
+ *
+ * Only a DISCRETE SWING is captured. A real swing is preceded by stillness
+ * (addressing the ball) and ramps from still to a high peak FAST. Handling the
+ * phone — pulling it out, dropping it in a pocket, adjusting it — is continuous
+ * motion that never settles, and it must NOT be captured (that was the bug that
+ * exited calibration after a single real shot: pocketing logged the other four).
+ * So a capture requires: a startup grace (to pocket the phone), a prior-quiet
+ * settle, then a peak past a swing-grade floor. A stall escape hatch ends the
+ * run rather than hang if swings never register.
  */
 export function useSwingCalibrator(opts: {
   needed?: number;
@@ -314,16 +328,24 @@ export function useSwingCalibrator(opts: {
   const onDoneRef = useRef(opts.onDone); onDoneRef.current = opts.onDone;
   const [active, setActive] = useState(false);
   const [captured, setCaptured] = useState(0);
+  const [failed, setFailed] = useState(false);
   const peaksRef = useRef<{ gyro: number; accel: number }[]>([]);
 
   useEffect(() => {
     if (!active || !swingGateAvailable) return;
     let alive = true;
     let sub: { remove: () => void } | null = null;
-    const BOOT_FLOOR = 120;     // deg/s — bootstrap arm threshold before we know the user
-    const BOOT_RELEASE = 60;
+    const BOOT_FLOOR = 200;      // deg/s — a real pocket swing clears this; most hand motion doesn't.
+                                 // Kept modest so a gentle / heavily-damped swing still arms.
+    const BOOT_RELEASE = 80;
+    const QUIET_GYRO = 60;       // deg/s — "standing still" addressing the ball
+    const MIN_QUIET_MS = 350;    // must be this still before a capture can arm
+    const STALL_MS = 15000;      // no new swing in this long → stop (don't hang) and prompt a retry
+    const startAt = Date.now() + 1200;   // grace so pocketing right after the tap isn't captured
     let phase: 'idle' | 'rising' = 'idle';
     let peakGyro = 0, peakAt = 0, peakAccel = 0, lastFire = 0;
+    let quietSince = 0, readyToArm = false, finished = false;
+    let lastProgressAt = startAt;        // for the stall escape hatch
 
     (async () => {
       let ok = false;
@@ -331,13 +353,37 @@ export function useSwingCalibrator(opts: {
       if (!alive || !ok) return;
       DeviceMotion.setUpdateInterval(20);
       const s = DeviceMotion.addListener((d) => {
+        if (finished) return;
         const g = gyroMag(d);
         if (g == null) return;
         const a = accelMag(d);
         const now = Date.now();
+        if (now < startAt) return;                 // startup grace — pocket the phone
+        // Escape hatch: if no swing has registered in a long while, stop rather
+        // than hang. Finish with whatever we caught if it's enough to be useful,
+        // otherwise flag a retry so the UI can prompt instead of spinning.
+        if (phase === 'idle' && now - lastProgressAt > STALL_MS) {
+          finished = true;
+          if (peaksRef.current.length >= 2) onDoneRef.current(deriveCalibration(peaksRef.current));
+          else setFailed(true);
+          setActive(false);
+          return;
+        }
+        // A capture must be a DISCRETE swing: armed only after a brief stillness
+        // (addressing the ball). Continuous handling never settles, so it stays
+        // disarmed. Crucially we do NOT disarm once stillness has armed us — a
+        // golf swing is ~1s of sub-floor backswing motion before the downswing
+        // spike, so disarming on mid-swing motion would miss every real swing.
+        if (g < QUIET_GYRO) {
+          if (!quietSince) quietSince = now;
+          if (now - quietSince >= MIN_QUIET_MS) readyToArm = true;
+        } else {
+          quietSince = 0;
+        }
         if (phase === 'idle') {
-          if (g >= BOOT_FLOOR && now - lastFire > CAL_REFRACTORY_MS) {
+          if (readyToArm && g >= BOOT_FLOOR && now - lastFire > CAL_REFRACTORY_MS) {
             phase = 'rising'; peakGyro = g; peakAt = now; peakAccel = a ?? 0; lastFire = now;
+            readyToArm = false; quietSince = 0;
           }
         } else {
           if (g > peakGyro) { peakGyro = g; peakAt = now; }
@@ -345,9 +391,11 @@ export function useSwingCalibrator(opts: {
           if (g < BOOT_RELEASE || now - peakAt > STUCK_MS) {
             phase = 'idle';
             peaksRef.current.push({ gyro: peakGyro, accel: peakAccel });
+            lastProgressAt = now;
             const n = peaksRef.current.length;
             setCaptured(n);
             if (n >= needed) {
+              finished = true;
               onDoneRef.current(deriveCalibration(peaksRef.current));
               setActive(false);
             }
@@ -361,10 +409,10 @@ export function useSwingCalibrator(opts: {
     return () => { alive = false; sub?.remove(); };
   }, [active, needed]);
 
-  const start = useCallback(() => { peaksRef.current = []; setCaptured(0); setActive(true); }, []);
-  const cancel = useCallback(() => { setActive(false); peaksRef.current = []; setCaptured(0); }, []);
+  const start = useCallback(() => { peaksRef.current = []; setCaptured(0); setFailed(false); setActive(true); }, []);
+  const cancel = useCallback(() => { setActive(false); peaksRef.current = []; setCaptured(0); setFailed(false); }, []);
 
-  return { active, captured, needed, start, cancel };
+  return { active, captured, needed, failed, start, cancel };
 }
 
 function median(xs: number[]): number {
