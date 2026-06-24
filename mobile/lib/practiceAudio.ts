@@ -91,14 +91,20 @@ export function useShotDetector(opts: {
   sensitivity: number;           // 0 (only very loud) .. 1 (very sensitive)
   onHit: () => void;
   muteUntilRef?: MutableRefObject<number>;
+  /** Min gap between counted hits (ms). Range uses a wider lock so the
+   *  ball-hits-the-screen echo collapses into one shot; putting keeps the
+   *  default 320 so rapid putts still register. */
+  refractoryMs?: number;
 }) {
-  const { enabled, sensitivity, onHit, muteUntilRef } = opts;
+  const { enabled, sensitivity, onHit, muteUntilRef, refractoryMs = 320 } = opts;
   const recRef = useRef<Audio.Recording | null>(null);
   const lastHitRef = useRef(0);
   const onHitRef = useRef(onHit);
   onHitRef.current = onHit;
   const sensRef = useRef(sensitivity);
   sensRef.current = sensitivity;
+  const refractoryRef = useRef(refractoryMs);
+  refractoryRef.current = refractoryMs;
   // Rolling ambient floor + previous sample, for adaptive transient detection.
   const bgRef = useRef(-55);
   const prevRef = useRef(-60);
@@ -145,7 +151,7 @@ export function useShotDetector(opts: {
           // catches muffled, in-pocket strikes whose crisp transient is damped
           // by cloth. The absolute gate ignores noise-floor jitter.
           const hit = (prominence > needProm && rise > needRise) || prominence > needProm + 6;
-          if (m > -58 && hit && now - lastHitRef.current > 320) {
+          if (m > -58 && hit && now - lastHitRef.current > refractoryRef.current) {
             lastHitRef.current = now;
             onHitRef.current();
           }
