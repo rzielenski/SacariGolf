@@ -6,6 +6,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 
 const router = Router();
@@ -305,7 +306,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   return res.json(rows);
 }));
 
-router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/', requireAuth, perUserRateLimit({ max: 60, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const { matchId, clanId, tournamentId, toUserId, body, voiceBase64, voiceMime, voiceDurationMs,
           imageBase64, imageMime } = req.body ?? {};
   // Trim text; cap at 2000 chars. For voice/image messages the body becomes

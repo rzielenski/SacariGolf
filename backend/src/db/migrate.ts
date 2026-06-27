@@ -2327,6 +2327,16 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON practice_sessions(user_id, created_at DESC);
     `,
   },
+  {
+    // Mark a served find matchup as voted, so /finds/vote can require the pair
+    // was actually shown to this user (anti ballot-stuffing) AND can't be voted
+    // on twice. NULL = served-but-not-yet-voted. Pure DDL, safe re-runnable.
+    name: 'find_pair_seen.voted_at',
+    sql: `
+      ALTER TABLE find_pair_seen
+        ADD COLUMN IF NOT EXISTS voted_at TIMESTAMPTZ;
+    `,
+  },
 ];
 
 export async function runMigrations() {

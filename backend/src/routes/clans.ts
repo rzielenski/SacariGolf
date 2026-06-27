@@ -5,6 +5,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -289,7 +290,7 @@ router.patch('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) =
 }));
 
 /** Leader-only avatar upload. Mirrors the user-avatar upload pattern. */
-router.post('/:id/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/:id/avatar', requireAuth, perUserRateLimit({ max: 10, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const { rows: roleRows } = await pool.query(
     `SELECT role FROM clan_members WHERE clan_id = $1 AND user_id = $2`,
     [req.params.id, req.userId]

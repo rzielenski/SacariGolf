@@ -22,8 +22,6 @@ export default function StatsScreen() {
   const { user } = useAuth();
   const [stats, setStats] = useState<any | null>(null);
   const [handicap, setHandicap] = useState<any | null>(null);
-  const [advancedSG, setAdvancedSG] = useState<any | null>(null);
-  const [sgMode, setSgMode] = useState<'basic' | 'advanced'>('basic');
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
 
@@ -100,12 +98,10 @@ export default function StatsScreen() {
     Promise.all([
       api.users.stats(user.user_id).catch(() => null),
       api.users.handicap(user.user_id).catch(() => null),
-      api.users.sgAdvanced(user.user_id).catch(() => null),
-    ]).then(([s, h, adv]) => {
+    ]).then(([s, h]) => {
       if (cancelled) return;
       setStats(s);
       setHandicap(h);
-      setAdvancedSG(adv);
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -146,75 +142,35 @@ export default function StatsScreen() {
             />
           </View>
 
-          {/* Strokes-gained breakdown — basic vs advanced */}
+          {/* Strokes-gained — computed ONLY from GPS-tracked shots (Broadie model) */}
           <View style={{ height: 12 }} />
           <OrnamentTitle title="Strokes Gained" align="center" />
 
-          {/* Mode toggle */}
-          <View style={s.modeRow}>
-            <TouchableOpacity
-              style={[s.modeBtn, sgMode === 'basic' && s.modeBtnActive]}
-              onPress={() => setSgMode('basic')}
-              activeOpacity={0.7}
-            >
-              <Text style={[s.modeLabel, sgMode === 'basic' && { color: C.bg }]}>BASIC</Text>
-              <Text style={[s.modeSub, sgMode === 'basic' && { color: C.bg + 'cc' }]}>From scorecard stats</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                s.modeBtn,
-                sgMode === 'advanced' && s.modeBtnActive,
-                !advancedSG?.sg_per_round && { opacity: 0.5 },
-              ]}
-              onPress={() => advancedSG?.sg_per_round && setSgMode('advanced')}
-              disabled={!advancedSG?.sg_per_round}
-              activeOpacity={0.7}
-            >
-              <Text style={[s.modeLabel, sgMode === 'advanced' && { color: C.bg }]}>ADVANCED</Text>
-              <Text style={[s.modeSub, sgMode === 'advanced' && { color: C.bg + 'cc' }]}>From tracked shots</Text>
-            </TouchableOpacity>
-          </View>
-
-          {sgMode === 'basic' ? (
-            stats?.sg_per_round && stats.sg_holes > 0 ? (
-              <>
-                <Text style={s.subtitle}>Per round (normalized to 18 holes) · positive = gaining vs scratch</Text>
-                <Text style={s.sample}>{stats.sg_holes} hole{stats.sg_holes === 1 ? '' : 's'} tracked across {stats.rounds_count} round{stats.rounds_count === 1 ? '' : 's'}</Text>
-                <View style={{ marginTop: 18 }}>
-                  <SGRow label="Off-the-Tee"  value={stats.sg_per_round.off_tee} />
-                  <SGRow label="Approach"     value={stats.sg_per_round.approach} />
-                  <SGRow label="Around-Green" value={stats.sg_per_round.around_green} />
-                  <SGRow label="Putting"      value={stats.sg_per_round.putting} />
-                  <View style={s.totalDivider} />
-                  <SGRow label="TOTAL"        value={stats.sg_per_round.total} bold />
-                </View>
-              </>
-            ) : (
-              <Text style={s.empty}>
-                Track putts, chips, and GIR during scoring to unlock strokes-gained categories.
-                Toggle stats on each hole in the scoring screen.
+          {stats?.sg_per_round ? (
+            <>
+              <Text style={s.subtitle}>PGA Tour baseline model · per 18 holes · positive = gaining</Text>
+              <Text style={s.sample}>
+                From {stats.sg_shots_used} tracked shot{stats.sg_shots_used === 1 ? '' : 's'} across {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
               </Text>
-            )
+              {stats.sg_rounds_used < 5 && (
+                <Text style={s.warn}>
+                  Small sample. Strokes gained gets reliable around 5+ tracked rounds, treat these as early signal.
+                </Text>
+              )}
+              <View style={{ marginTop: 18 }}>
+                <SGRow label="Off-the-Tee"  value={stats.sg_per_round.off_tee} />
+                <SGRow label="Approach"     value={stats.sg_per_round.approach} />
+                <SGRow label="Around-Green" value={stats.sg_per_round.around_green} />
+                <SGRow label="Putting"      value={stats.sg_per_round.putting} />
+                <View style={s.totalDivider} />
+                <SGRow label="TOTAL"        value={stats.sg_per_round.total} bold />
+              </View>
+            </>
           ) : (
-            advancedSG?.sg_per_round ? (
-              <>
-                <Text style={s.subtitle}>PGA Tour baseline model · {advancedSG.shots_used} shots, {advancedSG.holes_used} holes</Text>
-                <Text style={s.sample}>Computed from your tracked shot locations and lies</Text>
-                <View style={{ marginTop: 18 }}>
-                  <SGRow label="Off-the-Tee"  value={advancedSG.sg_per_round.off_tee} />
-                  <SGRow label="Approach"     value={advancedSG.sg_per_round.approach} />
-                  <SGRow label="Around-Green" value={advancedSG.sg_per_round.around_green} />
-                  <SGRow label="Putting"      value={advancedSG.sg_per_round.putting} />
-                  <View style={s.totalDivider} />
-                  <SGRow label="TOTAL"        value={advancedSG.sg_per_round.total} bold />
-                </View>
-              </>
-            ) : (
-              <Text style={s.empty}>
-                Advanced strokes-gained needs tracked shot locations + pin coordinates.
-                Track every shot during a round and the heatmap unlocks too.
-              </Text>
-            )
+            <Text style={s.empty}>
+              Strokes gained is computed from your tracked shots. Track every shot during a round
+              (on a hole that has pin coordinates) and it unlocks here.
+            </Text>
           )}
 
           {/* Other accumulated stats */}
@@ -305,6 +261,7 @@ const s = StyleSheet.create({
   content: { padding: 20, paddingBottom: 80 },
   subtitle: { color: C.textMuted, fontSize: 12, textAlign: 'center', marginTop: 10 },
   sample: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginTop: 4, fontStyle: 'italic' },
+  warn: { color: C.gold, fontSize: 11, textAlign: 'center', marginTop: 8, paddingHorizontal: 24, lineHeight: 16, fontStyle: 'italic' },
   empty: { color: C.textMuted, fontSize: 13, textAlign: 'center', marginTop: 20, paddingHorizontal: 20, lineHeight: 18 },
 
   summaryRow: { flexDirection: 'row', gap: 10, marginTop: 12, marginBottom: 24 },

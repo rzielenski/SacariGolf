@@ -267,9 +267,15 @@ export default function UserProfileScreen() {
             <Stat label="Avg/Hole" value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'} />
           </View>
 
-          {stats.sg_per_round && stats.sg_holes > 0 && (
+          {/* Strokes gained — from GPS-tracked shots only (Broadie model). */}
+          {stats.sg_per_round && (
             <>
-              <Text style={styles.sgSubtitle}>STROKES GAINED PER ROUND</Text>
+              <Text style={styles.sgSubtitle}>
+                STROKES GAINED / 18  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'} tracked
+              </Text>
+              {stats.sg_rounds_used < 5 && (
+                <Text style={styles.sgWarn}>Small sample — more tracked rounds needed for a reliable read.</Text>
+              )}
               <View style={styles.sgRow}>
                 <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
                 <SGCell label="Approach" value={stats.sg_per_round.approach} />
@@ -775,6 +781,7 @@ const styles = StyleSheet.create({
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 18 },
   perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },
   sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginBottom: 6, marginTop: 2 },
+  sgWarn: { color: C.gold, fontSize: 10, fontStyle: 'italic', marginTop: -2, marginBottom: 6 },
   sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
   sgCell: {
     flex: 1, paddingVertical: 10, alignItems: 'center',

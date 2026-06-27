@@ -90,79 +90,10 @@ export type ScorecardEntry = {
   handicap_index?: number | null;
 };
 
-/** Compute 4-category strokes-gained totals and the per-hole sample size.
- *
- * SG is measured against the player's *handicap-adjusted* expectation, not
- * against par. A 20-cap shooting their handicap on par 72 should see ~0 SG
- * total. Mirrors the backend basic-SG model in users.ts so the in-app
- * scorecard preview matches the profile-stats numbers.
- *
- *   expected_strokes_per_hole = par + (handicap_index / 18)
- *
- * Short-game baselines (putting/around-green/approach) stay absolute —
- * they measure short-game skill in absolute terms regardless of handicap.
- * The handicap shift is absorbed entirely by the Off-the-Tee residual.
- */
-function computeRoundSG(
-  scores: number[],
-  stats: HoleStat[] | null | undefined,
-  holes: { par: number }[],
-  handicapIndex: number = 0,
-) {
-  let off_tee = 0, approach = 0, around_green = 0, putting = 0, total = 0;
-  let sgHoles = 0;
-  if (!stats || !stats.length) return null;
-  const expectedExtraPerHole = (handicapIndex || 0) / 18;
-  for (let i = 0; i < scores.length; i++) {
-    const par = holes[i]?.par;
-    const strokes = scores[i];
-    const h = stats[i];
-    if (!h || par == null || !strokes) continue;
-    const putts = typeof h.putts === 'number' ? h.putts : null;
-    const chips = typeof h.chips === 'number' ? h.chips : null;
-    const gir = typeof h.gir === 'boolean' ? h.gir : null;
-    if (putts === null || chips === null || gir === null) continue;
-    // Putting baseline: 1 if player chipped on (already "near" green), else 2.
-    // Mirrors backend basic-SG model in users.ts.
-    const puttBaseline = chips > 0 ? 1 : 2;
-    const putt = puttBaseline - putts;
-    const around = chips > 0 ? 1 - chips : 0;
-    const appr = gir ? 0 : -1;
-    const expectedStrokes = par + expectedExtraPerHole;
-    const tee = (expectedStrokes - strokes) - putt - around - appr;
-    putting += putt;
-    around_green += around;
-    approach += appr;
-    off_tee += tee;
-    total += (expectedStrokes - strokes);
-    sgHoles += 1;
-  }
-  if (sgHoles === 0) return null;
-  return { off_tee, approach, around_green, putting, total, sgHoles };
-}
-
-/** Inline strokes-gained summary row — renders nothing if no SG-eligible holes. */
-function RoundSGSummary({ entry, holes }: { entry: ScorecardEntry; holes: any[] }) {
-  const sg = computeRoundSG(
-    entry.hole_scores ?? [], entry.hole_stats ?? null, holes,
-    entry.handicap_index ?? 0,
-  );
-  if (!sg) return null;
-  const fmt = (n: number) => (n > 0 ? `+${n.toFixed(1)}` : n.toFixed(1));
-  const color = (n: number) => (n > 0.05 ? C.green : n < -0.05 ? C.red : C.text);
-  return (
-    <View style={s.sgWrap}>
-      <Text style={s.sgHeader}>STROKES GAINED  ·  {sg.sgHoles} hole{sg.sgHoles === 1 ? '' : 's'} tracked</Text>
-      <View style={s.sgRow}>
-        <View style={s.sgCell}><Text style={s.sgLabel}>Off-Tee</Text><Text style={[s.sgVal, { color: color(sg.off_tee) }]}>{fmt(sg.off_tee)}</Text></View>
-        <View style={s.sgCell}><Text style={s.sgLabel}>Approach</Text><Text style={[s.sgVal, { color: color(sg.approach) }]}>{fmt(sg.approach)}</Text></View>
-        <View style={s.sgCell}><Text style={s.sgLabel}>Around</Text><Text style={[s.sgVal, { color: color(sg.around_green) }]}>{fmt(sg.around_green)}</Text></View>
-        <View style={s.sgCell}><Text style={s.sgLabel}>Putt</Text><Text style={[s.sgVal, { color: color(sg.putting) }]}>{fmt(sg.putting)}</Text></View>
-        <View style={s.sgCell}><Text style={s.sgLabel}>Total</Text><Text style={[s.sgVal, { color: color(sg.total), fontWeight: '800' }]}>{fmt(sg.total)}</Text></View>
-      </View>
-    </View>
-  );
-}
+// Per-round strokes-gained was removed from the scorecard. SG is now computed
+// ONLY from GPS-tracked shots (the Broadie model), surfaced in aggregate on the
+// profile / Stats screens — not the old per-hole putt/chip/GIR heuristic, and
+// not per single round (one round rarely has enough tracked shots to be useful).
 
 function useTeeboxHoles(courseId?: string | null, teeboxId?: string | null) {
   const [holes, setHoles] = useState<any[]>([]);
@@ -261,7 +192,6 @@ export function ScorecardCard({ entry, highlight, onPress }: {
       )}
       <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
       {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
-      <RoundSGSummary entry={entry} holes={[...front, ...back]} />
     </>
   );
 
@@ -623,7 +553,6 @@ function ModalContents({ entry, holes, onClose, onViewProfile }: {
 
         <Grid label="OUT" holes={front} scores={frontScores} parTotal={frontPar} />
         {back.length > 0 && <Grid label="IN" holes={back} scores={backScores} parTotal={backPar} />}
-        <RoundSGSummary entry={entry} holes={[...front, ...back]} />
 
         {/* Shot maps — holes the player tracked GPS shots on */}
         {trackedHoles.length > 0 && (

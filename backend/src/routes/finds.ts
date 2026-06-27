@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 
 const router = Router();
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -17,7 +18,7 @@ function expectedScore(rA: number, rB: number) {
   return 1 / (1 + Math.pow(10, (rB - rA) / 400));
 }
 
-router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/', requireAuth, perUserRateLimit({ max: 20, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const { imageBase64, mimeType, description } = req.body ?? {};
   if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
     return res.status(400).json({ error: 'imageBase64 required' });
@@ -160,6 +161,24 @@ router.post('/vote', requireAuth, wrap(async (req: AuthRequest, res: Response) =
     );
     if (rows.length < 2) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Find not found' }); }
 
+    // The pair must have actually been served to this user (via GET /pair) and
+    // not yet voted — blocks scripted votes on arbitrary finds and double-votes
+    // on the same matchup. Canonicalised with LEAST/GREATEST to match how the
+    // pair was recorded. Locked FOR UPDATE so concurrent votes can't both pass.
+    const { rows: seen } = await client.query(
+      `SELECT 1 FROM find_pair_seen
+        WHERE user_id = $1
+          AND find_a_id = LEAST($2::uuid, $3::uuid)
+          AND find_b_id = GREATEST($2::uuid, $3::uuid)
+          AND voted_at IS NULL
+        FOR UPDATE`,
+      [req.userId, winnerId, loserId]
+    );
+    if (!seen.length) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'pair not served or already voted' });
+    }
+
     const w = rows.find((r) => r.find_id === winnerId)!;
     const l = rows.find((r) => r.find_id === loserId)!;
     const K = 32;
@@ -172,6 +191,15 @@ router.post('/vote', requireAuth, wrap(async (req: AuthRequest, res: Response) =
     await client.query(
       `UPDATE finds SET elo = GREATEST(100, elo - $1), total_votes = total_votes + 1 WHERE find_id = $2`,
       [delta, loserId]
+    );
+
+    // Mark this matchup voted so it can't be voted on again.
+    await client.query(
+      `UPDATE find_pair_seen SET voted_at = NOW()
+        WHERE user_id = $1
+          AND find_a_id = LEAST($2::uuid, $3::uuid)
+          AND find_b_id = GREATEST($2::uuid, $3::uuid)`,
+      [req.userId, winnerId, loserId]
     );
 
     await client.query('COMMIT');

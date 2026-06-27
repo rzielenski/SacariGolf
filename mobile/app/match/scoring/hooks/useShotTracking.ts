@@ -83,6 +83,10 @@ interface UseShotTrackingArgs {
    *  picked but we do know where the hole is. Absent on holes the player
    *  hasn't pinned yet AND the course catalog doesn't have a pin for. */
   getPinPoint?: () => { lat: number; lng: number } | null;
+  /** Optional: the teebox coordinate for THIS hole. Used as the START anchor
+   *  when logging a forgotten DRIVE (the first shot of the hole) the player
+   *  never tapped TRACK for. Null on holes without a marked tee. */
+  getTeePoint?: () => { lat: number; lng: number } | null;
   /** Optional: ms since the last accepted GPS fix (from useLocation). When
    *  the GPS is frozen (iOS paused the watch, deep pocket, etc.) the
    *  displayed position is stale; recording a shot from it produces a
@@ -103,7 +107,7 @@ const STALE_FIX_TRACK_MS = 15_000;
 
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
-  getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint,
+  getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint, getTeePoint,
   getMsSinceLastFix,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
@@ -234,6 +238,53 @@ export function useShotTracking({
     api.matches.saveShotTrack(matchId, holeNum, next).catch(() => { /* best-effort */ });
   };
 
+  /** Build, append, persist, and reset for a finalized shot. Shared by the
+   *  normal STOP path and the "forgot to start" path so the geometry (total /
+   *  lateral / plays-like) is identical for both. */
+  const finalizeShot = (p: {
+    start: Pt; end: Pt; club: string; lie?: string; partial?: string; holeNum: number;
+  }) => {
+    const { start, end, club, lie, partial, holeNum } = p;
+    const playsLike = computePlaysLike?.(start, end);
+    const aim = getAimPoint?.() ?? null;
+    const pin = getPinPoint?.() ?? null;
+    const total_yds = Math.round(distYards(start.lat, start.lng, end.lat, end.lng));
+    let lateral_yds: number | undefined;
+    let lateral_ref: 'aim' | 'pin' | undefined;
+    const centerline = aim ?? pin;
+    if (centerline) {
+      const refBearing = bearingDeg(start.lat, start.lng, centerline.lat, centerline.lng);
+      const shotBearing = bearingDeg(start.lat, start.lng, end.lat, end.lng);
+      let dB = shotBearing - refBearing;
+      while (dB > 180) dB -= 360;
+      while (dB < -180) dB += 360;
+      lateral_yds = Math.round(total_yds * Math.sin(dB * Math.PI / 180));
+      lateral_ref = aim ? 'aim' : 'pin';
+    }
+    const newShot: Shot = {
+      club,
+      lie,
+      start,
+      end,
+      recorded_at: new Date().toISOString(),
+      total_yds,
+      ...(typeof playsLike === 'number' && playsLike > 0 ? { plays_like_yds: Math.round(playsLike) } : {}),
+      ...(aim ? { aim } : {}),
+      ...(lateral_yds != null && lateral_ref ? { lateral_yds, lateral_ref } : {}),
+      ...(partial ? { partial_value: partial } : {}),
+    };
+    setShotsByHole((prev) => {
+      const cur = prev[holeNum] ?? [];
+      const next = [...cur, newShot];
+      persistShots(holeNum, next);
+      return { ...prev, [holeNum]: next };
+    });
+    setActiveShot(null);
+    setPendingClubState(null);
+    setPendingPartial(null);
+    manualPickRef.current = false;
+  };
+
   /** User explicitly picked a club. Sticks until the next shot is finalized. */
   const pickClubManual = (club: string | null) => {
     manualPickRef.current = club !== null;
@@ -272,88 +323,21 @@ export function useShotTracking({
       Alert.alert('GPS stale', "Your GPS hasn't updated recently. Wait for a fresh fix before tracking the shot.");
       return;
     }
-    // STOP — finalize the active shot.
+    // STOP — finalize the active shot. Attribute it to the hole it was STARTED
+    // on (activeShot.holeNum), not whatever hole is on screen now, so a mid-shot
+    // hole change can't misfile it. Falls back to the current hole for legacy
+    // active shots persisted without holeNum.
     if (activeShot) {
       const end = ptFromCoord();
       if (!end) return;
-      const playsLike = computePlaysLike?.(activeShot.start, end);
-      // Snapshot the player's heatmap target as the shot's aim — used by
-      // post-round stats to compute lateral relative to start→aim instead of
-      // start→pin. Falls back to undefined if the player never dragged the
-      // heatmap, in which case stats default to the start→pin centerline.
-      const aim = getAimPoint?.() ?? null;
-      const pin = getPinPoint?.() ?? null;
-
-      // ── Per-shot geometry, computed at finalize time ──────────────────
-      //   total_yds  – raw great-circle yards from start to end. Always
-      //                present (only requires both endpoints).
-      //   lateral_yds – signed perpendicular offset of the END point from
-      //                 the start→centerline line, where the centerline is:
-      //                   • start → aim, if the player dragged a target
-      //                   • start → pin, if the hole's pin is known
-      //                   • undefined otherwise — we record NO lateral
-      //                     rather than fall back to a meaningless axis.
-      //                 Sign: positive = right of intended line, negative
-      //                 = left. Standard course-mapper convention.
-      const total_yds = Math.round(distYards(
-        activeShot.start.lat, activeShot.start.lng,
-        end.lat,              end.lng,
-      ));
-      let lateral_yds: number | undefined;
-      let lateral_ref: 'aim' | 'pin' | undefined;
-      const centerline = aim ?? pin;
-      if (centerline) {
-        const refBearing = bearingDeg(
-          activeShot.start.lat, activeShot.start.lng,
-          centerline.lat,       centerline.lng,
-        );
-        const shotBearing = bearingDeg(
-          activeShot.start.lat, activeShot.start.lng,
-          end.lat,              end.lng,
-        );
-        // Signed bearing delta in (-180, 180]. Positive = end is clockwise
-        // (right) of the centerline as viewed from start; negative = left.
-        let dB = shotBearing - refBearing;
-        while (dB > 180) dB -= 360;
-        while (dB < -180) dB += 360;
-        // Perpendicular component: total * sin(angleBetween). Same as
-        // projecting end onto the axis perpendicular to the centerline at
-        // start. For small angles this is essentially the lateral miss.
-        lateral_yds = Math.round(total_yds * Math.sin(dB * Math.PI / 180));
-        lateral_ref = aim ? 'aim' : 'pin';
-      }
-
-      const newShot: Shot = {
-        club: activeShot.club,
-        lie: activeShot.lie,
+      finalizeShot({
         start: activeShot.start,
         end,
-        recorded_at: new Date().toISOString(),
-        total_yds,
-        ...(typeof playsLike === 'number' && playsLike > 0
-          ? { plays_like_yds: Math.round(playsLike) }
-          : {}),
-        ...(aim ? { aim } : {}),
-        ...(lateral_yds != null && lateral_ref
-          ? { lateral_yds, lateral_ref }
-          : {}),
-        ...(activeShot.partial_value ? { partial_value: activeShot.partial_value } : {}),
-      };
-      // Attribute the shot to the hole it was STARTED on, not whatever hole
-      // is on screen now — guards against a mid-shot hole change misfiling
-      // it (and against a cross-hole start→end segment). Falls back to the
-      // current hole for legacy active shots persisted without holeNum.
-      const finalizeHole = activeShot.holeNum ?? currentHoleNum;
-      setShotsByHole((prev) => {
-        const cur = prev[finalizeHole] ?? [];
-        const next = [...cur, newShot];
-        persistShots(finalizeHole, next);
-        return { ...prev, [finalizeHole]: next };
+        club: activeShot.club,
+        lie: activeShot.lie,
+        partial: activeShot.partial_value,
+        holeNum: activeShot.holeNum ?? currentHoleNum,
       });
-      setActiveShot(null);
-      setPendingClubState(null);
-      setPendingPartial(null);
-      manualPickRef.current = false;
       return;
     }
     // START — require a club first.
@@ -368,6 +352,62 @@ export function useShotTracking({
     const start = ptFromCoord();
     if (!start) return;
     setActiveShot({ club: pendingClub, partial_value: pendingPartial ?? undefined, start, startedAt: new Date().toISOString(), holeNum: currentHoleNum });
+  };
+
+  /** Start anchor for a "forgot to start" shot: the END of the previous shot
+   *  on this hole, or the teebox for the first shot (a drive). Null when neither
+   *  is known — we never fabricate a start out of thin air. */
+  const forgottenShotStart = (): { pt: Pt; lie?: string } | null => {
+    if (currentHoleNum == null) return null;
+    const cur = shotsByHole[currentHoleNum] ?? [];
+    if (cur.length > 0) {
+      // Drop baro_relative_m from the prior end: it may belong to an earlier
+      // barometer session (app relaunch mid-round), so comparing it to a fresh
+      // end reading would yield a bogus slope. Plays-like falls back to the
+      // GPS-altitude delta — less precise but correct in sign.
+      const { baro_relative_m: _b, ...startNoBaro } = cur[cur.length - 1].end;
+      return { pt: startNoBaro };
+    }
+    const tee = getTeePoint?.() ?? null;
+    if (tee) return { pt: { lat: tee.lat, lng: tee.lng }, lie: 'tee' };
+    return null;
+  };
+
+  /** True when a forgotten shot can be anchored (previous shot's finish, or a
+   *  known tee for a drive). The UI only offers the action when this is true. */
+  const canTrackForgottenShot = (): boolean => forgottenShotStart() != null;
+
+  /** Log a shot the player forgot to START: start = previous shot's finish (or
+   *  the tee for a drive), end = current position. One tap, no walk-back. */
+  const trackForgottenShot = () => {
+    if (activeShot || currentHoleNum == null) return;
+    const sinceFix = getMsSinceLastFix?.();
+    if (sinceFix != null && sinceFix > STALE_FIX_TRACK_MS) {
+      Alert.alert('GPS stale', "Your GPS hasn't updated recently. Wait for a fresh fix before logging the shot.");
+      return;
+    }
+    const anchor = forgottenShotStart();
+    if (!anchor) {
+      Alert.alert(
+        "Can't log that yet",
+        'A forgotten shot can only be logged when we know where it started — the finish of your previous shot on this hole, or the tee for a drive.',
+      );
+      return;
+    }
+    if (!pendingClub) {
+      Alert.alert(
+        'Pick a club first',
+        'Tap CLUB to choose what you hit, then log the forgotten shot.',
+        [{ text: 'OK', onPress: () => setClubPickerVisible(true) }],
+      );
+      return;
+    }
+    const end = ptFromCoord();
+    if (!end) { Alert.alert('No GPS', 'Wait for a GPS lock before logging the shot.'); return; }
+    finalizeShot({
+      start: anchor.pt, end, club: pendingClub, lie: anchor.lie,
+      partial: pendingPartial ?? undefined, holeNum: currentHoleNum,
+    });
   };
 
   const cancelActiveShot = () => {
@@ -466,6 +506,8 @@ export function useShotTracking({
     onTrackLongPress,
     cancelActiveShot,
     deleteShotAt,
+    canTrackForgottenShot,
+    trackForgottenShot,
     hydrate,
   };
 }

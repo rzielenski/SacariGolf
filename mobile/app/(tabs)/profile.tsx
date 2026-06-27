@@ -811,10 +811,16 @@ export default function ProfileScreen() {
             />
           </View>
 
-          {/* Strokes gained — needs at least one hole with both putts and chips tracked */}
-          {stats.sg_per_round && stats.sg_holes > 0 && (
+          {/* Strokes gained — computed ONLY from GPS-tracked shots (Broadie model).
+              Null until the player has tracked shots. */}
+          {stats.sg_per_round && (
             <>
-              <Text style={styles.sgSubtitle}>STROKES GAINED PER ROUND  ·  positive = better than scratch baseline</Text>
+              <Text style={styles.sgSubtitle}>
+                STROKES GAINED / 18  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'} of tracked shots
+              </Text>
+              {stats.sg_rounds_used < 5 && (
+                <Text style={styles.sgWarn}>Small sample — track more rounds for a reliable read.</Text>
+              )}
               <View style={styles.sgRow}>
                 <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
                 <SGCell label="Approach" value={stats.sg_per_round.approach} />
@@ -996,6 +1002,17 @@ export default function ProfileScreen() {
         activeOpacity={0.7}
       >
         <Text style={styles.acctRowText}>Privacy Policy</Text>
+        <Text style={styles.acctRowChev}>›</Text>
+      </TouchableOpacity>
+
+      {/* Terms of Service — Apple expects an in-app link (and one on the paywall)
+          for an app with subscriptions + user content. Hosted on the marketing site. */}
+      <TouchableOpacity
+        style={styles.acctRow}
+        onPress={() => Linking.openURL('https://sacarigolf.com/terms')}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.acctRowText}>Terms of Service</Text>
         <Text style={styles.acctRowChev}>›</Text>
       </TouchableOpacity>
 
@@ -1682,6 +1699,7 @@ const styles = StyleSheet.create({
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 },
   perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },
   sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginTop: 4, marginBottom: 6 },
+  sgWarn: { color: C.gold, fontSize: 10, fontStyle: 'italic', marginTop: -2, marginBottom: 6 },
   sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 14,

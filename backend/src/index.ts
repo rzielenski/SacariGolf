@@ -1,7 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
+import pool from './db/pool';
 
 import authRouter from './routes/auth';
 import usersRouter from './routes/users';
@@ -29,8 +31,51 @@ import { startCleanupSchedule } from './utils/cleanup';
 import { startTwitterDigestSchedule } from './utils/twitterDigest';
 
 const app = express();
-app.use(cors());
+
+// Behind Railway's proxy: trust the first hop so req.ip is the real client IP
+// (not a spoofable raw x-forwarded-for) for rate-limit keying.
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
+// Security headers. CSP is left off (this is a JSON API + static images, not an
+// HTML app, so a page CSP buys little and risks breaking image embeds); the
+// resource policy is cross-origin so the native app and web can load /uploads.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+
+// CORS. React Native fetch sends NO Origin header and does not enforce CORS, so
+// the mobile client is unaffected by this lockdown. Browser origins are denied
+// unless explicitly allowlisted via CORS_ORIGINS (comma-separated). With the env
+// unset, only no-origin callers (native / server-to-server) are allowed.
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);                  // native / curl / same-origin
+    if (CORS_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(null, false);                              // unknown browser origin → no CORS headers
+  },
+}));
+
 app.use(express.json({ limit: '8mb' }));
+
+// Lightweight request log: errors + slow requests only, to keep volume sane.
+// Skips health/static so the log isn't drowned by probes and asset fetches.
+app.use((req, res, next) => {
+  if (req.path === '/health' || req.path.startsWith('/uploads') || req.path.startsWith('/avatars')) {
+    return next();
+  }
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    if (res.statusCode >= 400 || ms > 1500) {
+      console.log(`${req.method} ${req.path} ${res.statusCode} ${ms}ms`);
+    }
+  });
+  next();
+});
 
 // Serve uploaded find photos and avatars (path overridable via UPLOADS_DIR env var)
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -86,6 +131,13 @@ process.on('unhandledRejection', (reason) => {
   console.error('Unhandled rejection:', reason);
 });
 
+// A truly uncaught exception leaves the process in an undefined state, but this
+// app's posture is to stay up (same as the rejection handler above) — log it so
+// it's diagnosable in Railway rather than silently crash-looping.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Migrations run TO COMPLETION before the server starts taking traffic.
@@ -104,5 +156,16 @@ const PORT = process.env.PORT || 3000;
   startCleanupSchedule();
   // Once-a-day @Sacari Twitter/X recap (no-op until TWITTER_* env is set).
   startTwitterDigestSchedule();
-  app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
+  const server = app.listen(PORT, () => console.log(`Sacari Golf API running on :${PORT}`));
+
+  // Graceful shutdown: on a Railway redeploy (SIGTERM) stop accepting new
+  // connections, let in-flight requests finish, close the DB pool, then exit.
+  // A 10s backstop force-exits if a connection won't drain.
+  const shutdown = (sig: string) => {
+    console.log(`${sig} received — draining and shutting down`);
+    server.close(() => { pool.end().finally(() => process.exit(0)); });
+    setTimeout(() => process.exit(0), 10_000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 })();

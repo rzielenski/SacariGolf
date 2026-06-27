@@ -5,6 +5,7 @@ import pool from '../db/pool';
 import { requireAuth, requirePremium, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 import { aggregateSG, Shot, Lie } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
@@ -402,25 +403,144 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
-// Aggregated stats from a player's completed rounds. Computes a simplified
-// 4-category strokes-gained model relative to a "scratch baseline" where a
-// hole = (par − 2) full swings to the green + 2 putts. Each component is
-// designed so the four categories sum to (par − strokes), matching score-vs-par.
-//
-//   SG: Putting       = 2 − putts
-//   SG: Around-Green  = chips > 0 ? (1 − chips) : 0
-//                       (1 chip baseline when off-green; 0 contribution when GIR.
-//                        Driving a par-4 green and chipping → GIR + 1 chip is fine,
-//                        the chip is the "around-green" stroke and SG_ATG = 0)
-//   SG: Approach      = gir ? 0 : −1
-//                       (missing the green = a forced extra stroke, attributed here)
-//   SG: Off-the-Tee   = (par − strokes) − SG_putting − SG_around_green − SG_approach
-//                       (the residual: any strokes saved/lost beyond what the other
-//                        three categories account for. Captures eagle-able drives,
-//                        first-shot disasters, and par-5 reach-in-2 bonuses.)
-//
-// Holes without putts AND chips AND gir tracked are excluded from SG averaging
-// so old untracked rounds don't dilute new data.
+/**
+ * Strokes-gained from the player's GPS-tracked shots ONLY (Mark Broadie model,
+ * see utils/sg.ts). This is the single source of truth for SG across the app —
+ * each shot is measured against PGA-Tour expected-strokes baselines, NOT inferred
+ * from per-hole putt/chip/GIR counts. Returns null when the player has no usable
+ * tracked shots (none recorded, or no pin coords to measure against). Sample
+ * sizes come back too so the client can warn when the data is thin.
+ *
+ * Normalised to a per-18-hole figure (× 18 / holes_used).
+ */
+async function computeShotBasedSG(userId: string): Promise<{
+  sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number };
+  shots_used: number;
+  holes_used: number;
+  rounds_used: number;
+} | null> {
+  const { rows } = await pool.query(
+    `SELECT s.match_id, s.hole_num,
+            json_agg(
+              json_build_object(
+                'club',  s.club,
+                'lie',   s.lie,
+                'start', json_build_object('lat', s.start_lat, 'lng', s.start_lng),
+                'end',   json_build_object('lat', s.end_lat,   'lng', s.end_lng)
+              ) ORDER BY s.shot_index
+            ) AS shots,
+            r.hole_scores, r.teebox_id,
+            (SELECT json_agg(json_build_object('hole_num', h.hole_num, 'par', h.par,
+                                                'pin_lat', h.pin_lat, 'pin_lng', h.pin_lng))
+               FROM holes h WHERE h.teebox_id = r.teebox_id) AS holes
+       FROM shots s
+       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = s.user_id
+      WHERE s.user_id = $1
+        AND s.match_id IS NOT NULL
+      GROUP BY s.match_id, s.hole_num, r.hole_scores, r.teebox_id
+      ORDER BY MAX(s.recorded_at) DESC
+      LIMIT 200`,
+    [userId]
+  );
+  if (!rows.length) return null;
+
+  const R = 6371000;
+  const toRad = (d: number) => d * Math.PI / 180;
+  const haversineYds = (a: any, b: any): number | null => {
+    if (a?.lat == null || b?.lat == null) return null;
+    const dLat = toRad(b.lat - a.lat);
+    const dLng = toRad(b.lng - a.lng);
+    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return (2 * R * Math.asin(Math.sqrt(h))) * 1.0936;
+  };
+
+  const allShots: Shot[] = [];
+  const holeIdsSeen = new Set<string>();
+  const matchIdsSeen = new Set<string>();
+
+  // Normalize either shot format into a flat list of {start,end,club,lie}. The
+  // new segment format is canonical; legacy points get paired consecutively.
+  const toSegments = (raw: any[]): { start: any; end: any; club?: string; lie?: string }[] => {
+    if (!raw.length) return [];
+    if (raw[0]?.start && raw[0]?.end) {
+      return raw.filter((s: any) => s?.start && s?.end)
+        .map((s: any) => ({ start: s.start, end: s.end, club: s.club, lie: s.lie }));
+    }
+    const out: { start: any; end: any; club?: string; lie?: string }[] = [];
+    for (let i = 0; i < raw.length - 1; i++) {
+      out.push({ start: raw[i], end: raw[i + 1], club: raw[i]?.club, lie: raw[i]?.lie });
+    }
+    return out;
+  };
+
+  for (const row of rows) {
+    const segments = toSegments(Array.isArray(row.shots) ? row.shots : []);
+    const holes: any[] = Array.isArray(row.holes) ? row.holes : [];
+    const holeMeta = holes.find((h: any) => h.hole_num === row.hole_num);
+    if (!holeMeta || holeMeta.pin_lat == null || holeMeta.pin_lng == null) continue;
+    if (segments.length === 0) continue;
+
+    const par = holeMeta.par ?? 4;
+    const pin = { lat: holeMeta.pin_lat, lng: holeMeta.pin_lng };
+    const holed = (Array.isArray(row.hole_scores) ? row.hole_scores[row.hole_num - 1] : null) ?? null;
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const isLast = i === segments.length - 1;
+      const startDist = haversineYds(seg.start, pin);
+      const endDist0  = haversineYds(seg.end, pin);
+      if (startDist == null) continue;
+      const startLie: Lie = (seg.lie as Lie) ?? (i === 0 ? 'tee' : 'fairway');
+      let endLie: Lie;
+      let endDist: number;
+      if (isLast && typeof holed === 'number' && segments.length === holed) {
+        endLie = 'green'; endDist = 0;
+      } else if (endDist0 != null) {
+        endLie = endDist0 < 30 ? 'green' : 'fairway';
+        endDist = endDist0 < 3 ? 0 : endDist0;
+      } else {
+        continue;
+      }
+      allShots.push({
+        start_lie: startLie,
+        start_dist_yds: Math.round(startDist),
+        end_lie: endLie,
+        end_dist_yds: Math.round(endDist),
+        par,
+        is_tee_shot: i === 0,
+      });
+    }
+    holeIdsSeen.add(`${row.match_id}:${row.hole_num}`);
+    matchIdsSeen.add(row.match_id);
+  }
+
+  if (!allShots.length) return null;
+
+  const totals = aggregateSG(allShots);
+  const holesUsed = holeIdsSeen.size;
+  const roundsUsed = matchIdsSeen.size;
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  const norm = holesUsed > 0 ? 18 / holesUsed : 0;
+  return {
+    sg_per_round: {
+      off_tee:      r2(totals.off_tee      * norm),
+      approach:     r2(totals.approach     * norm),
+      around_green: r2(totals.around_green * norm),
+      putting:      r2(totals.putting      * norm),
+      total:        r2(totals.total        * norm),
+    },
+    shots_used: totals.shots_used,
+    holes_used: holesUsed,
+    rounds_used: roundsUsed,
+  };
+}
+
+// Aggregated stats from a player's completed rounds (GIR / fairways / putts /
+// up-and-downs from tracked hole_stats), plus strokes-gained — which now comes
+// ONLY from GPS-tracked shots via computeShotBasedSG (the old putt/chip/GIR
+// heuristic was removed). sg_per_round is null when the player hasn't tracked
+// shots; sg_rounds_used lets the client warn on a thin sample.
 router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT r.round_id, r.created_at, r.hole_scores, r.hole_stats, r.total_score,
@@ -439,23 +559,9 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     [req.params.id]
   );
 
-  // Skill baseline: instead of measuring SG vs. scratch (par), we measure
-  // vs. the player's own handicap-adjusted expectation. A 20-cap shooting
-  // 92 on par 72 should see "+0 SG" — they played to their level — not
-  // "−20 SG". Course-specific scoring averages would be better but we
-  // don't have enough rounds per course to estimate one, so handicap is
-  // the cleanest skill-level generalization.
-  //
-  // Per-hole expected strokes = par + (handicap_index / 18). Players with
-  // no stored handicap (brand new accounts) fall back to scratch baseline.
-  const { rows: userRows } = await pool.query(
-    `SELECT handicap_index FROM users WHERE user_id = $1`,
-    [req.params.id]
-  );
-  const handicapIndex: number = typeof userRows[0]?.handicap_index === 'number'
-    ? userRows[0].handicap_index
-    : 0;
-  const expectedExtraPerHole = handicapIndex / 18;
+  // Strokes-gained comes exclusively from GPS-tracked shots (the Broadie model
+  // in computeShotBasedSG). The old hole-count heuristic was removed.
+  const shotSG = await computeShotBasedSG(req.params.id);
 
   // Aggregators
   let roundsCount = 0;
@@ -470,14 +576,6 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
   let threePuttCount = 0;
   let upAndDownCount = 0;    // chips ≥ 1 and putts == 1 → saved par from off green
   let upAndDownChances = 0;  // any hole with chips ≥ 1 and putts tracked
-
-  // SG aggregators — 4 categories. Only over holes with full stat tracking.
-  let sgHoles = 0;
-  let sgPutting = 0;
-  let sgAroundGreen = 0;
-  let sgApproach = 0;
-  let sgOffTee = 0;
-  let sgTotal = 0;
 
   for (const r of rows) {
     if (!Array.isArray(r.hole_scores) || r.hole_scores.length === 0) continue;
@@ -522,39 +620,6 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
         if (fwHit) fwHits += 1;
       }
 
-      // 4-category basic SG — needs putts, chips AND gir tracked.
-      // Baselines (Shotscope-style simplified) measured against the
-      // player's HANDICAP-ADJUSTED expectation, not raw par. This means a
-      // 20-cap who plays to their handicap sees ~0 SG total, and a tour-
-      // pro-level player would see +20 SG on the same scorecard.
-      //
-      //   • Putting baseline = 2 if the player reached the green (GIR), else 1.
-      //     If the player chipped on, they're effectively in 1-putt territory, so
-      //     2-putting a chip = 0 SG (par for that recovery), 1-putt = +1, 3-putt = −1.
-      //   • Around-Green baseline = 1 chip (when chips > 0).
-      //   • Approach baseline = GIR (gir = 0 SG, missed green = −1).
-      //   • Off-the-Tee = residual so the four sum to (expected − strokes),
-      //     where expected = par + (handicap_index / 18).
-      //
-      // We keep the putting / around / approach baselines unchanged — they
-      // measure short-game skill in absolute terms (a 1-putt is a 1-putt
-      // regardless of handicap). The handicap shift is absorbed entirely
-      // by the Off-the-Tee residual, which is by far the noisiest signal
-      // anyway. That keeps the short-game categories interpretable.
-      if (putts !== null && chips !== null && gir !== null) {
-        sgHoles += 1;
-        const expectedStrokes = par + expectedExtraPerHole;
-        const puttBaseline = chips > 0 ? 1 : 2;
-        const putt = puttBaseline - putts;
-        const around = chips > 0 ? (1 - chips) : 0;
-        const approach = gir ? 0 : -1;
-        const tee = (expectedStrokes - strokes) - putt - around - approach;
-        sgPutting += putt;
-        sgAroundGreen += around;
-        sgApproach += approach;
-        sgOffTee += tee;
-        sgTotal += (expectedStrokes - strokes);
-      }
     }
   }
 
@@ -577,16 +642,11 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     up_and_down_pct: upAndDownChances ? round((upAndDownCount / upAndDownChances) * 100, 1) : null,
     up_and_downs: upAndDownCount,
     up_and_down_chances: upAndDownChances,
-    sg_holes: sgHoles,
-    sg_per_round: sgHoles && roundsCount
-      ? {
-          off_tee:      round((sgOffTee      / sgHoles) * (holesPlayed / roundsCount)),
-          approach:     round((sgApproach    / sgHoles) * (holesPlayed / roundsCount)),
-          around_green: round((sgAroundGreen / sgHoles) * (holesPlayed / roundsCount)),
-          putting:      round((sgPutting     / sgHoles) * (holesPlayed / roundsCount)),
-          total:        round((sgTotal       / sgHoles) * (holesPlayed / roundsCount)),
-        }
-      : null,
+    // Strokes-gained from tracked shots only (null until the player tracks shots).
+    sg_per_round: shotSG?.sg_per_round ?? null,
+    sg_shots_used: shotSG?.shots_used ?? 0,
+    sg_holes_used: shotSG?.holes_used ?? 0,
+    sg_rounds_used: shotSG?.rounds_used ?? 0,
   });
 }));
 
@@ -1141,138 +1201,10 @@ router.delete('/me/shots/:shotId', requireAuth, wrap(async (req: AuthRequest, re
  * the basic /stats endpoint in that case.
  */
 router.get('/:id/sg-advanced', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  // Group rows from the new shots table by (match_id, hole_num) and join
-  // each group with its round + teebox holes for pin coordinates.
-  const { rows } = await pool.query(
-    `SELECT s.match_id, s.hole_num,
-            json_agg(
-              json_build_object(
-                'club',  s.club,
-                'lie',   s.lie,
-                'start', json_build_object('lat', s.start_lat, 'lng', s.start_lng),
-                'end',   json_build_object('lat', s.end_lat,   'lng', s.end_lng)
-              ) ORDER BY s.shot_index
-            ) AS shots,
-            r.hole_scores, r.teebox_id,
-            (SELECT json_agg(json_build_object('hole_num', h.hole_num, 'par', h.par,
-                                                'pin_lat', h.pin_lat, 'pin_lng', h.pin_lng))
-               FROM holes h WHERE h.teebox_id = r.teebox_id) AS holes
-       FROM shots s
-       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = s.user_id
-      WHERE s.user_id = $1
-        AND s.match_id IS NOT NULL
-      GROUP BY s.match_id, s.hole_num, r.hole_scores, r.teebox_id
-      ORDER BY MAX(s.recorded_at) DESC
-      LIMIT 200`,
-    [req.params.id]
-  );
-
-  if (!rows.length) return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
-
-  const R = 6371000;
-  const toRad = (d: number) => d * Math.PI / 180;
-  const haversineYds = (a: any, b: any) => {
-    if (a?.lat == null || b?.lat == null) return null;
-    const dLat = toRad(b.lat - a.lat);
-    const dLng = toRad(b.lng - a.lng);
-    const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-    return (2 * R * Math.asin(Math.sqrt(h))) * 1.0936;
-  };
-
-  const allShots: Shot[] = [];
-  const holeIdsSeen = new Set<string>();
-  const matchIdsSeen = new Set<string>();
-
-  // Normalize either format into a flat list of {start, end, club, lie} tuples
-  // per hole. The new segment format is canonical; legacy points get paired.
-  const toSegments = (raw: any[]): { start: any; end: any; club?: string; lie?: string }[] => {
-    if (!raw.length) return [];
-    if (raw[0]?.start && raw[0]?.end) {
-      return raw
-        .filter((s: any) => s?.start && s?.end)
-        .map((s: any) => ({ start: s.start, end: s.end, club: s.club, lie: s.lie }));
-    }
-    const out: { start: any; end: any; club?: string; lie?: string }[] = [];
-    for (let i = 0; i < raw.length - 1; i++) {
-      out.push({ start: raw[i], end: raw[i + 1], club: raw[i]?.club, lie: raw[i]?.lie });
-    }
-    return out;
-  };
-
-  for (const row of rows) {
-    const segments = toSegments(Array.isArray(row.shots) ? row.shots : []);
-    const holes: any[] = Array.isArray(row.holes) ? row.holes : [];
-    const holeMeta = holes.find((h: any) => h.hole_num === row.hole_num);
-    if (!holeMeta || holeMeta.pin_lat == null || holeMeta.pin_lng == null) continue;
-    if (segments.length === 0) continue;
-
-    const par = holeMeta.par ?? 4;
-    const pin = { lat: holeMeta.pin_lat, lng: holeMeta.pin_lng };
-    const holed = (Array.isArray(row.hole_scores) ? row.hole_scores[row.hole_num - 1] : null) ?? null;
-
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      const isLast = i === segments.length - 1;
-
-      const startDist = haversineYds(seg.start, pin);
-      const endDist0  = haversineYds(seg.end, pin);
-      if (startDist == null) continue;
-
-      // Start lie: prefer player tag, else infer.
-      const startLie: Lie = (seg.lie as Lie) ?? (i === 0 ? 'tee' : 'fairway');
-
-      // End lie/distance: holed out on the last shot if scorecard total matches.
-      let endLie: Lie;
-      let endDist: number;
-      if (isLast && typeof holed === 'number' && segments.length === holed) {
-        endLie = 'green';
-        endDist = 0;
-      } else if (endDist0 != null) {
-        endLie = endDist0 < 30 ? 'green' : 'fairway';
-        endDist = endDist0 < 3 ? 0 : endDist0;
-      } else {
-        // No usable end distance — skip this shot entirely.
-        continue;
-      }
-
-      allShots.push({
-        start_lie: startLie,
-        start_dist_yds: Math.round(startDist),
-        end_lie: endLie,
-        end_dist_yds: Math.round(endDist),
-        par,
-        is_tee_shot: i === 0,
-      });
-    }
-
-    holeIdsSeen.add(`${row.match_id}:${row.hole_num}`);
-    matchIdsSeen.add(row.match_id);
-  }
-
-  if (!allShots.length) {
-    return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
-  }
-
-  const totals = aggregateSG(allShots);
-  const holesUsed = holeIdsSeen.size;
-  const roundsUsed = matchIdsSeen.size;
-  const round = (n: number) => Math.round(n * 100) / 100;
-
-  // Per-round = total SG × (18 / holes_used). Crude but interpretable.
-  const norm = holesUsed > 0 ? 18 / holesUsed : 0;
-  return res.json({
-    shots_used: totals.shots_used,
-    holes_used: holesUsed,
-    rounds_used: roundsUsed,
-    sg_per_round: {
-      off_tee:      round(totals.off_tee      * norm),
-      approach:     round(totals.approach     * norm),
-      around_green: round(totals.around_green * norm),
-      putting:      round(totals.putting      * norm),
-      total:        round(totals.total        * norm),
-    },
-  });
+  // Same shot-based engine the /stats endpoint uses (kept for back-compat).
+  const sg = await computeShotBasedSG(req.params.id);
+  if (!sg) return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
+  return res.json(sg);
 }));
 
 // Course records — the courses where this user holds the lowest score on
@@ -2230,7 +2162,7 @@ router.post('/me/import-shots', requireAuth, wrap(async (req: AuthRequest, res: 
 }));
 
 // Avatar upload
-router.post('/me/avatar', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/me/avatar', requireAuth, perUserRateLimit({ max: 10, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const { imageBase64, mimeType } = req.body ?? {};
   if (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim()) {
     return res.status(400).json({ error: 'imageBase64 required' });

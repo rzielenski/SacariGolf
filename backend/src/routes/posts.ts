@@ -21,6 +21,7 @@ import { randomUUID } from 'crypto';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 import { sendPush, isLikeNotifyMilestone } from '../utils/notify';
 import { processMentions, hasEveryoneTag, broadcastToEveryone } from '../utils/mentions';
 import { equippedVisualSql } from '../utils/cosmeticSql';
@@ -60,7 +61,7 @@ function unlinkFeedImage(url: string | null | undefined) {
   try { fs.unlinkSync(path.join(FEED_DIR, fname)); } catch { /* already gone, fine */ }
 }
 
-router.post('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/', requireAuth, perUserRateLimit({ max: 20, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const { body, imageBase64, imageMime } = req.body ?? {};
 
   const text = typeof body === 'string' ? body.trim().slice(0, MAX_BODY_LEN) : '';
@@ -437,24 +438,31 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
 
 // GET /posts/:id/comments → list, oldest first, each flagged `mine`.
 router.get('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Cap at the 200 most-recent comments (returned oldest-first for display) so a
+  // thread that accumulates thousands of comments can't return the whole set on
+  // every fetch. Pagination is a future add if any thread regularly exceeds this.
   const { rows } = await pool.query(
-    `SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
-            c.parent_comment_id, c.image_url,
-            (c.user_id = $2) AS mine,
-            (SELECT COUNT(*)::int FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id) AS like_count,
-            EXISTS(SELECT 1 FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id AND pcl.user_id = $2) AS liked,
-            ${equippedVisualSql('u')} AS equipped_visual
-       FROM post_comments c
-       JOIN users u ON u.user_id = c.user_id
-      WHERE c.post_id = $1
-      ORDER BY c.created_at ASC`,
+    `SELECT * FROM (
+       SELECT c.comment_id, c.user_id, u.username, u.avatar_url, c.body, c.created_at, c.client_id,
+              c.parent_comment_id, c.image_url,
+              (c.user_id = $2) AS mine,
+              (SELECT COUNT(*)::int FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id) AS like_count,
+              EXISTS(SELECT 1 FROM post_comment_likes pcl WHERE pcl.comment_id = c.comment_id AND pcl.user_id = $2) AS liked,
+              ${equippedVisualSql('u')} AS equipped_visual
+         FROM post_comments c
+         JOIN users u ON u.user_id = c.user_id
+        WHERE c.post_id = $1
+        ORDER BY c.created_at DESC
+        LIMIT 200
+     ) t
+     ORDER BY t.created_at ASC`,
     [req.params.id, req.userId]
   );
   return res.json(rows);
 }));
 
 // POST /posts/:id/comments  body: { body, clientId? }
-router.post('/:id/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/:id/comments', requireAuth, perUserRateLimit({ max: 30, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
   // Optional image attachment (camera roll). A comment needs text OR an image.
   const imageBase64 = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64 : '';

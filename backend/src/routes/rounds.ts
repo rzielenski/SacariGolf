@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
+import { perUserRateLimit } from '../utils/rateLimit';
 import { sendPush } from '../utils/notify';
 import { persistCommentImage, unlinkCommentImage } from '../utils/commentImage';
 
@@ -59,16 +60,22 @@ router.get('/:roundId/social', requireAuth, wrap(async (req: AuthRequest, res: R
      ORDER BY count DESC, reaction`,
     [req.params.roundId, req.userId]
   );
+  // Cap at the 200 most-recent comments (returned oldest-first) so a busy round
+  // recap can't return an unbounded comment set on every fetch.
   const { rows: cmRows } = await pool.query(
-    `SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at, c.client_id,
-            c.parent_comment_id, c.image_url,
-            (c.user_id = $2) AS mine,
-            (SELECT COUNT(*)::int FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id) AS like_count,
-            EXISTS(SELECT 1 FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id AND rcl.user_id = $2) AS liked
-     FROM round_comments c
-     JOIN users u ON u.user_id = c.user_id
-     WHERE c.round_id = $1
-     ORDER BY c.created_at ASC`,
+    `SELECT * FROM (
+       SELECT c.comment_id, c.user_id, u.username, c.body, c.created_at, c.client_id,
+              c.parent_comment_id, c.image_url,
+              (c.user_id = $2) AS mine,
+              (SELECT COUNT(*)::int FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id) AS like_count,
+              EXISTS(SELECT 1 FROM round_comment_likes rcl WHERE rcl.comment_id = c.comment_id AND rcl.user_id = $2) AS liked
+       FROM round_comments c
+       JOIN users u ON u.user_id = c.user_id
+       WHERE c.round_id = $1
+       ORDER BY c.created_at DESC
+       LIMIT 200
+     ) t
+     ORDER BY t.created_at ASC`,
     [req.params.roundId, req.userId]
   );
   return res.json({ reactions: rxRows, comments: cmRows });
@@ -126,7 +133,7 @@ router.post('/:roundId/reactions', requireAuth, wrap(async (req: AuthRequest, re
 
 // Post a comment
 //   body: { body: 'nice round', clientId?: '...' }
-router.post('/:roundId/comments', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+router.post('/:roundId/comments', requireAuth, perUserRateLimit({ max: 30, windowMs: 60_000 }), wrap(async (req: AuthRequest, res: Response) => {
   const body = (req.body?.body ?? '').toString().trim().slice(0, 280);
   // Optional image attachment (camera roll). A comment needs text OR an image.
   const imageBase64 = typeof req.body?.imageBase64 === 'string' ? req.body.imageBase64 : '';

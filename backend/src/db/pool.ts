@@ -9,6 +9,11 @@ import { Pool } from 'pg';
 // fail fast and recycle connections instead:
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  // TLS when the DB is reached over a public endpoint. Railway's internal
+  // networking is private (no SSL needed), so this is opt-in via DATABASE_SSL=
+  // 'require' to match the web server's pool config and avoid an unencrypted
+  // connection if DATABASE_URL ever points at a public Postgres host.
+  ssl: process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false } : undefined,
   // Stay well under Railway Postgres' connection cap so an overlapping deploy
   // (old + new instance both holding pools) can't exhaust the server.
   max: 10,

@@ -323,8 +323,13 @@ export const api = {
       avg_chips_per_round: number | null;
       three_putt_count: number;
       up_and_down_pct: number | null; up_and_downs: number; up_and_down_chances: number;
-      sg_holes: number;
+      // Strokes-gained, now sourced ONLY from GPS-tracked shots (Broadie model).
+      // null until the player has tracked shots. Sample counts drive the
+      // low-sample warning.
       sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number } | null;
+      sg_shots_used: number;
+      sg_holes_used: number;
+      sg_rounds_used: number;
     }>('GET', `/users/${id}/stats`),
     holeShots: (id: string, courseId: string, holeNum: number, excludeMatchId?: string) => {
       const q = new URLSearchParams({

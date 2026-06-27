@@ -8,6 +8,7 @@ import {
   estimateRatingSlope, looksPlausibleRating, validateTeebox, HoleInput,
 } from '../utils/courseEstimate';
 import { scanScorecard, ScorecardScanError } from '../utils/scorecardScan';
+import { isAdminAuthed } from '../utils/adminAuth';
 
 const router = Router();
 
@@ -28,7 +29,9 @@ router.get('/nearby', requireAuth, wrap(async (req: Request, res: Response) => {
 }));
 
 router.get('/search', requireAuth, wrap(async (req: Request, res: Response) => {
-  const q = (req.query.q as string) || '';
+  // Cap length and strip LIKE wildcards (% and _) so a wildcard-bomb can't force
+  // a full-table ILIKE scan — same hardening as the user search.
+  const q = ((req.query.q as string) || '').slice(0, 80).replace(/[%_]/g, '');
   const limit = Math.min(Number(req.query.limit) || 20, 50);
   if (!q.trim()) return res.json([]);
   const { rows } = await pool.query(
@@ -723,6 +726,10 @@ router.get('/:id/elevation-at', requireAuth, wrap(async (req: any, res: Response
  * curl runbook + admin client cache key. It's not actually gated anymore.
  */
 router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response) => {
+  // Admin-gated: this overwrites canonical pin coordinates for ALL teeboxes of a
+  // course (global shared data), so it needs the admin token, not just a login.
+  // In-round per-player pin contributions still flow through /matches/:id/pin.
+  if (!isAdminAuthed(req, res)) return;
   const { courseId, pins } = req.body ?? {};
   if (typeof courseId !== 'string' || !courseId) {
     return res.status(400).json({ error: 'courseId required' });
@@ -786,6 +793,8 @@ router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response)
  * Response: { updated: N, missing_hole_nums: [...] }
  */
 router.post('/admin/set-teeboxes', requireAuth, wrap(async (req: any, res: Response) => {
+  // Admin-gated — overwrites canonical per-hole tee data (global shared data).
+  if (!isAdminAuthed(req, res)) return;
   const { teeboxId, tees } = req.body ?? {};
   if (typeof teeboxId !== 'string' || !teeboxId) {
     return res.status(400).json({ error: 'teeboxId required' });

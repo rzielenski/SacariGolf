@@ -45,8 +45,12 @@ setInterval(() => {
 }, 60_000).unref?.();
 
 function clientIp(req: Request): string {
-  const xf = (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim();
-  return xf || req.ip || 'unknown';
+  // With `trust proxy` set in index.ts, req.ip is the real client IP derived
+  // from the validated Railway proxy hop — preferred over the raw, spoofable
+  // x-forwarded-for header (which is only a fallback for non-proxied/local runs).
+  return req.ip
+    || (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim()
+    || 'unknown';
 }
 
 // Email/password auth

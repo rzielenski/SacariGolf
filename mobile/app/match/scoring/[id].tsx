@@ -1071,6 +1071,7 @@ export default function ScoringScreen() {
     ? { lat: measurePin.latitude, lng: measurePin.longitude }
     : null;
   const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
+  const knownTeeRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
@@ -1082,11 +1083,14 @@ export default function ScoringScreen() {
     // hook gets the current hole's pin without needing the calling
     // component to memoize the callback.
     getPinPoint: () => knownPinRef.current,
+    // Tee anchor for logging a forgotten DRIVE (the hole's first shot).
+    getTeePoint: () => knownTeeRef.current,
   });
   const {
     shotsByHole, currentShots, activeShot, pendingClub, pendingPartial, clubPickerVisible,
     setClubPickerVisible, pickClubManual, pickClubAuto, pickPartial, isManualPick,
     onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt,
+    canTrackForgottenShot, trackForgottenShot,
   } = tracking;
 
   // ── Capture barometric anchor on FIRST track press of the round ────────
@@ -1518,6 +1522,11 @@ export default function ScoringScreen() {
   // the right pin on each finalize. Plain assignment in render is fine —
   // refs aren't reactive and we're just shipping the latest value through.
   knownPinRef.current = knownPin ? { lat: knownPin.lat, lng: knownPin.lng } : null;
+  // Mirror the current hole's marked teebox for the forgotten-drive anchor.
+  knownTeeRef.current =
+    currentHoleObj && typeof (currentHoleObj as any).tee_lat === 'number' && typeof (currentHoleObj as any).tee_lng === 'number'
+      ? { lat: (currentHoleObj as any).tee_lat, lng: (currentHoleObj as any).tee_lng }
+      : null;
 
   // ── Relative-elevation: pin lookup ─────────────────────────────────────
   // Pulls the cached relative elevation at the current hole's pin, if any
@@ -2956,6 +2965,24 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* Forgot to start a shot? Log one anchored to the previous shot's finish
+          (or the tee for a drive) → current position. Shown only when idle and
+          an anchor is actually known, so we never fabricate a start. */}
+      {!preview && !activeShot && userCoord && canTrackForgottenShot() && (
+        <TouchableOpacity
+          style={styles.forgotShotBtn}
+          onPress={() => {
+            const sinceFix = getMsSinceLastFix();
+            if (sinceFix != null && sinceFix > 5000) refreshGps();
+            trackForgottenShot();
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.forgotShotText}>
+            ↩  Forgot to start? Log this shot from {currentShots.length > 0 ? 'your last shot' : 'the tee'}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* Club picker modal */}
       <Modal
@@ -3820,6 +3847,18 @@ const styles = StyleSheet.create({
   topChipLocked:  { borderColor: C.textMuted + '88' },
   topChipLabel:   { color: C.textMuted, fontWeight: '800', fontSize: 9, letterSpacing: 1 },
   topChipValue:   { color: C.text, fontWeight: '900', fontSize: 12, marginTop: 2 },
+
+  // "Forgot to start a shot?" affordance — sits just below the action row.
+  forgotShotBtn: {
+    position: 'absolute', top: 180, left: 12, right: 12, zIndex: 5,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 6, borderWidth: 1, borderColor: C.gold + '66',
+    paddingVertical: 7, paddingHorizontal: 10,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
+  forgotShotText: { color: C.gold, fontWeight: '800', fontSize: 11 },
 
   // ── Bottom-right pin anchor — bottom value follows panel height ────────
   pinDistAnchor: { position: 'absolute', right: 12 },
