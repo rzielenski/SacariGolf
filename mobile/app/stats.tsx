@@ -148,13 +148,13 @@ export default function StatsScreen() {
 
           {stats?.sg_per_round ? (
             <>
-              <Text style={s.subtitle}>PGA Tour baseline model · per 18 holes · positive = gaining</Text>
+              <Text style={s.subtitle}>PGA Tour baseline · per round · positive = gaining</Text>
               <Text style={s.sample}>
-                From {stats.sg_shots_used} tracked shot{stats.sg_shots_used === 1 ? '' : 's'} across {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
+                Putting & chipping from your putt distances · off-tee & approach from tracked shots · {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
               </Text>
               {stats.sg_rounds_used < 5 && (
                 <Text style={s.warn}>
-                  Small sample. Strokes gained gets reliable around 5+ tracked rounds, treat these as early signal.
+                  Small sample. Strokes gained gets reliable around 5+ rounds, treat these as early signal.
                 </Text>
               )}
               <View style={{ marginTop: 18 }}>
@@ -165,11 +165,14 @@ export default function StatsScreen() {
                 <View style={s.totalDivider} />
                 <SGRow label="TOTAL"        value={stats.sg_per_round.total} bold />
               </View>
+              <Text style={s.sample}>
+                A dash (—) means no data yet for that category. Putting & chipping need putt distances entered; off-tee & approach need tracked shots.
+              </Text>
             </>
           ) : (
             <Text style={s.empty}>
-              Strokes gained is computed from your tracked shots. Track every shot during a round
-              (on a hole that has pin coordinates) and it unlocks here.
+              Enter your putt distances during scoring to unlock putting & chipping strokes-gained.
+              Track your shots to add off-the-tee & approach.
             </Text>
           )}
 
@@ -235,13 +238,14 @@ function SummaryBox({ label, value, sub }: { label: string; value: string; sub?:
   );
 }
 
-function SGRow({ label, value, bold }: { label: string; value: number; bold?: boolean }) {
-  const sign = value > 0 ? '+' : '';
-  const color = value > 0.05 ? C.green : value < -0.05 ? C.red : C.text;
+function SGRow({ label, value, bold }: { label: string; value: number | null; bold?: boolean }) {
+  const has = typeof value === 'number';
+  const sign = has && (value as number) > 0 ? '+' : '';
+  const color = !has ? C.textMuted : (value as number) > 0.05 ? C.green : (value as number) < -0.05 ? C.red : C.text;
   return (
     <View style={s.sgRow}>
       <Text style={[s.sgLabel, bold && { fontWeight: '900', color: C.gold }]}>{label}</Text>
-      <Text style={[s.sgVal, { color }, bold && { fontWeight: '900' }]}>{sign}{value.toFixed(2)}</Text>
+      <Text style={[s.sgVal, { color }, bold && { fontWeight: '900' }]}>{has ? `${sign}${(value as number).toFixed(2)}` : '—'}</Text>
     </View>
   );
 }

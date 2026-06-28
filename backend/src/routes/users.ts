@@ -6,7 +6,7 @@ import { requireAuth, requirePremium, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { perUserRateLimit } from '../utils/rateLimit';
-import { aggregateSG, Shot, Lie } from '../utils/sg';
+import { Shot, Lie, sgForShot, categorize, expectedPutts } from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
@@ -403,22 +403,34 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
+/** Expected strokes to get down from a greenside chip (PGA-Tour-ish baseline).
+ *  Around-green SG = this − how-close-the-chip-left-it − chips. Tunable. */
+const AROUND_GREEN_BASELINE = 2.5;
+
 /**
- * Strokes-gained from the player's GPS-tracked shots ONLY (Mark Broadie model,
- * see utils/sg.ts). This is the single source of truth for SG across the app —
- * each shot is measured against PGA-Tour expected-strokes baselines, NOT inferred
- * from per-hole putt/chip/GIR counts. Returns null when the player has no usable
- * tracked shots (none recorded, or no pin coords to measure against). Sample
- * sizes come back too so the client can warn when the data is thin.
- *
- * Normalised to a per-18-hole figure (× 18 / holes_used).
+ * Strokes-gained — the single source of truth for SG across the app. HYBRID:
+ *   • Off-the-tee + Approach come from GPS-tracked shots (Mark Broadie model in
+ *     utils/sg.ts) — these need shot locations + pin coords.
+ *   • Putting + Around-green (chipping) come from the player's TYPED PUTT
+ *     DISTANCES in hole_stats, no GPS needed. Putting telescopes to
+ *     expectedPutts(firstPutt) − putt count (last typed distance is the make).
+ *     Chipping is judged by how close the chip left it (the first putt); a chip
+ *     with NO putt is assumed holed (chip-in).
+ * Each category is a per-round figure and is null when there's no data for it
+ * (so the long game stays empty until shots are tracked, while the short game
+ * shows as soon as putt distances are entered). Returns null only when NOTHING
+ * is available. rounds_used drives the low-sample warning.
  */
-async function computeShotBasedSG(userId: string): Promise<{
-  sg_per_round: { off_tee: number; approach: number; around_green: number; putting: number; total: number };
+async function computeStrokesGained(userId: string): Promise<{
+  sg_per_round: {
+    off_tee: number | null; approach: number | null;
+    around_green: number | null; putting: number | null; total: number;
+  };
   shots_used: number;
   holes_used: number;
   rounds_used: number;
 } | null> {
+  // ── Long game (off-the-tee + approach) from GPS-tracked shots ─────────────
   const { rows } = await pool.query(
     `SELECT s.match_id, s.hole_num,
             json_agg(
@@ -442,7 +454,6 @@ async function computeShotBasedSG(userId: string): Promise<{
       LIMIT 200`,
     [userId]
   );
-  if (!rows.length) return null;
 
   const R = 6371000;
   const toRad = (d: number) => d * Math.PI / 180;
@@ -454,13 +465,6 @@ async function computeShotBasedSG(userId: string): Promise<{
     const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
     return (2 * R * Math.asin(Math.sqrt(h))) * 1.0936;
   };
-
-  const allShots: Shot[] = [];
-  const holeIdsSeen = new Set<string>();
-  const matchIdsSeen = new Set<string>();
-
-  // Normalize either shot format into a flat list of {start,end,club,lie}. The
-  // new segment format is canonical; legacy points get paired consecutively.
   const toSegments = (raw: any[]): { start: any; end: any; club?: string; lie?: string }[] => {
     if (!raw.length) return [];
     if (raw[0]?.start && raw[0]?.end) {
@@ -474,6 +478,9 @@ async function computeShotBasedSG(userId: string): Promise<{
     return out;
   };
 
+  const allShots: Shot[] = [];
+  const gpsHoles = new Set<string>();
+  const gpsRounds = new Set<string>();
   for (const row of rows) {
     const segments = toSegments(Array.isArray(row.shots) ? row.shots : []);
     const holes: any[] = Array.isArray(row.holes) ? row.holes : [];
@@ -511,27 +518,86 @@ async function computeShotBasedSG(userId: string): Promise<{
         is_tee_shot: i === 0,
       });
     }
-    holeIdsSeen.add(`${row.match_id}:${row.hole_num}`);
-    matchIdsSeen.add(row.match_id);
+    gpsHoles.add(`${row.match_id}:${row.hole_num}`);
+    gpsRounds.add(row.match_id);
   }
 
-  if (!allShots.length) return null;
+  // Aggregate ONLY off-tee + approach from the GPS shots. Putting / around-green
+  // categorised from GPS are intentionally ignored — they come from the typed
+  // putt distances below.
+  let offTeeSum = 0, approachSum = 0, offTeeShots = 0, approachShots = 0;
+  for (const shot of allShots) {
+    const sg = sgForShot(shot);
+    if (!Number.isFinite(sg)) continue;
+    const cat = categorize(shot);
+    if (cat === 'off_tee') { offTeeSum += sg; offTeeShots += 1; }
+    else if (cat === 'approach') { approachSum += sg; approachShots += 1; }
+  }
 
-  const totals = aggregateSG(allShots);
-  const holesUsed = holeIdsSeen.size;
-  const roundsUsed = matchIdsSeen.size;
+  // ── Short game (putting + around-green) from typed putt distances ─────────
+  const { rows: statRows } = await pool.query(
+    `SELECT r.match_id, r.hole_stats
+       FROM rounds r JOIN matches m ON m.match_id = r.match_id
+      WHERE r.user_id = $1 AND m.is_practice = false
+      ORDER BY r.created_at DESC
+      LIMIT 50`,
+    [userId]
+  );
+  let puttSG = 0, chipSG = 0;
+  const puttRounds = new Set<string>();
+  const chipRounds = new Set<string>();
+  for (const r of statRows) {
+    const stats: any[] = Array.isArray(r.hole_stats) ? r.hole_stats : [];
+    for (const h of stats) {
+      if (!h) continue;
+      const puttD: number[] = Array.isArray(h.puttDistances)
+        ? h.puttDistances.filter((d: any) => typeof d === 'number' && d >= 0)
+        : [];
+      const chips = typeof h.chips === 'number' ? h.chips : 0;
+      const puttCount = puttD.length;
+      // The Hole Detail sheet pads undialed putt slots with a literal 0, so a 0
+      // means "distance not entered", not a 0-ft putt. The first NON-zero entry
+      // is the real starting distance; 0 here means nothing was dialed.
+      const firstPuttFt = puttD.find((d) => d > 0) ?? 0;
+      const hasDialedPutt = firstPuttFt > 0;
+      // Putting SG telescopes to expectedPutts(firstPutt) − putt count (the last
+      // typed distance is the made putt, so the count IS puttD.length). Skip a
+      // hole where putts were recorded but no distance was dialed — undefined.
+      if (puttCount > 0 && hasDialedPutt) {
+        puttSG += expectedPutts(firstPuttFt) - puttCount;
+        puttRounds.add(r.match_id);
+      }
+      // Around-green: judged by how close the chip left it (the first putt's
+      // distance). A chip with NO putt is assumed holed (chip-in → leave = 0).
+      // A chip whose putts have no dialed distance is left out (can't gauge it).
+      if (chips >= 1) {
+        if (puttCount === 0) {
+          chipSG += AROUND_GREEN_BASELINE - 0 - chips;       // chip-in (assumed made)
+          chipRounds.add(r.match_id);
+        } else if (hasDialedPutt) {
+          chipSG += AROUND_GREEN_BASELINE - expectedPutts(firstPuttFt) - chips;
+          chipRounds.add(r.match_id);
+        }
+      }
+    }
+  }
+
+  // ── Combine — per-round figures; a category is null when it has no data. ──
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const norm = holesUsed > 0 ? 18 / holesUsed : 0;
+  const gpsRoundCount = gpsRounds.size;
+  const off_tee      = offTeeShots   > 0 && gpsRoundCount > 0 ? r2(offTeeSum   / gpsRoundCount) : null;
+  const approach     = approachShots > 0 && gpsRoundCount > 0 ? r2(approachSum / gpsRoundCount) : null;
+  const putting      = puttRounds.size > 0 ? r2(puttSG / puttRounds.size) : null;
+  const around_green = chipRounds.size > 0 ? r2(chipSG / chipRounds.size) : null;
+
+  if (off_tee == null && approach == null && putting == null && around_green == null) return null;
+
+  const total = r2((off_tee ?? 0) + (approach ?? 0) + (around_green ?? 0) + (putting ?? 0));
+  const roundsUsed = new Set<string>([...gpsRounds, ...puttRounds, ...chipRounds]).size;
   return {
-    sg_per_round: {
-      off_tee:      r2(totals.off_tee      * norm),
-      approach:     r2(totals.approach     * norm),
-      around_green: r2(totals.around_green * norm),
-      putting:      r2(totals.putting      * norm),
-      total:        r2(totals.total        * norm),
-    },
-    shots_used: totals.shots_used,
-    holes_used: holesUsed,
+    sg_per_round: { off_tee, approach, around_green, putting, total },
+    shots_used: offTeeShots + approachShots,
+    holes_used: gpsHoles.size,
     rounds_used: roundsUsed,
   };
 }
@@ -559,9 +625,9 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     [req.params.id]
   );
 
-  // Strokes-gained comes exclusively from GPS-tracked shots (the Broadie model
-  // in computeShotBasedSG). The old hole-count heuristic was removed.
-  const shotSG = await computeShotBasedSG(req.params.id);
+  // Strokes-gained: long game from GPS shots, short game from typed putt
+  // distances (see computeStrokesGained). Each category can be null.
+  const shotSG = await computeStrokesGained(req.params.id);
 
   // Aggregators
   let roundsCount = 0;
@@ -1201,8 +1267,8 @@ router.delete('/me/shots/:shotId', requireAuth, wrap(async (req: AuthRequest, re
  * the basic /stats endpoint in that case.
  */
 router.get('/:id/sg-advanced', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  // Same shot-based engine the /stats endpoint uses (kept for back-compat).
-  const sg = await computeShotBasedSG(req.params.id);
+  // Same strokes-gained engine the /stats endpoint uses (kept for back-compat).
+  const sg = await computeStrokesGained(req.params.id);
   if (!sg) return res.json({ shots_used: 0, sg_per_round: null, holes_used: 0, rounds_used: 0 });
   return res.json(sg);
 }));

@@ -810,26 +810,28 @@ export default function ProfileScreen() {
               value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'}
             />
           </View>
+        </>
+      )}
 
-          {/* Strokes gained — computed ONLY from GPS-tracked shots (Broadie model).
-              Null until the player has tracked shots. */}
-          {stats.sg_per_round && (
-            <>
-              <Text style={styles.sgSubtitle}>
-                STROKES GAINED / 18  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'} of tracked shots
-              </Text>
-              {stats.sg_rounds_used < 5 && (
-                <Text style={styles.sgWarn}>Small sample — track more rounds for a reliable read.</Text>
-              )}
-              <View style={styles.sgRow}>
-                <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
-                <SGCell label="Approach" value={stats.sg_per_round.approach} />
-                <SGCell label="Around" value={stats.sg_per_round.around_green} />
-                <SGCell label="Putt" value={stats.sg_per_round.putting} />
-                <SGCell label="Total" value={stats.sg_per_round.total} highlight />
-              </View>
-            </>
+      {/* Strokes gained — its OWN section, independent of GIR/fairway tracking.
+          Putting + around-green come from typed putt distances; off-tee +
+          approach from tracked shots (— per category until there's data). */}
+      {stats?.sg_per_round && (
+        <>
+          <OrnamentTitle title="Strokes Gained" />
+          <Text style={styles.sgSubtitle}>
+            PER ROUND  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
+          </Text>
+          {stats.sg_rounds_used < 5 && (
+            <Text style={styles.sgWarn}>Small sample — track more rounds for a reliable read.</Text>
           )}
+          <View style={styles.sgRow}>
+            <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
+            <SGCell label="Approach" value={stats.sg_per_round.approach} />
+            <SGCell label="Around" value={stats.sg_per_round.around_green} />
+            <SGCell label="Putt" value={stats.sg_per_round.putting} />
+            <SGCell label="Total" value={stats.sg_per_round.total} highlight />
+          </View>
         </>
       )}
 
@@ -1348,18 +1350,20 @@ export default function ProfileScreen() {
   );
 }
 
-function SGCell({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
-  // Format with explicit sign + 1 decimal. Color reflects sign: green = saving
-  // strokes vs scratch baseline, red = losing them.
-  const sign = value > 0 ? '+' : '';
-  const color = value > 0 ? C.green : value < 0 ? C.red : C.textMuted;
+function SGCell({ label, value, highlight }: { label: string; value: number | null; highlight?: boolean }) {
+  // null = no data for this category yet (e.g. off-tee/approach before any shot
+  // is tracked) → render a dash. Otherwise sign + 1 decimal, green = gaining.
+  const has = typeof value === 'number';
+  const sign = has && (value as number) > 0 ? '+' : '';
+  const color = !has ? C.textDim : (value as number) > 0 ? C.green : (value as number) < 0 ? C.red : C.textMuted;
   return (
     <View style={[
       stylesSG.cell,
       highlight && { borderColor: C.gold },
     ]}>
-      <Text style={stylesSG.label}>{label.toUpperCase()}</Text>
-      <Text style={[stylesSG.value, { color }]}>{sign}{value.toFixed(1)}</Text>
+      {/* shrink-to-fit one line so "APPROACH" can't wrap the H onto a 2nd row */}
+      <Text style={stylesSG.label} numberOfLines={1} adjustsFontSizeToFit>{label.toUpperCase()}</Text>
+      <Text style={[stylesSG.value, { color }]}>{has ? `${sign}${(value as number).toFixed(1)}` : '—'}</Text>
     </View>
   );
 }

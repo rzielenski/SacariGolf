@@ -91,6 +91,14 @@ export function expectedStrokes(lie: Lie, distYds: number): number {
   }
 }
 
+/** Expected putts to hole out from a given distance IN FEET (PGA-Tour putting
+ *  baseline). Used by the input-based putting/chipping SG, which works off the
+ *  putt distances the player types in rather than GPS-tracked shots. */
+export function expectedPutts(distFt: number): number {
+  if (distFt <= 0) return 0;          // already holed
+  return lerp(ES_GREEN_FT, distFt);
+}
+
 /** Strokes-gained for a single shot. */
 export function sgForShot(shot: Shot): number {
   const before = expectedStrokes(shot.start_lie, shot.start_dist_yds);

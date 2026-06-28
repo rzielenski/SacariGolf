@@ -1131,11 +1131,17 @@ export default function ScoringScreen() {
             for (let i = 0; i < raw.length - 1; i++) {
               segs.push({
                 club: raw[i]?.club ?? 'unknown',
-                start: { lat: raw[i].lat, lng: raw[i].lng },
-                end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng },
+                start: { lat: raw[i]?.lat, lng: raw[i]?.lng },
+                end:   { lat: raw[i + 1]?.lat, lng: raw[i + 1]?.lng },
               });
             }
           }
+          // Drop any malformed segment (missing / non-numeric coords) so the
+          // overlay render can never deref undefined and crash the screen.
+          segs = segs.filter((s: any) =>
+            s?.start && s?.end &&
+            typeof s.start.lat === 'number' && typeof s.start.lng === 'number' &&
+            typeof s.end.lat === 'number' && typeof s.end.lng === 'number');
           return { match_id: r.match_id, created_at: r.created_at, shots: segs };
         }).filter((r) => r.shots.length > 0);
         setPastHoleShots(normalized);
@@ -1715,6 +1721,10 @@ export default function ScoringScreen() {
         }
       }
       for (const s of segs) {
+        // Skip malformed segments (legacy/partial data) so neither this
+        // distance read nor the overlay render derefs an undefined coord.
+        if (typeof s?.start?.lat !== 'number' || typeof s?.start?.lng !== 'number'
+          || typeof s?.end?.lat !== 'number' || typeof s?.end?.lng !== 'number') continue;
         const d = distMetres(here.lat, here.lng, s.start.lat, s.start.lng);
         if (d <= NEARBY_RADIUS_M) {
           out.push({ ...s, match_id: round.match_id, created_at: round.created_at });
@@ -2515,10 +2525,17 @@ export default function ScoringScreen() {
           let bestIdx = -1;
           let bestDist = Infinity;
           currentShots.forEach((s, i) => {
-            const d = Math.min(
-              distMetres(latitude, longitude, s.end.lat, s.end.lng),
-              distMetres(latitude, longitude, s.start.lat, s.start.lng),
-            );
+            // Distance to the whole tracer LINE (sampled along start→end), so a
+            // long-press anywhere on the shot — not just on its dots — selects
+            // it. Matches the natural "long-press the shot tracer to delete" UX.
+            let d = Infinity;
+            const N = 12;
+            for (let k = 0; k <= N; k++) {
+              const t = k / N;
+              const plat = s.start.lat + (s.end.lat - s.start.lat) * t;
+              const plng = s.start.lng + (s.end.lng - s.start.lng) * t;
+              d = Math.min(d, distMetres(latitude, longitude, plat, plng));
+            }
             if (d < bestDist) { bestDist = d; bestIdx = i; }
           });
           const HIT_M = 18; // ~20 yds — generous for a fingertip long-press
@@ -2756,6 +2773,26 @@ export default function ScoringScreen() {
               >
                 <View style={[styles.shotEndDot, { borderColor: color }]} />
               </Marker>
+              {/* Yardage at the shot's midpoint. A normal shot was shown live
+                  while walking; a "forgot to track" one-tap shot never had a
+                  live line, so this is the only place its distance appears.
+                  Uses the stored total_yds, else computes from the endpoints. */}
+              {(() => {
+                const yds = shot.total_yds ?? Math.round(distYards(shot.start.lat, shot.start.lng, shot.end.lat, shot.end.lng));
+                if (!Number.isFinite(yds) || yds <= 0) return null;
+                return (
+                  <Marker
+                    coordinate={{ latitude: (shot.start.lat + shot.end.lat) / 2, longitude: (shot.start.lng + shot.end.lng) / 2 }}
+                    anchor={{ x: 0.5, y: 0.5 }}
+                    tappable={false}
+                    tracksViewChanges={false}
+                  >
+                    <View style={[styles.liveShotPill, { borderColor: color }]}>
+                      <Text style={[styles.liveShotPillText, { color }]}>{yds} yds</Text>
+                    </View>
+                  </Marker>
+                );
+              })()}
             </React.Fragment>
           );
         })}
@@ -4360,6 +4397,12 @@ function inferHoleStatsFromShots(
   chips?: number;
 } {
   if (!hole.pin_lat || !hole.pin_lng || shots.length === 0) return {};
+  // Bail if any shot is malformed (legacy/partial/cached data) — this runs in
+  // an effect, where an unguarded coord deref would throw uncaught.
+  if (!shots.every((s) =>
+    s?.start && s?.end &&
+    typeof s.start.lat === 'number' && typeof s.start.lng === 'number' &&
+    typeof s.end.lat === 'number' && typeof s.end.lng === 'number')) return {};
   const pin = { lat: hole.pin_lat, lng: hole.pin_lng };
   const tee = shots[0].start;
   const centerB = bearingRad(tee, pin);

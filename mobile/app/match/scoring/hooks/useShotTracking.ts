@@ -105,6 +105,27 @@ const AVERAGE_WINDOW_MS = 2500;
  *  to start/stop a shot rather than record a phantom from a stale fix. */
 const STALE_FIX_TRACK_MS = 15_000;
 
+/** A shot is only safe to keep (and render) if both endpoints have numeric
+ *  coords. Malformed entries — legacy formats, half-saved offline tracks, a
+ *  corrupt local cache — are dropped at ingestion so NO render path (the map
+ *  loops, the forgotten-shot anchor, the stat inference) can deref an undefined
+ *  coordinate and crash the scoring screen. */
+function isValidShot(s: any): s is Shot {
+  return !!s && !!s.start && !!s.end
+    && typeof s.start.lat === 'number' && typeof s.start.lng === 'number'
+    && typeof s.end.lat === 'number' && typeof s.end.lng === 'number';
+}
+
+/** Filter a persisted shotsByHole map down to well-formed shots only. */
+function sanitizeShotsByHole(obj: any): Record<number, Shot[]> {
+  const out: Record<number, Shot[]> = {};
+  if (!obj || typeof obj !== 'object') return out;
+  for (const k of Object.keys(obj)) {
+    if (Array.isArray(obj[k])) out[Number(k)] = obj[k].filter(isValidShot);
+  }
+  return out;
+}
+
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
   getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint, getTeePoint,
@@ -138,7 +159,7 @@ export function useShotTracking({
       try {
         const cached = JSON.parse(raw);
         if (cached && typeof cached === 'object' && !serverHydratedRef.current) {
-          setShotsByHole(cached);
+          setShotsByHole(sanitizeShotsByHole(cached));
         }
       } catch { /* corrupt cache → wait for server hydrate */ }
     });
@@ -361,15 +382,20 @@ export function useShotTracking({
     if (currentHoleNum == null) return null;
     const cur = shotsByHole[currentHoleNum] ?? [];
     if (cur.length > 0) {
+      const prevEnd = cur[cur.length - 1]?.end;
+      // Only anchor to a previous shot that actually has a usable endpoint.
+      if (!prevEnd || typeof prevEnd.lat !== 'number' || typeof prevEnd.lng !== 'number') return null;
       // Drop baro_relative_m from the prior end: it may belong to an earlier
       // barometer session (app relaunch mid-round), so comparing it to a fresh
       // end reading would yield a bogus slope. Plays-like falls back to the
       // GPS-altitude delta — less precise but correct in sign.
-      const { baro_relative_m: _b, ...startNoBaro } = cur[cur.length - 1].end;
+      const { baro_relative_m: _b, ...startNoBaro } = prevEnd;
       return { pt: startNoBaro };
     }
     const tee = getTeePoint?.() ?? null;
-    if (tee) return { pt: { lat: tee.lat, lng: tee.lng }, lie: 'tee' };
+    if (tee && typeof tee.lat === 'number' && typeof tee.lng === 'number') {
+      return { pt: { lat: tee.lat, lng: tee.lng }, lie: 'tee' };
+    }
     return null;
   };
 
@@ -453,18 +479,18 @@ export function useShotTracking({
       const raw = (r.shots as any[]) ?? [];
       if (!raw.length) { fromServer[r.hole_num] = []; continue; }
       if (raw[0]?.start && raw[0]?.end) {
-        fromServer[r.hole_num] = raw as Shot[];
+        fromServer[r.hole_num] = (raw as Shot[]).filter(isValidShot);
       } else {
         const segs: Shot[] = [];
         for (let i = 0; i < raw.length - 1; i++) {
           segs.push({
             club: raw[i]?.club ?? 'unknown',
             lie: raw[i]?.lie,
-            start: { lat: raw[i].lat, lng: raw[i].lng, elevation_m: raw[i].elevation_m },
-            end:   { lat: raw[i + 1].lat, lng: raw[i + 1].lng, elevation_m: raw[i + 1].elevation_m },
+            start: { lat: raw[i]?.lat, lng: raw[i]?.lng, elevation_m: raw[i]?.elevation_m },
+            end:   { lat: raw[i + 1]?.lat, lng: raw[i + 1]?.lng, elevation_m: raw[i + 1]?.elevation_m },
           });
         }
-        fromServer[r.hole_num] = segs;
+        fromServer[r.hole_num] = segs.filter(isValidShot);
       }
     }
     serverHydratedRef.current = true;

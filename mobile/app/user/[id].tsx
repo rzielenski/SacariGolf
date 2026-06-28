@@ -266,25 +266,27 @@ export default function UserProfileScreen() {
             <Stat label="3-putts" value={stats.three_putt_count ?? 0} />
             <Stat label="Avg/Hole" value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'} />
           </View>
+        </>
+      )}
 
-          {/* Strokes gained — from GPS-tracked shots only (Broadie model). */}
-          {stats.sg_per_round && (
-            <>
-              <Text style={styles.sgSubtitle}>
-                STROKES GAINED / 18  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'} tracked
-              </Text>
-              {stats.sg_rounds_used < 5 && (
-                <Text style={styles.sgWarn}>Small sample — more tracked rounds needed for a reliable read.</Text>
-              )}
-              <View style={styles.sgRow}>
-                <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
-                <SGCell label="Approach" value={stats.sg_per_round.approach} />
-                <SGCell label="Around" value={stats.sg_per_round.around_green} />
-                <SGCell label="Putt" value={stats.sg_per_round.putting} />
-                <SGCell label="Total" value={stats.sg_per_round.total} highlight />
-              </View>
-            </>
+      {/* Strokes gained — its OWN section, independent of GIR/fairway tracking.
+          Short game from typed putt distances, long game from tracked shots. */}
+      {stats?.sg_per_round && (
+        <>
+          <OrnamentTitle title="Strokes Gained" />
+          <Text style={styles.sgSubtitle}>
+            PER ROUND  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
+          </Text>
+          {stats.sg_rounds_used < 5 && (
+            <Text style={styles.sgWarn}>Small sample — more tracked rounds needed for a reliable read.</Text>
           )}
+          <View style={styles.sgRow}>
+            <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
+            <SGCell label="Approach" value={stats.sg_per_round.approach} />
+            <SGCell label="Around" value={stats.sg_per_round.around_green} />
+            <SGCell label="Putt" value={stats.sg_per_round.putting} />
+            <SGCell label="Total" value={stats.sg_per_round.total} highlight />
+          </View>
         </>
       )}
 
@@ -705,13 +707,14 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-function SGCell({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
-  const sign = value > 0 ? '+' : '';
-  const color = value > 0 ? C.green : value < 0 ? C.red : C.textMuted;
+function SGCell({ label, value, highlight }: { label: string; value: number | null; highlight?: boolean }) {
+  const has = typeof value === 'number';
+  const sign = has && (value as number) > 0 ? '+' : '';
+  const color = !has ? C.textDim : (value as number) > 0 ? C.green : (value as number) < 0 ? C.red : C.textMuted;
   return (
     <View style={[styles.sgCell, highlight && { borderColor: C.gold }]}>
-      <Text style={styles.sgLabel}>{label.toUpperCase()}</Text>
-      <Text style={[styles.sgValue, { color }]}>{sign}{value.toFixed(1)}</Text>
+      <Text style={styles.sgLabel} numberOfLines={1} adjustsFontSizeToFit>{label.toUpperCase()}</Text>
+      <Text style={[styles.sgValue, { color }]}>{has ? `${sign}${(value as number).toFixed(1)}` : '—'}</Text>
     </View>
   );
 }
