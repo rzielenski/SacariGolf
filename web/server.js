@@ -226,6 +226,12 @@ app.get('/app/review', requireAuth, (_req, res) => {
   res.send(R.renderAppReview());
 });
 
+// Compare Sesh: two swing videos side by side. Same client-only model.
+app.get('/app/review/compare', requireAuth, (_req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.send(R.renderAppReviewCompare());
+});
+
 app.get('/account/clubs', requireAuth, async (req, res) => {
   try {
     const me = await apiGet('/users/me', req.token);

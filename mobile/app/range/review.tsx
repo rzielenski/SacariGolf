@@ -66,6 +66,22 @@ export default function ReviewSesh() {
   const [cameraAngle, setCameraAngle] = useState<CameraAngle>('face_on');
   const [busy, setBusy] = useState(false);
 
+  // ── Compare mode ────────────────────────────────────────────────────────
+  // Toggle the history list into a 2-of-N picker instead of tap-to-analyze.
+  // Selecting a 3rd swing evicts the oldest pick rather than dead-ending —
+  // no "deselect one first" friction. Selection persists across a visit to
+  // /range/compare and back, so swapping one side is just: back, tap a
+  // different swing, Compare again.
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const toggleCompareSelect = (swingId: string) => {
+    setCompareSelection((prev) => {
+      if (prev.includes(swingId)) return prev.filter((id) => id !== swingId);
+      const next = [...prev, swingId];
+      return next.length > 2 ? next.slice(next.length - 2) : next;
+    });
+  };
+
   // Load history on mount + whenever we navigate back.
   const reload = useCallback(async () => {
     if (!user?.user_id) return;
@@ -181,6 +197,11 @@ export default function ReviewSesh() {
           onPress: async () => {
             if (!user?.user_id) return;
             await deleteSwing(user.user_id, swing.swing_id);
+            // Long-press-delete stays reachable while compareMode is active
+            // (it's gated only on `!compareMode && analyzing`) — drop the
+            // deleted id from the pick list so it can't sit in a compare slot
+            // and later 404 in /range/compare.
+            setCompareSelection((prev) => prev.filter((id) => id !== swing.swing_id));
             await reload();
           },
         },
@@ -305,7 +326,24 @@ export default function ReviewSesh() {
         </View>
 
         {/* Session history */}
-        <Text style={[styles.sectionLabel, { marginTop: 28 }]}>HISTORY</Text>
+        <View style={styles.historyHeader}>
+          <Text style={styles.sectionLabel}>HISTORY</Text>
+          {swings.length >= 2 && (
+            <TouchableOpacity
+              onPress={() => { setCompareMode((v) => !v); if (compareMode) setCompareSelection([]); }}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.compareToggle, compareMode && styles.compareToggleActive]}>
+                {compareMode ? 'Cancel' : 'Compare 2 Swings'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        {compareMode && (
+          <Text style={styles.compareHint}>
+            Tap 2 swings to compare side by side. Tap a 3rd to swap out the oldest pick.
+          </Text>
+        )}
         {swings.length === 0 ? (
           <View style={styles.emptyBox}>
             <Text style={styles.emptyText}>No swings recorded yet.</Text>
@@ -315,39 +353,53 @@ export default function ReviewSesh() {
             </Text>
           </View>
         ) : (
-          swings.map((s) => (
-            <TouchableOpacity
-              key={s.swing_id}
-              style={styles.swingRow}
-              onPress={() => router.push(`/range/analyze?swing=${s.swing_id}` as any)}
-              onLongPress={() => confirmDelete(s)}
-              activeOpacity={0.75}
-              disabled={s.status === 'analyzing'}
-            >
-              <View style={styles.swingThumb}>
-                <Text style={styles.swingThumbText}>
-                  {CLUB_LABELS[s.club]?.split(' ').map((w) => w[0]).join('') ?? s.club}
-                </Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.swingClub}>{CLUB_LABELS[s.club] ?? s.club}</Text>
-                <Text style={styles.swingMeta}>
-                  {new Date(s.recorded_at).toLocaleString(undefined, {
-                    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-                  })}
-                  {s.status === 'complete' && s.result && (
-                    <Text style={styles.swingMetric}>
-                      {'  ·  '}{s.result.club.clubheadSpeedMph} mph
-                      {'  ·  '}{s.result.club.carryYds} yds
+          swings.map((s) => {
+            const pickIdx = compareSelection.indexOf(s.swing_id);
+            const picked = pickIdx >= 0;
+            return (
+              <TouchableOpacity
+                key={s.swing_id}
+                style={[styles.swingRow, picked && styles.swingRowPicked]}
+                onPress={() => (compareMode
+                  ? toggleCompareSelect(s.swing_id)
+                  : router.push(`/range/analyze?swing=${s.swing_id}` as any))}
+                onLongPress={() => confirmDelete(s)}
+                activeOpacity={0.75}
+                disabled={!compareMode && s.status === 'analyzing'}
+              >
+                {compareMode ? (
+                  <View style={[styles.swingThumb, picked && styles.swingThumbPicked]}>
+                    <Text style={[styles.swingThumbText, picked && { color: C.bg }]}>
+                      {picked ? String(pickIdx + 1) : ''}
                     </Text>
-                  )}
-                </Text>
-              </View>
-              {s.status === 'analyzing' && <ActivityIndicator color={C.gold} />}
-              {s.status === 'complete' && <Text style={styles.swingChev}>›</Text>}
-              {s.status === 'failed' && <Text style={styles.swingFailed}>FAILED</Text>}
-            </TouchableOpacity>
-          ))
+                  </View>
+                ) : (
+                  <View style={styles.swingThumb}>
+                    <Text style={styles.swingThumbText}>
+                      {CLUB_LABELS[s.club]?.split(' ').map((w) => w[0]).join('') ?? s.club}
+                    </Text>
+                  </View>
+                )}
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.swingClub}>{CLUB_LABELS[s.club] ?? s.club}</Text>
+                  <Text style={styles.swingMeta}>
+                    {new Date(s.recorded_at).toLocaleString(undefined, {
+                      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+                    })}
+                    {s.status === 'complete' && s.result && (
+                      <Text style={styles.swingMetric}>
+                        {'  ·  '}{s.result.club.clubheadSpeedMph} mph
+                        {'  ·  '}{s.result.club.carryYds} yds
+                      </Text>
+                    )}
+                  </Text>
+                </View>
+                {!compareMode && s.status === 'analyzing' && <ActivityIndicator color={C.gold} />}
+                {!compareMode && s.status === 'complete' && <Text style={styles.swingChev}>›</Text>}
+                {!compareMode && s.status === 'failed' && <Text style={styles.swingFailed}>FAILED</Text>}
+              </TouchableOpacity>
+            );
+          })
         )}
 
         <Text style={styles.note}>
@@ -355,6 +407,21 @@ export default function ReviewSesh() {
           no cloud upload.
         </Text>
       </ScrollView>
+
+      {/* Floating compare bar — appears once exactly 2 swings are picked. */}
+      {compareMode && compareSelection.length === 2 && (
+        <View style={styles.compareBar}>
+          <TouchableOpacity
+            style={styles.compareBarBtn}
+            activeOpacity={0.85}
+            onPress={() => router.push(
+              `/range/compare?a=${encodeURIComponent(compareSelection[0])}&b=${encodeURIComponent(compareSelection[1])}` as any,
+            )}
+          >
+            <Text style={styles.compareBarBtnText}>Compare Selected →</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -386,6 +453,25 @@ const styles = StyleSheet.create({
   paywallBtnText: { color: C.bg, fontWeight: '800', fontSize: 12, letterSpacing: 0.5 },
 
   sectionLabel: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1.5, marginBottom: 10 },
+
+  historyHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: 28, marginBottom: 4,
+  },
+  compareToggle: { color: C.gold, fontSize: 12, fontWeight: '800' },
+  compareToggleActive: { color: C.red },
+  compareHint: { color: C.textMuted, fontSize: 11, lineHeight: 15, marginBottom: 10 },
+  swingRowPicked: { borderColor: C.gold, backgroundColor: C.gold + '11' },
+  swingThumbPicked: { backgroundColor: C.gold, borderColor: C.gold },
+
+  compareBar: {
+    position: 'absolute', left: 20, right: 20, bottom: 24,
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 8, shadowOffset: { width: 0, height: 3 },
+  },
+  compareBarBtn: {
+    backgroundColor: C.gold, borderRadius: 10, paddingVertical: 14, alignItems: 'center',
+  },
+  compareBarBtnText: { color: C.bg, fontWeight: '900', fontSize: 14 },
 
   clubRow: { marginBottom: 4 },
   clubChip: {

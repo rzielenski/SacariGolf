@@ -1247,6 +1247,7 @@ function renderAppReview() {
     <a class="recaps-back" href="/app">&larr; Home</a>
     <h1>Review Sesh</h1>
     <p>Upload a swing video, slow it down, and draw on it to break down your plane, tempo, and positions. Nothing is uploaded &mdash; the video stays in this browser tab.</p>
+    <a class="cta-ghost review-compare-link" href="/app/review/compare">Compare 2 swings &rarr;</a>
   </section>
   <section class="review-wrap" data-page="review">
     <div class="review-drop" id="review-drop">
@@ -1289,6 +1290,83 @@ function renderAppReview() {
   </section>
   <script src="/review.js?v=${ASSET_V}" defer></script>`;
   return page({ title: 'Review Sesh · Sacari Golf', description: 'Upload a swing video, play it back slow, and draw on it.', active: 'review', authed: true, noindex: true, body });
+}
+
+// Compare Sesh: two swing videos, side by side, one shared slo-mo transport
+// (play/pause + speed + a scrub that seeks each clip to the SAME FRACTION of
+// its own duration), independent draw layer per side. Same client-only model
+// as Review Sesh — nothing uploaded, nothing persisted.
+function renderAppReviewCompare() {
+  const dropZone = (side, label) => `
+    <div class="review-compare-panel" data-side="${side}">
+      <div class="review-compare-drop" id="compare-drop-${side}">
+        <input type="file" id="compare-file-${side}" accept="video/*" hidden />
+        <button type="button" class="cta-ghost" id="compare-pick-${side}">Choose ${label}</button>
+        <p class="review-compare-error" id="compare-error-${side}" hidden></p>
+      </div>
+      <div class="review-compare-stage" id="compare-stage-${side}" hidden>
+        <p class="review-panel-label" id="compare-label-${side}">${label}</p>
+        <div class="review-frame review-compare-frame" id="compare-frame-${side}">
+          <video id="compare-video-${side}" playsinline muted loop></video>
+          <canvas id="compare-canvas-${side}"></canvas>
+        </div>
+      </div>
+    </div>`;
+
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/app/review">&larr; Review Sesh</a>
+    <h1>Compare Swings</h1>
+    <p>Upload two swing videos and play them back side by side. One shared play/pause and speed control drives both; draw on either independently. Nothing is uploaded &mdash; both videos stay in this browser tab.</p>
+  </section>
+  <section class="review-wrap" data-page="review-compare">
+    <div class="review-compare-row">
+      ${dropZone('a', 'Video A')}
+      ${dropZone('b', 'Video B')}
+    </div>
+
+    <div class="review-compare-controls" id="compare-controls" hidden>
+      <div class="review-playbar">
+        <button type="button" class="review-play" id="compare-playbtn" aria-label="Play/Pause">&#9654;</button>
+        <div class="review-scrub" id="compare-scrub">
+          <div class="review-scrub-rail"><div class="review-scrub-fill" id="compare-scrub-fill"></div></div>
+        </div>
+      </div>
+      <div class="review-compare-times">
+        <span id="compare-time-a">A 0:00 / 0:00</span>
+        <span id="compare-time-b">B 0:00 / 0:00</span>
+      </div>
+
+      <div class="review-toolbar">
+        <span class="review-tb-label">SPEED</span>
+        <div class="review-chips" id="compare-speed"></div>
+      </div>
+      <div class="review-toolbar">
+        <span class="review-tb-label">DRAW ON</span>
+        <div class="review-chips" id="compare-target">
+          <button type="button" data-target="a" class="on">A</button>
+          <button type="button" data-target="b">B</button>
+        </div>
+      </div>
+      <div class="review-toolbar">
+        <span class="review-tb-label">DRAW</span>
+        <div class="review-chips" id="compare-tools">
+          <button type="button" data-tool="pen">&#9998; Pen</button>
+          <button type="button" data-tool="eraser">&#9003; Erase</button>
+          <button type="button" data-tool="line">&#9585; Line</button>
+          <button type="button" data-tool="circle">&#9675; Circle</button>
+          <button type="button" id="compare-done" hidden>Done</button>
+          <button type="button" id="compare-undo" hidden>Undo</button>
+          <button type="button" id="compare-clear" hidden>Clear</button>
+        </div>
+      </div>
+      <div class="review-colors" id="compare-colors" hidden></div>
+      <p class="review-hint" id="compare-hint" hidden>Drawing mode &mdash; tap Done to release the canvas.</p>
+      <button type="button" class="cta-ghost review-new" id="compare-reset">Start over</button>
+    </div>
+  </section>
+  <script src="/reviewCompare.js?v=${ASSET_V}" defer></script>`;
+  return page({ title: 'Compare Swings · Sacari Golf', description: 'Play two swing videos back side by side, in slow motion, with drawing tools.', active: 'review', authed: true, noindex: true, body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
@@ -1571,7 +1649,7 @@ module.exports = {
   renderHome, renderHowTo, renderLeaderboard, renderMatchesFeed, renderCoursesIndex, renderCourse,
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderSignup, renderVerifyEmail,
-  renderAppHome, renderAppPlay, renderAppMatch, renderAppScore, renderAppReview,
+  renderAppHome, renderAppPlay, renderAppMatch, renderAppScore, renderAppReview, renderAppReviewCompare,
   renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
 };

@@ -29,7 +29,7 @@
  * survives a device rotation or container resize.
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, StyleSheet, PanResponder } from 'react-native';
 import type { Stroke } from '../lib/rangeSession';
 
@@ -66,6 +66,20 @@ export function SwingAnnotator({
   activeRef.current = active;
   // Start point for the line / circle tools (the drag anchor).
   const anchorRef = useRef<{ x: number; y: number } | null>(null);
+
+  // `drawing` can flip to false out from under an in-progress gesture — e.g.
+  // the compare screen's "Draw on A/B" toggle switching panels mid-stroke, or
+  // (already possible before compare existed) a second touch tapping "Done"
+  // while the first is still down. Once `drawing` is false the touch-capturing
+  // View drops pointerEvents + the pan-responder handlers, which orphans RN's
+  // native responder chain for that gesture — no further onPanResponderMove/
+  // Release/Terminate ever fires, so without this the half-drawn stroke would
+  // never commit or clear and would sit rendered forever as a stuck artifact.
+  // Discarding here (not committing) is deliberate: an interrupted gesture's
+  // intent is ambiguous, so dropping it is the least-surprising outcome.
+  useEffect(() => {
+    if (!drawing) setActive(null);
+  }, [drawing]);
 
   // Re-create the PanResponder whenever the mode / dimensions / pen-color
   // change so the closure captures the right values. Otherwise an

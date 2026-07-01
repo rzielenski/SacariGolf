@@ -639,8 +639,9 @@ body.login-body { display: block; } /* drop the flex chain so the wrap fills the
   font-size: 0.82rem; cursor: pointer; transition: border-color .12s ease, background .12s ease, color .12s ease; }
 .review-chips button:hover { border-color: var(--gold); color: var(--text); }
 .review-chips button.on { background: var(--gold); border-color: var(--gold); color: #1a1206; }
-.review-chips button#review-done, .review-chips button#review-undo { color: var(--text); }
-.review-chips button#review-clear { border-color: rgba(176,52,52,0.5); color: #d16565; }
+.review-chips button#review-done, .review-chips button#review-undo,
+.review-chips button#compare-done, .review-chips button#compare-undo { color: var(--text); }
+.review-chips button#review-clear, .review-chips button#compare-clear { border-color: rgba(176,52,52,0.5); color: #d16565; }
 
 .review-colors { display: flex; gap: 10px; margin-top: 10px; padding-left: 60px; }
 .review-colors button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
@@ -653,4 +654,31 @@ body.login-body { display: block; } /* drop the flex chain so the wrap fills the
 
 @media (max-width: 560px) {
   .review-colors, .review-hint { padding-left: 0; }
+}
+
+/* ----- Compare Sesh -------------------------------------------------------- */
+.review-compare-link { margin-top: 14px; }
+
+.review-compare-row { display: flex; gap: 14px; align-items: flex-start; }
+.review-compare-panel { flex: 1; min-width: 0; }
+
+.review-compare-drop { text-align: center; padding: 26px 12px; background: var(--card);
+  border: 1px dashed var(--border); border-radius: 12px; }
+.review-compare-error { color: #d16565; font-size: 0.8rem; margin-top: 10px; }
+.review-panel-label { color: var(--muted); font-size: 0.78rem; font-weight: 800; margin: 0 0 6px; }
+/* Compare frames sit two-up, so each is roughly half the width of a single
+   Review Sesh frame — the aspect-ratio box is proportionally shorter too, so
+   the 78vh single-page cap rarely binds; this is just a tighter safety net. */
+.review-compare-frame { max-height: 60vh; }
+
+.review-compare-times { display: flex; justify-content: space-between; margin-top: 6px; }
+.review-compare-times span { color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+
+.review-compare-controls .review-new { margin-top: 20px; }
+
+@media (max-width: 560px) {
+  /* Two 9:16 panels side by side get very narrow on a phone — stack them so
+     each keeps a legible width instead of squeezing to a sliver. */
+  .review-compare-row { flex-direction: column; }
+  .review-compare-frame { max-height: 50vh; }
 }
