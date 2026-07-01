@@ -218,6 +218,14 @@ app.get('/app/score/:id', requireAuth, (req, res) => {
   res.send(R.renderAppScore({ matchId: id }));
 });
 
+// Review Sesh: upload a swing video, play it back slow, draw on it. Purely
+// client-side (video stays in the browser tab via an object URL — no upload,
+// no backend call), so this route just serves the shell.
+app.get('/app/review', requireAuth, (_req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.send(R.renderAppReview());
+});
+
 app.get('/account/clubs', requireAuth, async (req, res) => {
   try {
     const me = await apiGet('/users/me', req.token);

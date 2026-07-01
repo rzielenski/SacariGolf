@@ -599,3 +599,58 @@ body.login-body { display: block; } /* drop the flex chain so the wrap fills the
 .course-search button:hover { filter: brightness(1.07); }
 .crest-img { transition: filter .2s ease; }
 .card:hover .crest-img, .dash-head:hover .crest-img { filter: drop-shadow(0 6px 18px rgba(0,0,0,0.6)) drop-shadow(0 0 16px rgba(212,169,63,0.25)); }
+
+/* ----- App hero: multiple CTAs ------------------------------------------ */
+.app-hero-ctas { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ----- Review Sesh -------------------------------------------------------- */
+.review-wrap { max-width: 640px; margin: 8px auto 0; padding: 0 18px 48px; }
+/* .cta / .cta-ghost were written for <a> tags, which inherit font naturally.
+   <button> gets its own UA font + native chrome (Arial, ~13px, grey face) —
+   reset it once here so every button on this page matches the site's type. */
+.review-wrap button { font-family: inherit; -webkit-appearance: none; appearance: none; }
+
+.review-drop { text-align: center; padding: 40px 20px; background: var(--card);
+  border: 1px dashed var(--border); border-radius: 14px; }
+.review-drop .muted-note { margin-top: 12px; }
+
+.review-frame { position: relative; width: 100%; aspect-ratio: 9 / 16; max-height: 78vh;
+  margin: 0 auto; background: #000; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--border); }
+.review-frame video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.review-frame canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; pointer-events: none; cursor: default; }
+.review-frame canvas.drawing { pointer-events: auto; cursor: crosshair; }
+
+.review-playbar { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.review-play { width: 44px; height: 44px; min-width: 44px; border-radius: 50%; border: 0;
+  background: linear-gradient(180deg, var(--gold-light), var(--gold)); color: #1a1206;
+  font-size: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.review-scrub { flex: 1; height: 28px; display: flex; align-items: center; cursor: pointer; }
+.review-scrub-rail { width: 100%; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.review-scrub-fill { height: 100%; width: 0%; background: var(--gold); border-radius: 3px; }
+.review-time { color: var(--muted); font-size: 0.8rem; font-weight: 700; min-width: 84px; text-align: right; white-space: nowrap; }
+
+.review-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+.review-tb-label { color: var(--muted); font-size: 0.72rem; font-weight: 900; letter-spacing: 1.4px; min-width: 50px; }
+.review-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.review-chips button { padding: 7px 13px; border-radius: 14px; border: 1px solid var(--border);
+  background: var(--card); color: var(--muted); font-family: inherit; font-weight: 800;
+  font-size: 0.82rem; cursor: pointer; transition: border-color .12s ease, background .12s ease, color .12s ease; }
+.review-chips button:hover { border-color: var(--gold); color: var(--text); }
+.review-chips button.on { background: var(--gold); border-color: var(--gold); color: #1a1206; }
+.review-chips button#review-done, .review-chips button#review-undo { color: var(--text); }
+.review-chips button#review-clear { border-color: rgba(176,52,52,0.5); color: #d16565; }
+
+.review-colors { display: flex; gap: 10px; margin-top: 10px; padding-left: 60px; }
+.review-colors button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
+  cursor: pointer; padding: 0; }
+.review-colors button.on { border-color: var(--text); }
+
+.review-hint { color: var(--gold); font-size: 0.8rem; font-style: italic; margin: 8px 0 0; padding-left: 60px; }
+.review-new { display: block; width: 100%; margin-top: 20px; text-align: center;
+  background: transparent; border: 1px solid var(--border); font-size: 0.95rem; cursor: pointer; }
+
+@media (max-width: 560px) {
+  .review-colors, .review-hint { padding-left: 0; }
+}

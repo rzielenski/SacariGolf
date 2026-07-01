@@ -70,6 +70,7 @@ function nav(active, authed) {
     ? `${link('/app', 'apphome', 'Home')}
        ${link('/leaderboard', 'leaderboard', 'Rankings')}
        ${link('/courses', 'courses', 'Courses')}
+       ${link('/app/review', 'review', 'Review')}
        ${link('/account', 'account', 'Profile')}
        <a href="/logout">Log out</a>
        <a class="nav-cta ${active === 'play' ? 'on' : ''}" href="/app/play">Play</a>`
@@ -1126,7 +1127,10 @@ function renderAppHome({ me, rank, matches }) {
         <div class="app-rank" style="color:${esc(rank.color)}">${esc(rankLine)} · ${esc(me.elo)} SR</div>
       </div>
     </div>
-    <a class="cta app-play-cta" href="/app/play">Play a round</a>
+    <div class="app-hero-ctas">
+      <a class="cta app-play-cta" href="/app/play">Play a round</a>
+      <a class="cta-ghost" href="/app/review">Review Sesh</a>
+    </div>
   </section>
   ${active.length
     ? `<section class="app-sec"><h2>Your matches</h2><div class="app-list">${list(active)}</div></section>`
@@ -1232,6 +1236,59 @@ function renderAppScore({ matchId }) {
   </section>
   <script src="/app.js?v=${ASSET_V}" defer></script>`;
   return page({ title: 'Scorecard · Sacari Golf', description: 'Enter your scores.', active: 'play', authed: true, noindex: true, body });
+}
+
+// Review Sesh: upload a swing video, play it back slow, and draw on it.
+// Entirely client-side — the video never leaves the browser tab (no upload,
+// no storage), matching the mobile app's on-device-only Review Sesh.
+function renderAppReview() {
+  const body = `
+  <section class="page-head">
+    <a class="recaps-back" href="/app">&larr; Home</a>
+    <h1>Review Sesh</h1>
+    <p>Upload a swing video, slow it down, and draw on it to break down your plane, tempo, and positions. Nothing is uploaded &mdash; the video stays in this browser tab.</p>
+  </section>
+  <section class="review-wrap" data-page="review">
+    <div class="review-drop" id="review-drop">
+      <input type="file" id="review-file" accept="video/*" hidden />
+      <button type="button" class="cta" id="review-pick">Choose a video</button>
+      <p class="muted-note">MP4 or MOV, from your camera roll or downloads.</p>
+    </div>
+    <div class="review-stage" id="review-stage" hidden>
+      <div class="review-frame" id="review-frame">
+        <video id="review-video" playsinline muted loop></video>
+        <canvas id="review-canvas"></canvas>
+      </div>
+      <div class="review-playbar">
+        <button type="button" class="review-play" id="review-playbtn" aria-label="Play/Pause">&#9654;</button>
+        <div class="review-scrub" id="review-scrub">
+          <div class="review-scrub-rail"><div class="review-scrub-fill" id="review-scrub-fill"></div></div>
+        </div>
+        <span class="review-time" id="review-time">0:00 / 0:00</span>
+      </div>
+      <div class="review-toolbar">
+        <span class="review-tb-label">SPEED</span>
+        <div class="review-chips" id="review-speed"></div>
+      </div>
+      <div class="review-toolbar">
+        <span class="review-tb-label">DRAW</span>
+        <div class="review-chips" id="review-tools">
+          <button type="button" data-tool="pen">&#9998; Pen</button>
+          <button type="button" data-tool="eraser">&#9003; Erase</button>
+          <button type="button" data-tool="line">&#9585; Line</button>
+          <button type="button" data-tool="circle">&#9675; Circle</button>
+          <button type="button" id="review-done" hidden>Done</button>
+          <button type="button" id="review-undo" hidden>Undo</button>
+          <button type="button" id="review-clear" hidden>Clear</button>
+        </div>
+      </div>
+      <div class="review-colors" id="review-colors" hidden></div>
+      <p class="review-hint" id="review-hint" hidden>Drawing mode &mdash; tap Done to release the canvas.</p>
+      <button type="button" class="cta-ghost review-new" id="review-new">Choose a different video</button>
+    </div>
+  </section>
+  <script src="/review.js?v=${ASSET_V}" defer></script>`;
+  return page({ title: 'Review Sesh · Sacari Golf', description: 'Upload a swing video, play it back slow, and draw on it.', active: 'review', authed: true, noindex: true, body });
 }
 
 function renderDashboard({ me, rank, season, stats, ball }) {
@@ -1514,7 +1571,7 @@ module.exports = {
   renderHome, renderHowTo, renderLeaderboard, renderMatchesFeed, renderCoursesIndex, renderCourse,
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderSignup, renderVerifyEmail,
-  renderAppHome, renderAppPlay, renderAppMatch, renderAppScore,
+  renderAppHome, renderAppPlay, renderAppMatch, renderAppScore, renderAppReview,
   renderDashboard, renderClubs, renderCoursePins,
   renderInvite,
 };
