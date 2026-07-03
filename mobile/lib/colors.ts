@@ -36,6 +36,18 @@ const _p = _skin.palette;
 /** The id of the skin this module evaluated against. */
 export const ACTIVE_SKIN_ID = _skin.id;
 
+/** True when the active skin has a light background (e.g. Ultra White).
+ *  Consumers that hard-assume dark chrome key off this — most importantly the
+ *  root layout's StatusBar, which must flip to dark text or the clock/battery
+ *  would be white-on-white. Computed from the bg's relative luminance so any
+ *  future light skin gets the right treatment without a registry. */
+export const IS_LIGHT_SKIN = (() => {
+  const m = _p.bg.replace('#', '');
+  const full = m.length === 3 ? m.split('').map((c) => c + c).join('') : m;
+  const r = parseInt(full.slice(0, 2), 16), g = parseInt(full.slice(2, 4), 16), b = parseInt(full.slice(4, 6), 16);
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.5;
+})();
+
 export const C = {
   bg:        _p.bg,
   surface:   _p.surface,

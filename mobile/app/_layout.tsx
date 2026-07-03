@@ -15,6 +15,7 @@ import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
 import { AppErrorBoundary } from '../components/AppErrorBoundary';
 import { OfflineBanner } from '../components/OfflineBanner';
 import { installOutboxDrainTriggers } from '../lib/outbox';
+import { C, IS_LIGHT_SKIN } from '../lib/colors';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -279,13 +280,17 @@ export default function RootLayout() {
   return (
     <AppErrorBoundary>
       <AuthProvider>
-        <StatusBar style="light" />
+        {/* Dark text on light skins (Ultra White), light text on the rest —
+            a hardcoded "light" made the clock white-on-white on a pearl bg. */}
+        <StatusBar style={IS_LIGHT_SKIN ? 'dark' : 'light'} />
         <KeyboardDismissOnBackground />
         <AppConfigLoader />
         <UpdateBanner />
         <OfflineBanner />
         <AuthGuard />
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: '#000000' } }}>
+        {/* C.bg, not literal black: on a light skin a hardcoded #000 flashed
+            black behind every screen transition. */}
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />

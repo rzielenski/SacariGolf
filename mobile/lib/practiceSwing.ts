@@ -78,7 +78,12 @@ const ARM_REFRACTORY_MS = 400;
 const CAL_REFRACTORY_MS = 900;
 const IMPACT_WINDOW_MS = 300;  // a contact spike must land within this of the peak
 const STUCK_MS = 1500;         // bail out of a rising arc that never falls back
-const CRACK_MATCH_MS = 400;    // a crack this close to a swing peak corroborates it
+const CRACK_MATCH_MS = 450;    // a crack up to this LATE vs the swing peak corroborates it
+// …but a crack can only precede the peak by this much. Your own contact sound
+// physically arrives AT/just after the downswing peak (plus mic pipeline lag),
+// so a crack well BEFORE the peak is someone else's — matching symmetrically
+// let a neighbor's crack that happened to precede a fidget-arm count as ours.
+const CRACK_EARLY_MS = 120;
 // Drop a crack arriving this soon after a counted swing — it's that shot's own
 // lag / screen echo, not a new shot. Kept below ARM_REFRACTORY_MS so a genuine
 // second shot's crack (which can't arrive sooner than a re-arm) is never eaten.
@@ -86,11 +91,25 @@ const CRACK_CONSUME_MS = 300;
 // Hard floor between counted shots. You can't physically hit two golf shots this
 // close together, so this is a simple, robust backstop: no matter how many
 // spikes one motion makes — or how many stray listeners are firing — a count can
-// only land once per this window. Tunable.
-const COUNT_MIN_INTERVAL_MS = 3000;
+// only land once per this window. 2.5s still admits a brisk wedge-drill cadence.
+const COUNT_MIN_INTERVAL_MS = 2500;
 // Same idea for calibration captures, but shorter so a brisk calibration pace
 // still registers every swing (the duplicate-spike problem is sub-second).
 const CAL_MIN_INTERVAL_MS = 1500;
+// ── Address-stillness precondition (shared by live detector + calibrator) ──
+// A real swing starts from standing over the ball: ~a third of a second with
+// the hip near-still, then a backswing, then a violent downswing peak. Walking,
+// raking, turning around and phone-fidgeting are CONTINUOUS motion — they never
+// produce that quiet-then-burst shape. The calibrator has always required this
+// (it's what fixed pocketing-the-phone being captured as swings); the live
+// detector now requires it too, which is the main defense against phantom arms
+// that a neighbor's crack could then "corroborate".
+const QUIET_GYRO = 60;         // deg/s — hip essentially still at address
+const MIN_QUIET_MS = 350;      // must be this still before an arm is allowed
+// How long readiness earned by stillness survives once motion starts. Address →
+// backswing → downswing peak spans well under this; readiness left over from a
+// stillness minutes ago must NOT let a mid-walk spike arm.
+const READY_TTL_MS = 4000;
 
 /** True where the IMU gate can run as pure OTA (50Hz sensors). */
 export const swingGateAvailable = Platform.OS === 'ios';
@@ -133,11 +152,21 @@ export type SwingEvent = {
 /**
  * Subscribe to DeviceMotion and detect the wearer's swing as a rotation arc:
  * a gyro magnitude that crosses `peakGyro` on the way up (we ARM at that
- * instant, since it's ~impact) then falls back below `releaseGyro`. We
- * deliberately do NOT require a quiet settling period before the swing — that
- * starves on a rake-and-hit range cadence — using a falling edge + refractory
- * instead. Orientation-invariant (magnitude), so pocket placement and
- * handedness don't matter.
+ * instant, since it's ~impact) then falls back below `releaseGyro`.
+ * Orientation-invariant (magnitude), so pocket placement and handedness don't
+ * matter.
+ *
+ * ARMING is two-tier:
+ *   1. Stillness-preceded (the normal path): the wearer was near-still for
+ *      MIN_QUIET_MS within the last READY_TTL_MS (standing over the ball),
+ *      then crossed the calibrated `peakGyro`. This is the same discrete-swing
+ *      shape the calibrator requires, and it's what stops walking / raking /
+ *      turning from arming the gate between shots — the false arms that let a
+ *      NEIGHBOR's crack land inside the match window and phantom-count.
+ *   2. Fast-arm rescue: a spike near the wearer's own full downswing speed
+ *      (relative to calibration) arms even without preceding stillness, so a
+ *      hurried rake-and-hit swing still counts. Fidgets essentially never
+ *      reach a real downswing peak, so this tier stays quiet in practice.
  *
  * `swingAtRef.current` is stamped (Date.now) at the arm instant so the caller's
  * mic gate can compare a transient against the most recent felt swing.
@@ -162,6 +191,7 @@ export function useSwingDetector(opts: {
     let sub: { remove: () => void } | null = null;
     let phase: 'idle' | 'rising' = 'idle';
     let peakGyro = 0, peakAt = 0, sawImpact = false, lastFire = 0;
+    let quietSince = 0, readyAt = 0;   // stillness tracker for tier-1 arming
 
     (async () => {
       let ok = false;
@@ -177,11 +207,29 @@ export function useSwingDetector(opts: {
         const now = Date.now();
         onSampleRef.current?.(g, a ?? 0);
         const cal = calRef.current;
+        // Track address-stillness. Readiness is REFRESHED every frame the hip
+        // stays still (so its TTL counts from the LAST quiet moment), and is
+        // deliberately NOT revoked by sub-threshold motion: the backswing is
+        // ~1s of moderate rotation between address and the downswing spike, and
+        // revoking on it would miss every real swing (the calibrator learned
+        // this the hard way).
+        if (g < QUIET_GYRO) {
+          if (!quietSince) quietSince = now;
+          if (now - quietSince >= MIN_QUIET_MS) readyAt = now;
+        } else {
+          quietSince = 0;
+        }
         if (phase === 'idle') {
-          if (g >= cal.peakGyro && now - lastFire > ARM_REFRACTORY_MS) {
+          // Tier 1: stillness-preceded arm at the calibrated threshold.
+          // Tier 2: near-full-speed spike arms without stillness (hurried
+          // rake-and-hit); anchored to the wearer's own measured swing speed.
+          const fastArm = Math.max(cal.peakGyro * 1.6, cal.measuredPeakGyro * 0.85);
+          const quietArmed = readyAt > 0 && now - readyAt <= READY_TTL_MS && g >= cal.peakGyro;
+          if ((quietArmed || g >= fastArm) && now - lastFire > ARM_REFRACTORY_MS) {
             phase = 'rising';
             peakGyro = g; peakAt = now; sawImpact = false;
             lastFire = now;
+            readyAt = 0; quietSince = 0;       // readiness is consumed by the arm
             swingAtRef.current = now;          // ARM at the peak crossing (≈ impact)
           }
         } else {
@@ -233,6 +281,12 @@ export function useSwingShotGate(opts: {
   const pendingRef = useRef<{ at: number } | null>(null);  // swing awaiting a late crack
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSwing, setLastSwing] = useState<{ peak: number; impact: boolean } | null>(null);
+  // Live session telemetry so the screen can SHOW which half of the fusion is
+  // failing at the actual range: swings the IMU felt, cracks the mic heard,
+  // and shots actually counted. felt≫counted → audio side is missing (raise
+  // sensitivity / unbury the mic); heard≫felt → motion side is missing (phone
+  // not in the pocket). Turns "it's not counting" into an actionable readout.
+  const [stats, setStats] = useState({ felt: 0, heard: 0, counted: 0 });
 
   const clearPendingTimer = () => {
     if (pendingTimerRef.current) { clearTimeout(pendingTimerRef.current); pendingTimerRef.current = null; }
@@ -249,16 +303,21 @@ export function useSwingShotGate(opts: {
     lastCrackRef.current = 0;
     pendingRef.current = null;
     clearPendingTimer();
+    setStats((v) => ({ ...v, counted: v.counted + 1 }));
     onCountRef.current();
   };
 
-  // A crack is only corroborating if it is recent (not a stale orphan) AND near
-  // the swing peak.
+  // A crack corroborates when it lands in the physical window around the swing
+  // peak: from just before it (mic pipeline jitter) to CRACK_MATCH_MS after.
+  // Judged purely against the PEAK time, not "how old is the crack right now" —
+  // this check runs at the swing's RELEASE, and a slow follow-through releases
+  // >400ms after impact, so a wall-clock recency test was silently discarding
+  // perfectly matched cracks (a felt swing + heard crack that still missed).
   const freshCrackMatches = (peakAt: number) => {
     const c = lastCrackRef.current;
     if (c <= 0) return false;
-    const now = Date.now();
-    return now - c <= CRACK_MATCH_MS && Math.abs(c - peakAt) <= CRACK_MATCH_MS;
+    const d = c - peakAt;
+    return d >= -CRACK_EARLY_MS && d <= CRACK_MATCH_MS;
   };
 
   useSwingDetector({
@@ -267,6 +326,7 @@ export function useSwingShotGate(opts: {
     swingAtRef,
     onSwing: (e) => {
       setLastSwing({ peak: Math.round(e.peakGyro), impact: e.impact });
+      setStats((v) => ({ ...v, felt: v.felt + 1 }));
       if (e.impact || freshCrackMatches(e.at)) { credit(e.at); return; }
       // No corroboration yet. Hold the swing pending so a crack arriving within
       // the match window (via reportCrack) credits it; expire it otherwise (it
@@ -285,6 +345,7 @@ export function useSwingShotGate(opts: {
   const reportCrack = useCallback(() => {
     if (!enabledRef.current) return;
     const now = Date.now();
+    setStats((v) => ({ ...v, heard: v.heard + 1 }));
     // Ignore the late crack of a shot we just counted (its own lag / the ball
     // hitting the screen) so it can't linger and corroborate a later air swing.
     // Measured from when the count FIRED (falling edge), not the earlier peak,
@@ -292,7 +353,10 @@ export function useSwingShotGate(opts: {
     if (resolvedAtRef.current > 0 && now - resolvedAtRef.current <= CRACK_CONSUME_MS) return;
     lastCrackRef.current = now;
     const p = pendingRef.current;
-    if (p && Math.abs(now - p.at) <= CRACK_MATCH_MS) credit(p.at);
+    // Same asymmetric physical window as freshCrackMatches: the crack may lag
+    // the peak by up to CRACK_MATCH_MS, but can only precede it by pipeline
+    // jitter (a crack well before your downswing peak is someone else's shot).
+    if (p && now - p.at <= CRACK_MATCH_MS && now - p.at >= -CRACK_EARLY_MS) credit(p.at);
   }, []);
 
   // Reset on stop / unmount: cancel the pending timer and clear all state so no
@@ -302,10 +366,13 @@ export function useSwingShotGate(opts: {
     clearPendingTimer();
     swingAtRef.current = 0; lastCrackRef.current = 0; resolvedRef.current = 0;
     resolvedAtRef.current = 0; lastCountAtRef.current = 0; pendingRef.current = null;
+    setStats({ felt: 0, heard: 0, counted: 0 });
   }, [enabled]);
   useEffect(() => () => clearPendingTimer(), []);
 
-  return { reportCrack, lastSwing };
+  // swingFeltAtRef: the mic detector reads this to RELAX its thresholds for a
+  // beat right after a felt swing — the in-pocket, muffled-crack rescue.
+  return { reportCrack, lastSwing, stats, swingFeltAtRef: swingAtRef };
 }
 
 export type CalibratorState = {
@@ -351,8 +418,8 @@ export function useSwingCalibrator(opts: {
     const BOOT_FLOOR = 200;      // deg/s — a real pocket swing clears this; most hand motion doesn't.
                                  // Kept modest so a gentle / heavily-damped swing still arms.
     const BOOT_RELEASE = 80;
-    const QUIET_GYRO = 60;       // deg/s — "standing still" addressing the ball
-    const MIN_QUIET_MS = 350;    // must be this still before a capture can arm
+    // Stillness gate shared with the live detector (QUIET_GYRO / MIN_QUIET_MS
+    // module constants) — the calibrator pioneered it, the detector adopted it.
     const STALL_MS = 15000;      // no new swing in this long → stop (don't hang) and prompt a retry
     const startAt = Date.now() + 1200;   // grace so pocketing right after the tap isn't captured
     let phase: 'idle' | 'rising' = 'idle';

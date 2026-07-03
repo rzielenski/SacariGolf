@@ -8,7 +8,7 @@
  * lifetime total on your profile.
  */
 import { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Switch } from 'react-native';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { C, F } from '../../lib/colors';
@@ -47,15 +47,22 @@ export default function PracticeSesh() {
   // passive corroboration signal that never counts on its own (see
   // useSwingShotGate). Putting and Android have no usable motion signal, so they
   // stay mic-only.
-  const swingGateOn = swingGateAvailable && !isPutting;
+  //
+  // The gate is user-toggleable because it REQUIRES the phone in a pocket: with
+  // the phone propped in the bay (e.g. filming a swing), the IMU never feels
+  // anything and gated counting is structurally dead. Gate off = mic-only with
+  // the wide echo-collapsing refractory.
+  const swingGateSupported = swingGateAvailable && !isPutting;
+  const [gateEnabled, setGateEnabled] = useState(true);
+  const swingGateOn = swingGateSupported && gateEnabled;
   const [calibration, setCalibration] = useState<SwingCalibration>(DEFAULT_CALIBRATION);
 
   useEffect(() => {
-    if (!swingGateOn) return;
+    if (!swingGateSupported) return;
     let alive = true;
     loadSwingCalibration().then((c) => { if (alive) setCalibration(c); });
     return () => { alive = false; };
-  }, [swingGateOn]);
+  }, [swingGateSupported]);
 
   const calibrator = useSwingCalibrator({
     onDone: (c) => { setCalibration(c); saveSwingCalibration(c); },
@@ -77,11 +84,31 @@ export default function PracticeSesh() {
     refractoryMs: isPutting ? 320 : (swingGateOn ? 200 : 600),
     onHit: () => {
       if (calibrator.active) return;
-      if (!swingGateOn) { setCount((c) => c + 1); return; }   // putting / Android: mic-only
+      if (!swingGateOn) { setCount((c) => c + 1); return; }   // putting / gate off: mic-only
       gate.reportCrack();                                      // gated: corroborate a felt swing
     },
     muteUntilRef,
+    // A felt swing relaxes the mic thresholds for a beat, so an in-pocket
+    // muffled strike still corroborates. Inert when the gate is off (ref stays 0).
+    swingBoostRef: gate.swingFeltAtRef,
   });
+
+  // Which half of the fusion is failing? Derived from the live gate telemetry,
+  // shown while listening so a quiet counter is diagnosable at the bay instead
+  // of a mystery. felt≫counted: swings register but no contact sound (mic
+  // buried / sensitivity low). heard≫felt: sound registers but no motion
+  // (phone not in the pocket).
+  const gateHint = (() => {
+    if (!listening || !swingGateOn) return null;
+    const { felt, heard, counted } = gate.stats;
+    if (felt - counted >= 3 && heard <= counted + 1) {
+      return 'Feeling your swings but not hearing contact. Raise sensitivity, or make sure the mic side of the phone is not buried in your pocket.';
+    }
+    if (heard - counted >= 3 && felt <= counted + 1) {
+      return 'Hearing contact but not feeling a swing. Keep the phone in your pocket, or turn the swing gate off to count by sound alone.';
+    }
+    return null;
+  })();
 
   const finish = async () => {
     if (count <= 0) { router.back(); return; }
@@ -144,17 +171,33 @@ export default function PracticeSesh() {
           Sensitivity {isPutting ? 'HIGH suits quiet putts' : 'MED suits range contact'}. Bump it up if shots aren't
           registering, down if it over-counts.
         </Text>
+        {listening && swingGateOn && (
+          <Text style={s.statLine}>
+            felt {gate.stats.felt} · heard {gate.stats.heard} · counted {gate.stats.counted}
+          </Text>
+        )}
+        {gateHint && <Text style={s.hintWarn}>{gateHint}</Text>}
 
         {/* Swing gate — iOS range only */}
-        {swingGateOn && (
+        {swingGateSupported && (
           <>
             <Text style={s.section}>SWING GATE</Text>
             <View style={s.gateCard}>
+              <View style={s.gateToggleRow}>
+                <Text style={s.gateToggleLabel}>Count only when a swing is felt</Text>
+                <Switch
+                  value={gateEnabled}
+                  onValueChange={setGateEnabled}
+                  trackColor={{ true: C.gold, false: C.border }}
+                  thumbColor="#fff"
+                />
+              </View>
               <Text style={s.gateBlurb}>
-                Phone in your pocket. The gate only counts a crack that lines up with your real swing, so claps, the
-                next bay over, and the ball hitting the screen are ignored.
+                {gateEnabled
+                  ? 'Phone in your POCKET. The gate only counts a crack that lines up with your real swing, so claps, the next bay over, and the ball hitting the screen are ignored.'
+                  : 'Counting every loud contact. Use this when the phone sits out in the bay (filming, on a stand). A loud neighbor can add counts, so keep an eye on it.'}
               </Text>
-              {calibrator.active ? (
+              {!gateEnabled ? null : calibrator.active ? (
                 <>
                   <Text style={s.gateBig}>{calibrator.captured} / {calibrator.needed}</Text>
                   <Text style={s.hint}>
@@ -180,7 +223,7 @@ export default function PracticeSesh() {
                   </Text>
                 </>
               )}
-              {__DEV__ && gate.lastSwing && (
+              {__DEV__ && gateEnabled && gate.lastSwing && (
                 <Text style={s.gateDebug}>
                   last swing {gate.lastSwing.peak}°/s · impact {gate.lastSwing.impact ? 'yes' : 'no'}
                 </Text>
@@ -254,6 +297,10 @@ const s = StyleSheet.create({
   sensChipOn: { borderColor: C.gold, backgroundColor: C.gold + '22' },
   sensLabel: { color: C.textMuted, fontWeight: '900', fontSize: 11, letterSpacing: 1 },
   hint: { color: C.textDim, fontSize: 11, lineHeight: 15, marginTop: 8 },
+  statLine: { color: C.textMuted, fontSize: 11, fontFamily: F.mono, marginTop: 8, textAlign: 'center' },
+  hintWarn: { color: C.gold, fontSize: 11, lineHeight: 15, marginTop: 8 },
+  gateToggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  gateToggleLabel: { color: C.text, fontSize: 13, fontWeight: '700', flex: 1 },
 
   gateCard: { backgroundColor: C.card, borderRadius: 12, borderWidth: 1, borderColor: C.border, padding: 14, gap: 6 },
   gateBlurb: { color: C.textMuted, fontSize: 12, lineHeight: 17 },

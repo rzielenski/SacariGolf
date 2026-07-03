@@ -50,7 +50,7 @@ import Svg, {
   LinearGradient as SvgLinearGradient, Stop, RadialGradient, Mask, ClipPath, Use,
 } from 'react-native-svg';
 import Animated, {
-  useSharedValue, useAnimatedStyle, useAnimatedProps, useDerivedValue,
+  useSharedValue, useAnimatedStyle, useAnimatedProps,
   withTiming, withRepeat, withSequence, withDelay,
   interpolate, Easing, cancelAnimation,
 } from 'react-native-reanimated';
@@ -349,24 +349,28 @@ const FLAG_STAR_POS: { cx: number; cy: number }[] = (() => {
   return pts;
 })();
 
-/** Shared travelling cloth wave — the SAME offset drives the stripes AND the
- *  canton, so the whole flag moves as one sheet. Amplitude grows toward the fly. */
+/** Cloth wave shape — used ONLY at bake time now (plain JS, not a worklet).
+ *  Amplitude grows toward the fly, like real cloth pinned at the hoist. */
 function flagWaveOffset(x: number, t: number): number {
-  'worklet';
   const fx = x / FLAG_VB_W;
   const amp = (0.25 + 0.75 * fx) * 17;
   return amp * (0.72 * Math.sin(fx * Math.PI * 2 * 1.3 - t) + 0.28 * Math.sin(fx * Math.PI * 2 * 2.7 - t * 1.7));
 }
 
-// ── Flag perf precompute ─────────────────────────────────────────────────────
-// The flag was the single heaviest per-frame worklet (13 stripes each
-// re-deriving the SAME wave offsets, + a 50-star path calling cos/sin per
-// vertex every frame). These cut that ~15x:
-//   - one SHARED offset grid (useDerivedValue) feeds all 13 stripes, so the
-//     sin terms are computed once per frame, not 13 times,
-//   - the star vertices are unit-vectors precomputed ONCE (the angles never
-//     change), so the per-frame star path is pure adds/mults, no trig,
-//   - fewer steps (14 / 16) on the stripe + canton edges.
+// ── Flag static-geometry bake ────────────────────────────────────────────────
+// PERF REWRITE: the flag used to animate 15 SVG path `d` strings per frame
+// (13 stripes + canton + one 50-star path ≈ 1,500 toFixed calls and ~15KB of
+// path text per frame), and every update forced react-native-svg to re-parse
+// the paths and re-rasterize the WHOLE SVG on the CPU at 60fps — the heaviest
+// background in the catalog, and it visibly lagged the profile page.
+//
+// The remake bakes the cloth curvature into STATIC paths once at module load
+// (the flag is frozen mid-wave, so it's never a flat rectangle), and creates
+// all motion with GPU-composited transforms instead: fold shadow + sheen bands
+// drifting across the curved cloth, plus a gentle whole-flag bob/roll. The SVG
+// rasterizes once and is then composited as a cached texture — zero per-frame
+// path work, zero re-rasters, nothing runs on the JS or UI thread per frame
+// beyond four native-driver transform loops.
 const FLAG_STRIPE_STEPS = 14;
 const FLAG_STRIPE_XS: number[] = Array.from({ length: FLAG_STRIPE_STEPS + 1 }, (_, s) => (s / FLAG_STRIPE_STEPS) * FLAG_VB_W);
 const FLAG_STAR_UNIT: { fx: number; fy: number }[] = (() => {
@@ -380,7 +384,6 @@ const FLAG_STAR_UNIT: { fx: number; fy: number }[] = (() => {
 })();
 /** Trig-free 5-point star (vertices precomputed in FLAG_STAR_UNIT). */
 function flagStarPath(cx: number, cy: number, r: number): string {
-  'worklet';
   let d = '';
   for (let i = 0; i < 10; i++) {
     const u = FLAG_STAR_UNIT[i];
@@ -389,13 +392,62 @@ function flagStarPath(cx: number, cy: number, r: number): string {
   return d + 'Z ';
 }
 
+// The phase the cloth is frozen at. Chosen so the flag shows a classic S-curve
+// with a slight curl at the fly — reads as "caught mid-wave", not sagging.
+const FLAG_BAKE_T = 2.1;
+
+/** All flag geometry, baked once at import: 13 stripe bands, the canton, and
+ *  the 50 stars, every edge bent along the SAME wave so it reads as one sheet. */
+const FLAG_STATIC: { stripes: string[]; canton: string; stars: string } = (() => {
+  const t = FLAG_BAKE_T;
+  const overscan = 24;
+  const stripes: string[] = [];
+  for (let i = 0; i < 13; i++) {
+    const top = i === 0 ? -overscan : i * FLAG_STRIPE_H;
+    const bot = i === 12 ? FLAG_VB_H + overscan : (i + 1) * FLAG_STRIPE_H;
+    let d = '';
+    for (let s = 0; s <= FLAG_STRIPE_STEPS; s++) {
+      d += `${s === 0 ? 'M' : 'L'}${FLAG_STRIPE_XS[s].toFixed(1)} ${(top + flagWaveOffset(FLAG_STRIPE_XS[s], t)).toFixed(2)} `;
+    }
+    for (let s = FLAG_STRIPE_STEPS; s >= 0; s--) {
+      d += `L${FLAG_STRIPE_XS[s].toFixed(1)} ${(bot + flagWaveOffset(FLAG_STRIPE_XS[s], t)).toFixed(2)} `;
+    }
+    stripes.push(d + 'Z');
+  }
+  // Canton: same wave, sampled on its own x-range; bottom dips 3 units past the
+  // 7-stripe line so a stripe edge can never poke up through the blue.
+  let canton = '';
+  {
+    const x0 = -overscan, x1 = FLAG_CANTON_W;
+    const top = -overscan, bot = FLAG_CANTON_H + 3;
+    const steps = 16;
+    for (let s = 0; s <= steps; s++) {
+      const x = x0 + (s / steps) * (x1 - x0);
+      canton += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + flagWaveOffset(x, t)).toFixed(2)} `;
+    }
+    for (let s = steps; s >= 0; s--) {
+      const x = x0 + (s / steps) * (x1 - x0);
+      canton += `L${x.toFixed(1)} ${(bot + flagWaveOffset(x, t)).toFixed(2)} `;
+    }
+    canton += 'Z';
+  }
+  // Stars: each displaced by the wave at its own x so the grid curves with the
+  // cloth instead of sitting on a flat block.
+  let stars = '';
+  for (const p of FLAG_STAR_POS) {
+    stars += flagStarPath(p.cx, p.cy + flagWaveOffset(p.cx, t), FLAG_STAR_R);
+  }
+  return { stripes, canton, stars };
+})();
+
 /**
- * Stars & Stripes, drawn as art that genuinely waves. Stripes, canton and stars
- * all live in ONE SVG and ride the SAME travelling wave (flagWaveOffset), so the
- * whole flag moves as a single sheet of cloth — the blue canton curves and bobs
- * with the stripes instead of sitting on top as a flat panel. Each stripe is
- * gradient-filled for a rounded, lit ridge; soft light/shadow fold bands drift
- * across on top for 3-D depth.
+ * Stars & Stripes. The cloth curvature is BAKED into the static paths
+ * (FLAG_STATIC — the flag is frozen mid-wave, never a flat rectangle), and all
+ * the motion is GPU-composited transforms layered on top: two fold shadows and
+ * a sheen drifting across the curves, a narrow fast ripple highlight, and a
+ * gentle bob/roll of the whole sheet. The SVG rasterizes once and is then just
+ * a cached texture — nothing rebuilds paths per frame (see the perf note above
+ * FLAG_STATIC for what the old version cost).
  */
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
@@ -406,24 +458,28 @@ function FlagBg({ v, style, children }: BgProps) {
   const whiteId = useBgId('flagWhite');
   const blueId = useBgId('flagBlue');
 
-  const wave = useSharedValue(0);
   const foldA = useSharedValue(0);
   const foldB = useSharedValue(0);
+  const ripple = useSharedValue(0);
+  const bob = useSharedValue(0);
   useEffect(() => {
-    wave.value = withRepeat(withTiming(1, { duration: 2000, easing: Easing.linear }), -1, false);
-    foldA.value = withRepeat(withTiming(1, { duration: 2400, easing: Easing.linear }), -1, false);
-    foldB.value = withRepeat(withTiming(1, { duration: 3300, easing: Easing.linear }), -1, false);
-    return () => { [wave, foldA, foldB].forEach(cancelAnimation); };
-  }, [wave, foldA, foldB]);
+    foldA.value = withRepeat(withTiming(1, { duration: 2600, easing: Easing.linear }), -1, false);
+    foldB.value = withRepeat(withTiming(1, { duration: 3500, easing: Easing.linear }), -1, false);
+    ripple.value = withRepeat(withTiming(1, { duration: 1700, easing: Easing.linear }), -1, false);
+    bob.value = withRepeat(withTiming(1, { duration: 3600, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => { [foldA, foldB, ripple, bob].forEach(cancelAnimation); };
+  }, [foldA, foldB, ripple, bob]);
 
-  // One shared wave-offset grid feeds all 13 stripes, so the sin terms run once
-  // per frame instead of 13x.
-  const stripeOff = useDerivedValue(() => {
-    const t = wave.value * Math.PI * 2;
-    const a: number[] = [];
-    for (let s = 0; s <= FLAG_STRIPE_STEPS; s++) a.push(flagWaveOffset(FLAG_STRIPE_XS[s], t));
-    return a;
-  });
+  // The whole sheet bobs and rolls slightly — cheap whole-layer transform that
+  // sells "cloth in wind" over the baked curves. Scale overscans a touch so the
+  // rotation can never expose the container edges.
+  const cloth = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(bob.value, [0, 1], [-3, 3]) },
+      { rotate: `${interpolate(bob.value, [0, 1], [-0.5, 0.5])}deg` },
+      { scale: interpolate(bob.value, [0, 0.5, 1], [1.03, 1.045, 1.03]) },
+    ],
+  }));
 
   // Soft fold light/shadow bands drift across (+ vertical bob) for 3-D depth.
   const shadow1 = useAnimatedStyle(() => ({
@@ -444,38 +500,49 @@ function FlagBg({ v, style, children }: BgProps) {
       { translateY: interpolate(foldB.value, [0, 0.5, 1], [-7, 7, -7]) },
     ],
   }));
+  // Narrow, faster highlight chasing across the cloth — the "gust" pass that
+  // keeps the flag feeling alive between the slow fold cycles.
+  const rippleStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(ripple.value, [0, 0.12, 0.88, 1], [0, 1, 1, 0]),
+    transform: [
+      { translateX: interpolate(ripple.value, [0, 1], [-340, 360]) },
+      { translateY: interpolate(ripple.value, [0, 0.5, 1], [4, -4, 4]) },
+    ],
+  }));
 
   return (
     <View style={[{ overflow: 'hidden', backgroundColor: shade(RED, -0.3) }, style]}>
-      {/* One SVG: stripes + canton + stars all share flagWaveOffset */}
-      <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
-        <Defs>
-          <SvgLinearGradient id={redId} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={shade(RED, -0.26)} />
-            <Stop offset="0.5" stopColor={RED} />
-            <Stop offset="1" stopColor={shade(RED, -0.4)} />
-          </SvgLinearGradient>
-          <SvgLinearGradient id={whiteId} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={shade(WHITE, -0.14)} />
-            <Stop offset="0.5" stopColor={WHITE} />
-            <Stop offset="1" stopColor={shade(WHITE, -0.22)} />
-          </SvgLinearGradient>
-          <SvgLinearGradient id={blueId} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor={shade(CANTON, 0.12)} />
-            <Stop offset="0.55" stopColor={CANTON} />
-            <Stop offset="1" stopColor={shade(CANTON, -0.24)} />
-          </SvgLinearGradient>
-        </Defs>
-        {Array.from({ length: 13 }).map((_, i) => (
-          <FlagWaveStripe key={i} index={i} fill={i % 2 === 0 ? `url(#${redId})` : `url(#${whiteId})`} off={stripeOff} />
-        ))}
-        {/* Canton, riding the same wave as the stripes underneath it */}
-        <FlagCanton wave={wave} fill={`url(#${blueId})`} />
-        {/* Stars bob with the canton's local wave so they stay attached to it */}
-        <FlagStars wave={wave} />
-      </Svg>
+      {/* Static SVG (rasterized once): stripes + canton + stars, pre-bent along
+          one shared wave so the whole flag reads as a single sheet of cloth. */}
+      <Animated.View style={[StyleSheet.absoluteFill, cloth]}>
+        <Svg style={StyleSheet.absoluteFill} viewBox={`0 0 ${FLAG_VB_W} ${FLAG_VB_H}`} preserveAspectRatio="none">
+          <Defs>
+            <SvgLinearGradient id={redId} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={shade(RED, -0.26)} />
+              <Stop offset="0.5" stopColor={RED} />
+              <Stop offset="1" stopColor={shade(RED, -0.4)} />
+            </SvgLinearGradient>
+            <SvgLinearGradient id={whiteId} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={shade(WHITE, -0.14)} />
+              <Stop offset="0.5" stopColor={WHITE} />
+              <Stop offset="1" stopColor={shade(WHITE, -0.22)} />
+            </SvgLinearGradient>
+            <SvgLinearGradient id={blueId} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={shade(CANTON, 0.12)} />
+              <Stop offset="0.55" stopColor={CANTON} />
+              <Stop offset="1" stopColor={shade(CANTON, -0.24)} />
+            </SvgLinearGradient>
+          </Defs>
+          {FLAG_STATIC.stripes.map((d, i) => (
+            <Path key={i} d={d} fill={i % 2 === 0 ? `url(#${redId})` : `url(#${whiteId})`} />
+          ))}
+          <Path d={FLAG_STATIC.canton} fill={`url(#${blueId})`} />
+          <Path d={FLAG_STATIC.stars} fill="#ffffff" />
+        </Svg>
+      </Animated.View>
 
-      {/* Drifting fold shadows + a highlight for 3-D cloth depth */}
+      {/* Drifting fold shadows + highlights for 3-D cloth depth — these moving
+          light bands over the static curves are what create the waving. */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, shadow1]}>
         <LinearGradient
           colors={['transparent', 'rgba(0,0,0,0.10)', 'rgba(0,0,0,0.34)', 'rgba(0,0,0,0.10)', 'transparent'] as const as readonly [string, string, ...string[]]}
@@ -497,75 +564,19 @@ function FlagBg({ v, style, children }: BgProps) {
           style={{ width: '26%', height: '100%' }}
         />
       </Animated.View>
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, rippleStyle]}>
+        <LinearGradient
+          colors={['transparent', 'rgba(255,255,255,0.05)', 'rgba(255,255,255,0.16)', 'rgba(255,255,255,0.05)', 'transparent'] as const as readonly [string, string, ...string[]]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ width: '14%', height: '100%' }}
+        />
+      </Animated.View>
 
       {/* Vignette so the flag doesn't fight foreground text */}
       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.14)' }]} />
       {children}
     </View>
   );
-}
-
-/** One stripe as a vector band whose top + bottom edges ride the shared wave,
- *  so all 13 ripple together as one sheet. */
-function FlagWaveStripe({ index, fill, off }: { index: number; fill: string; off: SharedValue<number[]> }) {
-  const animatedProps = useAnimatedProps(() => {
-    const overscan = 24;
-    const top = index === 0 ? -overscan : index * FLAG_STRIPE_H;
-    const bot = index === 12 ? FLAG_VB_H + overscan : (index + 1) * FLAG_STRIPE_H;
-    const o = off.value;   // shared grid: no trig here, just read + concat
-    let d = '';
-    for (let s = 0; s <= FLAG_STRIPE_STEPS; s++) {
-      d += `${s === 0 ? 'M' : 'L'}${FLAG_STRIPE_XS[s].toFixed(1)} ${(top + o[s]).toFixed(2)} `;
-    }
-    for (let s = FLAG_STRIPE_STEPS; s >= 0; s--) {
-      d += `L${FLAG_STRIPE_XS[s].toFixed(1)} ${(bot + o[s]).toFixed(2)} `;
-    }
-    return { d: d + 'Z' };
-  });
-  return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
-}
-
-/** The blue canton as a band of the same waving sheet — its edges use
- *  flagWaveOffset (sampled on the SAME x-grid as the stripes), so it curves and
- *  bobs exactly like them. The bottom dips slightly past the 7-stripe line so a
- *  waving stripe can never poke up through the blue. */
-function FlagCanton({ wave, fill }: { wave: SharedValue<number>; fill: string }) {
-  const animatedProps = useAnimatedProps(() => {
-    const overscan = 24;
-    const x0 = -overscan, x1 = FLAG_CANTON_W;
-    const top = -overscan, bot = FLAG_CANTON_H + 3; // overlap hides any seam
-    const steps = 16;
-    const t = wave.value * Math.PI * 2;
-    let d = '';
-    for (let s = 0; s <= steps; s++) {
-      const x = x0 + (s / steps) * (x1 - x0);
-      d += `${s === 0 ? 'M' : 'L'}${x.toFixed(1)} ${(top + flagWaveOffset(x, t)).toFixed(2)} `;
-    }
-    for (let s = steps; s >= 0; s--) {
-      const x = x0 + (s / steps) * (x1 - x0);
-      d += `L${x.toFixed(1)} ${(bot + flagWaveOffset(x, t)).toFixed(2)} `;
-    }
-    return { d: d + 'Z' };
-  });
-  return <AnimatedPath animatedProps={animatedProps} fill={fill} />;
-}
-
-/** The 50 stars as one path, each star displaced by the wave at its OWN x, so
- *  the grid curves with the cloth (the blue field visibly ripples) instead of
- *  bobbing as a flat block. */
-function FlagStars({ wave }: { wave: SharedValue<number> }) {
-  const animatedProps = useAnimatedProps(() => {
-    const t = wave.value * Math.PI * 2;
-    let d = '';
-    for (let i = 0; i < FLAG_STAR_POS.length; i++) {
-      const s = FLAG_STAR_POS[i];
-      // flagStarPath is trig-free (vertices precomputed), so only the per-star
-      // wave offset costs a couple of sin calls.
-      d += flagStarPath(s.cx, s.cy + flagWaveOffset(s.cx, t), FLAG_STAR_R);
-    }
-    return { d } as any;
-  });
-  return <AnimatedPath animatedProps={animatedProps} fill="#ffffff" />;
 }
 
 // ── 3. Storm (lightning + flashes) ──────────────────────────────────────────

@@ -195,6 +195,40 @@ export const SKINS: Skin[] = [
       silver: '#b8e0d8', silverDim: '#6d8a84',
     },
   },
+  {
+    // The ONE light skin. Styled after a matte-white energy can: cool pearl
+    // panels, a brushed-gunmetal accent where every other skin runs a bright
+    // hue, jet-black type. Every slot is re-derived for a light ground —
+    // "dim" means LIGHTER here (fades toward the paper), status colours are
+    // darkened to hold contrast on white, and chrome silver goes dark slate
+    // so it still reads as metal against pearl. The root layout flips the
+    // iOS status bar to dark text when this skin is active (IS_LIGHT_SKIN).
+    id: 'ultra', name: 'Ultra White',
+    blurb: 'Matte pearl, brushed gunmetal, jet black. Zero sugar.',
+    swatch: ['#f7f8fa', '#6e7681', '#16181c'],
+    palette: {
+      bg: '#eef0f3', surface: '#e7eaee', card: '#f7f8fa', cardAlt: '#ffffff', border: '#d3d8de',
+      gold: '#6e7681', goldLight: '#98a1ab',
+      text: '#16181c', textMuted: '#5d6570', textDim: '#a6adb6',
+      green: '#2e8b57', red: '#c03038', blue: '#3a6ea8',
+      silver: '#4c545e', silverDim: '#9aa2ac',
+    },
+  },
+  {
+    // July 4th. Pairs with the Stars & Stripes profile background: deep navy
+    // night, firework-red accent, star-white type and silver. Danger red stays
+    // hotter than the accent red (same precedent as Crimson).
+    id: 'glory', name: 'Old Glory',
+    blurb: 'Navy night, firework red, fifty stars of white.',
+    swatch: ['#101c38', '#e8434a', '#eff3fb'],
+    palette: {
+      bg: '#060c1d', surface: '#0a1226', card: '#101c38', cardAlt: '#172548', border: '#243560',
+      gold: '#e8434a', goldLight: '#ff7d75',
+      text: '#eff3fb', textMuted: '#97a3c2', textDim: '#46527c',
+      green: '#5fae78', red: '#ff5a52', blue: '#6f9fe8',
+      silver: '#ccd7ec', silverDim: '#7985a3',
+    },
+  },
 ];
 
 export const DEFAULT_SKIN_ID = 'default';

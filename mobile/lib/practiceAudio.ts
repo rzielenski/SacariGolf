@@ -100,11 +100,24 @@ export function useMetronome(initialBpm: number, onTick?: () => void) {
  *  next effect runs. */
 let teardownPromise: Promise<unknown> | null = null;
 
+/** After a felt swing, the mic relaxes its thresholds for this long. An
+ *  in-pocket strike is muffled by cloth, and at a loud range it can miss the
+ *  normal prominence bar — but WITHIN a beat of the wearer's own swing, weaker
+ *  audio evidence is enough (the IMU already supplied the strong evidence). */
+const SWING_BOOST_MS = 700;
+
 /**
  * Mic shot detector. Records (audio discarded) with metering on, and fires
  * `onHit` when a loud transient crosses a sensitivity-derived threshold, with a
  * refractory window so one strike counts once. `muteUntilRef` lets the caller
  * suppress detection right after a metronome click.
+ *
+ * ONE HIT PER ACOUSTIC EVENT: a hit dis-ARMS the detector, and it only re-arms
+ * once the level falls back near the ambient floor. Without this, a loud sound
+ * that LASTS — the ball rattling down a sim screen's return, a dropped bag, a
+ * mower — sits far above the slowly-adapting floor and re-fires on every 50ms
+ * metering frame, bounded only by the refractory: one event became 2-3 counts.
+ * That was the core "one shot registers as 3" bug in mic-only mode.
  */
 export function useShotDetector(opts: {
   enabled: boolean;
@@ -115,8 +128,12 @@ export function useShotDetector(opts: {
    *  ball-hits-the-screen echo collapses into one shot; putting keeps the
    *  default 320 so rapid putts still register. */
   refractoryMs?: number;
+  /** Timestamp (Date.now) of the most recent IMU-felt swing. When a transient
+   *  arrives within SWING_BOOST_MS of it, thresholds relax so a pocket-muffled
+   *  strike still registers. Stays 0 in mic-only mode (no boost). */
+  swingBoostRef?: MutableRefObject<number>;
 }) {
-  const { enabled, sensitivity, onHit, muteUntilRef, refractoryMs = 320 } = opts;
+  const { enabled, sensitivity, onHit, muteUntilRef, refractoryMs = 320, swingBoostRef } = opts;
   const recRef = useRef<Audio.Recording | null>(null);
   const lastHitRef = useRef(0);
   const onHitRef = useRef(onHit);
@@ -128,6 +145,8 @@ export function useShotDetector(opts: {
   // Rolling ambient floor + previous sample, for adaptive transient detection.
   const bgRef = useRef(-55);
   const prevRef = useRef(-60);
+  // Schmitt-trigger arm state: hits fire only while armed; re-arms near floor.
+  const armedRef = useRef(true);
   const [permission, setPermission] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -144,6 +163,7 @@ export function useShotDetector(opts: {
         await teardownPromise?.catch(() => { });
         if (!alive) return;
         await ensurePracticeAudioMode();
+        armedRef.current = true;   // fresh session starts armed
         const rec = new Audio.Recording();
         await rec.prepareToRecordAsync({
           ...Audio.RecordingOptionsPresets.LOW_QUALITY,
@@ -167,16 +187,28 @@ export function useShotDetector(opts: {
           // threshold missed it.
           prevRef.current = m;
           bgRef.current = bg + (m > bg ? 0.04 : 0.30) * (m - bg);
+          // Re-arm once the level has fallen back near the ambient floor. A
+          // sustained loud event (screen-return rattle, mower) keeps prominence
+          // high, so it stays dis-armed and can never fire twice; genuine
+          // silence between strikes re-arms within a frame or two.
+          if (!armedRef.current && prominence < 4) armedRef.current = true;
           if (muteUntilRef && now < muteUntilRef.current) return;   // skip the metronome click
           const sens = sensRef.current;
-          const needProm = 12 - sens * 7;       // sens 0 → 12 dB above floor, sens 1 → 5 dB
-          const needRise = 9 - sens * 5;        // sens 0 → 9 dB jump, sens 1 → 4 dB
+          // Within a beat of a felt swing the IMU has already supplied strong
+          // evidence this is OUR strike, so the audio bar drops: a pocket-
+          // muffled crack that misses the normal thresholds still corroborates.
+          const boosted = swingBoostRef != null && swingBoostRef.current > 0
+            && now - swingBoostRef.current <= SWING_BOOST_MS;
+          const needProm = (12 - sens * 7) - (boosted ? 3 : 0);  // sens 0 → 12 dB above floor, sens 1 → 5 dB
+          const needRise = (9 - sens * 5) - (boosted ? 2 : 0);   // sens 0 → 9 dB jump, sens 1 → 4 dB
+          const absFloor = boosted ? -64 : -58;
           // A real strike is a sharp impulse: well above ambient AND a fast
           // onset. The OR-path (a clearly prominent spike with a softer onset)
           // catches muffled, in-pocket strikes whose crisp transient is damped
           // by cloth. The absolute gate ignores noise-floor jitter.
           const hit = (prominence > needProm && rise > needRise) || prominence > needProm + 6;
-          if (m > -58 && hit && now - lastHitRef.current > refractoryRef.current) {
+          if (m > absFloor && hit && armedRef.current && now - lastHitRef.current > refractoryRef.current) {
+            armedRef.current = false;           // one hit per acoustic event
             lastHitRef.current = now;
             onHitRef.current();
           }
