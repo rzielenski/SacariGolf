@@ -8,7 +8,7 @@ import MapView, { Marker, Polyline, Polygon, Circle, Region } from 'react-native
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router } from 'expo-router';
-import { api, OfflineError, NotAuthenticatedError } from '../../../lib/api';
+import { api, OfflineError, ServerError, NotAuthenticatedError } from '../../../lib/api';
 import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
 import { isPremium } from '../../../lib/premium';
@@ -153,7 +153,6 @@ export default function ScoringScreen() {
   // Drives the "ghost shots" overlay so the player can see where they've
   // landed shots on this hole before. Premium-only. Refreshed on hole change.
   type PastRoundShots = { match_id: string; created_at: string; shots: Shot[] };
-  const [pastHoleShots, setPastHoleShots] = useState<PastRoundShots[]>([]);
 
   // Elevation of the user's home course, used as a baseline so altitude
   // effects on plays-like distance are RELATIVE to where the player normally
@@ -394,10 +393,18 @@ export default function ScoringScreen() {
   useEffect(() => {
     if (selectingCourse || preview || holes.length === 0 || scores.length === 0 || !teebox) return;
     const send = () => {
-      const sent = scores.slice(0, Math.max(currentHole + 1, 1));
+      // Upload up to the FURTHEST hole reached or entered — never just the
+      // hole the player is currently on. Slicing at currentHole+1 would
+      // truncate later holes from the server backstop (and the live/scramble
+      // shared card) the moment the player navigates BACK to fix an earlier
+      // hole, silently discarding real scores on a draft-cleared resume.
+      let maxIdx = currentHole;
+      enteredHoles.forEach((i) => { if (i > maxIdx) maxIdx = i; });
+      const end = Math.max(maxIdx + 1, 1);
+      const sent = scores.slice(0, end);
       api.matches.progress(id, {
         holeScores: sent,
-        holeStats: holeStats.slice(0, Math.max(currentHole + 1, 1)),
+        holeStats: holeStats.slice(0, end),
         teeboxId: teebox.teebox_id,
       })
         .then(() => {
@@ -417,7 +424,7 @@ export default function ScoringScreen() {
     if (progressTimer.current) clearTimeout(progressTimer.current);
     progressTimer.current = setTimeout(send, 2000);
     return () => { if (progressTimer.current) clearTimeout(progressTimer.current); };
-  }, [scores, holeStats, currentHole, selectingCourse, holes.length, id, teebox]);
+  }, [scores, holeStats, currentHole, enteredHoles, selectingCourse, holes.length, id, teebox]);
 
   // ── Birdie / Eagle / Hole-in-One celebrations ─────────────────────────
   // Polls /celebrations every 8s while the scoring screen is mounted +
@@ -596,6 +603,11 @@ export default function ScoringScreen() {
         if (!remote || remote.length === 0) return;
 
         const baseline = lastSyncedScoresRef.current;
+        // With a real baseline seeded (applyMatchData) this is normally true;
+        // if we still somehow diff against an empty baseline, adopt remote
+        // values for DISPLAY but don't mark them entered — otherwise a
+        // teammate's par-padded placeholders would satisfy the submit gate.
+        const baselineReady = baseline.length > 0;
         const localScores = scoresRef.current;
         const localEntered = enteredHolesRef.current;
 
@@ -611,7 +623,7 @@ export default function ScoringScreen() {
           if (r === 0) continue;
           if (r !== baseline[i]) {
             nextScores[i] = r;
-            nextEntered.add(i);
+            if (baselineReady) nextEntered.add(i);
             changed = true;
           }
         }
@@ -696,6 +708,13 @@ export default function ScoringScreen() {
     const localEntered = Array.isArray(saved?.entered) ? saved!.entered : [];
     const par = sorted.map((h) => h.par);
 
+    // Seed the scramble teammate-sync baseline from our OWN server row so the
+    // very first sync poll diffs against real known state. Left empty, the
+    // first diff treats every one of a teammate's par-padded placeholder holes
+    // as a fresh "entered" value and adopts them — which would let an all-par
+    // card slip past the submit gate.
+    lastSyncedScoresRef.current = serverScores ? serverScores.slice() : [];
+
     setMatch(m);
     setCourse(courseDetails);
     setTeebox(tb);
@@ -719,10 +738,13 @@ export default function ScoringScreen() {
       );
       setCurrentHole(saved.currentHole ?? 0);
     } else if (serverScores && serverScores.length > 0) {
-      // Draft gone → rebuild from the server. We can't know which of the
-      // server's holes were "entered" vs par placeholders, so we treat every
-      // hole it has a score for as entered (recovers the round; the player
-      // can adjust any that were just placeholders).
+      // Draft gone → rebuild from the server. The /progress endpoint pads
+      // unplayed holes with par, so we can't mark EVERY server hole entered
+      // (that would let an incomplete round be finalized as all-par and move
+      // SR/ELO). Mark entered only holes whose restored score differs from par
+      // — the same heuristic the on-device draft path uses above. A genuine
+      // par the player must re-confirm is a fair price for not crediting
+      // placeholders they never played.
       const restored = [...par];
       serverScores.forEach((s, i) => { if (i < restored.length && typeof s === 'number') restored[i] = s; });
       setScores(restored);
@@ -731,7 +753,7 @@ export default function ScoringScreen() {
           ? sorted.map((_, i) => serverStats[i] ?? {})
           : sorted.map(() => ({}))
       );
-      setEnteredHoles(new Set(serverScores.map((_, i) => i).filter((i) => i < restored.length)));
+      setEnteredHoles(new Set(serverScores.map((_, i) => i).filter((i) => i < restored.length && restored[i] !== par[i])));
       setCurrentHole(Math.max(0, Math.min(serverScores.length - 1, sorted.length - 1)));
     } else {
       setScores(saved?.scores ?? par);
@@ -963,6 +985,12 @@ export default function ScoringScreen() {
             // hole_num continues 10..18 for the second pass so the scorecard
             // grid and downstream keys (shot-tracking, hole_stats) are unique.
             hole_num: hole.hole_num + 9,
+            // hole_id must ALSO be unique or the second nine collides with the
+            // first: duplicate React keys, and a pin dropped on hole 3 would
+            // bleed onto hole 12 (both keyed by the same hole_id in pinByHole).
+            // The '#dup' suffix is stripped before any backend call so the
+            // physical hole is still targeted correctly.
+            hole_id: `${hole.hole_id}#dup`,
           })),
         ]
       : baseHoles.slice(0, playableHoles);
@@ -1110,45 +1138,39 @@ export default function ScoringScreen() {
   }, [activeShot, userCoord, getRelativeAltitudeM]);
 
   // ── Past shots at this hole — premium ghost-shot overlay ──────────────
-  // Pulls every tracked shot this user has landed on the current course +
-  // hole in prior rounds. Only refetches when the hole or course changes.
-  useEffect(() => {
-    if (!userIsPremium) { setPastHoleShots([]); return; }
-    if (!user || !course || currentHoleNum == null) return;
-    let cancelled = false;
-    api.users.holeShots(user.user_id, course.course_id, currentHoleNum, id)
-      .then((d) => {
-        if (cancelled) return;
-        // Normalise both segment and legacy point formats into segment shape.
-        const normalized: PastRoundShots[] = d.rounds.map((r) => {
-          const raw = (r.shots as any[]) ?? [];
-          let segs: Shot[] = [];
-          if (raw.length === 0) {
-            segs = [];
-          } else if (raw[0]?.start && raw[0]?.end) {
-            segs = raw as Shot[];
-          } else {
-            for (let i = 0; i < raw.length - 1; i++) {
-              segs.push({
-                club: raw[i]?.club ?? 'unknown',
-                start: { lat: raw[i]?.lat, lng: raw[i]?.lng },
-                end:   { lat: raw[i + 1]?.lat, lng: raw[i + 1]?.lng },
-              });
-            }
-          }
-          // Drop any malformed segment (missing / non-numeric coords) so the
-          // overlay render can never deref undefined and crash the screen.
-          segs = segs.filter((s: any) =>
-            s?.start && s?.end &&
-            typeof s.start.lat === 'number' && typeof s.start.lng === 'number' &&
-            typeof s.end.lat === 'number' && typeof s.end.lng === 'number');
-          return { match_id: r.match_id, created_at: r.created_at, shots: segs };
-        }).filter((r) => r.shots.length > 0);
-        setPastHoleShots(normalized);
-      })
-      .catch(() => { /* silent — overlay just stays empty */ });
-    return () => { cancelled = true; };
-  }, [userIsPremium, user?.user_id, course?.course_id, currentHoleNum, id]);
+  // Derived from the per-hole cache the fetch effect below populates, so the
+  // overlay normalises into segment shape WITHOUT issuing a second, identical
+  // holeShots request per hole (it previously had its own duplicate fetch).
+  const pastHoleShots = useMemo<PastRoundShots[]>(() => {
+    if (!userIsPremium || currentHoleNum == null) return [];
+    const rounds = pastShotsByHole[currentHoleNum];
+    if (!rounds) return [];
+    // Normalise both segment and legacy point formats into segment shape.
+    return rounds.map((r) => {
+      const raw = (r.shots as any[]) ?? [];
+      let segs: Shot[] = [];
+      if (raw.length === 0) {
+        segs = [];
+      } else if (raw[0]?.start && raw[0]?.end) {
+        segs = raw as Shot[];
+      } else {
+        for (let i = 0; i < raw.length - 1; i++) {
+          segs.push({
+            club: raw[i]?.club ?? 'unknown',
+            start: { lat: raw[i]?.lat, lng: raw[i]?.lng },
+            end:   { lat: raw[i + 1]?.lat, lng: raw[i + 1]?.lng },
+          });
+        }
+      }
+      // Drop any malformed segment (missing / non-numeric coords) so the
+      // overlay render can never deref undefined and crash the screen.
+      segs = segs.filter((s: any) =>
+        s?.start && s?.end &&
+        typeof s.start.lat === 'number' && typeof s.start.lng === 'number' &&
+        typeof s.end.lat === 'number' && typeof s.end.lng === 'number');
+      return { match_id: r.match_id, created_at: r.created_at, shots: segs };
+    }).filter((r) => r.shots.length > 0);
+  }, [userIsPremium, currentHoleNum, pastShotsByHole]);
 
   // ── Past-shots fetch ──────────────────────────────────────────────────
   // When the player switches holes (and they're premium), fetch their shot
@@ -1619,7 +1641,10 @@ export default function ScoringScreen() {
     const minSurface = isDem ? 1 : 3;
     if (Math.abs(adj) < minSurface) return null;
     return { adj, playsLike: yardsToPin + adj, uphill: adj > 0, source: isDem ? 'dem' as const : 'gps' as const };
-  }, [knownPin, userCoord, yardsToPin, pinRelElevM, elevOffsetM, playerElevationM]);
+    // Depend on knownPin's PRIMITIVES, not the object — it's rebuilt fresh
+    // every render when the pin comes from the hole catalog, which would
+    // otherwise defeat this memo and re-run the slope math on every render.
+  }, [knownPin?.lat, knownPin?.lng, knownPin?.elevation_m, userCoord, yardsToPin, pinRelElevM, elevOffsetM, playerElevationM]);
 
   // ── Auto-suggest the most likely club from yardsToPin ─────────────────
   // Picks the bag club whose median distance is closest to the current
@@ -1936,7 +1961,10 @@ export default function ScoringScreen() {
     };
     return { sigma1: buildRing(1), sigma2: buildRing(2), center };
   }, [
-    userIsPremium, userCoord, knownPin, clubStats, activeShot, pendingClub,
+    // knownPin's primitives, not the object — see slopeAdjustment above; the
+    // catalog-fallback literal is a new reference each render and would re-run
+    // this 120-point ellipse projection + eigen-decomposition every render.
+    userIsPremium, userCoord, knownPin?.lat, knownPin?.lng, knownPin?.elevation_m, clubStats, activeShot, pendingClub,
     // Re-roll when conditions change — weather poll, slope DEM lookup, or
     // player elevation calibration. Without these the ellipses would feel
     // stale relative to the pin's plays-like banner.
@@ -2021,8 +2049,13 @@ export default function ScoringScreen() {
       : typeof userCoord.altitude === 'number' ? userCoord.altitude
       : null;
     const point: LocalPin = { lat, lng, elevation_m };
+    // Local pin state is keyed by the (possibly '#dup'-suffixed) hole_id so the
+    // two passes of a play-9-twice round stay independent on screen. The
+    // BACKEND, however, must receive the real physical hole_id — both passes
+    // are the same green, so their pin samples aggregate together server-side.
+    const realHoleId = currentHoleObj.hole_id.split('#')[0];
     setPinByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: point }));
-    api.matches.contributePin(id, currentHoleObj.hole_id, point.lat, point.lng, elevation_m)
+    api.matches.contributePin(id, realHoleId, point.lat, point.lng, elevation_m)
       .then((res) => {
         if (typeof res?.samples === 'number') {
           setPinSamplesByHole((prev) => ({ ...prev, [currentHoleObj.hole_id]: res.samples }));
@@ -2033,10 +2066,10 @@ export default function ScoringScreen() {
         // continue using their just-marked pin for distances + heatmap. The
         // outbox will upload the contribution when service returns. Only
         // genuine server errors roll back + alert.
-        if (e instanceof OfflineError) {
+        if (e instanceof OfflineError || e instanceof ServerError) {
           queueContributePin({
             matchId: id,
-            holeId: currentHoleObj.hole_id,
+            holeId: realHoleId,
             lat: point.lat,
             lng: point.lng,
             elevation_m,
@@ -2273,11 +2306,15 @@ export default function ScoringScreen() {
       // local score draft (SAVE_KEY + shot caches) on disk so a relaunch
       // still rehydrates the in-progress state, and the outbox will replay
       // the submit the moment we're back online.
-      if (e instanceof OfflineError) {
+      // Offline OR a transient server error (5xx) = queue for replay rather
+      // than lose the round. The outbox retries both until they land.
+      if (e instanceof OfflineError || e instanceof ServerError) {
         try { await queueSubmitScores({ matchId: id, body: submitBody }); } catch { /* disk full → fall through to alert */ }
         Alert.alert(
           'Saved — Will Sync',
-          "You're offline. Your scores are saved on this device and will submit automatically the moment you have a connection.",
+          e instanceof OfflineError
+            ? "You're offline. Your scores are saved on this device and will submit automatically the moment you have a connection."
+            : 'The server had a hiccup. Your scores are saved on this device and will submit automatically in a moment.',
           [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }],
         );
       } else {
@@ -4561,7 +4598,10 @@ function AdvancedEntryModal({
               <StatStepper
                 label="Putts"
                 value={stat?.putts ?? null}
-                onChange={(v) => onChange({ putts: v })}
+                // Trim putt distances to the new count so lowering the putt
+                // number can't leave orphaned distances in the submitted
+                // stats (which would skew strokes-gained with a phantom putt).
+                onChange={(v) => onChange({ putts: v, puttDistances: (stat?.puttDistances ?? []).slice(0, v) })}
               />
               <StatStepper
                 label="Chips"

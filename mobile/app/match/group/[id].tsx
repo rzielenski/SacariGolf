@@ -154,6 +154,22 @@ export default function GroupScoringScreen() {
     ]);
   };
 
+  // "Leave (autosaved)" must actually save first. save() is otherwise only
+  // called from goNext/goPrev/onFinish, so the current hole's steppers and any
+  // guests added via addGuest were silently dropped on leave (worst on the last
+  // hole, which shows Finish not Next). Commit the open hole and persist it —
+  // mirroring goNext — then navigate regardless of whether the save succeeds.
+  const leave = async () => {
+    if (!busy && !finishing) {
+      try {
+        const committed = commitHole(scores, hole);
+        setScores(committed);
+        await save(false, committed);
+      } catch { /* still let them leave even if the save failed */ }
+    }
+    router.replace(`/match/${id}` as any);
+  };
+
   const addGuest = () => {
     const name = newGuest.trim().slice(0, 30);
     if (!name) return;
@@ -173,7 +189,7 @@ export default function GroupScoringScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       <ScrollView contentContainerStyle={{ padding: 20, paddingTop: insets.top + 12, paddingBottom: 48 }}>
-        <TouchableOpacity onPress={() => router.replace(`/match/${id}` as any)} style={{ marginBottom: 8 }}>
+        <TouchableOpacity onPress={leave} disabled={busy || finishing} style={{ marginBottom: 8 }}>
           <Text style={{ color: C.gold, fontSize: 16 }}>← Leave (autosaved)</Text>
         </TouchableOpacity>
         <Text style={s.course}>{courseName}</Text>

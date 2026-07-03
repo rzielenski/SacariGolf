@@ -59,19 +59,32 @@ export default function CourseMapScreen() {
 
       // Get a quick initial fix (Highest = kCLLocationAccuracyBest, max
       // hardware accuracy — about 5x more accurate than High at the same
-      // battery cost on iPhone)
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
+      // battery cost on iPhone). Wrapped in try/catch: the initial fix can
+      // reject on a cold start in low signal (kCLErrorLocationUnknown). If it
+      // does, we skip centering here but must still clear the loader and start
+      // the watch so a later fix recovers the screen.
+      try {
+        const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
+        if (!active) return;
+        const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        const near = isOnCourse(coord.latitude, coord.longitude, cLat, cLng);
+        setOnCourse(near);
+        setUserCoord(coord);
+        if (!near) setFollowing(false);
+      } catch {
+        /* initial fix can fail in low-signal areas — watch will recover */
+      } finally {
+        if (active) setLocLoading(false);
+      }
       if (!active) return;
-      const coord = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-      const near = isOnCourse(coord.latitude, coord.longitude, cLat, cLng);
-      setOnCourse(near);
-      setUserCoord(coord);
-      if (!near) setFollowing(false);
-      setLocLoading(false);
 
-      // Then watch for updates
-      watchRef.current = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.Highest, distanceInterval: 2 },
+      // Then watch for updates. distanceInterval: 0 + timeInterval: 1000 keeps
+      // fixes arriving ~1/sec even while the golfer stands still — the whole
+      // point of this screen is tap-to-measure while stationary, and at
+      // distanceInterval: 2 a motionless player gets ZERO callbacks so the
+      // measured yardage silently goes stale.
+      const sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Highest, distanceInterval: 0, timeInterval: 1000 },
         (loc) => {
           if (!active) return;
           const c = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
@@ -81,6 +94,14 @@ export default function CourseMapScreen() {
           setUserCoord(c);
         },
       );
+      // If the user backed out during the subscribe delay, cleanup already ran
+      // (active=false) before this resolved — tear down the now-live sub so it
+      // doesn't leak, and don't stash it in the ref.
+      if (!active) {
+        sub.remove();
+        return;
+      }
+      watchRef.current = sub;
     })();
     return () => {
       active = false;

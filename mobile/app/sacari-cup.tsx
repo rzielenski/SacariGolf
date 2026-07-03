@@ -12,7 +12,7 @@
  * a "past champions" strip at the bottom for social proof.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator,
   RefreshControl, Image,
@@ -44,6 +44,13 @@ export default function SacariCupScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Ticks every 30s so the "Xd Yh left" / "Yh Zm left" countdown re-renders
+  // while the screen is open instead of freezing at its first-render value.
+  const [, setNow] = useState(Date.now());
+  // Fire load() exactly once when the countdown crosses zero so the board
+  // flips from a stale countdown to the server's "resolving" state.
+  const resolvedRef = useRef(false);
+
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try { setData(await api.weeklyCup.current()); }
@@ -51,6 +58,23 @@ export default function SacariCupScreen() {
     finally { setLoading(false); setRefreshing(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // When the week ends, refetch once so the resolved cup / next week loads.
+  const weekEndsAt = data?.cup?.week_ends_at;
+  // Re-arm the once-only guard whenever a new week's deadline arrives.
+  useEffect(() => { resolvedRef.current = false; }, [weekEndsAt]);
+  useEffect(() => {
+    if (!weekEndsAt) return;
+    if (new Date(weekEndsAt).getTime() - Date.now() <= 0 && !resolvedRef.current) {
+      resolvedRef.current = true;
+      load();
+    }
+  });
 
   return (
     <View style={s.container}>

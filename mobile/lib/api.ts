@@ -32,6 +32,16 @@ export class OfflineError extends Error {
   constructor(message = 'No internet connection') { super(message); this.name = 'OfflineError'; }
 }
 
+/** Thrown when the server is REACHABLE but returned a 5xx. Distinct from
+ *  OfflineError so we don't tell a user with full signal that they're
+ *  "offline" during a backend blip, and don't flip the connectivity banner.
+ *  Retryable (idempotent requests retry it; the outbox retries queued
+ *  writes on it), but after exhaustion it surfaces as a real server error. */
+export class ServerError extends Error {
+  status: number;
+  constructor(message = 'Server error', status = 500) { super(message); this.name = 'ServerError'; this.status = status; }
+}
+
 /** True for errors that a screen's load-on-mount effect should SWALLOW rather
  *  than surface via Alert.alert:
  *   • NotAuthenticatedError — the session ended (logout / token invalidated)
@@ -140,8 +150,12 @@ async function singleAttempt<T>(
   );
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    // Server returned HTML (e.g. 404 page or crash) — surface a clean message
-    throw new Error(`Server error (${res.status})`);
+    // Server returned HTML (e.g. 404 page or crash) — surface a clean message.
+    // A 5xx crash page is a (retryable) server error, not a routing 4xx.
+    if (res.status >= 500) throw new ServerError(`Server error (${res.status})`, res.status);
+    const err = new Error(`Server error (${res.status})`);
+    (err as any).status = res.status;
+    throw err;
   }
   const data = await res.json();
   if (!res.ok) {
@@ -149,12 +163,10 @@ async function singleAttempt<T>(
       if (onSessionInvalid) onSessionInvalid();
       throw new NotAuthenticatedError(data.error);
     }
-    // 5xx is retryable — wrap with the network-error name so the retry loop
-    // catches it. 4xx is a real error and propagates immediately.
+    // 5xx → ServerError: retryable (the loop below retries it) but never
+    // masked as "offline". 4xx is a real client error and propagates now.
     if (res.status >= 500) {
-      const err = new Error(data?.error || 'Server error');
-      err.name = 'TypeError';
-      throw err;
+      throw new ServerError(data?.error || 'Server error', res.status);
     }
     // Real 4xx — propagate immediately. Attach the HTTP status so callers can
     // distinguish e.g. a 404 ("the thing is gone — navigate away quietly")
@@ -208,16 +220,25 @@ async function request<T>(
       lastErr = e;
       // Real, non-retryable errors — propagate immediately.
       if (e instanceof NotAuthenticatedError) throw e;
-      if (!isNetworkError(e)) {
+      const isServer = e instanceof ServerError;
+      if (!isNetworkError(e) && !isServer) {
         // Server-side 4xx / parse error — still counts as a successful
         // connection (the server answered us), so flip back to online.
         noteFetchSuccess();
         throw e;
       }
-      // Retryable: wait and try again unless we've burned all attempts.
+      // Retryable (network-class or 5xx): wait and try again unless we've
+      // burned all attempts.
       if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
         continue;
+      }
+      // Exhausted. A 5xx means the server IS reachable — it's not a
+      // connectivity problem — so surface the real ServerError and DON'T
+      // flip the app to offline or mask it as OfflineError.
+      if (isServer) {
+        noteFetchSuccess();
+        throw e;
       }
     }
   }

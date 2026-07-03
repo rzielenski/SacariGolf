@@ -16,7 +16,7 @@ import { VoiceMessageBubble } from '../../../components/VoiceMessageBubble';
 import { UserAvatar } from '../../../components/UserAvatar';
 import { IdentityName } from '../../../components/UserIdentity';
 import { MentionInput } from '../../../components/MentionInput';
-import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
+import { useVoiceRecorder, VoiceClip } from '../hooks/useVoiceRecorder';
 import { censorText } from '../../../lib/censor';
 import { Ionicons } from '@expo/vector-icons';
 import { compressForUpload } from '../../../lib/imageUpload';
@@ -58,8 +58,14 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Voice-message recorder + slide-to-cancel state
-  const recorder = useVoiceRecorder(60_000);
+  // Voice-message recorder + slide-to-cancel state. The max-duration callback
+  // fires when a held recording hits 60s: the hook has already stopped and
+  // read the clip, so we just send it — unless the finger is currently in the
+  // cancel zone, in which case honour the cancel intent and drop it.
+  const recorder = useVoiceRecorder(60_000, (clip) => {
+    if (cancelLatched.current) return;
+    postVoiceClip(clip);
+  });
   // dragX: signed offset of the user's finger from the mic button while
   // recording. Negative = pulled left toward the cancel zone. Drives the
   // mic-row's visual offset + the cancel hint opacity.
@@ -322,11 +328,10 @@ export default function ChatScreen() {
     }
   };
 
-  /** Finalise the recording and POST it. Called by the PanResponder's
-   *  release handler when cancelLatched is false. */
-  const sendVoice = async () => {
-    const clip = await recorder.stopAndGet();
-    if (!clip) return;          // permission denied / start failed / no audio
+  /** POST an already-finalised voice clip. Shared by the finger-up release
+   *  handler and the 60s max-duration auto-stop, so a clip that hit the cap
+   *  sends exactly like a manual release. */
+  const postVoiceClip = async (clip: VoiceClip) => {
     if (clip.durationMs < 500) return;   // sub-half-second = accidental tap
     setSending(true);
     try {
@@ -353,6 +358,14 @@ export default function ChatScreen() {
     } finally {
       setSending(false);
     }
+  };
+
+  /** Finalise the recording and POST it. Called by the PanResponder's
+   *  release handler when cancelLatched is false. */
+  const sendVoice = async () => {
+    const clip = await recorder.stopAndGet();
+    if (!clip) return;          // permission denied / start failed / no audio / already auto-stopped
+    await postVoiceClip(clip);
   };
 
   // PanResponder on the mic button. onStartShouldSet captures the touch

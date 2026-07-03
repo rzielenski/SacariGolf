@@ -1,8 +1,15 @@
-/* Compare Sesh — two swing videos, side by side, one shared slo-mo transport.
-   Each side is an independent panel (own file, own canvas, own strokes);
-   play/pause + speed + the scrub bar drive BOTH videos together (scrub seeks
-   each clip to the SAME FRACTION of its own duration). Drawing is routed to
-   whichever panel is selected via the "DRAW ON A/B" toggle.
+/* Compare Sesh — two swing videos, side by side.
+     • Playback: each panel has its own play/pause button (play A alone, or B
+       alone), PLUS one big shared button that plays/pauses BOTH together.
+       Speed and the scrub bar stay shared — the scrub seeks each clip to the
+       SAME FRACTION of its own duration (not the same absolute time), which
+       is also useful for lining the two up even when only one is playing.
+     • Drawing: no "which panel" mode. Both canvases are always live together;
+       whichever one you touch is the one that gets the mark — the browser's
+       own pointer targeting already resolves that, no routing needed. Tool
+       and color are shared (pick a color once, draw with it on either
+       video); Undo/Clear are per-panel since there's no single "current"
+       panel to route a shared Undo/Clear to.
 
    The per-panel canvas math (DPR-aware sizing, pen/eraser/line/circle,
    nearest-stroke eraser hit-test) is the exact same logic as review.js,
@@ -24,18 +31,14 @@
   var timeAEl = document.getElementById('compare-time-a');
   var timeBEl = document.getElementById('compare-time-b');
   var speedRow = document.getElementById('compare-speed');
-  var targetRow = document.getElementById('compare-target');
   var toolsRow = document.getElementById('compare-tools');
   var doneBtn = document.getElementById('compare-done');
-  var undoBtn = document.getElementById('compare-undo');
-  var clearBtn = document.getElementById('compare-clear');
   var colorsRow = document.getElementById('compare-colors');
   var hintEl = document.getElementById('compare-hint');
   var resetBtn = document.getElementById('compare-reset');
 
   var tool = null;              // null | 'pen' | 'eraser' | 'line' | 'circle'
   var penColor = PEN_COLORS[0];
-  var activeTarget = 'a';       // which panel draw tools apply to
 
   function fmtTime(sec) {
     if (!isFinite(sec) || sec < 0) sec = 0;
@@ -43,8 +46,8 @@
     return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   }
 
-  // ----- One panel (video + canvas + independent strokes) ------------------
-  function makePanel(side) {
+  // ----- One panel (video + canvas + independent strokes + own play/undo) --
+  function makePanel(side, label) {
     var dropEl = document.getElementById('compare-drop-' + side);
     var fileInput = document.getElementById('compare-file-' + side);
     var pickBtn = document.getElementById('compare-pick-' + side);
@@ -53,6 +56,10 @@
     var video = document.getElementById('compare-video-' + side);
     var canvas = document.getElementById('compare-canvas-' + side);
     var errorEl = document.getElementById('compare-error-' + side);
+    var panelPlayBtn = document.getElementById('compare-playbtn-' + side);
+    var strokesRow = document.getElementById('compare-strokes-' + side);
+    var undoBtn = document.getElementById('compare-undo-' + side);
+    var clearBtn = document.getElementById('compare-clear-' + side);
     var ctx = canvas.getContext('2d');
 
     var objectUrl = null;
@@ -61,8 +68,6 @@
     var anchor = null;
     var cssW = 1, cssH = 1;
     var loaded = false;
-
-    function isMine() { return activeTarget === side; }
 
     function resizeCanvas() {
       var rect = frameEl.getBoundingClientRect();
@@ -122,12 +127,16 @@
     }
     function eraseAt(pt) {
       var idx = nearestStrokeIndex(pt);
-      if (idx >= 0) { strokes.splice(idx, 1); updateToolButtons(); redraw(); }
+      if (idx >= 0) { strokes.splice(idx, 1); updateStrokeUI(); redraw(); }
     }
 
+    // Both panels' canvases are always live once a tool is armed — whichever
+    // one a pointerdown lands on is the one that gets the stroke. No "is this
+    // my panel" check needed: the browser already resolved that by dispatching
+    // the event to THIS canvas.
     var pointerDown = false;
     canvas.addEventListener('pointerdown', function (e) {
-      if (!tool || !isMine()) return;
+      if (!tool) return;
       e.preventDefault();
       pointerDown = true;
       try { canvas.setPointerCapture(e.pointerId); } catch (err) { }
@@ -138,7 +147,7 @@
       redraw();
     });
     canvas.addEventListener('pointermove', function (e) {
-      if (!tool || !isMine() || !pointerDown) return;
+      if (!tool || !pointerDown) return;
       e.preventDefault();
       var p = localPoint(e);
       if (tool === 'eraser') { eraseAt(p); return; }
@@ -157,19 +166,14 @@
     });
     function finishStroke() {
       pointerDown = false;
-      // isMine() re-check matters here: setPointerCapture (in pointerdown)
-      // keeps routing this pointerup to THIS canvas even if the user switched
-      // the "Draw on A/B" target mid-drag — pointermove already stops growing
-      // `active` once that happens, but without this check the stale partial
-      // stroke would still get committed to the panel the user just left.
-      if (active && tool !== 'eraser' && isMine()) {
+      if (active && tool !== 'eraser') {
         if (active.mode === 'circle' ? (active.center && active.edge) : active.points.length > 0) {
           strokes.push(active);
         }
       }
       active = null;
       anchor = null;
-      updateToolButtons();
+      updateStrokeUI();
       redraw();
     }
     canvas.addEventListener('pointerup', finishStroke);
@@ -206,8 +210,28 @@
     function redraw() {
       ctx.clearRect(0, 0, cssW, cssH);
       for (var i = 0; i < strokes.length; i++) drawStroke(strokes[i]);
-      if (active && tool !== 'eraser' && isMine()) drawStroke(active);
+      if (active && tool !== 'eraser') drawStroke(active);
     }
+
+    // Show/hide + wire this panel's own Undo/Clear row.
+    function updateStrokeUI() {
+      strokesRow.hidden = strokes.length === 0;
+    }
+    undoBtn.addEventListener('click', function () { strokes.pop(); updateStrokeUI(); redraw(); });
+    clearBtn.addEventListener('click', function () { strokes = []; updateStrokeUI(); redraw(); });
+
+    // This panel's own play/pause — independent of the shared "Play Both"
+    // button below, so either swing can play on its own.
+    function updatePanelPlayLabel() {
+      panelPlayBtn.innerHTML = (video.paused ? '&#9654; Play ' : '&#10074;&#10074; Pause ') + label;
+    }
+    video.addEventListener('play', updatePanelPlayLabel);
+    video.addEventListener('pause', updatePanelPlayLabel);
+    panelPlayBtn.addEventListener('click', function () {
+      if (!loaded) return;
+      if (video.paused) video.play().catch(function () { });
+      else video.pause();
+    });
 
     // `loaded` only flips true once the browser actually decodes the file
     // (loadedmetadata), and an `error` event reverts to the drop state with a
@@ -224,6 +248,7 @@
       errorEl.hidden = true;
       dropEl.hidden = true;
       stageEl.hidden = false;
+      updateStrokeUI();
       redraw();
       video.addEventListener('error', function onErr() {
         video.removeEventListener('error', onErr);
@@ -247,6 +272,7 @@
       loaded = false;
       stageEl.hidden = true;
       dropEl.hidden = false;
+      updateStrokeUI();
       onPanelChanged();
     }
 
@@ -278,40 +304,50 @@
       video: video,
       canvas: canvas,
       isLoaded: function () { return loaded; },
-      strokeCount: function () { return strokes.length; },
-      undoStroke: function () { strokes.pop(); redraw(); },
-      clearStrokes: function () { strokes = []; redraw(); },
       redraw: redraw,
       reset: reset,
     };
   }
 
-  var panelA = makePanel('a');
-  var panelB = makePanel('b');
+  var panelA = makePanel('a', 'Video A');
+  var panelB = makePanel('b', 'Video B');
 
   function bothLoaded() { return panelA.isLoaded() && panelB.isLoaded(); }
   function onPanelChanged() { controlsEl.hidden = !bothLoaded(); }
 
-  // ----- Shared transport: play/pause + speed + fraction-synced scrub ------
-  function updatePlayIcon() { playBtn.innerHTML = panelA.video.paused ? '&#9654;' : '&#10074;&#10074;'; }
+  // ----- Shared transport: "Play Both" + speed + fraction-synced scrub -----
+  // The shared icon reflects whether EITHER clip is playing — mirrors each
+  // panel's own play button (which drives that video alone) rather than
+  // silently ignoring one side, so a broken/never-loaded A can't wedge this
+  // like a single-source read would.
+  function updatePlayIcon() {
+    var anyPlaying = !panelA.video.paused || !panelB.video.paused;
+    playBtn.innerHTML = anyPlaying ? '&#10074;&#10074;' : '&#9654;';
+  }
   panelA.video.addEventListener('play', updatePlayIcon);
   panelA.video.addEventListener('pause', updatePlayIcon);
+  panelB.video.addEventListener('play', updatePlayIcon);
+  panelB.video.addEventListener('pause', updatePlayIcon);
 
   playBtn.addEventListener('click', function () {
     if (!bothLoaded()) return;
-    if (panelA.video.paused) {
-      panelA.video.play().catch(function () { });
-      panelB.video.play().catch(function () { });
-    } else {
+    var anyPlaying = !panelA.video.paused || !panelB.video.paused;
+    if (anyPlaying) {
       panelA.video.pause();
       panelB.video.pause();
+    } else {
+      panelA.video.play().catch(function () { });
+      panelB.video.play().catch(function () { });
     }
   });
 
   function updateTimeUI() {
     var dA = panelA.video.duration || 0, pA = panelA.video.currentTime || 0;
     var dB = panelB.video.duration || 0, pB = panelB.video.currentTime || 0;
-    scrubFill.style.width = (dA > 0 ? Math.min(100, (pA / dA) * 100) : 0) + '%';
+    // Fall back to B's fraction when A has no duration (or never loads) — a
+    // broken A shouldn't permanently pin the shared scrub bar at 0%.
+    var frac = dA > 0 ? pA / dA : (dB > 0 ? pB / dB : 0);
+    scrubFill.style.width = Math.min(100, Math.max(0, frac * 100)) + '%';
     timeAEl.textContent = 'A ' + fmtTime(pA) + ' / ' + fmtTime(dA);
     timeBEl.textContent = 'B ' + fmtTime(pB) + ' / ' + fmtTime(dB);
   }
@@ -320,7 +356,9 @@
   panelB.video.addEventListener('timeupdate', updateTimeUI);
   panelB.video.addEventListener('durationchange', updateTimeUI);
 
-  // Seek both clips to the SAME FRACTION of their own duration.
+  // Seek both clips to the SAME FRACTION of their own duration — applies
+  // regardless of which is playing, useful for lining the two up even when
+  // only one is actively running.
   function seekToFrac(frac) {
     var f = Math.max(0, Math.min(1, frac));
     if (panelA.video.duration) panelA.video.currentTime = f * panelA.video.duration;
@@ -354,7 +392,7 @@
     speedRow.appendChild(b);
   });
 
-  // ----- Drawing target + tools (shared toolbar, routed to A or B) ---------
+  // ----- Drawing tools (shared tool/color; both canvases always live) ------
   PEN_COLORS.forEach(function (c) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -369,23 +407,10 @@
   });
 
   function updateCanvasDrawingClass() {
-    panelA.canvas.classList.toggle('drawing', !!tool && activeTarget === 'a');
-    panelB.canvas.classList.toggle('drawing', !!tool && activeTarget === 'b');
+    var on = !!tool;
+    panelA.canvas.classList.toggle('drawing', on);
+    panelB.canvas.classList.toggle('drawing', on);
   }
-  function setActiveTarget(side) {
-    activeTarget = side;
-    Array.prototype.forEach.call(targetRow.children, function (x) {
-      x.classList.toggle('on', x.getAttribute('data-target') === side);
-    });
-    updateCanvasDrawingClass();
-    updateToolButtons();
-    panelA.redraw();
-    panelB.redraw();
-  }
-  Array.prototype.forEach.call(targetRow.querySelectorAll('button[data-target]'), function (b) {
-    b.addEventListener('click', function () { setActiveTarget(b.getAttribute('data-target')); });
-  });
-
   function setTool(next) {
     tool = next;
     doneBtn.hidden = !tool;
@@ -397,9 +422,6 @@
     Array.prototype.forEach.call(toolsRow.querySelectorAll('button[data-tool]'), function (b) {
       b.classList.toggle('on', b.getAttribute('data-tool') === tool);
     });
-    var count = (activeTarget === 'a' ? panelA : panelB).strokeCount();
-    undoBtn.hidden = count === 0;
-    clearBtn.hidden = count === 0;
   }
   Array.prototype.forEach.call(toolsRow.querySelectorAll('button[data-tool]'), function (b) {
     b.addEventListener('click', function () {
@@ -408,20 +430,12 @@
     });
   });
   doneBtn.addEventListener('click', function () { setTool(null); updateToolButtons(); });
-  undoBtn.addEventListener('click', function () {
-    (activeTarget === 'a' ? panelA : panelB).undoStroke();
-    updateToolButtons();
-  });
-  clearBtn.addEventListener('click', function () {
-    (activeTarget === 'a' ? panelA : panelB).clearStrokes();
-    updateToolButtons();
-  });
 
   resetBtn.addEventListener('click', function () {
     panelA.reset();
     panelB.reset();
     setTool(null);
-    setActiveTarget('a'); // matches the server-rendered initial state (A selected)
+    updateToolButtons();
     onPanelChanged();
   });
 })();

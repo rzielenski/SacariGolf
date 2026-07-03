@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image, ScrollView,
   Alert, ActivityIndicator, Animated, Dimensions, RefreshControl, Modal,
-  PanResponder,
+  PanResponder, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -215,27 +215,35 @@ function UploadButton() {
     if (result.canceled || !result.assets[0]) return;
     const img = await compressForUpload(result.assets[0]);
 
-    Alert.prompt(
-      'Describe your find',
-      'What did you discover? (optional)',
-      async (description) => {
-        setUploading(true);
-        try {
-          await api.finds.upload(
-            img.base64,
-            img.mime,
-            description ?? ''
-          );
-          Alert.alert('Uploaded!', 'Your find is in the ranker.');
-        } catch (e: any) {
-          Alert.alert('Upload failed', e.message);
-        } finally {
-          setUploading(false);
-        }
-      },
-      'plain-text',
-      '',
-    );
+    const doUpload = async (description: string) => {
+      setUploading(true);
+      try {
+        await api.finds.upload(
+          img.base64,
+          img.mime,
+          description
+        );
+        Alert.alert('Uploaded!', 'Your find is in the ranker.');
+      } catch (e: any) {
+        Alert.alert('Upload failed', e.message);
+      } finally {
+        setUploading(false);
+      }
+    };
+
+    // Alert.prompt is iOS-only. On Android (or if it's ever unavailable) fall
+    // back to uploading with an empty description so the Find still posts.
+    if (Platform.OS === 'ios' && typeof Alert.prompt === 'function') {
+      Alert.prompt(
+        'Describe your find',
+        'What did you discover? (optional)',
+        (description) => doUpload(description ?? ''),
+        'plain-text',
+        '',
+      );
+    } else {
+      doUpload('');
+    }
   };
 
   return (

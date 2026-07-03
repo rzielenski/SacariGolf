@@ -14,7 +14,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
-import { api, subscribeConn, OfflineError } from './api';
+import { api, subscribeConn, OfflineError, ServerError } from './api';
 
 /** Per-match local cache keys that need clearing once the round's been
  *  successfully submitted by the outbox. Mirrors the cleanup the inline
@@ -72,30 +72,58 @@ async function writeAll(entries: Entry[]) {
   try { await AsyncStorage.setItem(KEY, JSON.stringify(entries)); } catch { /* disk full → drop, caller already failed */ }
 }
 
+/**
+ * Serialize every read-modify-write against the outbox through a promise
+ * chain. Without this, a drain that snapshots the queue, does slow network
+ * I/O, then writes back its (now stale) snapshot would clobber a submission
+ * the user queued mid-drain — losing a finished round with no error shown.
+ * The drain holds this lock ONLY for its final storage reconciliation, never
+ * during the network calls, so queueing offline stays instant.
+ */
+let mutex: Promise<void> = Promise.resolve();
+function withOutboxLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = mutex.then(fn, fn);
+  mutex = run.then(() => { }, () => { });
+  return run;
+}
+
+/** Stable value-identity for an entry, including queuedAt so a re-queued
+ *  submission (new timestamp) is never confused with the snapshot entry a
+ *  concurrent drain is retiring. */
+function entryId(e: Entry): string {
+  return e.kind === 'contribute_pin'
+    ? `pin:${e.payload.matchId}:${e.payload.holeId}:${e.queuedAt}`
+    : `submit:${e.payload.matchId}:${e.queuedAt}`;
+}
+
 export async function queueSubmitScores(payload: SubmitPayload): Promise<void> {
-  const entries = await readAll();
-  // Replace any prior queued submit for the same matchId — only the latest
-  // score state matters. Prevents racy double-submits if the user taps
-  // submit, then tweaks a hole, then taps submit again before sync.
-  const next = entries.filter((e) =>
-    !(e.kind === 'submit_scores' && e.payload.matchId === payload.matchId)
-  );
-  next.push({ kind: 'submit_scores', queuedAt: new Date().toISOString(), payload });
-  await writeAll(next);
+  await withOutboxLock(async () => {
+    const entries = await readAll();
+    // Replace any prior queued submit for the same matchId — only the latest
+    // score state matters. Prevents racy double-submits if the user taps
+    // submit, then tweaks a hole, then taps submit again before sync.
+    const next = entries.filter((e) =>
+      !(e.kind === 'submit_scores' && e.payload.matchId === payload.matchId)
+    );
+    next.push({ kind: 'submit_scores', queuedAt: new Date().toISOString(), payload });
+    await writeAll(next);
+  });
 }
 
 /** Queue a pin contribution for later upload. Deduplicates by (matchId, holeId)
  *  — only the most-recent pin per hole survives, matching the server's
  *  median-aggregator semantics where each device contributes once per hole. */
 export async function queueContributePin(payload: PinPayload): Promise<void> {
-  const entries = await readAll();
-  const next = entries.filter((e) =>
-    !(e.kind === 'contribute_pin'
-      && e.payload.matchId === payload.matchId
-      && e.payload.holeId === payload.holeId)
-  );
-  next.push({ kind: 'contribute_pin', queuedAt: new Date().toISOString(), payload });
-  await writeAll(next);
+  await withOutboxLock(async () => {
+    const entries = await readAll();
+    const next = entries.filter((e) =>
+      !(e.kind === 'contribute_pin'
+        && e.payload.matchId === payload.matchId
+        && e.payload.holeId === payload.holeId)
+    );
+    next.push({ kind: 'contribute_pin', queuedAt: new Date().toISOString(), payload });
+    await writeAll(next);
+  });
 }
 
 export async function hasQueuedSubmitFor(matchId: string): Promise<boolean> {
@@ -118,9 +146,12 @@ export async function drainOutbox(): Promise<void> {
   if (draining) return;
   draining = true;
   try {
-    let entries = await readAll();
+    const entries = await readAll();
     if (!entries.length) return;
-    const remaining: Entry[] = [];
+    // Snapshot entries this drain has finished with — either sent OK or
+    // dropped as non-retryable. Anything NOT in here (still-offline entries,
+    // and crucially anything the user queued mid-drain) is left untouched.
+    const handledIds = new Set<string>();
     // Match IDs whose submit landed (either fresh or "already completed" =
     // server confirms there's nothing more to send). We clear the local
     // round caches for these so a stranded score draft doesn't linger.
@@ -139,26 +170,36 @@ export async function drainOutbox(): Promise<void> {
             entry.payload.elevation_m,
           );
         }
-        // Success → don't re-queue.
+        handledIds.add(entryId(entry)); // sent → retire from the store
       } catch (e: any) {
-        // Still offline → keep for next attempt. Server-side error → drop
-        // (retrying won't fix a 4xx like "Match already completed"). A
-        // 409 'Match already completed' on submit means another device
-        // already submitted the round; treat that as "done" so the local
-        // draft caches get cleaned up too.
-        if (e instanceof OfflineError) {
-          remaining.push(entry);
+        // Still offline OR a transient 5xx → keep for next attempt (do NOT
+        // mark handled), so a backend hiccup during the drive home can't
+        // drop a finished round. A 4xx propagates as a plain Error and IS
+        // dropped (retrying won't fix "Match already completed"). A 409
+        // 'Match already completed' on submit means another device already
+        // submitted the round; treat that as "done" so the local draft
+        // caches get cleaned up too.
+        if (e instanceof OfflineError || e instanceof ServerError) {
+          // leave it in the store for the next drain
         } else {
           if (entry.kind === 'submit_scores'
               && /already completed/i.test(String(e?.message ?? ''))) {
             submittedMatchIds.add(entry.payload.matchId);
           }
+          handledIds.add(entryId(entry)); // non-retryable → drop from the store
           // eslint-disable-next-line no-console
           console.warn('[outbox] dropping non-retryable entry', entry.kind, e);
         }
       }
     }
-    await writeAll(remaining);
+    // Reconcile under the lock: re-read the CURRENT store and remove only the
+    // entries this drain actually retired, so a submission queued while the
+    // network calls above were in flight is preserved instead of clobbered.
+    await withOutboxLock(async () => {
+      const current = await readAll();
+      const next = current.filter((e) => !handledIds.has(entryId(e)));
+      await writeAll(next);
+    });
 
     // Local-draft cleanup for every match whose submit successfully landed
     // (or was already done server-side). Best-effort — a failed unlink

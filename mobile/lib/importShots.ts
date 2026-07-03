@@ -75,13 +75,61 @@ function normalizeHeader(h: string) {
   return h.toLowerCase().replace(/\s*\(.*?\)/g, '').replace(/[_\-]+/g, ' ').trim();
 }
 
+/** Minimal RFC-4180 line tokenizer. Splits a single CSV line on `delim`
+ *  while respecting double-quoted fields (so a delimiter inside "…" is kept
+ *  as data), unescaping doubled quotes ("") and stripping the surrounding
+ *  quotes. Launch-monitor exports quote club names/notes containing commas
+ *  (e.g. "Driver, 10.5°"); a naive split() would shift every later column. */
+function splitCsvLine(line: string, delim: string): string[] {
+  const out: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { field += '"'; i++; }  // escaped quote
+        else inQuotes = false;                            // closing quote
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delim) {
+      out.push(field);
+      field = '';
+    } else {
+      field += ch;
+    }
+  }
+  out.push(field);
+  return out;
+}
+
+/** Sniff the delimiter from the header line: whichever of comma / semicolon /
+ *  tab appears most (outside quotes). European exports use ';' so a comma
+ *  decimal separator doesn't clash. Defaults to comma. */
+function detectDelimiter(headerLine: string): string {
+  const candidates = [',', ';', '\t'];
+  let best = ',';
+  let bestCount = -1;
+  for (const d of candidates) {
+    const count = splitCsvLine(headerLine, d).length;
+    if (count > bestCount) { bestCount = count; best = d; }
+  }
+  return best;
+}
+
 export function parseCSV(raw: string): ParseResult {
   const lines = raw.split(/\r?\n/).filter((l) => l.trim().length);
   if (lines.length < 2) {
     return { shots: [], perClubCounts: {}, unmappedClubs: [], rowsSkipped: 0 };
   }
 
-  const headers = lines[0].split(',').map((h) => normalizeHeader(h));
+  // Detect the delimiter from the header so European semicolon/tab exports
+  // work, then use that SAME delimiter for every row below.
+  const delim = detectDelimiter(lines[0]);
+  const headers = splitCsvLine(lines[0], delim).map((h) => normalizeHeader(h));
   const idx = (...candidates: string[]) => {
     for (const c of candidates) {
       const i = headers.indexOf(c);
@@ -109,7 +157,7 @@ export function parseCSV(raw: string): ParseResult {
   let rowsSkipped = 0;
 
   for (let i = 1; i < lines.length; i++) {
-    const cells = lines[i].split(',');
+    const cells = splitCsvLine(lines[i], delim);
     const rawClub = cells[colClub]?.trim();
     if (!rawClub) { rowsSkipped++; continue; }
 

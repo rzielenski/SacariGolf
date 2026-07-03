@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, ActivityIndicator, Alert,
@@ -36,6 +36,10 @@ export default function CoursesScreen() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Course[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  // Monotonic request counter so out-of-order search responses can't clobber
+  // newer results — only the latest in-flight request may commit state.
+  const seqRef = useRef(0);
   const [nearby, setNearby] = useState<Course[]>([]);
   const [loadingNearby, setLoadingNearby] = useState(false);
   // The player's current location, captured once we have permission. Drives
@@ -79,12 +83,24 @@ export default function CoursesScreen() {
 
   const search = useCallback(async (q: string) => {
     setQuery(q);
-    if (q.length < 2) { setResults([]); return; }
+    if (q.length < 2) { setResults([]); setSearchError(null); return; }
     setSearching(true);
+    setSearchError(null);
+    // Capture a per-request sequence number; only the most recent request is
+    // allowed to commit, so a slow response for an earlier query (e.g. "Peb")
+    // can't overwrite the results for the current one ("Pebble").
+    const seq = ++seqRef.current;
     try {
       const r = await api.courses.search(q);
-      setResults(r);
-    } finally { setSearching(false); }
+      if (seq === seqRef.current) setResults(r);
+    } catch {
+      if (seq === seqRef.current) {
+        setResults([]);
+        setSearchError("Couldn't reach the server. Check your connection and try again.");
+      }
+    } finally {
+      if (seq === seqRef.current) setSearching(false);
+    }
   }, []);
 
   const open = (c: Course) => router.push(`/course/${c.course_id}` as any);
@@ -137,7 +153,10 @@ export default function CoursesScreen() {
         {showResults ? (
           <>
             {searching && <ActivityIndicator color={C.gold} style={{ marginTop: 16 }} />}
-            {!searching && results.length === 0 && (
+            {!searching && searchError && (
+              <Text style={styles.empty}>{searchError}</Text>
+            )}
+            {!searching && !searchError && results.length === 0 && (
               <Text style={styles.empty}>No courses match "{query}"</Text>
             )}
             {sortByDistance(results).map((c) => (

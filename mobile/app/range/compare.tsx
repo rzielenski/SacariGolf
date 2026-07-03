@@ -1,14 +1,22 @@
 /**
  * Range Session — side-by-side compare screen.
  *
- * Two swings, picked from Review Sesh history (?a=<swingId>&b=<swingId>),
- * playing side by side with ONE shared transport: play/pause drives both
- * videos together, speed applies to both, and the scrub bar seeks each
- * video to the SAME FRACTION of its own duration — the simplest sync model
- * that doesn't require the player to hand-align an impact frame on each
- * clip. Drawing is independent per side (own strokes), routed through one
- * shared toolbar via a "Drawing on A / B" toggle so the screen doesn't need
- * two full toolbars stacked on a phone.
+ * Two swings, picked from Review Sesh history (?a=<swingId>&b=<swingId>).
+ *
+ *   • Playback — each panel has its own small play/pause button (play A
+ *     alone, or B alone), PLUS one big shared button that plays/pauses BOTH
+ *     together. Speed and the scrub bar stay shared: speed applies to both
+ *     clips, and the scrub seeks each clip to the SAME FRACTION of its own
+ *     duration (not the same absolute time) — the simplest sync model that
+ *     doesn't require hand-aligning an impact frame on each clip, and it's
+ *     useful for lining the two up even when only one is actually playing.
+ *   • Drawing — no "which panel" mode to set. Both canvases are always live
+ *     together; whichever panel you touch is the one that gets the mark
+ *     (native touch dispatch already resolves that — no routing needed).
+ *     Tool/color are shared (pen vs. eraser vs. line vs. circle, and which
+ *     color), same as picking up one pen and using it on either drawing.
+ *     Undo/Clear are per-panel (shown right under that panel) since there's
+ *     no single "current" panel anymore.
  *
  * Compare annotations are SESSION-ONLY (not persisted back to the swing
  * record) — this is a scratchpad for a side-by-side look, not a saved
@@ -52,8 +60,6 @@ function fmtTime(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-type Panel = 'a' | 'b';
-
 export default function RangeCompare() {
   const { user } = useAuth();
   const { a: idA, b: idB } = useLocalSearchParams<{ a: string; b: string }>();
@@ -73,15 +79,14 @@ export default function RangeCompare() {
   const videoBRef = useRef<Video>(null);
 
   // ── Shared transport ────────────────────────────────────────────────
-  // isPlaying/fracProgress are derived from WHICHEVER side is actually
-  // reporting status, not just A — if A's local video_uri ever fails to
-  // resolve (stale file:// path after a reinstall) while B loads fine, the
-  // shared transport must still track B rather than permanently reading "not
-  // playing" / "0% progress" off a video that never loads.
+  // isPlaying(A/B) are derived from each side's own status — needed both for
+  // the per-panel play buttons AND so a broken/unloaded A can't wedge the
+  // shared "play both" button's read of overall state (see fracProgress
+  // fallback below for the matching scrub-bar case).
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [isPlayingA, setIsPlayingA] = useState(false);
   const [isPlayingB, setIsPlayingB] = useState(false);
-  const isPlaying = isPlayingA || isPlayingB;
+  const anyPlaying = isPlayingA || isPlayingB;
   const [durationMsA, setDurationMsA] = useState(0);
   const [positionMsA, setPositionMsA] = useState(0);
   const [durationMsB, setDurationMsB] = useState(0);
@@ -113,8 +118,21 @@ export default function RangeCompare() {
     }
   }, [playbackRate]);
 
-  const togglePlay = useCallback(async () => {
-    if (isPlaying) {
+  /** Start/stop a single video, re-applying the shared rate on play (same
+   *  expo-av quirk the shared transport already works around). */
+  const togglePlayOne = useCallback(async (ref: React.RefObject<Video | null>, playing: boolean) => {
+    if (playing) { await ref.current?.pauseAsync().catch(() => { }); return; }
+    await ref.current?.playAsync().catch(() => { });
+    await ref.current?.setRateAsync(playbackRate, true).catch(() => { });
+  }, [playbackRate]);
+  const togglePlayA = useCallback(() => togglePlayOne(videoARef, isPlayingA), [togglePlayOne, isPlayingA]);
+  const togglePlayB = useCallback(() => togglePlayOne(videoBRef, isPlayingB), [togglePlayOne, isPlayingB]);
+
+  // "Play both" — if either is currently playing, stop everything; if
+  // neither is, start both. Lets one button act as a master control on top
+  // of the two independent per-panel ones.
+  const togglePlayBoth = useCallback(async () => {
+    if (anyPlaying) {
       await Promise.all([
         videoARef.current?.pauseAsync().catch(() => { }),
         videoBRef.current?.pauseAsync().catch(() => { }),
@@ -129,10 +147,12 @@ export default function RangeCompare() {
       videoARef.current?.setRateAsync(playbackRate, true).catch(() => { }),
       videoBRef.current?.setRateAsync(playbackRate, true).catch(() => { }),
     ]);
-  }, [isPlaying, playbackRate]);
+  }, [anyPlaying, playbackRate]);
 
   // Seek both clips to the SAME FRACTION of their own duration — each video
   // keeps its own timeline, so "50%" means each clip's own halfway point.
+  // Still applies to both regardless of which is playing — useful for lining
+  // the two up even when only one is actively running.
   const seekToFrac = useCallback((frac: number) => {
     const f = Math.max(0, Math.min(1, frac));
     if (durationMsA > 0) videoARef.current?.setPositionAsync(f * durationMsA).catch(() => { });
@@ -153,14 +173,12 @@ export default function RangeCompare() {
   const fracProgress = durationMsA > 0 ? positionMsA / durationMsA
     : durationMsB > 0 ? positionMsB / durationMsB : 0;
 
-  // ── Drawing (independent per panel, routed via a shared toolbar) ────────
-  const [activePanel, setActivePanel] = useState<Panel>('a');
+  // ── Drawing — shared tool/color, but both canvases are always live ──────
   const [drawingMode, setDrawingMode] = useState<'pen' | 'eraser' | 'line' | 'circle'>('pen');
   const [drawingEnabled, setDrawingEnabled] = useState(false);
   const [penColor, setPenColor] = useState<string>(PEN_COLORS[0]);
   const [strokesA, setStrokesA] = useState<Stroke[]>([]);
   const [strokesB, setStrokesB] = useState<Stroke[]>([]);
-  const activeStrokeCount = (activePanel === 'a' ? strokesA : strokesB).length;
 
   if (swingA === undefined || swingB === undefined) {
     return (
@@ -192,14 +210,16 @@ export default function RangeCompare() {
         <View style={styles.panelRow}>
           <SwingPanel
             label="A" swing={swingA} videoRef={videoARef} onStatus={onStatusA}
-            playbackRate={playbackRate} positionMs={positionMsA}
-            strokes={strokesA} drawing={drawingEnabled && activePanel === 'a'}
+            playbackRate={playbackRate} positionMs={positionMsA} durationMs={durationMsA}
+            isPlaying={isPlayingA} onTogglePlay={togglePlayA}
+            strokes={strokesA} drawing={drawingEnabled}
             mode={drawingMode} penColor={penColor} onStrokesChange={setStrokesA}
           />
           <SwingPanel
             label="B" swing={swingB} videoRef={videoBRef} onStatus={onStatusB}
-            playbackRate={playbackRate} positionMs={positionMsB}
-            strokes={strokesB} drawing={drawingEnabled && activePanel === 'b'}
+            playbackRate={playbackRate} positionMs={positionMsB} durationMs={durationMsB}
+            isPlaying={isPlayingB} onTogglePlay={togglePlayB}
+            strokes={strokesB} drawing={drawingEnabled}
             mode={drawingMode} penColor={penColor} onStrokesChange={setStrokesB}
           />
         </View>
@@ -207,10 +227,10 @@ export default function RangeCompare() {
           <Text style={styles.changeLinkText}>‹ Change swings</Text>
         </TouchableOpacity>
 
-        {/* Shared playback bar — one scrub drives both clips by fraction. */}
+        {/* Shared playback bar — plays/pauses BOTH; one scrub drives both by fraction. */}
         <View style={styles.playbar}>
-          <TouchableOpacity style={styles.playBtn} onPress={togglePlay} activeOpacity={0.8}>
-            <Ionicons name={isPlaying ? 'pause' : 'play'} size={20} color={C.bg} />
+          <TouchableOpacity style={styles.playBtn} onPress={togglePlayBoth} activeOpacity={0.8}>
+            <Ionicons name={anyPlaying ? 'pause' : 'play'} size={20} color={C.bg} />
           </TouchableOpacity>
           <View
             style={styles.scrubTrack}
@@ -222,6 +242,7 @@ export default function RangeCompare() {
             </View>
           </View>
         </View>
+        <Text style={styles.playBothHint}>Play Both</Text>
         <View style={styles.timeRow}>
           <Text style={styles.timeText}>A {fmtTime(positionMsA)} / {fmtTime(durationMsA)}</Text>
           <Text style={styles.timeText}>B {fmtTime(positionMsB)} / {fmtTime(durationMsB)}</Text>
@@ -240,25 +261,6 @@ export default function RangeCompare() {
               >
                 <Text style={[styles.rateChipLabel, playbackRate === p.rate && styles.rateChipLabelActive]}>
                   {p.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Which panel drawing tools apply to. */}
-        <View style={styles.toolbarRow}>
-          <Text style={styles.toolbarLabel}>DRAW ON</Text>
-          <View style={styles.toolbarChips}>
-            {(['a', 'b'] as Panel[]).map((p) => (
-              <TouchableOpacity
-                key={p}
-                style={[styles.rateChip, activePanel === p && styles.rateChipActive]}
-                onPress={() => setActivePanel(p)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.rateChipLabel, activePanel === p && styles.rateChipLabelActive]}>
-                  {p.toUpperCase()}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -301,26 +303,6 @@ export default function RangeCompare() {
                 <Text style={styles.toolBtnLabel}>Done</Text>
               </TouchableOpacity>
             )}
-            {activeStrokeCount > 0 && (
-              <TouchableOpacity
-                style={styles.toolBtn}
-                onPress={() => (activePanel === 'a'
-                  ? setStrokesA((s) => s.slice(0, -1))
-                  : setStrokesB((s) => s.slice(0, -1)))}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.toolBtnLabel}>Undo</Text>
-              </TouchableOpacity>
-            )}
-            {activeStrokeCount > 0 && (
-              <TouchableOpacity
-                style={[styles.toolBtn, { borderColor: C.red + '88' }]}
-                onPress={() => (activePanel === 'a' ? setStrokesA([]) : setStrokesB([]))}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.toolBtnLabel, { color: C.red }]}>Clear</Text>
-              </TouchableOpacity>
-            )}
           </View>
         </View>
 
@@ -339,7 +321,7 @@ export default function RangeCompare() {
 
         {drawingEnabled && (
           <Text style={styles.drawHint}>
-            Drawing on {activePanel.toUpperCase()} — scroll is locked. Tap Done to scroll the page.
+            Drawing — draw directly on either video. Scroll is locked; tap Done to scroll the page.
           </Text>
         )}
 
@@ -353,7 +335,7 @@ export default function RangeCompare() {
 }
 
 function SwingPanel({
-  label, swing, videoRef, onStatus, playbackRate, positionMs,
+  label, swing, videoRef, onStatus, playbackRate, positionMs, durationMs, isPlaying, onTogglePlay,
   strokes, drawing, mode, penColor, onStrokesChange,
 }: {
   label: string;
@@ -362,12 +344,25 @@ function SwingPanel({
   onStatus: (s: AVPlaybackStatus) => void;
   playbackRate: number;
   positionMs: number;
+  durationMs: number;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
   strokes: Stroke[];
   drawing: boolean;
   mode: 'pen' | 'eraser' | 'line' | 'circle';
   penColor: string;
   onStrokesChange: (next: Stroke[]) => void;
 }) {
+  // Same normalization as /range/analyze: the clubhead trace's `t` values span
+  // the swing duration (0..traceTotalT), not the recorded clip length, so map
+  // playback progress proportionally onto the trace timeline instead of feeding
+  // absolute video time. Otherwise the trace fully draws in the first ~second
+  // and then sits, out of sync with the on-screen swing.
+  const trace = swing.result?.clubheadTrace;
+  const traceTotalT = trace && trace.length > 0 ? trace[trace.length - 1].t : 0;
+  const traceCurrentTimeSec = durationMs > 0
+    ? (positionMs / durationMs) * traceTotalT
+    : 0;
   return (
     <View style={styles.panel}>
       <Text style={styles.panelLabel} numberOfLines={1}>
@@ -390,12 +385,15 @@ function SwingPanel({
               trace={swing.result.clubheadTrace}
               width={PANEL_W}
               height={PANEL_H}
-              currentTimeSec={positionMs / 1000}
+              currentTimeSec={traceCurrentTimeSec}
               impactTimeSec={swing.result.impactTimeSec}
               lineWidth={2.5}
             />
           </View>
         )}
+        {/* Drawing is always live on both panels — whichever canvas the
+            finger is actually on is the one that gets the mark, so there's
+            no "which panel" mode to pick first. */}
         <SwingAnnotator
           width={PANEL_W}
           height={PANEL_H}
@@ -407,6 +405,26 @@ function SwingPanel({
           onStrokesChange={onStrokesChange}
         />
       </View>
+
+      {/* Per-panel play/pause — lets either swing play alone, independent of
+          the shared "Play Both" button below. */}
+      <TouchableOpacity style={styles.panelPlayBtn} onPress={onTogglePlay} activeOpacity={0.75}>
+        <Ionicons name={isPlaying ? 'pause' : 'play'} size={14} color={C.gold} />
+        <Text style={styles.panelPlayLabel}>{isPlaying ? 'Pause' : 'Play'} {label}</Text>
+      </TouchableOpacity>
+
+      {/* Per-panel Undo/Clear — there's no single "current" panel anymore,
+          so these act directly on the panel they're under. */}
+      {strokes.length > 0 && (
+        <View style={styles.panelStrokeRow}>
+          <TouchableOpacity onPress={() => onStrokesChange(strokes.slice(0, -1))} activeOpacity={0.7}>
+            <Text style={styles.panelStrokeBtn}>Undo</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => onStrokesChange([])} activeOpacity={0.7}>
+            <Text style={[styles.panelStrokeBtn, { color: C.red }]}>Clear</Text>
+          </TouchableOpacity>
+        </View>
+      )}
     </View>
   );
 }
@@ -430,11 +448,21 @@ const styles = StyleSheet.create({
   },
   video: { width: '100%', height: '100%' },
 
+  panelPlayBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
+    marginTop: 8, paddingVertical: 7, borderRadius: 8,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+  },
+  panelPlayLabel: { color: C.gold, fontSize: 11, fontWeight: '800' },
+  panelStrokeRow: { flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 6 },
+  panelStrokeBtn: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
+
   changeLink: { alignSelf: 'flex-start', marginTop: 10, marginBottom: 4 },
   changeLinkText: { color: C.gold, fontSize: 12, fontWeight: '700' },
 
   playbar: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 14 },
   playBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: C.gold, alignItems: 'center', justifyContent: 'center' },
+  playBothHint: { color: C.textDim, fontSize: 10, marginTop: 4, marginLeft: 56 },
   scrubTrack: { flex: 1, height: 28, justifyContent: 'center' },
   scrubRail: { height: 6, borderRadius: 3, backgroundColor: C.border, overflow: 'hidden' },
   scrubFill: { height: 6, borderRadius: 3, backgroundColor: C.gold },

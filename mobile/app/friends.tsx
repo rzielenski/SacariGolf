@@ -236,15 +236,22 @@ function AddFriendsTab({
   // Track which search results we've already sent a request to this session
   // so the button flips to "Requested" without a full reload.
   const [sentIds, setSentIds] = useState<Set<string>>(new Set());
+  // Monotonic token so out-of-order search responses can't overwrite newer
+  // results (typing 'ric' then 'rich' must never land 'ric' last).
+  const seqRef = useRef(0);
 
   const search = async (q: string) => {
     setQuery(q);
     if (q.trim().length < 2) { setResults([]); return; }
+    const seq = ++seqRef.current;
     setSearching(true);
     try {
       const r = await api.users.search(q.trim());
+      if (seq !== seqRef.current) return; // a newer query superseded this one
       setResults(Array.isArray(r) ? r : []);
-    } catch { /* silent */ } finally { setSearching(false); }
+    } catch { /* silent */ } finally {
+      if (seq === seqRef.current) setSearching(false);
+    }
   };
 
   const add = async (p: Person) => {

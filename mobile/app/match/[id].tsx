@@ -4,7 +4,7 @@ import {
   ActivityIndicator, Alert, Share, Modal, TextInput,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, isSilentError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -79,6 +79,20 @@ export default function MatchLobbyScreen() {
   }, [id, user?.user_id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Keep the lobby live. The only fetch used to be the mount effect above, so a
+  // resolved match never flipped to its VICTORY/DEFEAT card, "done" dots never
+  // lit, and the waiting copy froze until the user backed out and reopened.
+  // Poll lightly while the match is still in progress and stop once it's
+  // completed (nothing left to update). Also refetch whenever the screen
+  // regains focus so returning from scoring / a profile shows fresh state.
+  useEffect(() => {
+    if (match?.completed) return;
+    const t = setInterval(() => { load(); }, 12000);
+    return () => clearInterval(t);
+  }, [match?.completed, load]);
+
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   // Share-loop trigger. When a completed match the viewer played is a WIN or a
   // promotion, prompt them to share the recap — once per match. Promotion is
@@ -188,13 +202,17 @@ export default function MatchLobbyScreen() {
         const courseDetails = await api.courses.get(me.course_id);
         const tb = courseDetails.teeboxes?.find((t: any) => t.teebox_id === me.teebox_id);
         const sortedHoles: any[] = (tb?.holes ?? []).sort((a: any, b: any) => a.hole_num - b.hole_num);
+        // Back-9 rounds store hole_scores[0] as hole 10, but sortedHoles[0] is
+        // hole 1 — so index the teebox holes with the same offset the scoring
+        // screen uses, or we'd read the wrong par and report a hole never played.
+        const offset = (match as any).holes_subset === 'back' ? 9 : 0;
         let bestDiff = 999, bestHole: number | null = null, bestScore = 0;
         for (let i = 0; i < me.hole_scores.length; i++) {
-          const par = sortedHoles[i]?.par;
+          const par = sortedHoles[offset + i]?.par;
           const sc = me.hole_scores[i];
           if (par == null || !sc) continue;
           const d = sc - par;
-          if (d < bestDiff) { bestDiff = d; bestHole = sortedHoles[i].hole_num; bestScore = sc; }
+          if (d < bestDiff) { bestDiff = d; bestHole = sortedHoles[offset + i].hole_num; bestScore = sc; }
         }
         if (bestHole != null && bestDiff <= -1) {
           const label = bestDiff <= -2 ? 'Eagle' : 'Birdie';

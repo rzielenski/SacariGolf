@@ -5,7 +5,7 @@ import {
   KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as Location from 'expo-location';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { api } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
@@ -78,16 +78,22 @@ export default function PlayScreen() {
   // can't accidentally start a second round while one's still open.
   const [resumeCount, setResumeCount] = useState(0);
   const [singleResumeId, setSingleResumeId] = useState<string | null>(null);
-  useEffect(() => {
+  // Refresh on focus, not just on mount. Play is a persistent bottom-tab
+  // screen, so a plain mount effect never re-ran when the user returned — the
+  // banner could show a stale/completed match or miss a freshly started one.
+  useFocusEffect(useCallback(() => {
+    let cancelled = false;
     (async () => {
       try {
         const list = await api.matches.list();
         const actives = (Array.isArray(list) ? list : []).filter((m: any) => !m.completed && !m.cancelled);
+        if (cancelled) return;
         setResumeCount(actives.length);
         setSingleResumeId(actives.length === 1 ? actives[0].match_id : null);
       } catch { /* silent — banner just stays hidden */ }
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, []));
   const [numHoles, setNumHoles] = useState<9 | 18>(18);
   // Front vs back is asked AFTER the user picks 9 holes — only meaningful
   // when playing a 9-hole subset of an 18-hole teebox.

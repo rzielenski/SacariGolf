@@ -20,15 +20,20 @@ export default function VerifyEmailScreen() {
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
   const codeRef = useRef<TextInput>(null);
+  // Set true once an in-screen action (submit/resend) is going to own the
+  // redirect itself, so the auto-bounce effect below doesn't ALSO navigate
+  // and race the success alert into a flicker.
+  const redirectHandledRef = useRef(false);
 
   useEffect(() => {
     setTimeout(() => codeRef.current?.focus(), 100);
   }, []);
 
-  // If they came here but they're already verified (e.g. linked via stale push),
-  // bounce them back rather than showing a confusing form.
+  // If they arrived already verified (e.g. linked via stale push), bounce them
+  // back rather than showing a confusing form. Skipped when an in-screen
+  // success is handling its own redirect (single owner → no double nav).
   useEffect(() => {
-    if (user?.email_verified) {
+    if (user?.email_verified && !redirectHandledRef.current) {
       router.replace('/');
     }
   }, [user?.email_verified]);
@@ -42,6 +47,9 @@ export default function VerifyEmailScreen() {
     setLoading(true);
     try {
       const res = await api.auth.verifyEmail(c);
+      // Claim the redirect so refreshUser()'s email_verified flip doesn't
+      // trigger the auto-bounce effect; the alert's OK is the sole navigator.
+      redirectHandledRef.current = true;
       await refreshUser();
       Alert.alert(
         res.alreadyVerified ? 'Already verified' : 'Email verified',
@@ -60,6 +68,7 @@ export default function VerifyEmailScreen() {
     try {
       const res = await api.auth.resendVerification();
       if (res.alreadyVerified) {
+        redirectHandledRef.current = true;
         await refreshUser();
         router.replace('/');
         return;

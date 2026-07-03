@@ -91,6 +91,12 @@ export default function ClubHeatmapScreen() {
                 }).filter(c => c.shots > 0),
               };
               setData(next);
+              // If deleting the club's last shot dropped it from the list, the
+              // stale `selected` would resolve to null and blank the detail
+              // view. Fall back to a remaining club (or null if none left).
+              if (!next.clubs.some(c => c.club === selected)) {
+                setSelected(next.clubs[0]?.club ?? null);
+              }
             }
             try {
               await api.users.deleteShot(shotId);

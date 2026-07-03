@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '../../lib/auth';
+import { OfflineError } from '../../lib/api';
 import { C, F } from '../../lib/colors';
 import { Divider } from '../../components/Flourish';
 
@@ -42,15 +43,31 @@ export default function LoginScreen() {
         Alert.alert('Enter a valid email');
         return;
       }
-      // Check if account exists by attempting login with empty password (will fail with specific error)
+      // Probe whether the account exists by attempting login with a sentinel
+      // password. The backend answers 404 "No account with that email" for a
+      // new user, or 401 (wrong password / Google account) for an existing
+      // one. We branch on the HTTP STATUS, not the message text — so an
+      // offline blip, timeout, rate-limit (429), or 5xx can NEVER misroute a
+      // returning user into the Create-account form. Those stay put + alert.
       setLoading(true);
       try {
         await login(email.trim().toLowerCase(), '__check__');
+        // A '__check__' password should never actually succeed; if it somehow
+        // does, the user is signed in — send them home.
+        router.replace('/');
       } catch (err: any) {
-        if (err.message === 'Wrong password' || err.message === 'This account uses Google Sign-In') {
+        const status = err?.status;
+        if (status === 404) {
+          fade(() => setStep('newuser'));
+        } else if (status === 401) {
           fade(() => setStep('password'));
         } else {
-          fade(() => setStep('newuser'));
+          Alert.alert(
+            'Could not check that email',
+            err instanceof OfflineError
+              ? 'You appear to be offline. Check your connection and try again.'
+              : (err?.message || 'Something went wrong. Please try again.'),
+          );
         }
       } finally {
         setLoading(false);
@@ -65,7 +82,16 @@ export default function LoginScreen() {
         await login(email.trim().toLowerCase(), password);
         router.replace('/');
       } catch (err: any) {
-        Alert.alert('Wrong password', err.message);
+        // Only call it a wrong password when the server actually said so (401).
+        // Offline / server errors get an honest title so the user doesn't
+        // reset a password that was never wrong.
+        if (err instanceof OfflineError) {
+          Alert.alert('No connection', 'Check your connection and try again.');
+        } else if (err?.status === 401) {
+          Alert.alert('Wrong password', err.message);
+        } else {
+          Alert.alert('Sign in failed', err?.message || 'Please try again.');
+        }
       } finally {
         setLoading(false);
       }

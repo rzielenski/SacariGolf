@@ -25,6 +25,12 @@ export type AppConfig = {
   banner?: string | null;
   features?: Record<string, unknown>;
   server_time?: string;
+  // App Store link for the "update required" banner. Delivered from the
+  // server so the store URL/id can be set or corrected WITHOUT a new
+  // native build. Accepts either an https apps.apple.com/...id<number>
+  // URL or a raw itms-apps:// deep link; UpdateBanner falls back to a
+  // store search when this is absent.
+  ios_store_url?: string;
 };
 
 const CACHE_KEY = 'sacari.app_config.v1';

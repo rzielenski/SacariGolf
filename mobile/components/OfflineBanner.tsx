@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, Animated } from 'react-native';
 import { subscribeConn } from '../lib/api';
+import { AppConfig, subscribeAppConfig, updateRequired } from '../lib/appConfig';
+import { UPDATE_BANNER_HEIGHT } from './UpdateBanner';
 import { C } from '../lib/colors';
+
+// Where the offline banner sits when the update banner is NOT shown.
+const TOP_BASE = 54; // below the system status bar
 
 /**
  * Slim top-of-app banner that surfaces when we believe the device is offline.
@@ -13,6 +18,11 @@ import { C } from '../lib/colors';
  */
 export function OfflineBanner() {
   const [offline, setOffline] = useState(false);
+  // Track the same app config that drives the update banner so we can drop
+  // BELOW it when it's visible instead of painting over its text (both
+  // banners mount side-by-side at the root; the update banner is in normal
+  // flow, this one is absolutely positioned).
+  const [config, setConfig] = useState<AppConfig | null>(null);
   // Fade-in/fade-out so the banner doesn't flicker on a single failed request
   // that happens to clear before the connection ticks back.
   const opacity = React.useRef(new Animated.Value(0)).current;
@@ -20,6 +30,12 @@ export function OfflineBanner() {
   useEffect(() => {
     return subscribeConn((s) => setOffline(s === 'offline'));
   }, []);
+
+  useEffect(() => subscribeAppConfig(setConfig), []);
+
+  // When the update banner is showing it occupies the top of the app, so
+  // shift down past it; otherwise sit at the normal status-bar offset.
+  const top = updateRequired(config) ? TOP_BASE + UPDATE_BANNER_HEIGHT : TOP_BASE;
 
   useEffect(() => {
     Animated.timing(opacity, {
@@ -34,7 +50,7 @@ export function OfflineBanner() {
   return (
     <Animated.View
       pointerEvents="none"
-      style={[s.wrap, { opacity }]}
+      style={[s.wrap, { top, opacity }]}
     >
       <View style={s.dot} />
       <Text style={s.text}>OFFLINE · Saving locally, will sync when you're back</Text>
@@ -45,7 +61,8 @@ export function OfflineBanner() {
 const s = StyleSheet.create({
   wrap: {
     position: 'absolute',
-    top: 54,   // below the system status bar
+    // `top` is applied inline — it depends on whether the update banner is
+    // showing (see TOP_BASE / UPDATE_BANNER_HEIGHT above).
     left: 8, right: 8,
     flexDirection: 'row',
     alignItems: 'center',

@@ -21,6 +21,17 @@ async function ensurePracticeAudioMode() {
   } catch { /* best effort */ }
 }
 
+/** Restore the default playback audio session after listening stops. Recording
+ *  mode routes iOS playback to the quiet earpiece, so once the shot detector
+ *  stops we flip `allowsRecordingIOS` back off — otherwise swing video, the
+ *  theme song and voice messages all come out the earpiece until something
+ *  else happens to reset the mode. */
+export async function resetPracticeAudioMode() {
+  try {
+    await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
+  } catch { /* best effort */ }
+}
+
 /**
  * Metronome. Plays a click each beat at `bpm`, drift-corrected against an
  * absolute start time so it doesn't slowly fall behind. `onTick` fires on each
@@ -80,6 +91,15 @@ export function useMetronome(initialBpm: number, onTick?: () => void) {
   return { bpm, setBpm, running, start, stop, toggle };
 }
 
+/** In-flight `stopAndUnloadAsync()` for the shot detector's Recording. iOS
+ *  allows only one prepared Recording at a time, so a fast off→on must wait for
+ *  the previous teardown to resolve before preparing a new one — otherwise
+ *  prepare throws 'Only one Recording object can be prepared at a given time'
+ *  and auto-count silently dies for the session. Module-scoped because the
+ *  effect that owns the old recorder has already been torn down by the time the
+ *  next effect runs. */
+let teardownPromise: Promise<unknown> | null = null;
+
 /**
  * Mic shot detector. Records (audio discarded) with metering on, and fires
  * `onHit` when a loud transient crosses a sensitivity-derived threshold, with a
@@ -118,6 +138,11 @@ export function useShotDetector(opts: {
         const perm = await Audio.requestPermissionsAsync();
         if (!perm.granted) { setPermission(false); return; }
         setPermission(true);
+        // Wait for any previous recorder's teardown to finish before preparing
+        // a new one — iOS only allows one prepared Recording at a time, so a
+        // fast off→on would otherwise throw and kill auto-count for the session.
+        await teardownPromise?.catch(() => { });
+        if (!alive) return;
         await ensurePracticeAudioMode();
         const rec = new Audio.Recording();
         await rec.prepareToRecordAsync({
@@ -158,14 +183,27 @@ export function useShotDetector(opts: {
         });
         await rec.startAsync();
         if (alive) recRef.current = rec;
-        else await rec.stopAndUnloadAsync().catch(() => { });
+        else {
+          // Disabled mid-startup: tear this recorder down and track the promise
+          // so a re-enable still waits for it (avoids the one-Recording race).
+          teardownPromise = rec.stopAndUnloadAsync().catch(() => { });
+        }
       } catch { /* mic unavailable — manual +/- still works */ }
     })();
     return () => {
       alive = false;
       const rec = recRef.current;
       recRef.current = null;
-      rec?.stopAndUnloadAsync().catch(() => { });
+      // Track this teardown so the next enable waits for it (see teardownPromise
+      // above), and restore normal playback routing once the mic is released so
+      // audio doesn't stay stuck on the earpiece after a Range Sesh.
+      const done = (rec?.stopAndUnloadAsync() ?? Promise.resolve()).catch(() => { });
+      teardownPromise = done;
+      done.then(() => {
+        // Only heal the audio session if nothing has re-armed the recorder in
+        // the meantime (rapid off→on), so we don't fight an active listener.
+        if (teardownPromise === done && recRef.current == null) resetPracticeAudioMode();
+      });
     };
   }, [enabled]);
 

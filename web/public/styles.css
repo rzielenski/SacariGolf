@@ -640,8 +640,8 @@ body.login-body { display: block; } /* drop the flex chain so the wrap fills the
 .review-chips button:hover { border-color: var(--gold); color: var(--text); }
 .review-chips button.on { background: var(--gold); border-color: var(--gold); color: #1a1206; }
 .review-chips button#review-done, .review-chips button#review-undo,
-.review-chips button#compare-done, .review-chips button#compare-undo { color: var(--text); }
-.review-chips button#review-clear, .review-chips button#compare-clear { border-color: rgba(176,52,52,0.5); color: #d16565; }
+.review-chips button#compare-done { color: var(--text); }
+.review-chips button#review-clear { border-color: rgba(176,52,52,0.5); color: #d16565; }
 
 .review-colors { display: flex; gap: 10px; margin-top: 10px; padding-left: 60px; }
 .review-colors button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent;
@@ -673,8 +673,26 @@ body.login-body { display: block; } /* drop the flex chain so the wrap fills the
 
 .review-compare-times { display: flex; justify-content: space-between; margin-top: 6px; }
 .review-compare-times span { color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+.review-compare-playboth-hint { color: var(--muted); font-size: 0.72rem; margin: 4px 0 0 56px; }
 
 .review-compare-controls .review-new { margin-top: 20px; }
+
+/* Per-panel play button — lets either video play on its own, independent of
+   the shared "Play Both" transport below both panels. */
+.review-panel-play { display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin-top: 8px; padding: 7px 0; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--card); color: var(--gold);
+  font-family: inherit; font-weight: 800; font-size: 0.78rem; cursor: pointer; }
+.review-panel-play:hover { border-color: var(--gold); }
+
+/* Per-panel Undo/Clear — there's no single "current" panel to route a shared
+   Undo/Clear to since drawing is always live on both, so these sit directly
+   under the panel they act on. */
+.review-panel-strokes { display: flex; justify-content: center; gap: 16px; margin-top: 6px; }
+.review-panel-strokes button { background: none; border: 0; padding: 0; cursor: pointer;
+  font-family: inherit; font-weight: 700; font-size: 0.78rem; color: var(--muted); }
+.review-panel-strokes button:last-child { color: #d16565; }
+.review-panel-strokes button:hover { color: var(--text); }
 
 @media (max-width: 560px) {
   /* Two 9:16 panels side by side get very narrow on a phone — stack them so

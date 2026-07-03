@@ -388,8 +388,8 @@ export default function ReviewSesh() {
                     })}
                     {s.status === 'complete' && s.result && (
                       <Text style={styles.swingMetric}>
-                        {'  ·  '}{s.result.club.clubheadSpeedMph} mph
-                        {'  ·  '}{s.result.club.carryYds} yds
+                        {s.result.club.clubheadSpeedMph != null && `  ·  ${s.result.club.clubheadSpeedMph} mph`}
+                        {s.result.club.carryYds != null && `  ·  ${s.result.club.carryYds} yds`}
                       </Text>
                     )}
                   </Text>

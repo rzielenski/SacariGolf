@@ -13,8 +13,10 @@
  * declines the mic prompt.
  *
  * The 60s cap auto-stops recording so the user can't hold past the server's
- * limit and get a 400 on send. The cap is parameterised but the server
- * silently clamps too, so this is just UX courtesy.
+ * limit and get a 400 on send. When the cap fires while the finger is still
+ * down, the hook stops+reads the clip itself and delivers it via the optional
+ * `onMaxDuration` callback (the consumer sends it just like a manual finger-up).
+ * The cap is parameterised but the server silently clamps too.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -41,7 +43,16 @@ export interface VoiceRecorder {
   cancel: () => Promise<void>;
 }
 
-export function useVoiceRecorder(maxDurationMs = 60_000): VoiceRecorder {
+/**
+ * @param maxDurationMs  Hard cap; recording auto-stops when reached.
+ * @param onMaxDuration  Optional. Invoked with the finished clip when the cap
+ *   auto-stops the recording (so the consumer can send it just as it would on
+ *   a manual finger-up). Not called on user-triggered stop/cancel.
+ */
+export function useVoiceRecorder(
+  maxDurationMs = 60_000,
+  onMaxDuration?: (clip: VoiceClip) => void,
+): VoiceRecorder {
   const [recording, setRecording] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const recRef = useRef<Audio.Recording | null>(null);
@@ -50,6 +61,10 @@ export function useVoiceRecorder(maxDurationMs = 60_000): VoiceRecorder {
   // Latch so the auto-stop on max-duration doesn't double-fire alongside
   // a user-triggered stop.
   const autoStoppingRef = useRef(false);
+  // Keep the latest onMaxDuration in a ref so the tick (bound once per
+  // recording) always calls the current callback without re-binding.
+  const onMaxDurationRef = useRef(onMaxDuration);
+  onMaxDurationRef.current = onMaxDuration;
 
   // Cleanup on unmount — if the user navigates away mid-record, drop the
   // Recording so the OS releases the mic. Best-effort; if it fails the
@@ -92,9 +107,14 @@ export function useVoiceRecorder(maxDurationMs = 60_000): VoiceRecorder {
         setElapsedMs(ms);
         if (ms >= maxDurationMs && !autoStoppingRef.current) {
           autoStoppingRef.current = true;
-          // Let the consumer pick up the clip via their own stopAndGet.
-          // No-op here — the next stopAndGet call resolves naturally with
-          // the recording up to this moment.
+          // Actually terminate the recording at the cap so the file bytes
+          // stop growing and the reported duration stays honest. Stop the
+          // tick first, finalise, then hand the clip to the consumer's
+          // callback so it sends exactly as it would on finger-up.
+          if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+          finalize().then((clip) => {
+            if (clip) onMaxDurationRef.current?.(clip);
+          });
         }
       }, 100);
       return true;
@@ -111,9 +131,13 @@ export function useVoiceRecorder(maxDurationMs = 60_000): VoiceRecorder {
     setElapsedMs(0);
   };
 
-  const stopAndGet = async (): Promise<VoiceClip | null> => {
+  // Stop the live recording and read its bytes. Idempotent: claims recRef up
+  // front so a second caller (e.g. the finger-release stopAndGet racing the
+  // max-duration auto-stop) returns null instead of double-stopping.
+  const finalize = async (): Promise<VoiceClip | null> => {
     const rec = recRef.current;
     if (!rec) return null;
+    recRef.current = null; // claim immediately so a concurrent call bails
     try {
       await rec.stopAndUnloadAsync();
       const uri = rec.getURI();
@@ -130,6 +154,8 @@ export function useVoiceRecorder(maxDurationMs = 60_000): VoiceRecorder {
       return null;
     }
   };
+
+  const stopAndGet = async (): Promise<VoiceClip | null> => finalize();
 
   const cancel = async () => {
     const rec = recRef.current;

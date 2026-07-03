@@ -14,7 +14,7 @@
  * I follow" + "find someone new to follow" naturally belong together.
  */
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, Image,
   ActivityIndicator, TextInput,
@@ -45,15 +45,22 @@ export function FollowList({
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<FollowUser[]>([]);
   const censor = useCensor();
+  // Monotonic token so out-of-order search responses can't overwrite newer
+  // results (typing 'ric' then 'rich' must never land 'ric' last).
+  const seqRef = useRef(0);
 
   const onSearchChange = async (q: string) => {
     setSearchQ(q);
     if (q.trim().length < 2) { setSearchResults([]); return; }
+    const seq = ++seqRef.current;
     setSearching(true);
     try {
       const results = await api.users.search(q.trim());
+      if (seq !== seqRef.current) return; // a newer query superseded this one
       setSearchResults(Array.isArray(results) ? results : []);
-    } catch { /* silent */ } finally { setSearching(false); }
+    } catch { /* silent */ } finally {
+      if (seq === seqRef.current) setSearching(false);
+    }
   };
 
   // Header has the screen padding so the FlatList renders flush against

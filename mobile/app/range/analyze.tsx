@@ -200,6 +200,18 @@ export default function RangeAnalyze() {
     );
   }
 
+  // Map absolute playback time onto the clubhead trace's own timeline. The
+  // trace's `t` values span 0..traceTotalT (the last point's t), which is the
+  // swing duration — not the recorded clip's duration. Feeding proportional
+  // progress keeps the trace drawing in step with the on-screen swing across
+  // the whole clip. `impactTimeSec` lives on the same 0..traceTotalT scale, so
+  // it stays aligned without extra conversion.
+  const trace = swing.result?.clubheadTrace;
+  const traceTotalT = trace && trace.length > 0 ? trace[trace.length - 1].t : 0;
+  const traceCurrentTimeSec = durationMs > 0
+    ? (positionMs / durationMs) * traceTotalT
+    : 0;
+
   return (
     <View style={styles.container}>
       <Stack.Screen options={{
@@ -238,7 +250,13 @@ export default function RangeAnalyze() {
                 trace={swing.result.clubheadTrace}
                 width={SCREEN_W - 40}
                 height={(SCREEN_W - 40) * (16 / 9)}
-                currentTimeSec={playbackTimeSec}
+                // The trace's `t` values run 0..traceTotalT (≈1s for the mock),
+                // which rarely matches the recorded clip length (a real clip is
+                // several seconds of the golfer standing around the swing). So
+                // map playback progress proportionally onto the trace timeline
+                // instead of feeding absolute video time — otherwise the trace
+                // fully draws in the first second and then just sits there.
+                currentTimeSec={traceCurrentTimeSec}
                 impactTimeSec={swing.result.impactTimeSec}
               />
             </View>

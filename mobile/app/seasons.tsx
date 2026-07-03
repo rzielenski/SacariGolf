@@ -73,7 +73,12 @@ export default function SeasonsScreen() {
         <View style={{ width: 60 }} />
       </View>
 
-      {loading ? (
+      {/* Full-screen spinner only on the INITIAL load (before the season
+          payload lands). Gating on `!data` (rather than `!standings.length`)
+          means a chip that filters to an EMPTY division still keeps the
+          FlatList — and its division chips + scope toggle — mounted, so the
+          chips never vanish/reflow on subsequent refetches. */}
+      {loading && !data ? (
         <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>
       ) : (
         <FlatList
@@ -227,7 +232,10 @@ function StandingRowView({ row, isMe, censor }: { row: StandingRow; isMe: boolea
         <Text style={styles.meta} numberOfLines={1}>{row.wins}–{row.losses}–{row.ties}</Text>
       </View>
       <View style={styles.ptsBox}>
-        <Text style={styles.pts} numberOfLines={1}>{rankBadge(row.elo)}</Text>
+        {/* Primary stat matches the sort key (points). SR badge is demoted
+            to a subtitle so the list never looks mis-ordered. */}
+        <Text style={styles.pts} numberOfLines={1}>{row.points}</Text>
+        <Text style={styles.ptsLabel} numberOfLines={1}>pts · {rankBadge(row.elo)}</Text>
       </View>
     </TouchableOpacity>
   );
