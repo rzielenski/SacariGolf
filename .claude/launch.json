@@ -11,6 +11,15 @@
       "port": 5599
     },
     {
+      "name": "flag-scene-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "-e",
+        "const http=require('http'),fs=require('fs');http.createServer((q,s)=>{s.writeHead(200,{'Content-Type':'text/html'});fs.createReadStream('C:/Users/Richard/AppData/Local/Temp/claude/C--Users-Richard-Clash-Of-Clubs-Official/d19583b8-bd09-4c87-9aad-bed5212aaea6/scratchpad/flag-scene-preview.html').pipe(s)}).listen(5602,()=>console.log('flag scene preview on 5602'))"
+      ],
+      "port": 5602
+    },
+    {
       "name": "sacari-web",
       "runtimeExecutable": "node",
       "runtimeArgs": [

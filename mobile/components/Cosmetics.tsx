@@ -42,7 +42,7 @@
 
 import React, { useEffect, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle, useWindowDimensions,
+  View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle, useWindowDimensions, Image,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, {
@@ -208,6 +208,9 @@ const STATIC_BG: Record<string, { colors: string[]; diag?: boolean; accent?: str
 
 function StaticBg({ v, style, children }: BgProps) {
   const styleId = v.style as string | undefined;
+  // An image background is already cheap (one static texture, no drivers), so
+  // the "static" grid variant just renders the real thing.
+  if (styleId === 'image') return <ImageBg v={v} style={style}>{children}</ImageBg>;
   const def = (styleId && STATIC_BG[styleId]) || { colors: [v.from ?? C.bg, v.to ?? '#1a1a1a'] } as { colors: string[]; diag?: boolean; accent?: string };
   const base = def.colors.length >= 2 ? def.colors : [def.colors[0], def.colors[0]];
   const colors = base as readonly string[] as readonly [string, string, ...string[]];
@@ -224,6 +227,37 @@ function StaticBg({ v, style, children }: BgProps) {
           borderRadius: 999, backgroundColor: def.accent, opacity: 0.3,
         }} />
       ) : null}
+      {children}
+    </View>
+  );
+}
+
+// Bundled background images. Drop a file in mobile/assets/backgrounds/ and add
+// its key here, then a cosmetic can use {"style":"image","asset":"<key>"}.
+// Remote images use {"style":"image","uri":"https://…"} and need NO entry here
+// (and no app rebuild — they're data-driven straight from the DB row).
+const BG_ASSETS: Record<string, any> = {
+  // america: require('../assets/backgrounds/america.png'),
+};
+
+/**
+ * Photo / illustration background — for when a cosmetic is a real rendered
+ * image (e.g. an AI poster) rather than generated vector art. Cover-crops to
+ * fill the frame; a soft vignette keeps foreground text legible (disable with
+ * "dim":false). Source resolves from visual_data:
+ *   {"style":"image","uri":"https://…"}   → remote, no rebuild, ships via DB
+ *   {"style":"image","asset":"america"}    → bundled, needs a BG_ASSETS entry
+ */
+function ImageBg({ v, style, children }: BgProps) {
+  const src = typeof v.uri === 'string' ? { uri: v.uri }
+            : (typeof v.asset === 'string' && BG_ASSETS[v.asset]) ? BG_ASSETS[v.asset]
+            : null;
+  return (
+    <View style={[{ overflow: 'hidden', backgroundColor: C.card }, style]}>
+      {src && <Image source={src} style={StyleSheet.absoluteFill} resizeMode="cover" />}
+      {v.dim !== false && (
+        <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.14)' }]} />
+      )}
       {children}
     </View>
   );
@@ -246,6 +280,7 @@ export function CosmeticBackground({
 
   switch (styleId) {
     case 'gradient':    return <GradientBg     v={v} style={style}>{children}</GradientBg>;
+    case 'image':       return <ImageBg        v={v} style={style}>{children}</ImageBg>;
     case 'flag':        return <FlagBg         v={v} style={style}>{children}</FlagBg>;
     case 'storm':
     case 'pulse':       return <StormBg        v={v} style={style}>{children}</StormBg>;
@@ -483,42 +518,225 @@ function B2Flyover() {
   );
 }
 
-// The patriotic icon field. Emoji render as full-colour native glyphs (crisp,
-// OTA-safe, no bundled art) — the reliable way to put recognisable "pictures"
-// of an eagle / hotdog / football on the cloth. Positions are % so they scale
-// with the container and are biased to the edges (the centre is where a profile
-// avatar sits). Each drifts on its OWN slow bob so they don't move in lockstep.
-const AMERICANA: { icon: string; left: number; top: number; size: number; dur: number; rise: number; rot: number }[] = [
-  { icon: '🦅', left: 4,  top: 9,  size: 34, dur: 3300, rise: 5, rot: 4 },
-  { icon: '🗽', left: 45, top: 3,  size: 30, dur: 3600, rise: 4, rot: 2 },
-  { icon: '🌭', left: 76, top: 7,  size: 30, dur: 3900, rise: 6, rot: 6 },
-  { icon: '🎇', left: 89, top: 28, size: 26, dur: 2800, rise: 6, rot: 5 },
-  { icon: '🏈', left: 83, top: 60, size: 32, dur: 3000, rise: 5, rot: 9 },
-  { icon: '🍔', left: 12, top: 44, size: 28, dur: 3500, rise: 6, rot: 7 },
-  { icon: '🎆', left: 2,  top: 66, size: 34, dur: 4200, rise: 7, rot: 3 },
-  { icon: '🍺', left: 30, top: 86, size: 27, dur: 3800, rise: 5, rot: 6 },
-  { icon: '🍟', left: 58, top: 84, size: 25, dur: 2600, rise: 5, rot: 8 },
-  { icon: '⭐', left: 90, top: 86, size: 22, dur: 3100, rise: 5, rot: 10 },
-];
+// THE SCENE — a full composed "4th of July poster" over the flag, not floating
+// icons: a muscular bald eagle front-and-centre hoisting a giant cheeseburger
+// and a raised golf driver (the gun from the reference art would bump the App
+// Store age rating; an eagle swinging a driver is also the better golf joke),
+// Statues of Liberty flanking both edges, fireworks blooming in a darkened sky,
+// ember glow at the base. All of it hand-built SVG in a shared 360x250 stage,
+// bottom-anchored with slice-cropping so the hero survives any container shape.
+// Same perf rules as the cloth: every group rasterizes ONCE; only transforms
+// and opacity animate.
+const SCENE_VB = '0 0 360 250';
 
-/** One floating americana icon — a single native-driver bob + tilt. */
-function AmericanaFloat({ icon, left, top, size, dur, rise, rot }: typeof AMERICANA[number]) {
+// Firework spoke unit-vectors, precomputed once (12 rays).
+const FW_DIRS: { x: number; y: number }[] = Array.from({ length: 12 }, (_, i) => {
+  const a = (Math.PI * 2 * i) / 12 - Math.PI / 2;
+  return { x: Math.cos(a), y: Math.sin(a) };
+});
+
+/** One firework: a static spoke burst that blooms (scale up + fade) on its own
+ *  staggered loop. Pure transform/opacity — the burst SVG never re-renders. */
+function FireworkBurst({ left, top, size, color, dur, delay }: {
+  left: number; top: number; size: number; color: string; dur: number; delay: number;
+}) {
   const t = useSharedValue(0);
   useEffect(() => {
-    t.value = withRepeat(withTiming(1, { duration: dur, easing: Easing.inOut(Easing.sin) }), -1, true);
+    // One-way bloom: t sweeps 0→1 across the whole life (scale up, fade out),
+    // then snaps back in a frame while opacity is 0. A symmetric up-then-down
+    // sequence would visibly REPLAY the burst in reverse on the way down
+    // (shrinking inward while re-brightening) — fireworks don't do that.
+    t.value = withRepeat(
+      withSequence(
+        withDelay(delay, withTiming(1, { duration: dur, easing: Easing.out(Easing.quad) })),
+        withTiming(0, { duration: 16 }),
+      ), -1, false);
     return () => cancelAnimation(t);
-  }, [t, dur]);
+  }, [t, dur, delay]);
   const st = useAnimatedStyle(() => ({
-    transform: [
-      { translateY: interpolate(t.value, [0, 1], [-rise, rise]) },
-      { rotate: `${interpolate(t.value, [0, 1], [-rot, rot])}deg` },
-    ],
+    opacity: interpolate(t.value, [0, 0.15, 0.8, 1], [0, 1, 0.8, 0]),
+    transform: [{ scale: interpolate(t.value, [0, 1], [0.3, 1]) }],
   }));
+  const r = size / 2;
+  const inner = r * 0.34, outer = r * 0.86;
   return (
-    <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: `${left}%`, top: `${top}%` }, st]}>
-      <Text style={{ fontSize: size, textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 }}>
-        {icon}
-      </Text>
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: `${left}%`, top: `${top}%`, width: size, height: size, marginLeft: -r, marginTop: -r }, st]}>
+      <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        {FW_DIRS.map((d, i) => (
+          <Line key={i}
+            x1={r + d.x * inner} y1={r + d.y * inner}
+            x2={r + d.x * outer} y2={r + d.y * outer}
+            stroke={color} strokeWidth={2} strokeLinecap="round" strokeOpacity={0.9} />
+        ))}
+        {FW_DIRS.map((d, i) => (
+          <Circle key={`t${i}`} cx={r + d.x * outer} cy={r + d.y * outer} r={2.2} fill="#ffffff" fillOpacity={0.9} />
+        ))}
+        <Circle cx={r} cy={r} r={inner * 0.5} fill={color} fillOpacity={0.55} />
+      </Svg>
+    </Animated.View>
+  );
+}
+
+/** Static supporting cast: the two Statues of Liberty (patina silhouettes with
+ *  lit torches) on the flanks. One SVG, rasterized once, zero drivers. */
+function AmericaStatues() {
+  return (
+    <Svg pointerEvents="none" style={StyleSheet.absoluteFill} viewBox={SCENE_VB} preserveAspectRatio="xMidYMax slice">
+      {/* Left statue (large) */}
+      <G>
+        <Rect x={6} y={190} width={48} height={8} rx={2} fill="#565b63" />
+        <Rect x={10} y={196} width={40} height={54} fill="#6a6f76" />
+        <Rect x={10} y={196} width={40} height={6} fill="#7d828a" />
+        <Path d="M16 192 L24 102 C24 88 40 88 40 102 L46 192 Z" fill="#4f8f7c" />
+        <Path d="M16 192 L24 102 C24 96 28 92 32 92 L30 192 Z" fill="#3a6c5e" />
+        <Rect x={12} y={118} width={9} height={17} rx={2} fill="#3f7767" />
+        <Path d="M32 106 L45 71 L48 72 L37 108 Z" fill="#4f8f7c" />
+        <Rect x={42} y={62} width={9} height={7} rx={2} fill="#c9a24a" />
+        <Circle cx={46.5} cy={56} r={9} fill="#ffd76a" opacity={0.28} />
+        <Path d="M46.5 48 C50 53 50 58 46.5 61 C43 58 43 53 46.5 48 Z" fill="#ffd76a" />
+        <Circle cx={30} cy={92} r={7.5} fill="#4f8f7c" />
+        {[-40, -20, 0, 20, 40].map((deg) => {
+          const rad = ((deg - 90) * Math.PI) / 180;
+          return <Line key={deg} x1={30 + Math.cos(rad) * 7} y1={92 + Math.sin(rad) * 7}
+                       x2={30 + Math.cos(rad) * 13} y2={92 + Math.sin(rad) * 13}
+                       stroke="#4f8f7c" strokeWidth={2.4} strokeLinecap="round" />;
+        })}
+      </G>
+      {/* Right statue (smaller, mirrored) */}
+      <G>
+        <Rect x={309} y={204} width={42} height={7} rx={2} fill="#565b63" />
+        <Rect x={313} y={210} width={34} height={40} fill="#6a6f76" />
+        <Path d="M317 206 L323 140 C323 130 334 130 334 140 L339 206 Z" fill="#4f8f7c" />
+        <Path d="M337 206 L334 140 C334 136 331 133 328 133 L330 206 Z" fill="#3a6c5e" />
+        <Path d="M326 143 L315 118 L312.5 119.5 L322 145 Z" fill="#4f8f7c" />
+        <Rect x={309} y={110} width={7.5} height={6} rx={2} fill="#c9a24a" />
+        <Circle cx={312.5} cy={105} r={7} fill="#ffd76a" opacity={0.28} />
+        <Path d="M312.5 98 C315.5 102.5 315.5 106.5 312.5 109 C309.5 106.5 309.5 102.5 312.5 98 Z" fill="#ffd76a" />
+        <Circle cx={329} cy={132} r={5.5} fill="#4f8f7c" />
+        {[-40, -20, 0, 20, 40].map((deg) => {
+          const rad = ((deg - 90) * Math.PI) / 180;
+          return <Line key={deg} x1={329 + Math.cos(rad) * 5} y1={132 + Math.sin(rad) * 5}
+                       x2={329 + Math.cos(rad) * 9.5} y2={132 + Math.sin(rad) * 9.5}
+                       stroke="#4f8f7c" strokeWidth={2} strokeLinecap="round" />;
+        })}
+      </G>
+    </Svg>
+  );
+}
+
+/** The hero: jacked bald eagle, giant cheeseburger, raised golf driver, jeans.
+ *  One static SVG on a slow 1.2% breathe so he reads alive without ever
+ *  re-rendering. Cartoon-poster styling: bold shapes, dark outlines. */
+function AmericaEagle() {
+  const torsoId = useBgId('eagleTorso');
+  const bunId = useBgId('eagleBun');
+  const breathe = useSharedValue(0);
+  useEffect(() => {
+    breathe.value = withRepeat(withTiming(1, { duration: 3200, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(breathe);
+  }, [breathe]);
+  const st = useAnimatedStyle(() => ({
+    transform: [{ scale: interpolate(breathe.value, [0, 1], [1, 1.012]) }],
+  }));
+  const OUT = '#241708';   // cartoon outline
+  return (
+    <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, st]}>
+      <Svg style={StyleSheet.absoluteFill} viewBox={SCENE_VB} preserveAspectRatio="xMidYMax slice">
+        <Defs>
+          <SvgLinearGradient id={torsoId} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#6b4a30" />
+            <Stop offset="1" stopColor="#3a2415" />
+          </SvgLinearGradient>
+          <SvgLinearGradient id={bunId} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#eebc6d" />
+            <Stop offset="1" stopColor="#d0964a" />
+          </SvgLinearGradient>
+        </Defs>
+
+        {/* ── golf driver, raised in the right fist ── */}
+        <Line x1={272} y1={64} x2={326} y2={18} stroke="#20180e" strokeWidth={7} strokeLinecap="round" />
+        <Line x1={272} y1={64} x2={326} y2={18} stroke="#cdd2da" strokeWidth={4} strokeLinecap="round" />
+        <Path d="M320 8 C334 4 344 12 342 22 C340 30 328 32 320 26 C314 21 314 12 320 8 Z"
+              fill="#aeb6c2" stroke={OUT} strokeWidth={2} />
+        <Path d="M322 11 C330 8 337 12 337 17" stroke="#eef2f7" strokeWidth={2} strokeLinecap="round" fill="none" />
+
+        {/* ── torso + shoulders ── */}
+        <Path d="M96 250 L96 162 C96 124 124 104 180 104 C236 104 264 124 264 162 L264 250 Z"
+              fill={`url(#${torsoId})`} stroke={OUT} strokeWidth={2.5} />
+        <Circle cx={106} cy={142} r={26} fill={`url(#${torsoId})`} stroke={OUT} strokeWidth={2.5} />
+        <Circle cx={254} cy={142} r={26} fill={`url(#${torsoId})`} stroke={OUT} strokeWidth={2.5} />
+        {/* pecs + chest feathering */}
+        <Ellipse cx={150} cy={168} rx={27} ry={18} fill="#7a563a" opacity={0.75} />
+        <Ellipse cx={212} cy={168} rx={27} ry={18} fill="#7a563a" opacity={0.75} />
+        <Path d="M168 196 L180 208 L192 196" stroke="#2e1d10" strokeWidth={3} strokeLinecap="round" fill="none" opacity={0.6} />
+        <Path d="M158 214 L172 226 L186 214" stroke="#2e1d10" strokeWidth={3} strokeLinecap="round" fill="none" opacity={0.45} />
+
+        {/* ── right arm hoisting the club ── */}
+        <Line x1={252} y1={148} x2={282} y2={112} stroke={OUT} strokeWidth={24} strokeLinecap="round" />
+        <Line x1={252} y1={148} x2={282} y2={112} stroke="#5a3d26" strokeWidth={19} strokeLinecap="round" />
+        <Line x1={282} y1={112} x2={268} y2={74} stroke={OUT} strokeWidth={20} strokeLinecap="round" />
+        <Line x1={282} y1={112} x2={268} y2={74} stroke="#5a3d26" strokeWidth={15} strokeLinecap="round" />
+        <Circle cx={266} cy={68} r={13} fill="#5a3d26" stroke={OUT} strokeWidth={2.5} />
+        <Path d="M256 62 C253 58 255 53 260 53 L262 60 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+        <Path d="M262 56 C261 51 265 48 269 50 L269 58 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+        <Path d="M270 55 C271 50 276 50 278 54 L274 60 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+
+        {/* ── left arm under the burger ── */}
+        <Line x1={104} y1={168} x2={148} y2={206} stroke={OUT} strokeWidth={26} strokeLinecap="round" />
+        <Line x1={104} y1={168} x2={148} y2={206} stroke="#5a3d26" strokeWidth={21} strokeLinecap="round" />
+
+        {/* ── THE BURGER ── */}
+        <Ellipse cx={140} cy={214} rx={50} ry={13} fill={`url(#${bunId})`} stroke={OUT} strokeWidth={2.5} />
+        <Ellipse cx={140} cy={201} rx={52} ry={11} fill="#55301e" stroke={OUT} strokeWidth={2} />
+        <Ellipse cx={122} cy={199} rx={5} ry={2.4} fill="#3c2013" />
+        <Ellipse cx={152} cy={202} rx={5} ry={2.4} fill="#3c2013" />
+        <Rect x={92} y={185} width={96} height={14} rx={7} fill="#f2b53a" stroke={OUT} strokeWidth={2} />
+        <Rect x={100} y={194} width={9} height={13} rx={4.5} fill="#f2b53a" stroke={OUT} strokeWidth={1.5} />
+        <Rect x={133} y={196} width={9} height={15} rx={4.5} fill="#f2b53a" stroke={OUT} strokeWidth={1.5} />
+        <Rect x={164} y={194} width={9} height={12} rx={4.5} fill="#f2b53a" stroke={OUT} strokeWidth={1.5} />
+        <Ellipse cx={140} cy={185} rx={50} ry={10} fill="#66381f" stroke={OUT} strokeWidth={2} />
+        <Path d="M88 182 Q96 170 104 180 Q112 169 120 179 Q128 168 136 179 Q144 169 152 179 Q160 168 168 179 Q176 170 184 181 Q188 184 184 187 L92 187 Q86 186 88 182 Z"
+              fill="#7fbf5a" stroke={OUT} strokeWidth={2} />
+        <Path d="M92 176 C92 148 116 140 140 140 C164 140 188 148 188 176 Q140 186 92 176 Z"
+              fill={`url(#${bunId})`} stroke={OUT} strokeWidth={2.5} />
+        <Path d="M104 154 C112 147 128 143 140 143" stroke="#f7d9a0" strokeWidth={3.5} strokeLinecap="round" fill="none" opacity={0.8} />
+        {[[112, 158], [128, 151], [146, 149], [162, 154], [174, 162], [120, 168], [152, 163]].map(([x, y], i) => (
+          <Ellipse key={i} cx={x} cy={y} rx={2.6} ry={1.7} fill="#fdf3dd" transform={`rotate(-12 ${x} ${y})`} />
+        ))}
+        {/* talons gripping the top bun */}
+        <Path d="M176 146 C182 142 188 145 187 151 L179 154 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+        <Path d="M182 156 C189 154 193 159 190 164 L182 164 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+        <Path d="M184 168 C191 168 193 174 189 177 L182 174 Z" fill="#d9a441" stroke={OUT} strokeWidth={1.5} />
+
+        {/* ── neck ruff + head ── */}
+        <Path d="M142 118 L152 104 L162 118 L172 104 L182 118 L192 104 L202 118 L212 106 L218 120 L218 96 L142 96 Z"
+              fill="#f3f0e8" stroke={OUT} strokeWidth={2} transform="translate(-1 0)" />
+        <Path d="M148 100 C144 52 158 30 180 28 C202 30 216 52 212 100 C202 110 158 110 148 100 Z"
+              fill="#f3f0e8" stroke={OUT} strokeWidth={2.5} />
+        <Path d="M206 56 C210 70 210 88 208 99 C213 96 214 70 211 55 Z" fill="#d8d2c4" opacity={0.9} />
+        {/* angry brows */}
+        <Line x1={152} y1={46} x2={173} y2={56} stroke={OUT} strokeWidth={6} strokeLinecap="round" />
+        <Line x1={208} y1={46} x2={187} y2={56} stroke={OUT} strokeWidth={6} strokeLinecap="round" />
+        {/* eyes: gold iris, keyed pupil */}
+        <Circle cx={168} cy={61} r={5} fill="#e8b23a" stroke={OUT} strokeWidth={1.5} />
+        <Circle cx={168} cy={61} r={2.2} fill="#141009" />
+        <Circle cx={169} cy={60} r={0.9} fill="#ffffff" />
+        <Circle cx={192} cy={61} r={5} fill="#e8b23a" stroke={OUT} strokeWidth={1.5} />
+        <Circle cx={192} cy={61} r={2.2} fill="#141009" />
+        <Circle cx={193} cy={60} r={0.9} fill="#ffffff" />
+        {/* hooked beak */}
+        <Path d="M166 66 C166 54 194 54 194 66 C194 80 188 92 180 98 C172 92 166 80 166 66 Z"
+              fill="#e8b23a" stroke={OUT} strokeWidth={2.5} />
+        <Path d="M180 98 C186 90 190 80 191 70 C191 82 187 93 181 98 Z" fill="#c68e26" />
+        <Circle cx={174} cy={64} r={1.4} fill="#8a6218" />
+        <Circle cx={186} cy={64} r={1.4} fill="#8a6218" />
+
+        {/* ── jeans + belt at the crop line ── */}
+        <Rect x={112} y={222} width={136} height={9} fill="#452c18" stroke={OUT} strokeWidth={2} />
+        <Rect x={170} y={221} width={18} height={11} rx={2} fill="#d9c06a" stroke={OUT} strokeWidth={1.5} />
+        <Rect x={112} y={231} width={136} height={19} fill="#3d5f8c" stroke={OUT} strokeWidth={2} />
+        <Line x1={180} y1={233} x2={180} y2={250} stroke="#2c4568" strokeWidth={3} />
+      </Svg>
     </Animated.View>
   );
 }
@@ -532,8 +750,9 @@ function AmericanaFloat({ icon, left, top, size, dur, rise, rot }: typeof AMERIC
  * a cached texture — nothing rebuilds paths per frame (see the perf note above
  * FLAG_STATIC for what the old version cost).
  *
- * On top of the cloth rides the AMERICANA layer: a B-2 flyover + a drifting
- * field of patriotic icons (🦅 🌭 🏈 🎆 🗽 …). Toggle-able via visual_data
+ * On top of the cloth rides THE SCENE (see SCENE_VB block above): fireworks
+ * over a darkened sky, a B-2 flyover, flanking Statues of Liberty, base ember
+ * glow, and the burger-and-driver eagle hero. Toggle-able via visual_data
  * `americana:false` for a plain flag, on by default.
  */
 function FlagBg({ v, style, children }: BgProps) {
@@ -659,11 +878,29 @@ function FlagBg({ v, style, children }: BgProps) {
         />
       </Animated.View>
 
-      {/* Americana: B-2 flyover + drifting patriotic icons over the cloth. */}
+      {/* THE SCENE: darkened firework sky, B-2 pass, flanking Statues of
+          Liberty, ember glow, and the burger-hoisting eagle up front. */}
       {v.americana !== false && (
         <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+          {/* Night falls over the top of the flag so the fireworks read. */}
+          <LinearGradient
+            colors={['rgba(6,10,30,0.78)', 'rgba(6,10,30,0.35)', 'transparent'] as const as readonly [string, string, ...string[]]}
+            start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '48%' }}
+          />
           <B2Flyover />
-          {AMERICANA.map((cfg, i) => <AmericanaFloat key={i} {...cfg} />)}
+          <FireworkBurst left={18} top={14} size={84} color="#ffd76a" dur={3600} delay={0} />
+          <FireworkBurst left={50} top={9}  size={96} color="#ff6a5c" dur={4200} delay={1400} />
+          <FireworkBurst left={83} top={16} size={78} color="#9ec2ff" dur={3300} delay={800} />
+          <FireworkBurst left={33} top={24} size={58} color="#ff9d5c" dur={2900} delay={2300} />
+          <AmericaStatues />
+          {/* Firelight rising from the base, like the reference art. */}
+          <LinearGradient
+            colors={['transparent', 'rgba(255,110,26,0.16)', 'rgba(255,110,26,0.34)'] as const as readonly [string, string, ...string[]]}
+            start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+            style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '30%' }}
+          />
+          <AmericaEagle />
         </View>
       )}
 
