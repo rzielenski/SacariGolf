@@ -209,8 +209,11 @@ const STATIC_BG: Record<string, { colors: string[]; diag?: boolean; accent?: str
 function StaticBg({ v, style, children }: BgProps) {
   const styleId = v.style as string | undefined;
   // An image background is already cheap (one static texture, no drivers), so
-  // the "static" grid variant just renders the real thing.
-  if (styleId === 'image') return <ImageBg v={v} style={style}>{children}</ImageBg>;
+  // the "static" grid variant just renders the real thing. The flag cosmetic is
+  // now a photo too (see the 'flag' dispatch note), so it takes the same path.
+  if (styleId === 'image' || styleId === 'flag') {
+    return <ImageBg v={{ ...v, asset: (typeof v.asset === 'string' ? v.asset : 'america') }} style={style}>{children}</ImageBg>;
+  }
   const def = (styleId && STATIC_BG[styleId]) || { colors: [v.from ?? C.bg, v.to ?? '#1a1a1a'] } as { colors: string[]; diag?: boolean; accent?: string };
   const base = def.colors.length >= 2 ? def.colors : [def.colors[0], def.colors[0]];
   const colors = base as readonly string[] as readonly [string, string, ...string[]];
@@ -281,7 +284,12 @@ export function CosmeticBackground({
   switch (styleId) {
     case 'gradient':    return <GradientBg     v={v} style={style}>{children}</GradientBg>;
     case 'image':       return <ImageBg        v={v} style={style}>{children}</ImageBg>;
-    case 'flag':        return <FlagBg         v={v} style={style}>{children}</FlagBg>;
+    // The flag cosmetic (bg_america) is now the composed americana PHOTO,
+    // bundled at assets/backgrounds/america.jpg. Routed to ImageBg here in CODE
+    // so it works without migrating the DB's visual_data from style:"flag" —
+    // i.e. shipping the app is enough. The old vector FlagBg scene stays defined
+    // below for an easy revert (route this case back to <FlagBg/>).
+    case 'flag':        return <ImageBg        v={{ ...v, asset: (typeof v.asset === 'string' ? v.asset : 'america') }} style={style}>{children}</ImageBg>;
     case 'storm':
     case 'pulse':       return <StormBg        v={v} style={style}>{children}</StormBg>;
     case 'aurora':      return <AuroraBg       v={v} style={style}>{children}</AuroraBg>;
