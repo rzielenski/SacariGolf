@@ -19,8 +19,6 @@ import { useState } from 'react';
 import { Image, StyleSheet, Text, View, ViewStyle } from 'react-native';
 import { API_BASE } from '../lib/api';
 import { C } from '../lib/colors';
-import { GolfAvatar } from './GolfAvatar';
-import { normalizeAvatar } from '../lib/avatar';
 
 interface UserAvatarProps {
   username?: string | null;
@@ -33,11 +31,6 @@ interface UserAvatarProps {
   /** Optional override for the fallback tile background. Defaults to gold@33. */
   tintColor?: string;
   style?: ViewStyle;
-  /** Custom golfer avatar build. When `avatarType` is 'character' and this is
-   *  present, the vector golfer (head+shoulders crop) renders instead of the
-   *  photo/letter — so a player's character shows anywhere UserAvatar is used. */
-  avatarConfig?: Record<string, string> | null;
-  avatarType?: string | null;
 }
 
 export function UserAvatar({
@@ -47,8 +40,6 @@ export function UserAvatar({
   borderRadius,
   tintColor,
   style,
-  avatarConfig,
-  avatarType,
 }: UserAvatarProps) {
   // Track whether the <Image> load failed so we can fall back to the letter
   // tile instead of showing a broken-image placeholder.
@@ -64,16 +55,6 @@ export function UserAvatar({
     justifyContent: 'center', alignItems: 'center',
     overflow: 'hidden',
   };
-
-  // Custom golfer wins when the player has opted into it. The container clips
-  // the square bust art into the avatar's circle/rounded-square.
-  if (avatarType === 'character' && avatarConfig) {
-    return (
-      <View style={[baseStyle, style]}>
-        <GolfAvatar config={normalizeAvatar(avatarConfig)} size={size} mode="bust" />
-      </View>
-    );
-  }
 
   if (avatarUrl && !errored) {
     // Server rows store relative paths; some legacy rows carry absolute

@@ -19,7 +19,6 @@ import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest, crestFootprint } from '../../components/RankCrest';
-import { GolfAvatar } from '../../components/GolfAvatar';
 import { rankForElo } from '../../lib/rank';
 import { accountLevel } from '../../lib/accountLevel';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
@@ -448,8 +447,6 @@ export default function ProfileScreen() {
           <RankCrest elo={user.elo} size={96}>
             {uploadingAvatar ? (
               <View style={styles.avatarLoader}><ActivityIndicator color={C.gold} /></View>
-            ) : (user as any).avatar_type === 'character' && (user as any).avatar_config ? (
-              <GolfAvatar config={(user as any).avatar_config} size={96} mode="bust" />
             ) : user.avatar_url ? (
               <Image
                 source={{ uri: `${API_BASE}${user.avatar_url}` }}
@@ -715,26 +712,27 @@ export default function ProfileScreen() {
         ))
       )}
 
-      {/* ── COMPETE ─────────────────────────────────────────────────
-          Every competitive surface in one labeled block. Season Ladder
-          and Ball Count used to be reachable ONLY through banners inside
-          the Leaderboard screen; now they're first-class rows. */}
+      {/* ── COMPETE ── every competitive surface as a compact tile grid,
+          scannable at a glance instead of a 9-row list. */}
       <Text style={[styles.sectionHeader, styles.menuHeader]}>COMPETE</Text>
-      <MenuRow label="⚑  MY MATCHES" onPress={() => router.push('/matches' as any)} />
-      <MenuRow label="★  LEADERBOARD" onPress={() => router.push('/leaderboard' as any)} />
-      <MenuRow label="◆  CREATOR LEAGUES" onPress={() => router.push('/creator-leagues' as any)} />
-      <MenuRow label="♛  TOURNAMENTS" onPress={() => router.push('/tournaments' as any)} />
-      <MenuRow label="🏆  SACARI CUP · THIS WEEK" onPress={() => router.push('/sacari-cup' as any)} />
-      <MenuRow label="◎  CLOSEST TO THE PIN · THIS WEEK" onPress={() => router.push('/closest-to-pin' as any)} />
-      <MenuRow label="🎖  TITLES" onPress={() => router.push('/titles' as any)} />
-      <MenuRow label="▲  SEASON LADDER · DIVISIONS" onPress={() => router.push('/seasons' as any)} />
-      <MenuRow label="◉  BALL COUNT · FOUND VS LOST" onPress={() => router.push('/balls' as any)} />
+      <View style={styles.hubGrid}>
+        <HubTile icon="⚑"  label="My Matches"    onPress={() => router.push('/matches' as any)} />
+        <HubTile icon="★"  label="Leaderboard"   onPress={() => router.push('/leaderboard' as any)} />
+        <HubTile icon="◆"  label="Leagues"       onPress={() => router.push('/creator-leagues' as any)} />
+        <HubTile icon="♛"  label="Tournaments"   onPress={() => router.push('/tournaments' as any)} />
+        <HubTile icon="🏆" label="Sacari Cup"    onPress={() => router.push('/sacari-cup' as any)} />
+        <HubTile icon="◎"  label="Closest Pin"   onPress={() => router.push('/closest-to-pin' as any)} />
+        <HubTile icon="🎖" label="Titles"        onPress={() => router.push('/titles' as any)} />
+        <HubTile icon="▲"  label="Season Ladder" onPress={() => router.push('/seasons' as any)} />
+        <HubTile icon="◉"  label="Ball Count"    onPress={() => router.push('/balls' as any)} />
+      </View>
 
       {/* ── STYLE ──────────────────────────────────────────────────── */}
       <Text style={[styles.sectionHeader, styles.menuHeader]}>STYLE</Text>
-      <MenuRow label="⛳  YOUR GOLFER · BUILD YOUR AVATAR" onPress={() => router.push('/avatar' as any)} />
-      <MenuRow label="✦  LOCKER ROOM · COSMETICS" onPress={() => router.push('/locker-room' as any)} />
-      <MenuRow label="▼  SEASON PASS · CLAIM REWARDS" onPress={() => router.push('/season-pass' as any)} />
+      <View style={styles.hubGrid}>
+        <HubTile icon="✦" label="Locker Room" onPress={() => router.push('/locker-room' as any)} />
+        <HubTile icon="▼" label="Season Pass" onPress={() => router.push('/season-pass' as any)} />
+      </View>
 
       {/* Personal theme song — plays during the match-found VS animation
           when no team theme is set. Solo players use this. */}
@@ -774,18 +772,11 @@ export default function ProfileScreen() {
 
       {/* ── ACCOUNT ────────────────────────────────────────────────── */}
       <Text style={[styles.sectionHeader, styles.menuHeader]}>ACCOUNT</Text>
-      <MenuRow label="✦  INVITE FRIENDS · EARN PERKS" onPress={() => router.push('/invite' as any)} />
-      <TouchableOpacity
-        style={styles.premiumBtn}
-        onPress={() => router.push('/premium' as any)}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.premiumBtnLabel}>
-          {isPremium(user as any) ? '👑 PREMIUM · MANAGE' : '👑 GO PREMIUM'}
-        </Text>
-        <Text style={styles.statsBtnArrow}>›</Text>
-      </TouchableOpacity>
-      <MenuRow label="⚙  SETTINGS" onPress={() => router.push('/settings' as any)} />
+      <View style={styles.hubGrid}>
+        <HubTile icon="✦" label="Invite Friends" onPress={() => router.push('/invite' as any)} />
+        <HubTile icon="👑" label={isPremium(user as any) ? 'Premium' : 'Go Premium'} onPress={() => router.push('/premium' as any)} />
+        <HubTile icon="⚙" label="Settings" onPress={() => router.push('/settings' as any)} />
+      </View>
 
       {/* Aggregated round stats — only shown once user has any tracked data */}
       {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
@@ -939,10 +930,11 @@ export default function ProfileScreen() {
         Joined {new Date(user.created_at).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
       </Text>
 
-      {/* Account section — discoverable Log Out / Blocked Users / Delete.
-          Apple expects the deletion flow to live somewhere obvious like a
-          settings screen, not a tiny footer link. */}
-      <Text style={[styles.editableLabel, { marginTop: 24, marginBottom: 8 }]}>ACCOUNT</Text>
+      {/* Privacy / legal / session footer — discoverable Log Out / Blocked
+          Users / Delete / Privacy / Terms. Apple expects the deletion flow +
+          policy links to live somewhere obvious, not a tiny footer link.
+          Labeled distinctly from the ACCOUNT hub above so it's not a dup. */}
+      <Text style={[styles.editableLabel, { marginTop: 24, marginBottom: 8 }]}>PRIVACY & MORE</Text>
 
       {/* Profanity / slur censor toggle. ON by default for new accounts
           (App Review expectation for any UGC app) — the user can flip
@@ -1400,6 +1392,18 @@ function MenuRow({ label, onPress }: { label: string; onPress: () => void }) {
   );
 }
 
+/** Compact tap-tile for the profile's navigation hub. Replaces the long
+ *  full-width menu rows so a whole section (e.g. COMPETE's 9 destinations)
+ *  fits in a few scannable rows instead of a long list to scroll past. */
+function HubTile({ icon, label, onPress }: { icon: string; label: string; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={styles.hubTile} onPress={onPress} activeOpacity={0.75}>
+      <Text style={styles.hubIcon}>{icon}</Text>
+      <Text style={styles.hubLabel} numberOfLines={2}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.bg },
   content: { padding: 20, paddingTop: 60, paddingBottom: 40 },
@@ -1419,6 +1423,17 @@ const styles = StyleSheet.create({
   // Extra breathing room above the COMPETE / STYLE / ACCOUNT menu groups
   // so each section reads as its own block in the long profile scroll.
   menuHeader: { marginTop: 22 },
+
+  // Navigation hub: compact 3-across tile grid (flexBasis + flexGrow so a
+  // row of 3 fills evenly, and a short section of 2 spreads to halves).
+  hubGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 2 },
+  hubTile: {
+    flexBasis: '30%', flexGrow: 1, minHeight: 76,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10,
+    paddingVertical: 12, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center', gap: 6,
+  },
+  hubIcon: { fontSize: 20, color: C.gold },
+  hubLabel: { color: C.text, fontSize: 11.5, fontWeight: '700', textAlign: 'center', lineHeight: 14 },
   teamsEmpty: {
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     marginBottom: 12, lineHeight: 17,

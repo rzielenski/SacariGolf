@@ -301,12 +301,6 @@ export const api = {
       /** Preferred partial-swing entry mode for the in-round club picker:
        *  'percentage' (90%/80%/70%) or 'clock' (10:30/9:00/7:30). */
       partialSwingMode?: 'percentage' | 'clock';
-      /** Custom golfer avatar build (skin/hair/clothes/… keys, see
-       *  lib/avatar.ts). Pass null to clear. */
-      avatarConfig?: Record<string, string> | null;
-      /** Which avatar to show for this player: their built 'character' or an
-       *  uploaded 'photo'. */
-      avatarType?: 'photo' | 'character';
     }) => request<any>('PATCH', '/users/me', body),
     uploadAvatar: (imageBase64: string, mimeType: string) => request<any>('POST', '/users/me/avatar', { imageBase64, mimeType }),
     /** Upload a personal voice memo and set it as the caller's theme song.

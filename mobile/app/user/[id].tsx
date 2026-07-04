@@ -17,7 +17,6 @@ import { fmtHandicap, parForHolesPlayed, toParForHolesPlayed, fmtToPar } from '.
 import { useCensor } from '../../lib/censor';
 import { rankForElo, rankHeadline } from '../../lib/rank';
 import { BountyBadge } from '../../components/BountyBadge';
-import { GolfAvatar } from '../../components/GolfAvatar';
 
 export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -136,9 +135,7 @@ export default function UserProfileScreen() {
       <View style={styles.headerSection}>
         <CosmeticBorder visual={borderVisual} size={crestFootprint(profile.elo, 96)}>
           <RankCrest elo={profile.elo} size={96} style={borderVisual ? undefined : { marginBottom: 8 }}>
-            {profile.avatar_type === 'character' && profile.avatar_config ? (
-              <GolfAvatar config={profile.avatar_config} size={96} mode="bust" />
-            ) : profile.avatar_url ? (
+            {profile.avatar_url ? (
               // Tap to view the photo full-screen — same pattern as a Find.
               <TouchableOpacity
                 activeOpacity={0.85}

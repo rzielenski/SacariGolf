@@ -23,7 +23,7 @@ const router = Router();
 router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
-            u.avatar_url, u.avatar_config, u.avatar_type, u.created_at,
+            u.avatar_url, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
@@ -78,7 +78,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode, avatarConfig, avatarType } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -215,34 +215,6 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
       updates.push(`clubs_in_bag = $${values.length}::jsonb`);
     } else {
       return res.status(400).json({ error: 'clubsInBag must be an array of {code,label?} entries or null' });
-    }
-  }
-
-  // Custom golfer avatar. `avatarType` toggles whether the character or an
-  // uploaded photo is used as the avatar; `avatarConfig` is the character's
-  // build (skin/hair/clothes/… keys — see mobile/lib/avatar.ts). We store only
-  // bounded string→string entries so a client can't stuff huge/arbitrary JSON;
-  // the mobile renderer re-normalizes unknown keys, so a partial blob is safe.
-  if (avatarType !== undefined) {
-    values.push(avatarType === 'character' ? 'character' : 'photo');
-    updates.push(`avatar_type = $${values.length}`);
-  }
-  if (avatarConfig !== undefined) {
-    if (avatarConfig === null) {
-      updates.push(`avatar_config = NULL`);
-    } else if (avatarConfig && typeof avatarConfig === 'object' && !Array.isArray(avatarConfig)) {
-      const clean: Record<string, string> = {};
-      let n = 0;
-      for (const [k, v] of Object.entries(avatarConfig)) {
-        if (n >= 30) break;
-        if (typeof k === 'string' && typeof v === 'string' && k.length <= 24 && v.length <= 24) {
-          clean[k.slice(0, 24)] = v; n++;
-        }
-      }
-      values.push(JSON.stringify(clean));
-      updates.push(`avatar_config = $${values.length}::jsonb`);
-    } else {
-      return res.status(400).json({ error: 'avatarConfig must be an object or null' });
     }
   }
 
@@ -1734,7 +1706,7 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
-            u.avatar_url, u.avatar_config, u.avatar_type, u.created_at,
+            u.avatar_url, u.created_at,
             u.bio, u.home_course_id, u.drinks, u.equipped_title,
             (SELECT name FROM titles WHERE title_id = u.equipped_title) AS equipped_title_name,
             ${equippedVisualSql('u')} AS equipped_visual,
