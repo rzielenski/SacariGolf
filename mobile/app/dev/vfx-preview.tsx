@@ -14,7 +14,16 @@ import { Stack } from 'expo-router';
 import { CosmeticBackground } from '../../components/Cosmetics';
 import { HoleScoreCelebration, CelebrationEvent, CelebrationKind } from '../../components/HoleScoreCelebration';
 import { MatchFoundIntro, SidePlayer } from '../../components/MatchFoundIntro';
+import { RankUpCeremony } from '../../components/RankUpCeremony';
 import { C, F } from '../../lib/colors';
+
+// Sample promotions to preview the ceremony at different tiers.
+const RANKUPS: { label: string; elo: number; from: string }[] = [
+  { label: 'RANK UP → SILVER', elo: 500, from: 'Bronze' },
+  { label: 'RANK UP → GOLD', elo: 700, from: 'Silver' },
+  { label: 'RANK UP → PLATINUM', elo: 900, from: 'Gold' },
+  { label: 'RANK UP → OBSIDIAN', elo: 1520, from: 'Diamond' },
+];
 
 const BACKGROUNDS: { style: string; name: string }[] = [
   { style: 'gradient', name: 'Gradient' },
@@ -56,6 +65,7 @@ const TILE_W = (SCREEN_W - 18 * 2 - 10) / 2;
 export default function VfxPreview() {
   const [celeb, setCeleb] = useState<CelebrationKind | null>(null);
   const [introVisible, setIntroVisible] = useState(false);
+  const [rankUp, setRankUp] = useState<{ elo: number; from: string } | null>(null);
 
   const event: CelebrationEvent | null = celeb
     ? { kind: celeb, username: 'RickyBobbyFairways', elo: 1850, themePreview: null, themeTitle: null, ...CELEB[celeb] }
@@ -81,6 +91,15 @@ export default function VfxPreview() {
           <Text style={s.btnText}>PLAY MATCH-FOUND INTRO</Text>
         </TouchableOpacity>
 
+        <Text style={s.section}>RANK-UP CEREMONY</Text>
+        <View style={s.btnRow}>
+          {RANKUPS.map((r) => (
+            <TouchableOpacity key={r.elo} style={s.btn} onPress={() => setRankUp({ elo: r.elo, from: r.from })} activeOpacity={0.85}>
+              <Text style={s.btnText}>{r.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
         <Text style={s.section}>BACKGROUNDS</Text>
         <View style={s.grid}>
           {BACKGROUNDS.map((b) => (
@@ -103,6 +122,15 @@ export default function VfxPreview() {
         side2Players={[opp]}
         onDismiss={() => setIntroVisible(false)}
       />
+      {rankUp && (
+        <RankUpCeremony
+          elo={rankUp.elo}
+          fromTierName={rankUp.from}
+          username="You"
+          avatarUrl={null}
+          onDismiss={() => setRankUp(null)}
+        />
+      )}
     </View>
   );
 }

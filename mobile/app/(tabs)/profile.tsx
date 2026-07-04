@@ -19,6 +19,7 @@ import type { Course } from '../../types';
 import { ScorecardModal, ScorecardEntry } from '../../components/Scorecard';
 import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest, crestFootprint } from '../../components/RankCrest';
+import { GolfAvatar } from '../../components/GolfAvatar';
 import { rankForElo } from '../../lib/rank';
 import { accountLevel } from '../../lib/accountLevel';
 import { PuttingApproachStats } from '../../components/PuttingApproachStats';
@@ -447,6 +448,8 @@ export default function ProfileScreen() {
           <RankCrest elo={user.elo} size={96}>
             {uploadingAvatar ? (
               <View style={styles.avatarLoader}><ActivityIndicator color={C.gold} /></View>
+            ) : (user as any).avatar_type === 'character' && (user as any).avatar_config ? (
+              <GolfAvatar config={(user as any).avatar_config} size={96} mode="bust" />
             ) : user.avatar_url ? (
               <Image
                 source={{ uri: `${API_BASE}${user.avatar_url}` }}
@@ -729,6 +732,7 @@ export default function ProfileScreen() {
 
       {/* ── STYLE ──────────────────────────────────────────────────── */}
       <Text style={[styles.sectionHeader, styles.menuHeader]}>STYLE</Text>
+      <MenuRow label="⛳  YOUR GOLFER · BUILD YOUR AVATAR" onPress={() => router.push('/avatar' as any)} />
       <MenuRow label="✦  LOCKER ROOM · COSMETICS" onPress={() => router.push('/locker-room' as any)} />
       <MenuRow label="▼  SEASON PASS · CLAIM REWARDS" onPress={() => router.push('/season-pass' as any)} />
 

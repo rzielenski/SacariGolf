@@ -11,6 +11,7 @@ import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
 import { sanitizeClubCode } from '../utils/clubs';
+import { computeWinStreaks, BOUNTY_THRESHOLD, attachBounties } from '../utils/streaks';
 import { persistVoiceClip } from './messages';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
@@ -22,7 +23,7 @@ const router = Router();
 router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.email, u.elo, u.total_matches, u.total_wins, u.total_ties,
-            u.avatar_url, u.created_at,
+            u.avatar_url, u.avatar_config, u.avatar_type, u.created_at,
             u.handicap_index, u.bio, u.home_course_id, u.email_verified,
             u.is_premium, u.premium_since, u.premium_until, u.premium_plan, u.is_owner,
             u.theme_track_id, u.theme_track_title, u.theme_track_artist,
@@ -77,7 +78,7 @@ router.get('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
 }));
 
 router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
-  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode } = req.body;
+  const { pushToken, handicapIndex, username, bio, homeCourseId, theme, clubsInBag, censorOffensiveLanguage, shareToTwitter, themeSongMaxVolume, partialSwingMode, avatarConfig, avatarType } = req.body;
   const updates: string[] = [];
   const values: unknown[] = [];
 
@@ -214,6 +215,34 @@ router.patch('/me', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
       updates.push(`clubs_in_bag = $${values.length}::jsonb`);
     } else {
       return res.status(400).json({ error: 'clubsInBag must be an array of {code,label?} entries or null' });
+    }
+  }
+
+  // Custom golfer avatar. `avatarType` toggles whether the character or an
+  // uploaded photo is used as the avatar; `avatarConfig` is the character's
+  // build (skin/hair/clothes/… keys — see mobile/lib/avatar.ts). We store only
+  // bounded string→string entries so a client can't stuff huge/arbitrary JSON;
+  // the mobile renderer re-normalizes unknown keys, so a partial blob is safe.
+  if (avatarType !== undefined) {
+    values.push(avatarType === 'character' ? 'character' : 'photo');
+    updates.push(`avatar_type = $${values.length}`);
+  }
+  if (avatarConfig !== undefined) {
+    if (avatarConfig === null) {
+      updates.push(`avatar_config = NULL`);
+    } else if (avatarConfig && typeof avatarConfig === 'object' && !Array.isArray(avatarConfig)) {
+      const clean: Record<string, string> = {};
+      let n = 0;
+      for (const [k, v] of Object.entries(avatarConfig)) {
+        if (n >= 30) break;
+        if (typeof k === 'string' && typeof v === 'string' && k.length <= 24 && v.length <= 24) {
+          clean[k.slice(0, 24)] = v; n++;
+        }
+      }
+      values.push(JSON.stringify(clean));
+      updates.push(`avatar_config = $${values.length}::jsonb`);
+    } else {
+      return res.status(400).json({ error: 'avatarConfig must be an object or null' });
     }
   }
 
@@ -1670,7 +1699,7 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
        ORDER BY u.elo DESC
        LIMIT 100`;
     const { rows } = await pool.query(sql, [req.userId, mode]);
-    return res.json(rows);
+    return res.json(await attachBounties(rows));
   }
 
   // ── Overall ELO leaderboard (default) ───────────────────────────────
@@ -1685,7 +1714,7 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
        LIMIT 100`,
       [req.userId]
     );
-    return res.json(rows);
+    return res.json(await attachBounties(rows));
   }
   // Apple Guideline 1.2: hide blocked users everywhere, including the
   // global leaderboard. Blocker only — blocked users still see the blocker.
@@ -1699,13 +1728,13 @@ router.get('/leaderboard', requireAuth, wrap(async (req: AuthRequest, res: Respo
      ORDER BY u.elo DESC LIMIT 100`,
     [req.userId]
   );
-  return res.json(rows);
+  return res.json(await attachBounties(rows));
 }));
 
 router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { rows } = await pool.query(
     `SELECT u.user_id, u.username, u.elo, u.total_matches, u.total_wins, u.total_ties,
-            u.avatar_url, u.created_at,
+            u.avatar_url, u.avatar_config, u.avatar_type, u.created_at,
             u.bio, u.home_course_id, u.drinks, u.equipped_title,
             (SELECT name FROM titles WHERE title_id = u.equipped_title) AS equipped_title_name,
             ${equippedVisualSql('u')} AS equipped_visual,
@@ -1825,6 +1854,9 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     [req.params.id]
   );
 
+  // Current ranked win streak → drives the "bounty" flag on the profile.
+  const streak = (await computeWinStreaks([req.params.id])).get(req.params.id) ?? 0;
+
   return res.json({
     ...userInfo,
     recent_rounds: recentRounds,
@@ -1834,6 +1866,8 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
     friendship_status: friendshipStatus,
     drinks,
     practice_shots: practiceRows[0]?.practice_shots ?? 0,
+    win_streak: streak,
+    bounty: streak >= BOUNTY_THRESHOLD,
   });
 }));
 

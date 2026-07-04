@@ -10,6 +10,7 @@ import { sanitizeClubCode } from '../utils/clubs';
 import { syncRoundNormalized } from '../utils/roundScore';
 import { autoPostSoloRoundToLeague } from '../utils/leagues';
 import { diff18 } from '../utils/scoring';
+import { computeWinStreaks, BOUNTY_THRESHOLD } from '../utils/streaks';
 import { currentSeason, divisionForElo } from './seasons';
 
 const router = Router();
@@ -665,6 +666,29 @@ export async function resolveLinkedPair(
   };
   await applySide(curPlayers, curDelta, !isTie && curWins, curDeltas);
   await applySide(parPlayers, parDelta, !isTie && !curWins, parDeltas);
+
+  // ── Giant Slayer bounty ─────────────────────────────────────────────────
+  // If the losing side had anyone on a 5+ win streak, the winners collected a
+  // bounty → grant the "Giant Slayer" title. Streaks are read from
+  // match_results BEFORE writeResult() below inserts this match's rows, so we
+  // see each player's PRE-match streak (their run does not yet include this
+  // loss). Best-effort: a title-grant hiccup must never fail a resolution.
+  if (!isTie) {
+    try {
+      const streaks = await computeWinStreaks(allIds, client);
+      const winners = curWins ? curPlayers : parPlayers;
+      const losers = curWins ? parPlayers : curPlayers;
+      const bountyCollected = losers.some((p: any) => (streaks.get(p.user_id) ?? 0) >= BOUNTY_THRESHOLD);
+      if (bountyCollected) {
+        await client.query(
+          `INSERT INTO user_titles (user_id, title_id)
+           SELECT unnest($1::uuid[]), 'giant_slayer'
+           ON CONFLICT (user_id, title_id) DO NOTHING`,
+          [winners.map((p: any) => p.user_id)],
+        );
+      }
+    } catch { /* best-effort — never fail the match over a title grant */ }
+  }
 
   const writeResult = async (
     matchId: string, s1: any[], s2: any[],

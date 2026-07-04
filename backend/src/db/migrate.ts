@@ -2131,7 +2131,8 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ('ace',          'Ace',          'Make a hole-in-one.',                       'epic',      120),
         ('iron_tour',    'Iron Tour',    'Track 100 shots.',                          'rare',      130),
         ('globetrotter', 'Globetrotter', 'Play 10 different courses.',                'rare',      140),
-        ('cup_champion', 'Cup Champion', 'Win the Sacari Cup.',                       'legendary', 150)
+        ('cup_champion', 'Cup Champion', 'Win the Sacari Cup.',                       'legendary', 150),
+        ('giant_slayer', 'Giant Slayer', 'Beat a player who was on a 5+ win streak.', 'epic',     145)
       ON CONFLICT (title_id) DO UPDATE
         SET name = EXCLUDED.name, description = EXCLUDED.description,
             rarity = EXCLUDED.rarity, sort = EXCLUDED.sort;
@@ -2371,6 +2372,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS crash_reports_created_idx ON crash_reports(created_at DESC);
+    `,
+  },
+  {
+    // Custom golfer avatar (Bitmoji-style). `avatar_config` is the character's
+    // build as a small JSON blob of style/colour keys (see mobile/lib/avatar.ts
+    // + components/GolfAvatar.tsx); `avatar_type` toggles whether the character
+    // or an uploaded photo is the player's avatar. Default 'photo' so existing
+    // users are unchanged until they build a golfer and opt in.
+    name: 'users.avatar_character',
+    sql: `
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS avatar_config JSONB,
+        ADD COLUMN IF NOT EXISTS avatar_type   TEXT NOT NULL DEFAULT 'photo';
     `,
   },
 ];

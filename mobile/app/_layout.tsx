@@ -12,6 +12,7 @@ import { init as initPurchases } from '../lib/purchases';
 import { ONBOARDING_KEY, setOnboardedState, subscribeOnboardedState } from '../lib/onboardingState';
 import { HomeCoursePreloader } from '../components/HomeCoursePreloader';
 import { MatchFoundWatcher } from '../components/MatchFoundWatcher';
+import { RankUpWatcher } from '../components/RankUpCeremony';
 import { AppErrorBoundary } from '../components/AppErrorBoundary';
 import { OfflineBanner } from '../components/OfflineBanner';
 import { installOutboxDrainTriggers } from '../lib/outbox';
@@ -243,6 +244,8 @@ function AuthGuard() {
       {/* Polls /matches and triggers the VS intro when an opponent appears
           on any of the user's pending matches — works from any screen. */}
       {user && <MatchFoundWatcher />}
+      {/* Fires the rank-up ceremony when the user climbs into a new tier. */}
+      {user && <RankUpWatcher />}
     </>
   );
 }
@@ -352,6 +355,7 @@ export default function RootLayout() {
             default hides headers, and without the nav bar the content
             starts under the status bar / Dynamic Island. */}
         <Stack.Screen name="locker-room" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="avatar" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="sacari-cup"  options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="season-pass" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="closest-to-pin" options={{ animation: 'slide_from_right', headerShown: true }} />

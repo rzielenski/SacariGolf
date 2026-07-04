@@ -12,6 +12,7 @@ import { UserAvatar } from '../components/UserAvatar';
 import { IdentityAvatar, IdentityName } from '../components/UserIdentity';
 import { useCensor } from '../lib/censor';
 import { rankForElo, rankBadge } from '../lib/rank';
+import { BountyBadge } from '../components/BountyBadge';
 
 type Mode = 'all' | 'solo' | 'duo' | 'squad';
 const MODES: { key: Mode; label: string }[] = [
@@ -183,6 +184,7 @@ function PlayerRow({ player, rank, isMe }: {
           {c(player.username)}
         </IdentityName>
         <Text style={styles.meta} numberOfLines={1}>{metaLine}</Text>
+        {player.bounty && <BountyBadge streak={player.win_streak} compact style={{ marginTop: 4 }} />}
       </View>
       <View style={styles.eloBox}>
         <Text style={[styles.rankBadgeText, { color: eloColor }]} numberOfLines={1}>{badge}</Text>
