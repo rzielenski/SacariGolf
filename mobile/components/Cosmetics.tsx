@@ -237,7 +237,7 @@ function StaticBg({ v, style, children }: BgProps) {
 // Remote images use {"style":"image","uri":"https://…"} and need NO entry here
 // (and no app rebuild — they're data-driven straight from the DB row).
 const BG_ASSETS: Record<string, any> = {
-  // america: require('../assets/backgrounds/america.png'),
+  america: require('../assets/backgrounds/america.jpg'),
 };
 
 /**
