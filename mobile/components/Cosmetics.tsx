@@ -42,7 +42,7 @@
 
 import React, { useEffect, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle,
+  View, Text, StyleSheet, ViewStyle, StyleProp, TextStyle, useWindowDimensions,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, {
@@ -440,6 +440,89 @@ const FLAG_STATIC: { stripes: string[]; canton: string; stars: string } = (() =>
   return { stripes, canton, stars };
 })();
 
+// ── Americana overlay (the "loaded" 4th-of-July flag) ───────────────────────
+// A drifting field of patriotic icons + a B-2 flyover, layered OVER the baked
+// flag. Perf: every piece is a static glyph/SVG moved by a native-driver
+// transform — same discipline as the flag itself, zero per-frame path work. The
+// grid views (locker/season-pass) never hit this: they render the static swatch
+// via animated={false}, so the icons only animate for the single equipped flag.
+
+// B-2 Spirit silhouette: swept flying-wing with the signature double-W sawtooth
+// trailing edge. viewBox extends left of the craft so the two vapour trails can
+// stream out behind it. Drawn once, flown across the "sky" by one transform.
+const B2_VIEWBOX = '-90 0 200 40';
+const B2_PATH =
+  'M50 7 L8 25 L18 33 L30 27 L42 33 L50 29 L58 33 L70 27 L82 33 L92 25 Z';
+
+/** The B-2 makes a slow pass across the top of the flag every ~11s. */
+function B2Flyover() {
+  const { width } = useWindowDimensions();
+  const fly = useSharedValue(0);
+  useEffect(() => {
+    fly.value = withRepeat(withTiming(1, { duration: 11000, easing: Easing.inOut(Easing.quad) }), -1, false);
+    return () => cancelAnimation(fly);
+  }, [fly]);
+  const st = useAnimatedStyle(() => ({
+    opacity: interpolate(fly.value, [0, 0.06, 0.9, 1], [0, 1, 1, 0]),
+    transform: [
+      { translateX: interpolate(fly.value, [0, 1], [-130, width + 130]) },
+      { translateY: interpolate(fly.value, [0, 0.5, 1], [0, -7, 0]) },   // gentle porpoise
+    ],
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', top: '13%', left: 0, width: 96, height: 34 }, st]}>
+      <Svg width={96} height={34} viewBox={B2_VIEWBOX}>
+        {/* vapour trails streaming behind the engines */}
+        <Line x1={34} y1={30} x2={-90} y2={26} stroke="#ffffff" strokeWidth={1.4} strokeOpacity={0.16} strokeLinecap="round" />
+        <Line x1={62} y1={30} x2={-90} y2={34} stroke="#ffffff" strokeWidth={1.4} strokeOpacity={0.16} strokeLinecap="round" />
+        <Path d={B2_PATH} fill="#12131a" />
+        {/* faint centre-body highlight so it reads as a solid craft, not a hole */}
+        <Path d="M50 10 L34 22 L50 20 L66 22 Z" fill="#262838" fillOpacity={0.9} />
+      </Svg>
+    </Animated.View>
+  );
+}
+
+// The patriotic icon field. Emoji render as full-colour native glyphs (crisp,
+// OTA-safe, no bundled art) — the reliable way to put recognisable "pictures"
+// of an eagle / hotdog / football on the cloth. Positions are % so they scale
+// with the container and are biased to the edges (the centre is where a profile
+// avatar sits). Each drifts on its OWN slow bob so they don't move in lockstep.
+const AMERICANA: { icon: string; left: number; top: number; size: number; dur: number; rise: number; rot: number }[] = [
+  { icon: '🦅', left: 4,  top: 9,  size: 34, dur: 3300, rise: 5, rot: 4 },
+  { icon: '🗽', left: 45, top: 3,  size: 30, dur: 3600, rise: 4, rot: 2 },
+  { icon: '🌭', left: 76, top: 7,  size: 30, dur: 3900, rise: 6, rot: 6 },
+  { icon: '🎇', left: 89, top: 28, size: 26, dur: 2800, rise: 6, rot: 5 },
+  { icon: '🏈', left: 83, top: 60, size: 32, dur: 3000, rise: 5, rot: 9 },
+  { icon: '🍔', left: 12, top: 44, size: 28, dur: 3500, rise: 6, rot: 7 },
+  { icon: '🎆', left: 2,  top: 66, size: 34, dur: 4200, rise: 7, rot: 3 },
+  { icon: '🍺', left: 30, top: 86, size: 27, dur: 3800, rise: 5, rot: 6 },
+  { icon: '🍟', left: 58, top: 84, size: 25, dur: 2600, rise: 5, rot: 8 },
+  { icon: '⭐', left: 90, top: 86, size: 22, dur: 3100, rise: 5, rot: 10 },
+];
+
+/** One floating americana icon — a single native-driver bob + tilt. */
+function AmericanaFloat({ icon, left, top, size, dur, rise, rot }: typeof AMERICANA[number]) {
+  const t = useSharedValue(0);
+  useEffect(() => {
+    t.value = withRepeat(withTiming(1, { duration: dur, easing: Easing.inOut(Easing.sin) }), -1, true);
+    return () => cancelAnimation(t);
+  }, [t, dur]);
+  const st = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: interpolate(t.value, [0, 1], [-rise, rise]) },
+      { rotate: `${interpolate(t.value, [0, 1], [-rot, rot])}deg` },
+    ],
+  }));
+  return (
+    <Animated.View pointerEvents="none" style={[{ position: 'absolute', left: `${left}%`, top: `${top}%` }, st]}>
+      <Text style={{ fontSize: size, textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 }}>
+        {icon}
+      </Text>
+    </Animated.View>
+  );
+}
+
 /**
  * Stars & Stripes. The cloth curvature is BAKED into the static paths
  * (FLAG_STATIC — the flag is frozen mid-wave, never a flat rectangle), and all
@@ -448,6 +531,10 @@ const FLAG_STATIC: { stripes: string[]; canton: string; stars: string } = (() =>
  * gentle bob/roll of the whole sheet. The SVG rasterizes once and is then just
  * a cached texture — nothing rebuilds paths per frame (see the perf note above
  * FLAG_STATIC for what the old version cost).
+ *
+ * On top of the cloth rides the AMERICANA layer: a B-2 flyover + a drifting
+ * field of patriotic icons (🦅 🌭 🏈 🎆 🗽 …). Toggle-able via visual_data
+ * `americana:false` for a plain flag, on by default.
  */
 function FlagBg({ v, style, children }: BgProps) {
   const stripes: string[] = v.stripes ?? [];
@@ -571,6 +658,14 @@ function FlagBg({ v, style, children }: BgProps) {
           style={{ width: '14%', height: '100%' }}
         />
       </Animated.View>
+
+      {/* Americana: B-2 flyover + drifting patriotic icons over the cloth. */}
+      {v.americana !== false && (
+        <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+          <B2Flyover />
+          {AMERICANA.map((cfg, i) => <AmericanaFloat key={i} {...cfg} />)}
+        </View>
+      )}
 
       {/* Vignette so the flag doesn't fight foreground text */}
       <View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.14)' }]} />
