@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { router } from 'expo-router';
 import { C, F } from '../lib/colors';
+import { reportBoundaryError } from '../lib/crashReporter';
 
 /**
  * Catches render-time exceptions anywhere in the tree below it and shows a
@@ -37,6 +38,9 @@ export class AppErrorBoundary extends React.Component<Props, State> {
     // Surface to the metro console in dev so the trace is searchable.
     // eslint-disable-next-line no-console
     console.error('[AppErrorBoundary]', error, info.componentStack);
+    // Report it so caught render errors show up in crash telemetry instead of
+    // depending on the user screenshotting the panel.
+    try { reportBoundaryError(error, info.componentStack ?? undefined); } catch { /* never throw */ }
     this.setState((s) => ({ errorCount: s.errorCount + 1 }));
   }
 

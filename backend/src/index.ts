@@ -25,6 +25,7 @@ import cosmeticsRouter from './routes/cosmetics';
 import titlesRouter from './routes/titles';
 import closestToPinRouter from './routes/closestToPin';
 import practiceRouter from './routes/practice';
+import telemetryRouter from './routes/telemetry';
 import { configRouter, adminRouter } from './routes/config';
 import { runMigrations } from './db/migrate';
 import { startCleanupSchedule } from './utils/cleanup';
@@ -114,6 +115,9 @@ app.use('/balls', ballsRouter);
 app.use('/titles', titlesRouter);
 app.use('/closest-to-pin', closestToPinRouter);
 app.use('/practice', practiceRouter);
+// Client crash telemetry: POST /telemetry/crash (optional auth) + GET
+// /telemetry/crashes (x-admin-token gated).
+app.use('/', telemetryRouter);
 // Server-driven config (public) + admin ops (x-admin-token gated).
 app.use('/config', configRouter);
 app.use('/admin', adminRouter);

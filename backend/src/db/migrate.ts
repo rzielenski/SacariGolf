@@ -2337,6 +2337,42 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS voted_at TIMESTAMPTZ;
     `,
   },
+  {
+    // Client crash telemetry. The app self-reports four failure kinds:
+    //   js_fatal            — uncaught JS exception (ErrorUtils global handler)
+    //   js_boundary         — render error caught by AppErrorBoundary
+    //   unhandled_rejection — a promise rejection nobody caught
+    //   abnormal_exit       — the PREVIOUS session ended while FOREGROUNDED with
+    //                         no clean shutdown = native crash / OOM / watchdog
+    //                         kill (detected on next launch from a persisted
+    //                         session marker; carries the last route, the
+    //                         breadcrumb trail, and how many iOS memory warnings
+    //                         preceded death — high mem_warns == leak/OOM, which
+    //                         is exactly the "crashes while just moving around"
+    //                         signature).
+    // user_id is NULLABLE: a crash can happen pre-login and an anonymous report
+    // is still useful. Rows are tiny; prune from the admin whenever.
+    name: 'crash_reports.create',
+    sql: `
+      CREATE TABLE IF NOT EXISTS crash_reports (
+        crash_id    BIGSERIAL PRIMARY KEY,
+        user_id     UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        kind        TEXT NOT NULL,
+        message     TEXT,
+        stack       TEXT,
+        last_route  TEXT,
+        breadcrumbs JSONB,
+        mem_warns   INT,
+        app_version TEXT,
+        update_id   TEXT,
+        platform    TEXT,
+        os_version  TEXT,
+        extra       JSONB,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS crash_reports_created_idx ON crash_reports(created_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations() {

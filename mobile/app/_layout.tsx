@@ -16,6 +16,13 @@ import { AppErrorBoundary } from '../components/AppErrorBoundary';
 import { OfflineBanner } from '../components/OfflineBanner';
 import { installOutboxDrainTriggers } from '../lib/outbox';
 import { C, IS_LIGHT_SKIN } from '../lib/colors';
+import { initCrashReporter, noteRoute } from '../lib/crashReporter';
+
+// Install crash reporting as the FIRST thing at boot so breadcrumbs capture the
+// whole session and an abnormal-exit from the previous run gets reported. See
+// lib/crashReporter.ts — this is how we catch native force-closes that no JS
+// error boundary can see.
+initCrashReporter();
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -263,6 +270,16 @@ function KeyboardDismissOnBackground() {
 // + app foreground. Idempotent so re-mounts during HMR don't double-bind.
 installOutboxDrainTriggers();
 
+/** Drops a breadcrumb every time the active route changes, so a crash report
+ *  pinpoints the exact screen the user was on when it died. */
+function RouteBreadcrumbs() {
+  const segments = useSegments();
+  useEffect(() => {
+    noteRoute('/' + segments.join('/'));
+  }, [segments]);
+  return null;
+}
+
 /** Fetch server config on boot + every foreground so min_version flips,
  *  banners, and feature flags reach running apps within one resume. */
 function AppConfigLoader() {
@@ -284,6 +301,7 @@ export default function RootLayout() {
             a hardcoded "light" made the clock white-on-white on a pearl bg. */}
         <StatusBar style={IS_LIGHT_SKIN ? 'dark' : 'light'} />
         <KeyboardDismissOnBackground />
+        <RouteBreadcrumbs />
         <AppConfigLoader />
         <UpdateBanner />
         <OfflineBanner />
