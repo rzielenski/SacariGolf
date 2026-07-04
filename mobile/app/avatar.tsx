@@ -82,6 +82,9 @@ export default function AvatarBuilder() {
         <TouchableOpacity style={s.randomBtn} onPress={randomize} activeOpacity={0.85}>
           <Text style={s.randomText}>🎲  Randomize</Text>
         </TouchableOpacity>
+        <TouchableOpacity onPress={() => router.push('/dev/avatar-lab' as any)} style={{ marginTop: 8 }}>
+          <Text style={s.artLink}>Preview other art styles →</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Category tabs */}
@@ -154,6 +157,7 @@ const s = StyleSheet.create({
     borderRadius: 999, paddingHorizontal: 16, paddingVertical: 8,
   },
   randomText: { color: C.gold, fontWeight: '800', fontSize: 13 },
+  artLink: { color: C.textMuted, fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' },
 
   catRow: { gap: 8, paddingHorizontal: 14, paddingVertical: 12 },
   catChip: {

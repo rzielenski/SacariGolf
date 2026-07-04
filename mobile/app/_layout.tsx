@@ -364,6 +364,7 @@ export default function RootLayout() {
         <Stack.Screen name="invite"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="resume"      options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="dev/vfx-preview"   options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="dev/avatar-lab"    options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="dev/crest-preview" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="verify-email" options={{ animation: 'slide_from_bottom', presentation: 'modal' }} />
       </Stack>
