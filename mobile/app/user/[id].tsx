@@ -4,6 +4,7 @@ import {
   ActivityIndicator, RefreshControl, Alert,
 } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { api, API_BASE } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { C, F } from '../../lib/colors';
@@ -82,8 +83,14 @@ export default function UserProfileScreen() {
     api.users.insights(id).then(setInsights).catch(() => { });
   }, [id]);
 
-  // Poll the player's live in-progress round every 15s while the screen is open
+  // Poll the player's live in-progress round every 15s — but only while this
+  // profile is the FOCUSED screen. A profile is one of the most-pushed routes
+  // (opened from the feed, leaderboard, comments, clan lists...), and each opens
+  // a new instance; without this, profile→profile→profile leaves N instances
+  // all polling every 15s. Re-runs on focus so it refreshes when you return.
+  const isFocused = useIsFocused();
   useEffect(() => {
+    if (!isFocused) return;
     let cancelled = false;
     const fetchActive = () => api.users.activeRound(id)
       .then((data) => { if (!cancelled) setActiveRound(data); })
@@ -91,7 +98,7 @@ export default function UserProfileScreen() {
     fetchActive();
     const t = setInterval(fetchActive, 15_000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [id]);
+  }, [id, isFocused]);
 
   if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} size="large" /></View>;
   if (!profile) {

@@ -9,6 +9,7 @@
  */
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
 import { api } from '../lib/api';
 import { C } from '../lib/colors';
 import { useCensor } from '../lib/censor';
@@ -29,12 +30,18 @@ export function LiveLeaderboard({ matchId, completed, onPressPlayer }: {
   onPressPlayer?: (userId: string) => void;
 }) {
   const c = useCensor();
+  // Only poll while the screen this board lives on is actually FOCUSED. The
+  // lobby stays mounted underneath the scoring screen for the entire round,
+  // so an ungated poll ran every 12s for hours from a covered screen (and
+  // forever from any screen left stranded in the stack).
+  const focused = useIsFocused();
   const [rows, setRows] = useState<Row[]>([]);
   const [format, setFormat] = useState('stroke');
   const [active, setActive] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    if (!focused) return;   // re-runs (and refetches) the moment focus returns
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
@@ -51,7 +58,7 @@ export function LiveLeaderboard({ matchId, completed, onPressPlayer }: {
     };
     tick();
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [matchId, completed]);
+  }, [matchId, completed, focused]);
 
   if (!loaded) return <ActivityIndicator color={C.gold} style={{ marginVertical: 14 }} />;
   if (!active || rows.length === 0) return null;

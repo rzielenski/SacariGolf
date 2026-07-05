@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator } from 'react-native';
 import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import { api } from '../lib/api';
@@ -73,22 +73,26 @@ export function LiveSpectatorModal({
     return () => { cancelled = true; clearInterval(t); };
   }, [visible, userId]);
 
-  // Compute initial map region from all shot endpoints
-  const region: Region | undefined = shots.length > 0
-    ? (() => {
-        const allPts = shots.flatMap((s) => [s.start, s.end]);
-        const lats = allPts.map((p) => p.lat);
-        const lngs = allPts.map((p) => p.lng);
-        const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-        const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-        return {
-          latitude: (minLat + maxLat) / 2,
-          longitude: (minLng + maxLng) / 2,
-          latitudeDelta: Math.max((maxLat - minLat) * 1.6, 0.0015),
-          longitudeDelta: Math.max((maxLng - minLng) * 1.6, 0.0015),
-        };
-      })()
-    : undefined;
+  // Compute the map region from all shot endpoints. Memoized on `shots` so its
+  // identity only changes when the tracked shots actually change (every 10s
+  // poll), NOT on every render. A controlled `region` prop with a fresh object
+  // identity each render forces react-native-maps to re-apply the camera and
+  // re-lay-out the satellite tile view repeatedly, which accumulates native
+  // map memory over a long spectate session.
+  const region: Region | undefined = useMemo(() => {
+    if (shots.length === 0) return undefined;
+    const allPts = shots.flatMap((s) => [s.start, s.end]);
+    const lats = allPts.map((p) => p.lat);
+    const lngs = allPts.map((p) => p.lng);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+    return {
+      latitude: (minLat + maxLat) / 2,
+      longitude: (minLng + maxLng) / 2,
+      latitudeDelta: Math.max((maxLat - minLat) * 1.6, 0.0015),
+      longitudeDelta: Math.max((maxLng - minLng) * 1.6, 0.0015),
+    };
+  }, [shots]);
 
   const segments = shots.map((s) => ({
     yards: distYards(s.start.lat, s.start.lng, s.end.lat, s.end.lng),
@@ -169,6 +173,7 @@ export function LiveSpectatorModal({
                         <Marker
                           coordinate={{ latitude: shot.start.lat, longitude: shot.start.lng }}
                           anchor={{ x: 0.5, y: 0.5 }}
+                          tracksViewChanges={false}
                         >
                           <View style={[s.dot, { backgroundColor: color }]}>
                             <Text style={s.dotText}>{i + 1}</Text>
@@ -177,6 +182,7 @@ export function LiveSpectatorModal({
                         <Marker
                           coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
                           anchor={{ x: 0.5, y: 0.5 }}
+                          tracksViewChanges={false}
                         >
                           <View style={[s.endDot, { borderColor: color }]} />
                         </Marker>

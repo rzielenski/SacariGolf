@@ -104,7 +104,11 @@ export default function VfxPreview() {
         <View style={s.grid}>
           {BACKGROUNDS.map((b) => (
             <View key={b.style} style={s.tile}>
-              <CosmeticBackground visual={{ style: b.style }} style={StyleSheet.absoluteFill} />
+              {/* Static swatch, not the live animation. Animating ~23 full
+                  backgrounds at once (hundreds of concurrent shared values +
+                  per-frame SVG path morphs) can spike memory hard; the thumbnail
+                  reads the same static. Tap-through to a single live bg for QA. */}
+              <CosmeticBackground visual={{ style: b.style }} style={StyleSheet.absoluteFill} animated={false} />
               <View style={s.tileLabelWrap}>
                 <Text style={s.tileLabel}>{b.name}</Text>
               </View>

@@ -270,15 +270,20 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const { matchId, clanId, toUserId, tournamentId } = req.query;
 
   if (toUserId) {
+    // Take the NEWEST 100, then re-sort ascending for display. The old
+    // `ORDER BY created_at ASC LIMIT 100` returned the OLDEST 100, so any
+    // thread past 100 messages never showed recent ones.
     const { rows } = await pool.query(
-      `SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
-              u.username, u.avatar_url,
-              ${equippedVisualSql('u')} AS equipped_visual,
-              dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id
-       FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
-       WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
-          OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
-       ORDER BY dm.created_at ASC LIMIT 100`,
+      `SELECT * FROM (
+         SELECT dm.dm_id AS message_id, dm.created_at, dm.body, dm.from_user_id AS user_id,
+                u.username, u.avatar_url,
+                ${equippedVisualSql('u')} AS equipped_visual,
+                dm.voice_url, dm.voice_duration_ms, dm.image_url, dm.client_id
+         FROM direct_messages dm JOIN users u ON u.user_id = dm.from_user_id
+         WHERE (dm.from_user_id = $1 AND dm.to_user_id = $2)
+            OR (dm.from_user_id = $2 AND dm.to_user_id = $1)
+         ORDER BY dm.created_at DESC LIMIT 100
+       ) sub ORDER BY created_at ASC`,
       [req.userId, toUserId]
     );
     return res.json(rows);
@@ -292,15 +297,19 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   const col = matchId ? 'match_id' : clanId ? 'clan_id' : 'tournament_id';
   const val = matchId ?? clanId ?? tournamentId;
 
+  // Newest 100, re-sorted ascending for display (see the DM branch above —
+  // the old ASC LIMIT 100 hid recent messages once a chat passed 100).
   const { rows } = await pool.query(
-    `SELECT m.message_id, m.created_at, m.body, m.user_id,
-            u.username, u.avatar_url,
-            ${equippedVisualSql('u')} AS equipped_visual,
-            m.voice_url, m.voice_duration_ms, m.image_url, m.client_id
-     FROM messages m JOIN users u ON u.user_id = m.user_id
-     WHERE m.${col} = $1
-     ORDER BY m.created_at ASC
-     LIMIT 100`,
+    `SELECT * FROM (
+       SELECT m.message_id, m.created_at, m.body, m.user_id,
+              u.username, u.avatar_url,
+              ${equippedVisualSql('u')} AS equipped_visual,
+              m.voice_url, m.voice_duration_ms, m.image_url, m.client_id
+       FROM messages m JOIN users u ON u.user_id = m.user_id
+       WHERE m.${col} = $1
+       ORDER BY m.created_at DESC
+       LIMIT 100
+     ) sub ORDER BY created_at ASC`,
     [val]
   );
   return res.json(rows);

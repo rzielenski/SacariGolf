@@ -308,6 +308,15 @@ export default function ScoringScreen() {
   // Score panel — animated height + drag handler. See hooks/useScorePanel.ts
   const { panelAnim, panResponder, panelExpanded, snapPanel } = useScorePanel(COLLAPSED_H, EXPANDED_H);
 
+  // Panel-relative bottom offsets for the two floating overlays (pin-distance +
+  // shot list). Memoized so we build the Animated node graph ONCE. Previously
+  // these were `Animated.add(panelAnim, new Animated.Value(N))` inline in the
+  // render, which allocated a fresh AnimatedValue + AnimatedAddition node on
+  // EVERY render — and this screen re-renders constantly (each ~1s GPS fix + a
+  // 5s stale tick), so those native animated nodes piled up fast during a round.
+  const pinDistBottom = useMemo(() => Animated.add(panelAnim, new Animated.Value(12)), [panelAnim]);
+  const shotListBottom = useMemo(() => Animated.add(panelAnim, new Animated.Value(20)), [panelAnim]);
+
   // Namespace saved progress by user so logging into a different account on
   // the same device doesn't pick up the previous user's in-progress round.
   const SAVE_KEY = `scores_${user?.user_id ?? 'anon'}_${id}`;
@@ -2115,7 +2124,11 @@ export default function ScoringScreen() {
       try { await AsyncStorage.removeItem(`shots_${id}`); } catch { }
       try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
       try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
-      router.replace('/(tabs)/' as any);
+      // dismissAll, NOT replace('/(tabs)/'): replace only swapped the TOP
+      // screen, stranding the lobby (and its polling leaderboard + view tree)
+      // in the stack forever. A session of rounds stacked dead screens until
+      // iOS jetsam-killed the app — the "force-closes mid-round" bug.
+      router.dismissAll();
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {
@@ -2135,7 +2148,10 @@ export default function ScoringScreen() {
       try { await AsyncStorage.removeItem(`shots_${id}`); } catch { }
       try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
       try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
-      router.replace(`/match/${id}` as any);
+      // back(), not replace: scoring is always pushed from this match's
+      // lobby, so popping lands on the REAL lobby (which refetches on focus
+      // and shows the forfeit result) instead of stacking a duplicate.
+      router.back();
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally {
@@ -2281,15 +2297,22 @@ export default function ScoringScreen() {
       try { await AsyncStorage.removeItem(`shots_active_${id}`); } catch { }
       try { await AsyncStorage.removeItem(`match_cache_${id}`); } catch { }
       const perkEarned = result?.result?.perkAwarded === 'lucky_round';
+      // back(), NOT replace(`/match/${id}`): scoring is always PUSHED from
+      // this match's lobby, so the lobby is directly beneath us and refetches
+      // on focus (poll + useFocusEffect) — popping shows the same result card.
+      // replace() left that lobby stranded in the stack (still mounted, still
+      // polling) and stacked a duplicate match screen per round; a session of
+      // back-to-back rounds accumulated dead screens until iOS killed the app
+      // for memory — the "app force-closes mid-round" bug.
       if (result.result && !result.result.perkAwarded) {
-        // Match fully resolved — go straight to the post-match page where
-        // the win/loss/draw card is rendered from authoritative server data.
-        router.replace(`/match/${id}` as any);
+        // Match fully resolved — pop to the lobby, which renders the
+        // win/loss/draw card from authoritative server data.
+        router.back();
       } else if (result.result && perkEarned) {
         Alert.alert(
           'Lucky Round Earned',
           'You marked the pin on enough holes to earn a Lucky Round perk! It will double your win or prevent a loss on your next ranked match.',
-          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
+          [{ text: 'OK', onPress: () => router.back() }]
         );
       } else {
         const msg = perkEarned
@@ -2298,7 +2321,7 @@ export default function ScoringScreen() {
         Alert.alert(
           perkEarned ? 'Lucky Round Earned' : 'Round Submitted',
           msg,
-          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }]
+          [{ text: 'OK', onPress: () => router.back() }]
         );
       }
     } catch (e: any) {
@@ -2315,7 +2338,7 @@ export default function ScoringScreen() {
           e instanceof OfflineError
             ? "You're offline. Your scores are saved on this device and will submit automatically the moment you have a connection."
             : 'The server had a hiccup. Your scores are saved on this device and will submit automatically in a moment.',
-          [{ text: 'OK', onPress: () => router.replace(`/match/${id}` as any) }],
+          [{ text: 'OK', onPress: () => router.back() }],
         );
       } else {
         Alert.alert('Error', e?.message ?? 'Submission failed');
@@ -2677,6 +2700,7 @@ export default function ScoringScreen() {
                   coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
                   anchor={{ x: 0.5, y: 0.5 }}
                   opacity={0.55}
+                  tracksViewChanges={false}
                 >
                   <View style={[styles.pastShotDot, { backgroundColor: color }]} />
                 </Marker>
@@ -2704,6 +2728,7 @@ export default function ScoringScreen() {
               coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
               anchor={{ x: 0.5, y: 0.5 }}
               opacity={0.8}
+              tracksViewChanges={false}
             >
               <View style={styles.pastShotEndDot} />
             </Marker>
@@ -2753,6 +2778,7 @@ export default function ScoringScreen() {
           <Marker
             coordinate={{ latitude: knownPin.lat, longitude: knownPin.lng }}
             anchor={{ x: 0.5, y: 1 }}
+            tracksViewChanges={false}
           >
             <View style={styles.pinMarker}>
               <View style={styles.pinMarkerHead} />
@@ -2861,6 +2887,7 @@ export default function ScoringScreen() {
               <Marker
                 coordinate={{ latitude: activeShot.start.lat, longitude: activeShot.start.lng }}
                 anchor={{ x: 0.5, y: 0.5 }}
+                tracksViewChanges={false}
               >
                 <View style={[styles.shotDot, { backgroundColor: color }]}>
                   <Text style={styles.shotDotText}>{currentShots.length + 1}</Text>
@@ -3212,8 +3239,8 @@ export default function ScoringScreen() {
       <Animated.View style={[
         styles.pinDistAnchor,
         // Sit 12px above the panel's current top edge, regardless of
-        // collapsed/expanded state.
-        { bottom: Animated.add(panelAnim, new Animated.Value(12)) },
+        // collapsed/expanded state (memoized node — see pinDistBottom).
+        { bottom: pinDistBottom },
       ]}>
         {yardsToPin != null ? (
           // Tappable: lets the user contribute another GPS reading to refine
@@ -3452,7 +3479,7 @@ export default function ScoringScreen() {
         return (
           <Animated.View style={[
             styles.distBanner,
-            { bottom: Animated.add(panelAnim, new Animated.Value(20)) },
+            { bottom: shotListBottom },
           ]}>
             <View>
               <Text style={styles.distNum}>{raw} yds</Text>

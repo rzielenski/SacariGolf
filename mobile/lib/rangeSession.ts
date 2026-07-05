@@ -24,6 +24,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import { SWING_REF, ClubMetrics, BodyMetrics } from './proSwingStats';
 
 const KEY = (userId: string) => `range_sessions_${userId}`;
@@ -145,6 +146,22 @@ export interface Point { x: number; y: number; }
 
 // ── Persistence ─────────────────────────────────────────────────────────
 
+/** Best-effort delete of a swing's local video file. Swallows all errors — a
+ *  missing/already-removed file must never block updating the record list, and
+ *  the file is worthless once its record is gone. Swings are recorded at up to
+ *  1080p/240fps, so leaving them on disk (the old behaviour on BOTH delete and
+ *  cap-eviction) leaked device storage indefinitely. */
+function deleteVideoFile(uri: string | undefined | null): void {
+  if (!uri || !uri.startsWith('file://')) return;   // only local recordings
+  try {
+    const f = new File(uri);
+    if (f.exists) {
+      const r: any = f.delete();
+      if (r && typeof r.then === 'function') r.catch(() => {});   // tolerate async variants
+    }
+  } catch { /* file gone or unreadable — nothing to clean up */ }
+}
+
 /** Load this user's saved range sessions, newest first. */
 export async function loadSwings(userId: string): Promise<RangeSwing[]> {
   try {
@@ -158,13 +175,20 @@ export async function loadSwings(userId: string): Promise<RangeSwing[]> {
 export async function saveSwing(userId: string, swing: RangeSwing): Promise<void> {
   const existing = await loadSwings(userId);
   // Replace any existing record with the same id (re-analysis updates).
-  const next = [swing, ...existing.filter((s) => s.swing_id !== swing.swing_id)]
-    .slice(0, MAX_STORED);
+  const deduped = [swing, ...existing.filter((s) => s.swing_id !== swing.swing_id)];
+  const next = deduped.slice(0, MAX_STORED);
+  // Anything pushed past the cap is gone from the list forever — delete its
+  // video file too (unless a kept record still points at the same file).
+  for (const s of deduped.slice(MAX_STORED)) {
+    if (!next.some((k) => k.video_uri === s.video_uri)) deleteVideoFile(s.video_uri);
+  }
   await AsyncStorage.setItem(KEY(userId), JSON.stringify(next));
 }
 
 export async function deleteSwing(userId: string, swingId: string): Promise<void> {
   const existing = await loadSwings(userId);
+  const removed = existing.find((s) => s.swing_id === swingId);
+  if (removed) deleteVideoFile(removed.video_uri);   // free the recording, not just the record
   await AsyncStorage.setItem(
     KEY(userId),
     JSON.stringify(existing.filter((s) => s.swing_id !== swingId)),

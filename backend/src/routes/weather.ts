@@ -46,6 +46,37 @@ function elevKey(lat: number, lng: number) {
   return `${lat.toFixed(5)},${lng.toFixed(5)}`;
 }
 
+// ── Cache eviction ──────────────────────────────────────────────────────────
+// `cache` and `elevCache` are module-level Maps that live for the whole process.
+// With no bound they grow one entry per unique key FOREVER — elevCache most of
+// all, since its ~1.1m-grid key means every distinct GPS point any player ever
+// walks mints a permanent entry (the TTL was only ever checked on read, so an
+// unre-queried coordinate was never freed). That is a genuine slow OOM on a
+// long-running Railway process. Two guards: a hard size cap (evict the oldest-
+// inserted entries on overflow — the real backstop) plus an hourly sweep of
+// stale entries so abandoned coordinates don't linger until the cap.
+const WEATHER_CACHE_MAX = 5_000;    // ~1.1km grid: thousands of course areas
+const ELEV_CACHE_MAX = 50_000;      // ~1.1m grid: each entry tiny ({number,string})
+
+function capMap<K, V>(map: Map<K, V>, max: number) {
+  if (map.size <= max) return;
+  const it = map.keys();               // Map preserves insertion order → oldest first
+  for (let n = map.size - max; n > 0; n--) {
+    const k = it.next().value;
+    if (k === undefined) break;
+    map.delete(k);
+  }
+}
+
+// `.unref()` so this timer never keeps the process alive at shutdown (mirrors
+// the rate-limiter sweep in utils/rateLimit.ts). Deleting during for..of on a
+// Map is safe.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of cache) if (now - v.fetched_at > CACHE_TTL_MS) cache.delete(k);
+  for (const [k, v] of elevCache) if (now - v.fetched_at > ELEV_TTL_MS) elevCache.delete(k);
+}, 60 * 60 * 1000).unref();
+
 /** USGS 3DEP coverage box (CONUS + most of Alaska). Coarse but rejects
  *  obviously-non-US points before wasting an upstream request. */
 function isLikelyUS(lat: number, lng: number) {
@@ -109,6 +140,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     };
 
     cache.set(key, { fetched_at: Date.now(), data });
+    capMap(cache, WEATHER_CACHE_MAX);
     res.json(data);
   } catch (err) {
     console.error('GET /weather upstream failed:', err);
@@ -179,6 +211,7 @@ router.get('/elevation', requireAuth, wrap(async (req: AuthRequest, res: Respons
 
   const data = { elevation_m, source };
   elevCache.set(key, { fetched_at: Date.now(), data });
+  capMap(elevCache, ELEV_CACHE_MAX);
   res.json({ ...data, cached: false });
 }));
 

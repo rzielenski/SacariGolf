@@ -88,6 +88,18 @@ const STILL_RADIUS_M = 6;
  *  position. A slightly-stale fix is far better than a position frozen at
  *  "the last place you stood" until the app is restarted. */
 const STUCK_ESCAPE_MS = 15_000;
+/** Display-coalescing threshold for the `userCoord` STATE (not the fix buffer).
+ *  We run TWO independent ~1Hz GPS streams into userCoord for resilience (the
+ *  expo watch + react-native-maps' onUserLocationChange) — see noteMapFix. That
+ *  means up to ~2 state writes/sec, and because each write is a fresh object it
+ *  re-renders the entire (very large) scoring screen every time, for the whole
+ *  round. When the new fix is within this radius of the last DISPLAYED coord we
+ *  skip the state write (return the same reference so React bails the render).
+ *  0.9m ≈ 1yd — well below the GPS error floor, so "yards to pin" is unaffected;
+ *  the fix buffer + averaged-fix path still see every raw sample for shot
+ *  tracking. This mainly de-dupes the two streams and kills stationary jitter
+ *  re-renders. */
+const DISPLAY_MOVE_EPSILON_M = 0.9;
 
 interface BufferedFix {
   lat: number;
@@ -311,16 +323,23 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse, forced
           ) {
             return;
           }
-          if (rawAcc >= 0) setGpsAccuracyM(rawAcc);
-          const c: UserCoord = {
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-            altitude: loc.coords.altitude,
-          };
-          const near2 = !cLat || distMetres(c.latitude, c.longitude, cLat, cLng) <= ON_COURSE_METRES;
+          // Round accuracy to whole metres so the display badge doesn't
+          // re-render on sub-metre GPS jitter (React bails when the value is
+          // unchanged); the raw value still drives hasQualityFix above.
+          if (rawAcc >= 0) setGpsAccuracyM(Math.round(rawAcc));
+          const lat2 = loc.coords.latitude, lng2 = loc.coords.longitude;
+          const near2 = !cLat || distMetres(lat2, lng2, cLat, cLng) <= ON_COURSE_METRES;
           setOnCourse(near2);
           if (!near2) offCourseCb.current?.();
-          setUserCoord(c);
+          setUserCoord((prev) => {
+            // Skip the re-render when we've barely moved (jitter / the other
+            // stream already reported this spot). Keeps the fix buffer fresh
+            // but stops ~2Hz whole-screen re-renders for the whole round.
+            if (prev && distMetres(prev.latitude, prev.longitude, lat2, lng2) < DISPLAY_MOVE_EPSILON_M) {
+              return prev;
+            }
+            return { latitude: lat2, longitude: lng2, altitude: loc.coords.altitude };
+          });
           lastFixAtRef.current = Date.now();
         },
       );
@@ -623,21 +642,29 @@ export function useLocation({ enabled, courseLat, courseLng, onOffCourse, forced
       if (buf.length > FIX_BUFFER_LIMIT) buf.shift();
       if (acc <= TRUST_ACCURACY_M) setHasQualityFix(true);
     }
-    if (acc >= 0) setGpsAccuracyM(acc);
+    if (acc >= 0) setGpsAccuracyM(Math.round(acc));
     const cLat = courseLat ?? 0;
     const near = !cLat || distMetres(lat, lng, cLat, courseLng ?? 0) <= ON_COURSE_METRES;
     setOnCourse(near);
     if (!near) offCourseCb.current?.();
-    setUserCoord((prev) => ({
-      latitude: lat,
-      longitude: lng,
-      // Preserve the last known altitude when a map fix doesn't carry one, so
-      // we never wipe a good GPS-altitude reading. Altitude is only the
-      // FALLBACK slope input anyway — barometer + crowdsourced course
-      // elevation are the primary sources — but keeping it intact means the
-      // map-fed path is never worse than the expo-fed path for slope.
-      altitude: typeof coord.altitude === 'number' ? coord.altitude : (prev?.altitude ?? null),
-    }));
+    setUserCoord((prev) => {
+      // Sub-epsilon move (jitter, or the expo watch already reported this
+      // spot): keep the same reference so the huge scoring screen doesn't
+      // re-render. The fix buffer above still captured this raw sample.
+      if (prev && distMetres(prev.latitude, prev.longitude, lat, lng) < DISPLAY_MOVE_EPSILON_M) {
+        return prev;
+      }
+      return {
+        latitude: lat,
+        longitude: lng,
+        // Preserve the last known altitude when a map fix doesn't carry one, so
+        // we never wipe a good GPS-altitude reading. Altitude is only the
+        // FALLBACK slope input anyway — barometer + crowdsourced course
+        // elevation are the primary sources — but keeping it intact means the
+        // map-fed path is never worse than the expo-fed path for slope.
+        altitude: typeof coord.altitude === 'number' ? coord.altitude : (prev?.altitude ?? null),
+      };
+    });
     lastFixAtRef.current = Date.now();
   }, [courseLat, courseLng]);
 

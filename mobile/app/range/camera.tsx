@@ -27,9 +27,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, ActivityIndicator,
-  Alert, Linking, Platform,
+  Alert, Linking, Platform, AppState,
 } from 'react-native';
 import { Stack, useLocalSearchParams, router } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 
 // ── react-native-vision-camera, guarded ─────────────────────────────────
 // The library throws an unhandled error AT IMPORT TIME when it can't find
@@ -131,6 +132,17 @@ export default function RangeCameraScreen() {
   const [recording, setRecording] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [saving, setSaving] = useState(false);
+
+  // Release the capture session when the app leaves the foreground or this
+  // screen loses focus (e.g. we push to the analyze screen after a take). The
+  // AVCaptureSession + its frame buffers are heavy; without this the camera
+  // stayed live the entire time the screen was mounted, even backgrounded.
+  const isFocused = useIsFocused();
+  const [appActive, setAppActive] = useState(true);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => setAppActive(s === 'active'));
+    return () => sub.remove();
+  }, []);
 
   // Permission flow — ask once on first mount. If denied, surface a
   // settings-jump alert; without camera we have nothing to do here.
@@ -314,7 +326,7 @@ export default function RangeCameraScreen() {
         // app.json (one fewer privacy prompt for the user).
         audio={false}
         video
-        isActive={!saving}
+        isActive={appActive && isFocused && !saving}
       />
 
       {/* ── Top status pill ──────────────────────────────────────────── */}

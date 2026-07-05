@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, isSilentError } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
@@ -86,11 +87,17 @@ export default function MatchLobbyScreen() {
   // Poll lightly while the match is still in progress and stop once it's
   // completed (nothing left to update). Also refetch whenever the screen
   // regains focus so returning from scoring / a profile shows fresh state.
+  //
+  // Focus-gated: this screen stays MOUNTED underneath the scoring screen for
+  // the entire round, and an ungated interval polled from under it for hours.
+  // The useFocusEffect below refetches immediately on pop-back, so nothing is
+  // stale when the player actually sees the lobby again.
+  const lobbyFocused = useIsFocused();
   useEffect(() => {
-    if (match?.completed) return;
+    if (match?.completed || !lobbyFocused) return;
     const t = setInterval(() => { load(); }, 12000);
     return () => clearInterval(t);
-  }, [match?.completed, load]);
+  }, [match?.completed, load, lobbyFocused]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -295,7 +302,10 @@ export default function MatchLobbyScreen() {
     try {
       await api.matches.forfeit(id);
       try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${id}`); } catch { }
-      router.replace('/(tabs)/' as any);
+      // dismissAll, NOT replace('/(tabs)/'): replace swapped only the top
+      // screen and left every screen below stranded-but-mounted, growing the
+      // stack each round until iOS killed the app for memory.
+      router.dismissAll();
     } catch (e: any) {
       Alert.alert('Could not forfeit', e?.message ?? 'Try again.');
     } finally {
@@ -328,7 +338,8 @@ export default function MatchLobbyScreen() {
             try {
               await api.matches.cancel(id);
               try { await AsyncStorage.removeItem(`scores_${user?.user_id ?? 'anon'}_${id}`); } catch { }
-              router.replace('/(tabs)/' as any);
+              // dismissAll — see doForfeit above (stack-leak fix).
+              router.dismissAll();
             } catch (e: any) {
               // 409 race: an opponent might submit in the same second the
               // user taps Cancel, even though the button below gates on

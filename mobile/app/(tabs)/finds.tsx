@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Image, ScrollView,
+  View, Text, StyleSheet, TouchableOpacity, Image, ScrollView, FlatList,
   Alert, ActivityIndicator, Animated, Dimensions, RefreshControl, Modal,
   PanResponder, Platform,
 } from 'react-native';
@@ -431,14 +431,21 @@ function LeaderboardTab({ onSelectFind }: { onSelectFind: (f: any) => void }) {
   }
 
   return (
-    <ScrollView
+    // FlatList (not ScrollView + map) so off-screen rows unmount and release
+    // their decoded remote course-photo bitmaps — the Top Finds board is
+    // unbounded, so a ScrollView kept every full-res image resident at once.
+    <FlatList
       style={styles.listScroll}
+      data={finds}
+      keyExtractor={(f) => f.find_id}
+      renderItem={({ item, index }) => (
+        <FindRow find={item} rank={index + 1} onPress={() => onSelectFind(item)} />
+      )}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
-    >
-      {finds.map((f, i) => (
-        <FindRow key={f.find_id} find={f} rank={i + 1} onPress={() => onSelectFind(f)} />
-      ))}
-    </ScrollView>
+      windowSize={7}
+      initialNumToRender={10}
+      maxToRenderPerBatch={8}
+    />
   );
 }
 
@@ -473,24 +480,32 @@ function MineTab({ userId, onSelectFind }: { userId: string; onSelectFind: (f: a
   if (loading) return <View style={styles.centered}><ActivityIndicator color={C.gold} /></View>;
 
   return (
-    <ScrollView style={styles.listScroll}>
-      {data.avgElo !== null && (
+    // FlatList so off-screen find rows unmount and free their remote images
+    // (see LeaderboardTab). Header carries the average-SR card; empty state
+    // renders when the player has no finds.
+    <FlatList
+      style={styles.listScroll}
+      data={data.finds}
+      keyExtractor={(f) => f.find_id}
+      renderItem={({ item, index }) => (
+        <FindRow find={item} rank={index + 1} onPress={() => onSelectFind(item)} onDelete={() => deletFind(item.find_id)} />
+      )}
+      ListHeaderComponent={data.avgElo !== null ? (
         <View style={styles.avgCard}>
           <Text style={styles.avgNum}>{data.avgElo}</Text>
           <Text style={styles.avgLabel}>Average Find SR</Text>
         </View>
-      )}
-      {data.finds.length === 0 ? (
+      ) : null}
+      ListEmptyComponent={
         <View style={styles.centered}>
           <Text style={styles.emptyTitle}>No finds yet</Text>
           <Text style={styles.emptySub}>Tap "+ Find" to upload your first course discovery.</Text>
         </View>
-      ) : (
-        data.finds.map((f, i) => (
-          <FindRow key={f.find_id} find={f} rank={i + 1} onPress={() => onSelectFind(f)} onDelete={() => deletFind(f.find_id)} />
-        ))
-      )}
-    </ScrollView>
+      }
+      windowSize={7}
+      initialNumToRender={10}
+      maxToRenderPerBatch={8}
+    />
   );
 }
 

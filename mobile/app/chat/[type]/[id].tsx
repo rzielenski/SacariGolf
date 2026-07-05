@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { api, API_BASE, subscribeConn } from '../../../lib/api';
@@ -111,7 +112,13 @@ export default function ChatScreen() {
     } catch { /* silent */ } finally { setLoading(false); }
   }, [type, id, mergeServer]);
 
+  // Only poll while THIS chat is the focused screen. A chat is a pushed route
+  // (open a chat, tap an avatar → /user/[id] pushes on top) and stays mounted
+  // underneath — an ungated 5s message re-fetch + 10s markRead would keep
+  // firing for every chat left in the stack. Re-runs (and refreshes) on focus.
+  const isFocused = useIsFocused();
   useEffect(() => {
+    if (!isFocused) return;
     load();
     pollRef.current = setInterval(load, 5000);
     const markRead = () => {
@@ -125,7 +132,7 @@ export default function ChatScreen() {
       clearInterval(readInterval);
       markRead();
     };
-  }, [load, type, id]);
+  }, [load, type, id, isFocused]);
 
   /** POST one text message. On success the optimistic bubble is swapped
    *  for the server row; on failure it flips to 'failed' (tap to retry).
