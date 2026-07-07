@@ -1,0 +1,39 @@
+diff --git a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/LegacyViewManagerInterop/RCTLegacyViewManagerInteropComponentView.mm b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/LegacyViewManagerInterop/RCTLegacyViewManagerInteropComponentView.mm
+index bec2ac5..bb63559 100644
+--- a/node_modules/react-native/React/Fabric/Mounting/ComponentViews/LegacyViewManagerInterop/RCTLegacyViewManagerInteropComponentView.mm
++++ b/node_modules/react-native/React/Fabric/Mounting/ComponentViews/LegacyViewManagerInterop/RCTLegacyViewManagerInteropComponentView.mm
+@@ -177,8 +177,15 @@ static NSString *const kRCTLegacyInteropChildIndexKey = @"index";
+     // called and the `finalizeUpdate` is not invoked.
+     if ([childComponentView isKindOfClass:[RCTLegacyViewManagerInteropComponentView class]]) {
+       UIView *target = ((RCTLegacyViewManagerInteropComponentView *)childComponentView).contentView;
+-      [_adapter.paperView insertReactSubview:target atIndex:index];
+-    } else {
++      // PATCH (sacari): a nested legacy-interop child's contentView may not be
++      // finalized yet during this mount pass; inserting nil aborts the app
++      // (NSInvalidArgumentException, -[__NSArrayM insertObject:atIndex:] object
++      // cannot be nil) — the random force-close on the map + locker room. Skip
++      // it; the child re-mounts on the next transaction once contentView is set.
++      if (target) {
++        [_adapter.paperView insertReactSubview:target atIndex:index];
++      }
++    } else if (childComponentView) {
+       [_adapter.paperView insertReactSubview:childComponentView atIndex:index];
+     }
+     [_adapter.paperView didUpdateReactSubviews];
+@@ -248,8 +255,14 @@ static NSString *const kRCTLegacyInteropChildIndexKey = @"index";
+     UIView *childView = mountInstruction[kRCTLegacyInteropChildComponentKey];
+     if ([childView isKindOfClass:[RCTLegacyViewManagerInteropComponentView class]]) {
+       UIView *target = ((RCTLegacyViewManagerInteropComponentView *)childView).contentView;
+-      [_adapter.paperView insertReactSubview:target atIndex:index.integerValue];
+-    } else {
++      // PATCH (sacari): skip a not-yet-finalized nested child (see
++      // mountChildComponentView) — prevents the insertReactSubview:nil abort
++      // under heavy nested-interop churn (react-native-maps markers/overlays,
++      // react-native-svg cosmetic nodes).
++      if (target) {
++        [_adapter.paperView insertReactSubview:target atIndex:index.integerValue];
++      }
++    } else if (childView) {
+       [_adapter.paperView insertReactSubview:childView atIndex:index.integerValue];
+     }
+   }

@@ -60,6 +60,12 @@ export interface Shot {
    *  for a full swing. Drives the per-club partial-distance breakdown in
    *  club-stats so a 75% wedge doesn't muddy the full-swing average. */
   partial_value?: string;
+  /** SCRAMBLE only: the teammate whose ball this tracked shot was. Set via the
+   *  "whose shot?" prompt after tracking. When present (and a valid same-side
+   *  member, enforced server-side), the shot's distance / dispersion /
+   *  closest-to-pin count toward THAT player's stats instead of the tracker's.
+   *  Absent/null = the tracker hit it (the normal case). */
+  owner_user_id?: string | null;
 }
 
 /** A shot that's been started but not stopped yet (TRACK tapped once). */

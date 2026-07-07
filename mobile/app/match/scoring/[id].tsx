@@ -20,6 +20,7 @@ import { useShotTracking } from './hooks/useShotTracking';
 import { useLocation } from './hooks/useLocation';
 import type { Pt, Shot, ActiveShot } from '../../../lib/scoringTypes';
 import { CLUB_CODES, DEFAULT_CLUB_YDS, partialPresetsFor } from '../../../lib/clubs';
+import { loadLocalBag } from '../../../lib/bag';
 import { Hole, Teebox, Course } from '../../../types';
 import { InviteFriendsModal } from '../../../components/InviteFriendsModal';
 import { HoleScoreCelebration, CelebrationEvent, CelebrationKind } from '../../../components/HoleScoreCelebration';
@@ -84,6 +85,17 @@ export default function ScoringScreen() {
     subsetParam === 'back' ? 'back' : subsetParam === 'front' ? 'front' : 'full'
   );
   const { user } = useAuth();
+
+  // Bag for the in-round picker / auto-suggest, loaded LOCAL-FIRST so a bag the
+  // player saved this session (even offline, before it synced to the server) is
+  // honored in the round; consumers fall back to the /me value.
+  const [localBag, setLocalBag] = useState<any[] | null>(null);
+  useEffect(() => {
+    if (!user?.user_id) return;
+    let cancelled = false;
+    loadLocalBag(user.user_id).then((b) => { if (!cancelled) setLocalBag(b); });
+    return () => { cancelled = true; };
+  }, [user?.user_id]);
 
   // Match / course data
   const [match, setMatch] = useState<any>(null);
@@ -398,7 +410,7 @@ export default function ScoringScreen() {
   // it" and adopts it locally. Without this ref, the very first poll
   // would always look like a teammate change and we'd stomp every par
   // default on the user's screen.
-  const lastSyncedScoresRef = useRef<number[]>([]);
+  const lastSyncedScoresRef = useRef<(number | null)[]>([]);
   useEffect(() => {
     if (selectingCourse || preview || holes.length === 0 || scores.length === 0 || !teebox) return;
     const send = () => {
@@ -410,7 +422,11 @@ export default function ScoringScreen() {
       let maxIdx = currentHole;
       enteredHoles.forEach((i) => { if (i > maxIdx) maxIdx = i; });
       const end = Math.max(maxIdx + 1, 1);
-      const sent = scores.slice(0, end);
+      // Send NULL (not the par-fill) for any hole the player hasn't explicitly
+      // scored, so the server / shared scramble card / spectator / a resume
+      // never see a defaulted par on an untouched hole. The backend + live
+      // leaderboard already skip non-numeric scores.
+      const sent = scores.slice(0, end).map((s, i) => (enteredHoles.has(i) ? s : null));
       api.matches.progress(id, {
         holeScores: sent,
         holeStats: holeStats.slice(0, end),
@@ -747,13 +763,12 @@ export default function ScoringScreen() {
       );
       setCurrentHole(saved.currentHole ?? 0);
     } else if (serverScores && serverScores.length > 0) {
-      // Draft gone → rebuild from the server. The /progress endpoint pads
-      // unplayed holes with par, so we can't mark EVERY server hole entered
-      // (that would let an incomplete round be finalized as all-par and move
-      // SR/ELO). Mark entered only holes whose restored score differs from par
-      // — the same heuristic the on-device draft path uses above. A genuine
-      // par the player must re-confirm is a fair price for not crediting
-      // placeholders they never played.
+      // Draft gone → rebuild from the server. New clients upload NULL for any
+      // hole the player never scored, so "entered" is exactly the holes the
+      // server has a real (non-null) score for. This never credits an untouched
+      // hole, and — unlike the old "differs from par" heuristic — never loses a
+      // hole the player genuinely scored at par. (par is only a display base for
+      // un-entered holes, which render blank anyway.)
       const restored = [...par];
       serverScores.forEach((s, i) => { if (i < restored.length && typeof s === 'number') restored[i] = s; });
       setScores(restored);
@@ -762,7 +777,7 @@ export default function ScoringScreen() {
           ? sorted.map((_, i) => serverStats[i] ?? {})
           : sorted.map(() => ({}))
       );
-      setEnteredHoles(new Set(serverScores.map((_, i) => i).filter((i) => i < restored.length && restored[i] !== par[i])));
+      setEnteredHoles(new Set(serverScores.map((_, i) => i).filter((i) => i < restored.length && typeof serverScores[i] === 'number')));
       setCurrentHole(Math.max(0, Math.min(serverScores.length - 1, sorted.length - 1)));
     } else {
       setScores(saved?.scores ?? par);
@@ -1110,9 +1125,27 @@ export default function ScoringScreen() {
   const knownPinRef = useRef<{ lat: number; lng: number } | null>(null);
   const knownTeeRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  // ── Scramble shot attribution ──────────────────────────────────────────
+  // In a scramble the team plays one ball, so after tracking the SELECTED shot
+  // the tracker tags which teammate's ball it was. That tag rides on the Shot
+  // (owner_user_id) and the backend credits that player's stats.
+  const mySide = match?.my_side ?? match?.players?.find((p: any) => p.user_id === myUserId)?.side;
+  const scrambleTeammates = useMemo<any[]>(
+    () => (isScramble
+      ? (match?.players ?? []).filter((p: any) => p.side === mySide && p.user_id !== myUserId)
+      : []),
+    [isScramble, match?.players, mySide, myUserId],
+  );
+  const canAttributeShots = isScramble && scrambleTeammates.length > 0;
+  // The shot awaiting a "whose shot?" answer (set right after finalize).
+  const [ownerPickShot, setOwnerPickShot] = useState<{ holeNum: number; index: number } | null>(null);
+
   const tracking = useShotTracking({
     matchId: id, userId: user?.user_id, userCoord, currentHoleNum, computePlaysLike,
     getAveragedFix, getRelativeAltitudeM, getMsSinceLastFix,
+    // After each finalized shot in a scramble with teammates, prompt for whose
+    // ball it was so the shot attributes to the right player's stats.
+    onShotFinalized: (holeNum, index) => { if (canAttributeShots) setOwnerPickShot({ holeNum, index }); },
     // Aim = last tapped measure point (if any). Read off a ref so the hook
     // always sees the current value without re-subscribing.
     getAimPoint: () => measurePinRef.current,
@@ -1126,9 +1159,18 @@ export default function ScoringScreen() {
   const {
     shotsByHole, currentShots, activeShot, pendingClub, pendingPartial, clubPickerVisible,
     setClubPickerVisible, pickClubManual, pickClubAuto, pickPartial, isManualPick,
-    onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt,
+    onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt, setShotOwner,
     canTrackForgottenShot, trackForgottenShot,
   } = tracking;
+
+  // Resolve a shot's owner (in a scramble) to a short name for the map label:
+  // the teammate's username if tagged to one, else null (the tracker's own
+  // ball — no label, to keep the map clean).
+  const shotOwnerName = useCallback((ownerId: string | null | undefined): string | null => {
+    if (!ownerId || ownerId === myUserId) return null;
+    const p = (match?.players ?? []).find((pl: any) => pl.user_id === ownerId);
+    return p?.username ?? null;
+  }, [match?.players, myUserId]);
 
   // ── Capture barometric anchor on FIRST track press of the round ────────
   // When activeShot transitions from null → not-null for the first time in
@@ -1681,8 +1723,9 @@ export default function ScoringScreen() {
     // Restrict the suggestion pool to the user's bag (when set). Bag now
     // stores `{code,label?}` entries — extract just the codes for the
     // filter set. Backward-compat: still accepts the legacy `string[]`
-    // shape in case a cached user object hasn't refreshed.
-    const bag = user?.clubs_in_bag;
+    // shape in case a cached user object hasn't refreshed. LOCAL-FIRST so a
+    // bag saved this session (even offline, pre-sync) is honored.
+    const bag = localBag ?? user?.clubs_in_bag;
     const bagCodes = (Array.isArray(bag) && bag.length > 0)
       ? bag.map((e: any) => typeof e === 'string' ? e : e?.code).filter(Boolean) as string[]
       : null;
@@ -1714,7 +1757,7 @@ export default function ScoringScreen() {
       if (!best || diff < best.diff) best = { club, diff };
     }
     return best?.club ?? null;
-  }, [userIsPremium, clubStats, yardsToPin, user?.clubs_in_bag]);
+  }, [userIsPremium, clubStats, yardsToPin, localBag, user?.clubs_in_bag]);
 
   // Auto-suggest the most-likely club as the player walks. Takes effect
   // whenever the user hasn't manually picked one (pickClubAuto respects
@@ -1728,50 +1771,6 @@ export default function ScoringScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userIsPremium, activeShot, suggestedClub]);
 
-  // ── Past shots near my current spot ───────────────────────────────────
-  // Pulls past rounds at this hole and keeps only the segments whose START
-  // was within ~20m of where the player is right now. Lets them see "last
-  // time I was here, the ball ended up over there" — useful for picking
-  // a target line based on what's actually worked before.
-  type PastSeg = { start: { lat: number; lng: number }; end: { lat: number; lng: number }; club?: string; match_id: string; created_at: string };
-  const NEARBY_RADIUS_M = 20;
-  const nearbyPastShots = useMemo<PastSeg[]>(() => {
-    if (!userIsPremium || !userCoord || currentHoleNum == null) return [];
-    const rounds = pastShotsByHole[currentHoleNum];
-    if (!rounds?.length) return [];
-    const here = { lat: userCoord.latitude, lng: userCoord.longitude };
-    const out: PastSeg[] = [];
-    for (const round of rounds) {
-      const raw: any[] = Array.isArray(round.shots) ? round.shots : [];
-      // Convert legacy point format into segments on the fly.
-      const segs: { start: any; end: any; club?: string }[] = [];
-      if (raw.length && raw[0]?.start && raw[0]?.end) {
-        for (const s of raw) {
-          if (s?.start && s?.end) segs.push({ start: s.start, end: s.end, club: s.club });
-        }
-      } else {
-        for (let i = 0; i < raw.length - 1; i++) {
-          segs.push({ start: raw[i], end: raw[i + 1], club: raw[i]?.club });
-        }
-      }
-      for (const s of segs) {
-        // Skip malformed segments (legacy/partial data) so neither this
-        // distance read nor the overlay render derefs an undefined coord.
-        if (typeof s?.start?.lat !== 'number' || typeof s?.start?.lng !== 'number'
-          || typeof s?.end?.lat !== 'number' || typeof s?.end?.lng !== 'number') continue;
-        const d = distMetres(here.lat, here.lng, s.start.lat, s.start.lng);
-        if (d <= NEARBY_RADIUS_M) {
-          out.push({ ...s, match_id: round.match_id, created_at: round.created_at });
-        }
-      }
-    }
-    return out;
-  }, [
-    userIsPremium, currentHoleNum, pastShotsByHole,
-    // Re-evaluate when the player's coarse position changes (within ~5m).
-    userCoord ? Math.round(userCoord.latitude * 20000) : null,
-    userCoord ? Math.round(userCoord.longitude * 20000) : null,
-  ]);
 
   // ── Heatmap overlay: project dispersion of the active/pending club onto
   // the map, anchored at the player's current position with "forward" =
@@ -1982,6 +1981,78 @@ export default function ScoringScreen() {
     // re-aims toward wherever they last tapped.
     measurePin?.latitude, measurePin?.longitude,
   ]);
+
+  // ── "Where your Nth shot lands" tendency region ────────────────────────
+  // Replaces the old per-shot dashed lines (which piled up fast on a hole
+  // you've played a lot). Instead of drawing every past shot, we show ONE
+  // shaded ellipse for the shot the player is ABOUT to hit: the landing
+  // dispersion of that same shot NUMBER across their prior rounds on this
+  // hole. On the tee it's "where your tee shots land"; after the drive it
+  // becomes "where your 2nd shots land"; and so on as they progress — never
+  // all shot positions at once. Styled cool + dashed so it reads as HISTORY
+  // and stays visually distinct from the warm (yellow/red) per-club
+  // predictive heatmap above.
+  const shotTendency = useMemo<{ ellipse: LL[]; center: LL; count: number; label: string } | null>(() => {
+    if (!userIsPremium || currentHoleNum == null) return null;
+    const si = currentShots.length;             // 0-based index of the shot about to be hit
+    // Landing point (segment end) of shot #si from each prior round that got
+    // that far. pastHoleShots is already normalised + coord-validated.
+    const pts: { lat: number; lng: number }[] = [];
+    for (const round of pastHoleShots) {
+      const seg = round.shots[si];
+      if (seg && typeof seg.end?.lat === 'number' && typeof seg.end?.lng === 'number') {
+        pts.push({ lat: seg.end.lat, lng: seg.end.lng });
+      }
+    }
+    if (pts.length < 2) return null;             // need a couple of samples to show a tendency
+
+    const N = pts.length;
+    const meanLat = pts.reduce((a, p) => a + p.lat, 0) / N;
+    const meanLng = pts.reduce((a, p) => a + p.lng, 0) / N;
+    // Local east/north metres frame around the centroid.
+    const mPerDegLat = 111320;
+    const mPerDegLng = 111320 * Math.cos(meanLat * Math.PI / 180);
+    let cxx = 0, cyy = 0, cxy = 0;
+    for (const p of pts) {
+      const ex = (p.lng - meanLng) * mPerDegLng;   // east metres
+      const ny = (p.lat - meanLat) * mPerDegLat;   // north metres
+      cxx += ex * ex; cyy += ny * ny; cxy += ex * ny;
+    }
+    cxx /= N; cyy /= N; cxy /= N;
+    // 2×2 symmetric eigen-decomposition (same approach as the club heatmap).
+    const trace = cxx + cyy;
+    const det = cxx * cyy - cxy * cxy;
+    const disc = Math.sqrt(Math.max(0, (trace / 2) ** 2 - det));
+    const l1 = trace / 2 + disc;
+    const l2 = Math.max(0, trace / 2 - disc);
+    const theta = 0.5 * Math.atan2(2 * cxy, cxx - cyy);   // major-axis angle in the E/N frame
+    // ~1.6σ ellipse, floored so a tight cluster still reads as a region, not a dot.
+    const MULT = 1.6;
+    const MIN_AXIS_M = 7;
+    const aMaj = Math.max(Math.sqrt(l1) * MULT, MIN_AXIS_M);
+    const aMin = Math.max(Math.sqrt(l2) * MULT, MIN_AXIS_M);
+    const cosT = Math.cos(theta), sinT = Math.sin(theta);
+    const STEPS = 48;
+    const ellipse: LL[] = [];
+    for (let i = 0; i < STEPS; i++) {
+      const t = (i / STEPS) * Math.PI * 2;
+      const bx = aMaj * Math.cos(t);   // axis-aligned ellipse point
+      const by = aMin * Math.sin(t);
+      const ex = bx * cosT - by * sinT;   // rotate into the E/N frame
+      const ny = bx * sinT + by * cosT;
+      ellipse.push({
+        latitude: meanLat + ny / mPerDegLat,
+        longitude: meanLng + ex / mPerDegLng,
+      });
+    }
+    const ORD = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'];
+    return {
+      ellipse,
+      center: { latitude: meanLat, longitude: meanLng },
+      count: N,
+      label: ORD[si] ?? `${si + 1}th`,
+    };
+  }, [userIsPremium, currentHoleNum, pastHoleShots, currentShots.length]);
 
   // Weather-adjusted plays-like distance — premium feature. Layers altitude,
   // temperature, wind, and rain on top of the slope-adjusted yardage.
@@ -2220,19 +2291,17 @@ export default function ScoringScreen() {
     // Guard against currentHole drifting out of bounds (e.g. holes were resliced
     // or scoring screen briefly mounts before holes load).
     if (currentHole < 0 || currentHole >= holes.length) return;
+    // NEVER default a blank hole to par. The +/- stepper only ADJUSTS a score
+    // the player has already picked (via the number row) — a hole gets no
+    // score at all until the player explicitly selects one. On a blank hole
+    // +/- is a no-op (the buttons are dimmed to signal it).
+    if (!enteredHoles.has(currentHole)) return;
     const par = holes[currentHole]?.par ?? 4;
-    // First touch on an unscored hole enters it at par (the delta is ignored
-    // on that tap), so a single +/- never skips past par from a blank hole.
-    // After that, +/- steps by one stroke, clamped to a sane range.
-    const firstTouch = !enteredHoles.has(currentHole);
     setScores((prev) => {
       const next = [...prev];
-      next[currentHole] = firstTouch
-        ? par
-        : Math.max(1, Math.min(20, (next[currentHole] ?? par) + delta));
+      next[currentHole] = Math.max(1, Math.min(20, (next[currentHole] ?? par) + delta));
       return next;
     });
-    markEntered(currentHole);
   };
 
   const goToHole = (dir: 1 | -1) => {
@@ -2552,7 +2621,17 @@ export default function ScoringScreen() {
         // froze and left distances/measure-line stuck at a stale position.
         // In preview the player is pinned to the tee, so we ignore this stream
         // entirely (otherwise it overwrites the forced tee with real GPS).
-        onUserLocationChange={preview ? undefined : (e) => noteMapFix(e.nativeEvent.coordinate as any)}
+        onUserLocationChange={preview ? undefined : (e) => {
+          // Only process the native location stream while actually foregrounded.
+          // Over a long round the app backgrounds/foregrounds many times (phone
+          // in and out of a pocket — see the crash breadcrumbs), and handling a
+          // fix mid-transition re-renders the map overlays exactly when MapKit
+          // is tearing down / restoring its GL surface. This doesn't stop the
+          // native event, it just avoids JS-driven map churn during transitions.
+          // Defense-in-depth for the native force-close on this screen.
+          if (AppState.currentState !== 'active') return;
+          noteMapFix(e.nativeEvent.coordinate as any);
+        }}
         onPress={(e) => {
           // Suppress the single phantom tap that bleeds through from the
           // Clear button overlay. Consume the flag on the very next event so
@@ -2678,62 +2757,35 @@ export default function ScoringScreen() {
           </>
         )}
 
-        {/* Past shots from prior rounds at this hole — faint colored lines
-            so they sit visually behind the current round's shots and the
-            heatmap. Each prior round gets its own color from the same palette
-            so a quick glance can compare different rounds. */}
-        {pastHoleShots.flatMap((round, ri) =>
-          round.shots.map((shot, si) => {
-            const color = SHOT_COLORS[ri % SHOT_COLORS.length];
-            return (
-              <React.Fragment key={`past-${round.match_id}-${si}`}>
-                <Polyline
-                  coordinates={[
-                    { latitude: shot.start.lat, longitude: shot.start.lng },
-                    { latitude: shot.end.lat,   longitude: shot.end.lng },
-                  ]}
-                  strokeColor={color + '88'}
-                  strokeWidth={2}
-                  lineDashPattern={[4, 4]}
-                />
-                <Marker
-                  coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  opacity={0.55}
-                  tracksViewChanges={false}
-                >
-                  <View style={[styles.pastShotDot, { backgroundColor: color }]} />
-                </Marker>
-              </React.Fragment>
-            );
-          })
-        )}
-
-        {/* Past-shot overlay — your shots from previous rounds where you
-            stood within ~20m of your current position. Drawn as faint
-            white-ish dashed lines with small endpoint markers, distinct
-            from the bright current-round colors. */}
-        {nearbyPastShots.map((shot, i) => (
-          <React.Fragment key={`past-${shot.match_id}-${i}`}>
-            <Polyline
-              coordinates={[
-                { latitude: shot.start.lat, longitude: shot.start.lng },
-                { latitude: shot.end.lat,   longitude: shot.end.lng },
-              ]}
-              strokeColor="rgba(255,255,255,0.55)"
+        {/* "Where your Nth shot lands" — the historical landing dispersion for
+            the shot the player is ABOUT to hit (the same shot number across
+            their prior rounds on this hole). Replaces the old per-shot dashed
+            lines, which piled up fast. Cool cyan + dashed border reads as
+            HISTORY and stays clearly distinct from the warm per-club
+            predictive heatmap below. Only ever one region (the current shot). */}
+        {shotTendency && (
+          <>
+            <Polygon
+              coordinates={shotTendency.ellipse}
+              strokeColor="#22d3ee"                 // cyan — historical tendency
               strokeWidth={2}
-              lineDashPattern={[4, 4]}
+              lineDashPattern={[6, 5]}
+              fillColor="rgba(34,211,238,0.14)"
             />
             <Marker
-              coordinate={{ latitude: shot.end.lat, longitude: shot.end.lng }}
+              coordinate={shotTendency.center}
               anchor={{ x: 0.5, y: 0.5 }}
-              opacity={0.8}
+              tappable={false}
               tracksViewChanges={false}
             >
-              <View style={styles.pastShotEndDot} />
+              <View style={styles.tendencyLabel}>
+                <Text style={styles.tendencyLabelText}>
+                  {shotTendency.label} shot · {shotTendency.count}
+                </Text>
+              </View>
             </Marker>
-          </React.Fragment>
-        ))}
+          </>
+        )}
 
         {/* Heatmap overlay — 1σ / 2σ confidence ellipses for the active
             club's shot dispersion, projected from the player toward the pin.
@@ -2852,6 +2904,7 @@ export default function ScoringScreen() {
                   >
                     <View style={[styles.liveShotPill, { borderColor: color }]}>
                       <Text style={[styles.liveShotPillText, { color }]}>{yds} yds</Text>
+                      {(() => { const o = shotOwnerName(shot.owner_user_id); return o ? <Text style={styles.shotOwnerLabel}>{o}'s ball</Text> : null; })()}
                     </View>
                   </Marker>
                 );
@@ -3085,6 +3138,58 @@ export default function ScoringScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Scramble: "whose shot?" — tag the just-tracked shot to the teammate
+          whose ball the team used, so it credits their stats. Tapping "You"
+          (or dismissing) leaves it as your own shot. */}
+      <Modal
+        visible={ownerPickShot != null}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setOwnerPickShot(null)}
+      >
+        <TouchableOpacity
+          style={styles.clubPickerBackdrop}
+          activeOpacity={1}
+          onPress={() => setOwnerPickShot(null)}
+        >
+          <View style={styles.clubPickerSheet}>
+            <Text style={styles.clubPickerTitle}>Whose shot?</Text>
+            <Text style={styles.clubPickerSub}>Tag the ball the team used so it counts toward their stats.</Text>
+            <View style={styles.ownerPickList}>
+              <TouchableOpacity
+                style={styles.ownerPickRow}
+                activeOpacity={0.8}
+                onPress={() => {
+                  if (ownerPickShot) setShotOwner(ownerPickShot.holeNum, ownerPickShot.index, null);
+                  setOwnerPickShot(null);
+                }}
+              >
+                <View style={[styles.ownerPickDot, { backgroundColor: C.gold + '2a', borderColor: C.gold, borderWidth: 1.5 }]}>
+                  <Text style={styles.ownerPickInitial}>{(user?.username ?? 'M').slice(0, 1).toUpperCase()}</Text>
+                </View>
+                <Text style={styles.ownerPickName}>You</Text>
+              </TouchableOpacity>
+              {scrambleTeammates.map((p: any) => (
+                <TouchableOpacity
+                  key={p.user_id}
+                  style={styles.ownerPickRow}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    if (ownerPickShot) setShotOwner(ownerPickShot.holeNum, ownerPickShot.index, p.user_id);
+                    setOwnerPickShot(null);
+                  }}
+                >
+                  <View style={[styles.ownerPickDot, { backgroundColor: C.cardAlt }]}>
+                    <Text style={styles.ownerPickInitial}>{p.username.slice(0, 1).toUpperCase()}</Text>
+                  </View>
+                  <Text style={styles.ownerPickName}>{p.username}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       {/* Club picker modal */}
       <Modal
         visible={clubPickerVisible}
@@ -3118,7 +3223,7 @@ export default function ScoringScreen() {
                   specific club's per-club stats. The backend skips
                   segments tagged 'chip' from /club-stats aggregation. */}
               {(() => {
-                const bag = user?.clubs_in_bag;
+                const bag = localBag ?? user?.clubs_in_bag;
                 type Vis = { code: string; label?: string; key: string };
                 let visible: Vis[];
                 if (Array.isArray(bag) && bag.length > 0) {
@@ -3574,16 +3679,27 @@ export default function ScoringScreen() {
             )}
 
             <View style={styles.scoreRow}>
-              <TouchableOpacity style={styles.scoreBtn} onPress={() => adjustScore(-1)}>
+              <TouchableOpacity
+                style={[styles.scoreBtn, !holeEntered && styles.scoreBtnDim]}
+                onPress={() => adjustScore(-1)}
+                disabled={!holeEntered}
+              >
                 <Text style={styles.scoreBtnText}>−</Text>
               </TouchableOpacity>
               <View style={styles.scoreCenter}>
                 <Text style={styles.scoreNum}>{scoreDisplay}</Text>
               </View>
-              <TouchableOpacity style={styles.scoreBtn} onPress={() => adjustScore(1)}>
+              <TouchableOpacity
+                style={[styles.scoreBtn, !holeEntered && styles.scoreBtnDim]}
+                onPress={() => adjustScore(1)}
+                disabled={!holeEntered}
+              >
                 <Text style={styles.scoreBtnText}>+</Text>
               </TouchableOpacity>
             </View>
+            {!holeEntered && (
+              <Text style={styles.scorePickHint}>Tap a number to enter your score</Text>
+            )}
 
             <View style={styles.quickScoreRow}>
               {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
@@ -4059,20 +4175,33 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   liveShotPillText: { fontFamily: F.serif, fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
+  // Scramble: whose ball a tracked shot was, under its yardage on the map.
+  shotOwnerLabel: { color: C.textMuted, fontSize: 8, fontWeight: '800', textAlign: 'center', marginTop: 1 },
+  // "Whose shot?" scramble attribution picker.
+  ownerPickList: { gap: 8, marginTop: 8 },
+  ownerPickRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 10, paddingHorizontal: 12,
+    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
+  },
+  ownerPickDot: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  ownerPickInitial: { color: C.text, fontWeight: '900', fontSize: 15 },
+  ownerPickName: { color: C.text, fontWeight: '800', fontSize: 15 },
 
   shotEndDot: {
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: '#fff', borderWidth: 3,
     shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 2,
   },
-  pastShotDot: {
-    width: 9, height: 9, borderRadius: 5,
-    borderWidth: 1, borderColor: '#fff',
+  // Label pill at the center of the shot-tendency region. Cyan-tinted to tie
+  // it to the cyan dispersion ellipse and set it apart from the heatmap dot.
+  tendencyLabel: {
+    backgroundColor: 'rgba(6,20,26,0.82)',
+    borderColor: '#22d3ee', borderWidth: 1,
+    borderRadius: 8, paddingHorizontal: 7, paddingVertical: 3,
   },
-  pastShotEndDot: {
-    width: 9, height: 9, borderRadius: 5,
-    backgroundColor: 'rgba(255,255,255,0.7)',
-    borderWidth: 1, borderColor: 'rgba(0,0,0,0.6)',
+  tendencyLabelText: {
+    color: '#67e8f9', fontSize: 10, fontWeight: '800', letterSpacing: 0.3,
   },
 
   // Pin distance + Mark Pin (chip variants are defined above; only the
@@ -4259,8 +4388,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: C.border,
   },
   scoreBtnText: { color: C.text, fontSize: 30, fontWeight: '300' },
+  // Dimmed +/- on a hole with no score yet — you pick a number first.
+  scoreBtnDim: { opacity: 0.3 },
   scoreCenter: { width: 110, alignItems: 'center' },
   scoreNum: { fontFamily: F.serif, fontSize: 64, fontWeight: '700', color: C.text, lineHeight: 72 },
+  scorePickHint: { color: C.textMuted, fontSize: 11, textAlign: 'center', marginTop: -6, marginBottom: 10 },
 
   quickScoreRow: { flexDirection: 'row', gap: 5, justifyContent: 'center', marginBottom: 12 },
   quickBtn: {

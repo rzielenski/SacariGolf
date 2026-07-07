@@ -93,6 +93,10 @@ interface UseShotTrackingArgs {
    *  0-yard or wildly-jumped phantom segment. We block START/STOP when this
    *  exceeds STALE_FIX_TRACK_MS rather than silently logging garbage. */
   getMsSinceLastFix?: () => number | null;
+  /** Optional: called right after a shot is finalized, with the hole and the
+   *  new shot's index. The scramble UI uses this to pop the "whose shot?"
+   *  prompt so the player can attribute the shot to the teammate who hit it. */
+  onShotFinalized?: (holeNum: number, index: number) => void;
 }
 
 /** How far back into the rolling fix buffer we look when finalising a shot
@@ -129,7 +133,7 @@ function sanitizeShotsByHole(obj: any): Record<number, Shot[]> {
 export function useShotTracking({
   matchId, userCoord, currentHoleNum, computePlaysLike,
   getAveragedFix, getRelativeAltitudeM, getAimPoint, getPinPoint, getTeePoint,
-  getMsSinceLastFix,
+  getMsSinceLastFix, onShotFinalized,
 }: UseShotTrackingArgs) {
   const [shotsByHole, setShotsByHole] = useState<Record<number, Shot[]>>({});
   const [activeShot, setActiveShot] = useState<ActiveShot | null>(null);
@@ -294,6 +298,9 @@ export function useShotTracking({
       ...(lateral_yds != null && lateral_ref ? { lateral_yds, lateral_ref } : {}),
       ...(partial ? { partial_value: partial } : {}),
     };
+    // Index the new shot will land at (append position) — passed to the
+    // parent so it can offer the scramble "whose shot?" prompt for it.
+    const newIndex = shotsByHole[holeNum]?.length ?? 0;
     setShotsByHole((prev) => {
       const cur = prev[holeNum] ?? [];
       const next = [...cur, newShot];
@@ -304,6 +311,7 @@ export function useShotTracking({
     setPendingClubState(null);
     setPendingPartial(null);
     manualPickRef.current = false;
+    onShotFinalized?.(holeNum, newIndex);
   };
 
   /** User explicitly picked a club. Sticks until the next shot is finalized. */
@@ -467,6 +475,20 @@ export function useShotTracking({
     });
   };
 
+  /** Assign (or clear, with null) the OWNER of a tracked shot — the teammate
+   *  whose ball it was in a scramble. Re-persists the hole so the backend
+   *  re-attributes that shot's distance / dispersion / closest-to-pin to the
+   *  chosen player (server validates they're a same-side member). */
+  const setShotOwner = (holeNum: number, index: number, ownerUserId: string | null) => {
+    setShotsByHole((prev) => {
+      const cur = prev[holeNum] ?? [];
+      if (index < 0 || index >= cur.length) return prev;
+      const next = cur.map((s, i) => (i === index ? { ...s, owner_user_id: ownerUserId } : s));
+      persistShots(holeNum, next);
+      return { ...prev, [holeNum]: next };
+    });
+  };
+
   /** Merge server-side records into shotsByHole. Server wins for any hole
    *  it has data for; holes the server doesn't know about (e.g. an offline
    *  save that never reached the API) keep whatever was in the local cache.
@@ -532,6 +554,7 @@ export function useShotTracking({
     onTrackLongPress,
     cancelActiveShot,
     deleteShotAt,
+    setShotOwner,
     canTrackForgottenShot,
     trackForgottenShot,
     hydrate,

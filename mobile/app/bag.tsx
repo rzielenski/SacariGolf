@@ -17,16 +17,16 @@
  * server). Less than 14 is fine; casual practice doesn't care.
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
-  Alert, TextInput, Modal, KeyboardAvoidingView, Platform,
+  Alert, TextInput, Modal, KeyboardAvoidingView, Platform, PanResponder, Animated,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
-import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { BagEntry } from '../types';
 import { C, F } from '../lib/colors';
+import { loadLocalBag, saveBag, resetBag, syncBag } from '../lib/bag';
 // Club catalogue + by-code lookup now live in lib/clubs.ts (single source
 // shared with the in-round picker and club-stats). Aliased to the local names
 // this screen already used so the rest of the file is unchanged.
@@ -42,23 +42,30 @@ export default function BagScreen() {
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
 
-  // Seed from server (or normalise legacy string[] form if the cached user
-  // object still has the old shape). Both shapes get coerced to BagEntry[].
+  // Seed LOCAL-FIRST: the device's last explicit save (including edits that
+  // never reached the server) wins over the /me value, so a bag saved offline
+  // still shows. Falls back to the server bag, then the standard 14-club
+  // lineup for a brand-new player. Legacy string[] shape is coerced too.
   useEffect(() => {
-    if (!user) return;
-    const raw = user.clubs_in_bag;
-    if (!Array.isArray(raw) || raw.length === 0) {
-      // First visit / no saved bag → seed with the standard 14-club lineup
-      // so the player prunes / renames instead of building from scratch.
-      const std = ['driver', '3w', 'hybrid', '5i', '6i', '7i', '8i', '9i', 'pw', 'gw', 'sw', 'lw', 'putter'];
-      setEntries(std.map((code) => ({ code })));
-      return;
-    }
-    setEntries(raw.map((e: any) =>
-      typeof e === 'string'
-        ? { code: e }
-        : { code: e.code, ...(e.label ? { label: e.label } : {}) }
-    ));
+    if (!user?.user_id) return;
+    let cancelled = false;
+    (async () => {
+      const local = await loadLocalBag(user.user_id);
+      const raw = local ?? (Array.isArray(user.clubs_in_bag) && user.clubs_in_bag.length ? user.clubs_in_bag : null);
+      if (cancelled) return;
+      if (!raw) {
+        const std = ['driver', '3w', 'hybrid', '5i', '6i', '7i', '8i', '9i', 'pw', 'gw', 'sw', 'lw', 'putter'];
+        setEntries(std.map((code) => ({ code })));
+      } else {
+        setEntries((raw as any[]).map((e: any) =>
+          typeof e === 'string' ? { code: e } : { code: e.code, ...(e.label ? { label: e.label } : {}) }
+        ));
+      }
+      // Background reconcile: retry a dirty local bag, or adopt the server bag
+      // locally if this device had none yet.
+      syncBag(user.user_id, user.clubs_in_bag);
+    })();
+    return () => { cancelled = true; };
   }, [user?.user_id]);
 
   const labelFor = (entry: BagEntry) =>
@@ -69,18 +76,52 @@ export default function BagScreen() {
     setRenamingIndex(null);
   };
 
-  // Reorder — the bag is saved (and rendered in the in-round picker) in exactly
-  // the order you arrange it here.
-  const move = (idx: number, dir: -1 | 1) => {
-    setEntries((prev) => {
-      const j = idx + dir;
-      if (j < 0 || j >= prev.length) return prev;
-      const next = [...prev];
-      [next[idx], next[j]] = [next[j], next[idx]];
-      return next;
-    });
-    setRenamingIndex(null);
-  };
+  // ── Hold-and-drag reorder ──────────────────────────────────────────────
+  // Replaces the old ▲▼ arrows: grab the ≡ handle and drag a club to its new
+  // spot. The bag is saved (and shown in the in-round picker) in exactly this
+  // order. Built on core PanResponder so it ships OTA (no gesture-handler dep).
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const dragY = useRef(new Animated.Value(0)).current;
+  const dragIndexRef = useRef<number | null>(null);
+  const dropIndexRef = useRef<number | null>(null);
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
+  const rowHRef = useRef(60);   // real row height, measured from the first row
+
+  const onRowMeasure = useCallback((idx: number, h: number) => {
+    if (idx === 0 && h > 0) rowHRef.current = h + 8;   // + marginBottom
+  }, []);
+  const onDragBegin = useCallback((idx: number) => {
+    dragIndexRef.current = idx; dropIndexRef.current = idx;
+    setDragIndex(idx); setDropIndex(idx); setRenamingIndex(null);
+    dragY.setValue(0);
+  }, [dragY]);
+  const onDragMove = useCallback((dy: number) => {
+    dragY.setValue(dy);
+    const from = dragIndexRef.current;
+    if (from == null) return;
+    const n = entriesRef.current.length;
+    const t = Math.max(0, Math.min(n - 1, from + Math.round(dy / rowHRef.current)));
+    if (t !== dropIndexRef.current) { dropIndexRef.current = t; setDropIndex(t); }
+  }, [dragY]);
+  const onDragEnd = useCallback((dy: number) => {
+    const from = dragIndexRef.current;
+    if (from != null) {
+      const n = entriesRef.current.length;
+      const to = Math.max(0, Math.min(n - 1, from + Math.round(dy / rowHRef.current)));
+      if (to !== from) {
+        setEntries((prev) => {
+          const next = [...prev];
+          const [moved] = next.splice(from, 1);
+          next.splice(to, 0, moved);
+          return next;
+        });
+      }
+    }
+    dragIndexRef.current = null; dropIndexRef.current = null;
+    setDragIndex(null); setDropIndex(null); dragY.setValue(0);
+  }, [dragY]);
 
   const startRename = (idx: number) => {
     setRenamingIndex(idx);
@@ -109,6 +150,7 @@ export default function BagScreen() {
   };
 
   const handleSave = async () => {
+    if (!user?.user_id) return;
     if (entries.length === 0) {
       Alert.alert(
         'Empty bag',
@@ -117,18 +159,20 @@ export default function BagScreen() {
       return;
     }
     setSaving(true);
-    try {
-      await api.users.update({ clubsInBag: entries });
-      await refreshUser?.();
-      router.back();
-    } catch (e: any) {
-      Alert.alert('Could not save', e?.message ?? 'Try again.');
-    } finally {
-      setSaving(false);
+    // saveBag writes to THIS DEVICE first, so the bag can never be lost to a
+    // failed request — then it best-effort syncs to the server. We go back
+    // either way; an unsynced bag is safe locally and retries on its own.
+    const { synced } = await saveBag(user.user_id, entries);
+    if (synced) await refreshUser?.();
+    setSaving(false);
+    if (!synced) {
+      Alert.alert('Saved on your phone', "Your bag is saved and will sync to your account when you're back online.");
     }
+    router.back();
   };
 
   const handleReset = () => {
+    if (!user?.user_id) return;
     Alert.alert(
       'Reset Bag',
       'Clears your custom bag — every club will be eligible in the picker until you save a new one.',
@@ -139,15 +183,10 @@ export default function BagScreen() {
           style: 'destructive',
           onPress: async () => {
             setSaving(true);
-            try {
-              await api.users.update({ clubsInBag: null });
-              await refreshUser?.();
-              router.back();
-            } catch (e: any) {
-              Alert.alert('Could not save', e?.message ?? 'Try again.');
-            } finally {
-              setSaving(false);
-            }
+            const { synced } = await resetBag(user.user_id);
+            if (synced) await refreshUser?.();
+            setSaving(false);
+            router.back();
           },
         },
       ],
@@ -168,65 +207,39 @@ export default function BagScreen() {
         <Text style={s.summaryLabel}>clubs in bag</Text>
       </View>
       <Text style={s.hint}>
-        Tap a club to rename it. Use ▲▼ to reorder, × to remove. Add a club below — a preset, or type any custom club.
+        Tap a club to rename it. Hold the ≡ handle and drag to reorder, × to remove. Add a club below — a preset, or type any custom club.
       </Text>
 
-      <ScrollView contentContainerStyle={s.list} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={s.list}
+        keyboardShouldPersistTaps="handled"
+        scrollEnabled={dragIndex == null}
+      >
         {entries.length === 0 && (
           <Text style={s.empty}>Empty bag. Add your first club below.</Text>
         )}
-        {entries.map((entry, idx) => {
-          const isRenaming = renamingIndex === idx;
-          return (
-            <View key={`${entry.code}-${idx}`} style={s.entry}>
-              {isRenaming ? (
-                <TextInput
-                  style={s.entryInput}
-                  value={renameDraft}
-                  onChangeText={setRenameDraft}
-                  placeholder={CATALOG_BY_CODE[entry.code]?.defaultLabel ?? entry.code}
-                  placeholderTextColor={C.textMuted}
-                  autoFocus
-                  maxLength={30}
-                  onSubmitEditing={commitRename}
-                  onBlur={commitRename}
-                  returnKeyType="done"
-                />
-              ) : (
-                <TouchableOpacity
-                  style={{ flex: 1 }}
-                  onPress={() => startRename(idx)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={s.entryLabel}>{labelFor(entry)}</Text>
-                  {entry.label && (
-                    <Text style={s.entryDefault}>
-                      {CATALOG_BY_CODE[entry.code]?.defaultLabel ?? entry.code}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              )}
-              <View style={s.entryCodeChip}>
-                <Text style={s.entryCodeText}>{entry.code.toUpperCase()}</Text>
-              </View>
-              <View style={s.reorder}>
-                <TouchableOpacity onPress={() => move(idx, -1)} disabled={idx === 0} hitSlop={{ top: 4, bottom: 2, left: 6, right: 6 }}>
-                  <Text style={[s.reorderArrow, idx === 0 && { opacity: 0.25 }]}>▲</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => move(idx, 1)} disabled={idx === entries.length - 1} hitSlop={{ top: 2, bottom: 4, left: 6, right: 6 }}>
-                  <Text style={[s.reorderArrow, idx === entries.length - 1 && { opacity: 0.25 }]}>▼</Text>
-                </TouchableOpacity>
-              </View>
-              <TouchableOpacity
-                style={s.entryRemove}
-                onPress={() => removeAt(idx)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={s.entryRemoveText}>×</Text>
-              </TouchableOpacity>
-            </View>
-          );
-        })}
+        {entries.map((entry, idx) => (
+          <BagRow
+            key={`${entry.code}-${idx}`}
+            entry={entry}
+            index={idx}
+            isRenaming={renamingIndex === idx}
+            renameDraft={renameDraft}
+            onRenameChange={setRenameDraft}
+            onCommitRename={commitRename}
+            onStartRename={startRename}
+            onRemove={removeAt}
+            label={labelFor(entry)}
+            defaultLabel={CATALOG_BY_CODE[entry.code]?.defaultLabel ?? entry.code}
+            isDragging={dragIndex === idx}
+            isDropTarget={dragIndex != null && dropIndex === idx && dropIndex !== dragIndex}
+            dragY={dragY}
+            onBegin={onDragBegin}
+            onMove={onDragMove}
+            onEnd={onDragEnd}
+            onMeasure={onRowMeasure}
+          />
+        ))}
 
         <TouchableOpacity
           style={s.addBtn}
@@ -262,6 +275,88 @@ export default function BagScreen() {
         onAdd={addEntry}
       />
     </KeyboardAvoidingView>
+  );
+}
+
+/** One bag row with a hold-and-drag handle (≡). The PanResponder is created
+ *  ONCE (useRef) so a re-render mid-drag — e.g. the drop-indicator state
+ *  updating — can't detach the active gesture. It reads the row's current
+ *  index off a ref and calls the parent's stable drag callbacks. */
+function BagRow({
+  entry, index, isRenaming, renameDraft, onRenameChange, onCommitRename,
+  onStartRename, onRemove, label, defaultLabel, isDragging, isDropTarget,
+  dragY, onBegin, onMove, onEnd, onMeasure,
+}: {
+  entry: BagEntry;
+  index: number;
+  isRenaming: boolean;
+  renameDraft: string;
+  onRenameChange: (t: string) => void;
+  onCommitRename: () => void;
+  onStartRename: (i: number) => void;
+  onRemove: (i: number) => void;
+  label: string;
+  defaultLabel: string;
+  isDragging: boolean;
+  isDropTarget: boolean;
+  dragY: Animated.Value;
+  onBegin: (i: number) => void;
+  onMove: (dy: number) => void;
+  onEnd: (dy: number) => void;
+  onMeasure: (i: number, h: number) => void;
+}) {
+  const idxRef = useRef(index);
+  idxRef.current = index;
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_e, g) => Math.abs(g.dy) > 3,
+      onPanResponderGrant: () => onBegin(idxRef.current),
+      onPanResponderMove: (_e, g) => onMove(g.dy),
+      onPanResponderRelease: (_e, g) => onEnd(g.dy),
+      onPanResponderTerminate: () => onEnd(0),
+    }),
+  ).current;
+
+  return (
+    <Animated.View
+      onLayout={(e) => onMeasure(index, e.nativeEvent.layout.height)}
+      style={[
+        s.entry,
+        isDropTarget && s.entryDropTarget,
+        isDragging && s.entryDragging,
+        isDragging && { transform: [{ translateY: dragY }], zIndex: 20 },
+      ]}
+    >
+      <View style={s.dragHandle} hitSlop={{ top: 10, bottom: 10, left: 6, right: 4 }} {...pan.panHandlers}>
+        <Text style={s.dragHandleText}>≡</Text>
+      </View>
+      {isRenaming ? (
+        <TextInput
+          style={s.entryInput}
+          value={renameDraft}
+          onChangeText={onRenameChange}
+          placeholder={defaultLabel}
+          placeholderTextColor={C.textMuted}
+          autoFocus
+          maxLength={30}
+          onSubmitEditing={onCommitRename}
+          onBlur={onCommitRename}
+          returnKeyType="done"
+        />
+      ) : (
+        <TouchableOpacity style={{ flex: 1 }} onPress={() => onStartRename(index)} activeOpacity={0.7}>
+          <Text style={s.entryLabel}>{label}</Text>
+          {entry.label ? <Text style={s.entryDefault}>{defaultLabel}</Text> : null}
+        </TouchableOpacity>
+      )}
+      <View style={s.entryCodeChip}>
+        <Text style={s.entryCodeText}>{entry.code.toUpperCase()}</Text>
+      </View>
+      <TouchableOpacity style={s.entryRemove} onPress={() => onRemove(index)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <Text style={s.entryRemoveText}>×</Text>
+      </TouchableOpacity>
+    </Animated.View>
   );
 }
 
@@ -428,8 +523,16 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   entryRemoveText: { color: C.textMuted, fontSize: 18, fontWeight: '900', lineHeight: 20 },
-  reorder: { alignItems: 'center', justifyContent: 'center' },
-  reorderArrow: { color: C.gold, fontSize: 13, fontWeight: '900', lineHeight: 15 },
+  dragHandle: { paddingHorizontal: 4, paddingVertical: 8, justifyContent: 'center', alignItems: 'center' },
+  dragHandleText: { color: C.textMuted, fontSize: 20, fontWeight: '900', lineHeight: 22 },
+  // The lifted row while dragging: gold border + shadow so it reads as "picked up".
+  entryDragging: {
+    borderColor: C.gold,
+    shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 10, shadowOffset: { width: 0, height: 5 },
+    elevation: 8,
+  },
+  // The slot the row will drop into — a gold line at its top edge.
+  entryDropTarget: { borderTopColor: C.gold, borderTopWidth: 2 },
 
   addBtn: {
     marginTop: 8, paddingVertical: 14, borderRadius: 8,

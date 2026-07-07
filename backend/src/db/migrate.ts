@@ -89,6 +89,22 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Scramble shot attribution: who actually HIT the tracked shot. NULL = the
+    // tracker (user_id) hit it themselves — the normal solo / non-scramble
+    // case. In a scramble, one phone logs the selected shots and tags each with
+    // the teammate whose ball was used, so distance / dispersion / closest-to-
+    // pin count toward THAT player's stats (via COALESCE(owner_user_id,user_id)).
+    // The atomic per-hole replace + map display still key on user_id (the
+    // tracker), so only stat attribution changes.
+    name: 'shots.owner_user_id',
+    sql: `
+      ALTER TABLE shots
+        ADD COLUMN IF NOT EXISTS owner_user_id UUID REFERENCES users(user_id) ON DELETE SET NULL;
+      CREATE INDEX IF NOT EXISTS shots_owner_club_idx
+        ON shots(owner_user_id, club) WHERE owner_user_id IS NOT NULL;
+    `,
+  },
+  {
     // For 9-hole matches on 18-hole teeboxes, store whether the player chose
     // the front 9 or the back 9. 18-hole rounds use 'full'. Affects which
     // ratings (front_course_rating vs back_course_rating) feed the WHS /

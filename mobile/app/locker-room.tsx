@@ -189,10 +189,13 @@ export default function LockerRoomScreen() {
 }
 
 /** Real preview — uses the same components that render the cosmetic on the
- *  profile screen / shot map. BACKGROUNDS render as a static swatch here
- *  (animated={false}) because the grid shows the whole catalog at once and
- *  animating ~20+ full backgrounds backs up the UI thread. The lighter
- *  border / username / trail effects still animate (few of them, cheap). */
+ *  profile screen / shot map, but EVERY kind renders in static mode here
+ *  (animated={false}). The grid shows the whole catalog at once, and mounting
+ *  dozens of live animated backgrounds/borders/usernames/trails together backs
+ *  up the UI thread and over-subscribes react-native-svg — a native-signature
+ *  force-close that hit this screen hardest. Static previews use plain View /
+ *  LinearGradient / Text (no SVG, no reanimated); the full animation plays once
+ *  the item is equipped (one at a time) on the profile. */
 function CosmeticPreview({ item }: { item: CatalogItem }) {
   const v = item.visual_data ?? {};
 
@@ -209,7 +212,7 @@ function CosmeticPreview({ item }: { item: CatalogItem }) {
   if (item.kind === 'username') {
     return (
       <View style={s.preview}>
-        <CosmeticUsername visual={v} style={{ fontSize: 20, fontWeight: '900', fontFamily: F.serif }}>
+        <CosmeticUsername visual={v} animated={false} style={{ fontSize: 20, fontWeight: '900', fontFamily: F.serif }}>
           Aa
         </CosmeticUsername>
       </View>
@@ -218,7 +221,7 @@ function CosmeticPreview({ item }: { item: CatalogItem }) {
   if (item.kind === 'border') {
     return (
       <View style={[s.preview, { backgroundColor: 'transparent' }]}>
-        <CosmeticBorder visual={v} size={32}>
+        <CosmeticBorder visual={v} size={32} animated={false}>
           <View style={{
             width: 32, height: 32, borderRadius: 16, backgroundColor: C.cardAlt,
             alignItems: 'center', justifyContent: 'center',
@@ -232,7 +235,7 @@ function CosmeticPreview({ item }: { item: CatalogItem }) {
   if (item.kind === 'ball_trail') {
     return (
       <View style={[s.preview, { padding: 6 }]}>
-        <CosmeticTrailPreview visual={v} />
+        <CosmeticTrailPreview visual={v} animated={false} />
       </View>
     );
   }

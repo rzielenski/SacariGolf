@@ -2767,9 +2767,13 @@ function PrismBg({ v, style, children }: BgProps) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function CosmeticBorder({
-  visual, size = 96, children,
-}: { visual: VisualData; size?: number; children?: React.ReactNode }) {
+  visual, size = 96, children, animated = true,
+}: { visual: VisualData; size?: number; children?: React.ReactNode; animated?: boolean }) {
   const v = visual ?? {};
+  // Static mode for dense previews (the locker-room grid): a plain colored ring,
+  // no reanimated loops and no react-native-svg nodes at all. The full animated
+  // border still renders once equipped (one at a time) on the profile.
+  if (!animated) return <StaticBorder v={v} size={size}>{children}</StaticBorder>;
   switch (v.style) {
     case 'traveling':  return <TravelingBorder v={v} size={size}>{children}</TravelingBorder>;
     case 'holographic':return <HolographicBorder v={v} size={size}>{children}</HolographicBorder>;
@@ -2784,6 +2788,23 @@ export function CosmeticBorder({
       if (!v.color) return <>{children}</>;
       return <GlowBorder v={v} size={size}>{children}</GlowBorder>;
   }
+}
+
+/** Static ring for grid previews — no animation, no SVG. Uses the border's
+ *  primary color (or the first gradient stop) so it still reads as that item. */
+function StaticBorder({ v, size, children }: BorderProps) {
+  const width = v.width ?? 3;
+  const padded = size + width * 2 + 6;
+  const color = v.color ?? (Array.isArray(v.gradient) ? v.gradient[0] : undefined) ?? C.gold;
+  return (
+    <View style={{
+      width: padded, height: padded, borderRadius: padded / 2,
+      borderWidth: width, borderColor: color,
+      alignItems: 'center', justifyContent: 'center',
+    }}>
+      {children}
+    </View>
+  );
 }
 
 function GlowBorder({ v, size, children }: BorderProps) {
@@ -3172,9 +3193,18 @@ function CoronaBorder({ v, size, children }: BorderProps) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export function CosmeticUsername({
-  visual, children, style,
-}: { visual: VisualData; children: React.ReactNode; style?: StyleProp<TextStyle> }) {
+  visual, children, style, animated = true,
+}: { visual: VisualData; children: React.ReactNode; style?: StyleProp<TextStyle>; animated?: boolean }) {
   const v = visual ?? {};
+  // Static mode for dense previews (the locker-room grid). Keeps the gradient
+  // or solid look but drops the animated sweep and its reanimated/SVG drivers,
+  // so we don't mount dozens of live username effects at once.
+  if (!animated) {
+    if (Array.isArray(v.gradient) && v.gradient.length >= 2) {
+      return <GradientUsername v={v} style={style}>{children}</GradientUsername>;
+    }
+    return <SolidUsername v={v} style={style}>{children}</SolidUsername>;
+  }
   switch (v.style) {
     case 'gradient':    return <GradientUsername v={v} style={style}>{children}</GradientUsername>;
     case 'shimmer':     return <ShimmerUsername v={v} style={style}>{children}</ShimmerUsername>;
@@ -3365,8 +3395,11 @@ function GlitchUsername({ v, style, children }: UnameProps) {
 // BALL TRAIL PREVIEW
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function CosmeticTrailPreview({ visual }: { visual: VisualData }) {
+export function CosmeticTrailPreview({ visual, animated = true }: { visual: VisualData; animated?: boolean }) {
   const v = visual ?? {};
+  // Static mode for dense previews (the locker-room grid): a plain streak or a
+  // static gradient, no reanimated/SVG. Full trail animates once equipped.
+  if (!animated) return <StaticTrailPreview v={v} />;
   switch (v.style) {
     case 'crackle':    return <CrackleTrailPreview v={v} />;
     case 'gradient':   return <GradientTrailPreview v={v} />;
@@ -3386,6 +3419,23 @@ function SolidTrailPreview({ v }: TrailProps) {
       backgroundColor: v.color ?? '#fff',
       shadowColor: v.color ?? '#fff', shadowOpacity: v.glow ? 0.9 : 0, shadowRadius: 4 }} />
   );
+}
+
+/** Static streak for grid previews — no animation, no SVG. Preserves a
+ *  multi-color trail as a static gradient; falls back to a solid streak. */
+function StaticTrailPreview({ v }: TrailProps) {
+  const cols = Array.isArray(v.gradient) ? v.gradient
+    : Array.isArray((v as any).colors) ? (v as any).colors : null;
+  if (cols && cols.length >= 2) {
+    return (
+      <LinearGradient
+        colors={cols as any}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+        style={{ width: '75%', height: v.width ?? 3, borderRadius: 2 }}
+      />
+    );
+  }
+  return <SolidTrailPreview v={v} />;
 }
 
 function PulseTrailPreview({ v }: TrailProps) {

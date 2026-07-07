@@ -341,9 +341,40 @@ export async function runBotMatchPass(): Promise<void> {
       const actual = isTie ? 0.5 : (humanWins ? 1 : 0);
       const base = k * (actual - expA);
       const placement = await placementUserSet(client, [c.human_id], c.match_id);
-      const delta = shapeDelta(base, humanWins, placement.has(c.human_id));
+      let delta = shapeDelta(base, humanWins, placement.has(c.human_id));
+      const baseDelta = delta;   // pre-perk swing — used for the bot's display + side-level delta_elo
+
+      // ── Lucky Round perk ───────────────────────────────────────────────
+      // Mirrors resolveElo in routes/matches. this resolver previously OMITTED
+      // it, so a solo win/loss vs a bot never got the perk (a win wasn't
+      // doubled, a loss wasn't protected, and the perk was never consumed).
+      // Oldest unused perk NOT earned in this match; only fires on a non-zero
+      // swing: a win DOUBLES, a loss is ZEROED. consumed_match_id is stamped to
+      // the human's own match so the "Lucky Round applied" line lands on their card.
+      const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
+      if (delta !== 0) {
+        const { rows: perkRows } = await client.query(
+          `SELECT perk_id FROM user_perks
+            WHERE user_id = $1 AND consumed_at IS NULL
+              AND (earned_match_id IS NULL OR earned_match_id != $2)
+            ORDER BY earned_at ASC LIMIT 1`,
+          [c.human_id, c.match_id],
+        );
+        if (perkRows.length) {
+          const original = delta;
+          delta = delta < 0 ? 0 : delta * 2;
+          await client.query(
+            `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+            [perkRows[0].perk_id, c.match_id],
+          );
+          perkApplications.push({ user_id: c.human_id, original, adjusted: delta, type: 'lucky_round' });
+        }
+      }
+
       // Display-only swing for the bot's feed card (lost when the human won).
-      const botShown = isTie ? 0 : (humanWins ? -Math.abs(delta) : Math.abs(delta));
+      // Uses the BASE swing — the human's perk is their personal bonus, not a
+      // real extra swing against the bot.
+      const botShown = isTie ? 0 : (humanWins ? -Math.abs(baseDelta) : Math.abs(baseDelta));
 
       // Only the human's ELO moves; the bot's rating is fixed.
       await client.query(
@@ -372,8 +403,12 @@ export async function runBotMatchPass(): Promise<void> {
         [
           c.match_id,
           isTie ? null : (humanWins ? 1 : 2),
-          humanDiff, botDiff, Math.abs(delta),
-          JSON.stringify({ bot: true, botId, tied: isTie, playerDeltas: { [c.human_id]: delta, [botId]: botShown } }),
+          humanDiff, botDiff, Math.abs(baseDelta),
+          JSON.stringify({
+            bot: true, botId, tied: isTie,
+            playerDeltas: { [c.human_id]: delta, [botId]: botShown },
+            perks: perkApplications,
+          }),
         ],
       );
       await client.query(`UPDATE matches SET completed = TRUE WHERE match_id = $1`, [c.match_id]);
@@ -609,10 +644,31 @@ export async function runBotTeamMatchPass(): Promise<void> {
       const placementSet = await placementUserSet(client, humanIds, c.match_id);
       const playerDeltas: Record<string, number> = {};
 
-      // Humans: shaped delta applied to ELO + record.
+      // Humans: shaped delta applied to ELO + record. Each human's Lucky Round
+      // perk fires here too (a win doubles, a loss is zeroed) — same as the solo
+      // bot fill + resolveElo. This resolver previously skipped perks entirely.
+      const perkApplications: { user_id: string; original: number; adjusted: number; type: string }[] = [];
       for (const p of side1 as any[]) {
         const won = !isTie && side1Wins;
-        const eloChange = shapeDelta(side1Delta, won, placementSet.has(p.user_id));
+        let eloChange = shapeDelta(side1Delta, won, placementSet.has(p.user_id));
+        if (eloChange !== 0) {
+          const { rows: perkRows } = await client.query(
+            `SELECT perk_id FROM user_perks
+              WHERE user_id = $1 AND consumed_at IS NULL
+                AND (earned_match_id IS NULL OR earned_match_id != $2)
+              ORDER BY earned_at ASC LIMIT 1`,
+            [p.user_id, c.match_id],
+          );
+          if (perkRows.length) {
+            const original = eloChange;
+            eloChange = eloChange < 0 ? 0 : eloChange * 2;
+            await client.query(
+              `UPDATE user_perks SET consumed_at = NOW(), consumed_match_id = $2 WHERE perk_id = $1`,
+              [perkRows[0].perk_id, c.match_id],
+            );
+            perkApplications.push({ user_id: p.user_id, original, adjusted: eloChange, type: 'lucky_round' });
+          }
+        }
         playerDeltas[p.user_id] = eloChange;
         await client.query(
           `UPDATE users
@@ -654,6 +710,7 @@ export async function runBotTeamMatchPass(): Promise<void> {
             side1DeltaSignedElo: side1Delta,
             side2DeltaSignedElo: side2Delta,
             playerDeltas,
+            perks: perkApplications,
             format: c.format,
             // Resolved by differential (bots are on different courses), so the
             // hole-by-hole format breakdown isn't computed for bot team matches.

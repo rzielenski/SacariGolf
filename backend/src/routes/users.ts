@@ -802,17 +802,17 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // to a generous cap so a power user with thousands of shots doesn't
   // blow up memory; the most recent 5000 are plenty for stats.
   const { rows: shotRows } = await pool.query(
-    // Club distances/dispersion reflect SOLO play only — a scramble shot
-    // isn't necessarily the player's own ball, and team/arena play
-    // shouldn't skew an individual's club profile. Shots from deleted
-    // matches (match_id NULL) drop out of the inner join, which is fine:
-    // we can't confirm they were solo.
+    // Club distances/dispersion default to SOLO play — a scramble shot isn't
+    // necessarily the player's own ball. EXCEPTION: a shot the player was
+    // explicitly tagged as the owner of (owner_user_id = them, e.g. a scramble
+    // drive they hit that the team used) IS their ball, so it counts too.
+    // Untagged team shots are still excluded so they can't skew the profile.
     `SELECT s.shot_id, s.club, s.start_lat, s.start_lng, s.end_lat, s.end_lng,
             s.plays_like_yds, s.recorded_at, s.total_yds, s.lateral_yds, s.partial_value
        FROM shots s
        JOIN matches m ON m.match_id = s.match_id
-      WHERE s.user_id = $1
-        AND m.match_type = 'solo'
+      WHERE COALESCE(s.owner_user_id, s.user_id) = $1
+        AND (m.match_type = 'solo' OR s.owner_user_id IS NOT NULL)
         AND m.is_practice = false
         AND s.club IS NOT NULL
         AND s.club <> 'unknown'
@@ -1072,9 +1072,12 @@ router.get('/:id/shot-stats', requireAuth, requirePremium, wrap(async (req: Auth
             s.start_lat, s.start_lng, s.end_lat, s.end_lng,
             h.pin_lat, h.pin_lng
        FROM shots s
-       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = s.user_id
+       -- Attribute by owner: a scramble approach the player was tagged for
+       -- counts as theirs. Their round is mirrored in a scramble, so the teebox
+       -- (and thus the pin) still resolves. COALESCE → tracker for solo shots.
+       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = COALESCE(s.owner_user_id, s.user_id)
        JOIN holes  h ON h.teebox_id = r.teebox_id AND h.hole_num = s.hole_num
-      WHERE s.user_id = $1
+      WHERE COALESCE(s.owner_user_id, s.user_id) = $1
         AND s.match_id IS NOT NULL
         AND h.pin_lat IS NOT NULL
         AND h.pin_lng IS NOT NULL

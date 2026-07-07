@@ -3,12 +3,14 @@
  *   GET /closest-to-pin  → per-distance-bucket boards for the current Sacari-Cup
  *                          week, plus the caller's best in each bucket.
  *
- * "Distance to pin" is the length of the FIRST PUTT on a hole: a putt means the
- * ball is on the green (so the winner is genuinely putting), and the first
- * putt's length is exactly how close the approach finished. The bucket is the
- * APPROACH's length (the tracked shot immediately before that first putt). So a
- * 140-yard approach that leaves a 6-foot putt is a 6 ft entry in the 100-150
- * bucket. Lowest distance wins each bucket.
+ * "Distance to pin" is the FIRST PUTT distance on a hole — exactly how close the
+ * approach finished. Putts are TYPED by the player (hole_stats.puttDistances, in
+ * feet), not GPS-tracked, so we read puttDistances[0], NOT any on-green shot
+ * track (the old version keyed on club='putter' shots that essentially never
+ * exist, so every board came back empty). The bucket is the APPROACH's length:
+ * the LAST tracked shot on the hole (the one that finished on/near the green).
+ * So a 140-yard approach that leaves a 6-foot first putt is a 6 ft entry in the
+ * 100-150 bucket. Lowest distance wins each bucket.
  */
 import { Router, Response } from 'express';
 import pool from '../db/pool';
@@ -29,30 +31,50 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
     `WITH wk AS (
        SELECT date_trunc('week', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS start
      ),
-     -- The first putt on each (user, match, hole) this week.
-     first_putt AS (
-       SELECT DISTINCT ON (s.user_id, s.match_id, s.hole_num)
-              s.user_id, s.match_id, s.hole_num, s.shot_index AS pidx,
-              s.start_lat, s.start_lng, s.end_lat, s.end_lng
+     -- APPROACH = the LAST tracked shot on each (user, match, hole) this week.
+     -- Putts are TYPED (hole_stats.puttDistances), not GPS-tracked, so the last
+     -- tracked non-putter shot is the one that finished on/near the green. Its
+     -- length is the approach distance that decides the bucket.
+     approach AS (
+       -- Attribute by the shot's OWNER: in a scramble the tracker tags each
+       -- selected shot with the teammate whose ball it was, and that teammate's
+       -- round is mirrored (carries the shared hole_stats), so the pairing below
+       -- still lands the putt. COALESCE → the tracker for untagged/solo shots.
+       SELECT DISTINCT ON (COALESCE(s.owner_user_id, s.user_id), s.match_id, s.hole_num)
+              COALESCE(s.owner_user_id, s.user_id) AS user_id, s.match_id, s.hole_num,
+              s.total_yds AS approach_yds
          FROM shots s, wk
-        WHERE s.club = 'putter'
-          AND s.match_id IS NOT NULL AND s.hole_num IS NOT NULL
+        WHERE s.match_id IS NOT NULL AND s.hole_num IS NOT NULL
+          AND s.club <> 'putter'
+          AND s.total_yds IS NOT NULL AND s.total_yds > 0
           AND s.recorded_at >= wk.start
-        ORDER BY s.user_id, s.match_id, s.hole_num, s.shot_index ASC
+        ORDER BY COALESCE(s.owner_user_id, s.user_id), s.match_id, s.hole_num, s.shot_index DESC
      ),
-     -- Pair each first putt with the approach (the shot right before it). The
-     -- putt's start->end length, in feet, is the proximity to the pin.
-     approached AS (
-       SELECT fp.user_id, a.total_yds AS approach_yds,
-              2 * 6371000 * asin(sqrt(
-                power(sin(radians(fp.end_lat - fp.start_lat) / 2), 2) +
-                cos(radians(fp.start_lat)) * cos(radians(fp.end_lat)) *
-                power(sin(radians(fp.end_lng - fp.start_lng) / 2), 2)
-              )) * 3.28084 AS proximity_ft
-         FROM first_putt fp
-         JOIN shots a ON a.user_id = fp.user_id AND a.match_id = fp.match_id
-          AND a.hole_num = fp.hole_num AND a.shot_index = fp.pidx - 1
-        WHERE a.club <> 'putter' AND a.total_yds IS NOT NULL AND a.total_yds > 0
+     -- FIRST-PUTT distance (typed feet) per (user, match, hole) — exactly how
+     -- close the approach finished. hole_stats is a positional JSON array;
+     -- ordinality is 1-based and maps to the actual hole number (+9 for a
+     -- back-nine round). puttDistances[0] is the first putt on the hole.
+     first_putt AS (
+       SELECT r.user_id, r.match_id,
+              (hs.ord + CASE WHEN m.holes_subset = 'back' THEN 9 ELSE 0 END)::int AS hole_num,
+              (hs.stat->'puttDistances'->>0)::numeric AS proximity_ft
+         FROM rounds r
+         JOIN matches m ON m.match_id = r.match_id
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE WHEN jsonb_typeof(r.hole_stats::jsonb) = 'array'
+                THEN r.hole_stats::jsonb ELSE '[]'::jsonb END
+         ) WITH ORDINALITY AS hs(stat, ord)
+        WHERE jsonb_typeof(hs.stat->'puttDistances') = 'array'
+          AND jsonb_array_length(hs.stat->'puttDistances') >= 1
+     ),
+     -- Pair the tracked approach with that hole's first-putt distance.
+     paired AS (
+       SELECT a.user_id, a.approach_yds, fp.proximity_ft
+         FROM approach a
+         JOIN first_putt fp
+           ON fp.user_id = a.user_id AND fp.match_id = a.match_id
+          AND fp.hole_num = a.hole_num
+        WHERE fp.proximity_ft > 0 AND fp.proximity_ft <= 120
      ),
      bucketed AS (
        SELECT user_id, proximity_ft, approach_yds,
@@ -60,8 +82,7 @@ router.get('/', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
                    WHEN approach_yds <= 150 THEN '100_150'
                    WHEN approach_yds <= 200 THEN '151_200'
                    ELSE '201_plus' END AS bucket
-         FROM approached
-        WHERE proximity_ft > 0 AND proximity_ft <= 120   -- drop GPS-noise "putts"
+         FROM paired
      ),
      best AS (
        SELECT DISTINCT ON (user_id, bucket) user_id, bucket, proximity_ft, approach_yds

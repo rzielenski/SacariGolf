@@ -924,7 +924,9 @@ export const api = {
     markIntroShown: (id: string) =>
       request<{ success: true }>('POST', `/matches/${id}/mark-intro-shown`, {}),
     progress: (id: string, body: {
-      holeScores: number[];
+      // null = a hole the player hasn't explicitly scored yet (never defaulted
+      // to par). The backend + live leaderboard skip non-numeric scores.
+      holeScores: (number | null)[];
       holeStats?: ({ putts?: number; chips?: number; fairwayHit?: boolean | null } | null)[];
       teeboxId?: string;
     }) => request<any>('POST', `/matches/${id}/progress`, body),

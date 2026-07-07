@@ -1212,6 +1212,13 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
   if (!Array.isArray(holeScores) || holeScores.length === 0) {
     return res.status(400).json({ error: 'holeScores array required' });
   }
+  // Every hole in a SUBMITTED card must carry a real score — no blanks (null),
+  // no defaulted pars, no 0/negatives. The client already blocks this, but we
+  // enforce it here so a partial or defaulted card can never be finalized (it
+  // would move SR/ELO on holes the player never actually scored).
+  if (holeScores.some((s: any) => typeof s !== 'number' || !Number.isFinite(s) || s < 1)) {
+    return res.status(400).json({ error: 'Every hole must have a score before submitting.' });
+  }
   const cleanStats = cleanHoleStats(holeStats, holeScores.length);
   // Beers logged this round — clamp to a sane 0–50 so a buggy client can't
   // poison the Beer Ranker leaderboards. Default 0 when omitted.
@@ -2890,6 +2897,12 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
         out.lie = s.lie.toLowerCase();
       }
       if (typeof s.recorded_at === 'string') out.recorded_at = s.recorded_at;
+      // Scramble attribution: the teammate whose ball this tracked shot was.
+      // Captured raw here; validated against same-side membership below before
+      // it's stored, so it can't be spoofed to credit a non-teammate.
+      if (typeof s.owner_user_id === 'string' && /^[0-9a-f-]{36}$/i.test(s.owner_user_id)) {
+        out.owner_user_id = s.owner_user_id;
+      }
       // Plays-like yardage: client-computed at finalize time using the
       // current weather snapshot + slope. Optional — older clients omit it.
       if (typeof s.plays_like_yds === 'number'
@@ -2936,12 +2949,18 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
     return out;
   }).filter((s: any) => s !== null);
 
-  // Verify membership
-  const { rows: members } = await pool.query(
-    `SELECT 1 FROM match_players WHERE match_id = $1 AND user_id = $2`,
+  // Verify membership AND collect the tracker's same-side teammates — the only
+  // players a shot may be attributed to. An owner_user_id that isn't on the
+  // tracker's own side is ignored (stored NULL = the tracker hit it), so a
+  // client can't spoof a shot onto a stranger's or an opponent's stats.
+  const { rows: sideRows } = await pool.query(
+    `SELECT user_id FROM match_players
+      WHERE match_id = $1
+        AND side = (SELECT side FROM match_players WHERE match_id = $1 AND user_id = $2)`,
     [req.params.id, req.userId]
   );
-  if (!members.length) return res.status(404).json({ error: 'Not in match' });
+  if (!sideRows.length) return res.status(404).json({ error: 'Not in match' });
+  const validOwners = new Set<string>(sideRows.map((r: any) => r.user_id));
 
   // Atomic replace: delete this user's shots for this hole, then insert the
   // new set. Same effective semantics as the old UPSERT-on-JSONB approach
@@ -2960,6 +2979,10 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
       // (start == end). Backward-compat for any client that hasn't
       // upgraded to segment shape.
       const end = s.end ?? start;
+      // Attribute to a same-side teammate when tagged + valid; else NULL, which
+      // COALESCE(owner_user_id, user_id) reads back as "the tracker hit it".
+      const owner = (typeof s.owner_user_id === 'string' && validOwners.has(s.owner_user_id))
+        ? s.owner_user_id : null;
       await client.query(
         `INSERT INTO shots (
            user_id, match_id, hole_num, shot_index,
@@ -2968,8 +2991,9 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
            end_lat,   end_lng,   end_elevation_m,
            recorded_at, source, plays_like_yds,
            aim_lat, aim_lng,
-           total_yds, lateral_yds, lateral_ref, partial_value
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19,$20)`,
+           total_yds, lateral_yds, lateral_ref, partial_value,
+           owner_user_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'gps',$14,$15,$16,$17,$18,$19,$20,$21)`,
         [
           req.userId, req.params.id, holeNum, i,
           s.club ?? 'unknown', s.lie ?? null,
@@ -2979,6 +3003,7 @@ router.put('/:id/shots/:holeNum', requireAuth, wrap(async (req: AuthRequest, res
           s.plays_like_yds ?? null,
           s.aim?.lat ?? null, s.aim?.lng ?? null,
           s.total_yds ?? null, s.lateral_yds ?? null, s.lateral_ref ?? null, s.partial_value ?? null,
+          owner,
         ]
       );
     }
@@ -3009,6 +3034,7 @@ router.get('/:id/shots', requireAuth, wrap(async (req: AuthRequest, res: Respons
               json_build_object(
                 'club',  s.club,
                 'lie',   s.lie,
+                'owner_user_id', s.owner_user_id,
                 'start', json_build_object(
                   'lat', s.start_lat, 'lng', s.start_lng, 'elevation_m', s.start_elevation_m
                 ),
