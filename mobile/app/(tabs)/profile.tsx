@@ -827,6 +827,48 @@ export default function ProfileScreen() {
             <SGCell label="Putt" value={stats.sg_per_round.putting} />
             <SGCell label="Total" value={stats.sg_per_round.total} highlight />
           </View>
+          {/* "Every Shot Counts" layer: where the strokes actually go, plus
+              tour-baseline what-ifs, so "what should I practice" is answered
+              by data instead of putting-green folklore. */}
+          {(() => {
+            const label: Record<string, string> = {
+              off_tee: 'Off the tee', approach: 'Approach',
+              around_green: 'Around the green', putting: 'Putting',
+            };
+            const leak = stats.sg_biggest_leak as string | null;
+            const whatIf = (stats.sg_what_if ?? []) as { category: string; gain_per_round: number }[];
+            const dec = stats.sg_decomposition as Record<string, number> | null;
+            const tp = stats.sg_three_putt as { per_round: number; sg_lost_per_round: number } | null;
+            if (!leak && whatIf.length === 0) return null;
+            // Only frame the long-game share when long-game data exists at all,
+            // otherwise a putts-only profile would read "0% long game".
+            const hasLongGame = stats.sg_per_round.off_tee != null || stats.sg_per_round.approach != null;
+            const longShare = dec && hasLongGame ? (dec.off_tee ?? 0) + (dec.approach ?? 0) : null;
+            return (
+              <View style={styles.sgInsightBox}>
+                {leak != null && (
+                  <Text style={styles.sgLeakLine}>
+                    BIGGEST LEAK: <Text style={styles.sgLeakName}>{(label[leak] ?? leak).toUpperCase()}</Text>
+                  </Text>
+                )}
+                {whatIf.slice(0, 2).map((w) => (
+                  <Text key={w.category} style={styles.sgInsightLine}>
+                    · {label[w.category] ?? w.category} at the tour baseline: +{w.gain_per_round.toFixed(1)} a round
+                  </Text>
+                ))}
+                {tp != null && tp.sg_lost_per_round >= 0.3 && (
+                  <Text style={styles.sgInsightLine}>
+                    · 3-putts alone cost {tp.sg_lost_per_round.toFixed(1)} a round ({tp.per_round.toFixed(1)} per round)
+                  </Text>
+                )}
+                {longShare != null && longShare > 0 && (
+                  <Text style={styles.sgSplitNote}>
+                    Long game: {longShare}% of your losses · typical amateur is ~65% (Broadie)
+                  </Text>
+                )}
+              </View>
+            );
+          })()}
         </>
       )}
 
@@ -1722,6 +1764,15 @@ const styles = StyleSheet.create({
   sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginTop: 4, marginBottom: 6 },
   sgWarn: { color: C.gold, fontSize: 10, fontStyle: 'italic', marginTop: -2, marginBottom: 6 },
   sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
+  // "Where the strokes go" insight block under the SG cells.
+  sgInsightBox: {
+    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
+    paddingVertical: 10, paddingHorizontal: 12, marginTop: -4, marginBottom: 12, gap: 3,
+  },
+  sgLeakLine: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  sgLeakName: { color: C.gold },
+  sgInsightLine: { color: C.text, fontSize: 12, lineHeight: 17 },
+  sgSplitNote: { color: C.textDim, fontSize: 10, fontStyle: 'italic', marginTop: 3 },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 14,
     padding: 16, alignItems: 'center', borderWidth: 1, borderColor: C.border,

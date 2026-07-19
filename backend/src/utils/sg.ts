@@ -34,34 +34,74 @@ export interface Shot {
 }
 
 /** PGA-Tour average expected strokes from each lie at given distance.
- * Distances in yards (or feet for putts). Linear interpolation between rows.
- * Sources: Broadie's published tables, Shotscope baselines.  */
+ * Distances in yards (feet for the green table). Linear interpolation between
+ * knots, clamped at the ends.
+ *
+ * These are Mark Broadie's published benchmark tables from "Every Shot Counts"
+ * (the appendix tables his strokes-gained model is built on), lightly rounded.
+ * Getting these right matters more than anything else in the SG engine: every
+ * per-shot figure is a difference of two lookups here, so a table that's 0.1
+ * high at one distance silently reshapes a player's whole category profile.
+ * Notable true-to-book shapes kept on purpose:
+ *   • TEE flattens toward 4.0 at 400-440 (tour players average ~even par on
+ *     long par 4s, NOT 4.3 — the old table overpaid every long-hole drive).
+ *   • SAND dips at 100-140 vs 60-80 (a full-swing fairway bunker shot is
+ *     easier than an awkward half-swing one — the book's table is
+ *     non-monotonic there and that's real, not a typo).
+ *   • GREEN is the tour putting curve: 50% make at 8 ft (1.50), 1.78 at 15 ft,
+ *     ~2.0 at 30 ft. The old table was far more pessimistic (1.99 at 15 ft),
+ *     which inflated everyone's putting SG and understated everyone's need to
+ *     practice the long game — the exact bias the book was written to kill. */
 const ES_TEE: Array<[number, number]> = [
-  [100, 2.92], [150, 2.97], [200, 3.05], [250, 3.27], [300, 3.65], [400, 4.30], [500, 4.85], [600, 5.30],
+  [100, 2.92], [120, 2.99], [140, 2.97], [160, 2.99], [180, 3.05], [200, 3.12],
+  [220, 3.17], [240, 3.25], [260, 3.45], [280, 3.65], [300, 3.71], [320, 3.79],
+  [340, 3.86], [360, 3.92], [380, 3.96], [400, 3.99], [420, 4.02], [440, 4.08],
+  [460, 4.17], [480, 4.28], [500, 4.41], [520, 4.54], [540, 4.65], [560, 4.74],
+  [580, 4.79], [600, 4.82],
 ];
 const ES_FAIRWAY: Array<[number, number]> = [
-  [10, 2.18], [20, 2.40], [30, 2.52], [40, 2.60], [60, 2.70], [80, 2.80],
-  [100, 2.85], [120, 2.91], [140, 2.96], [160, 3.02], [180, 3.10], [200, 3.20],
-  [220, 3.30], [240, 3.40], [260, 3.50],
+  [10, 2.18], [20, 2.40], [30, 2.52], [40, 2.60], [50, 2.66], [60, 2.70],
+  [70, 2.72], [80, 2.75], [90, 2.77], [100, 2.80], [120, 2.85], [140, 2.91],
+  [160, 2.98], [180, 3.08], [200, 3.19], [220, 3.32], [240, 3.42], [260, 3.53],
+  [280, 3.62], [300, 3.71], [320, 3.79], [340, 3.86], [360, 3.92], [380, 3.96],
+  [400, 3.99], [440, 4.10], [480, 4.34], [520, 4.59], [560, 4.78], [600, 4.88],
 ];
 const ES_ROUGH: Array<[number, number]> = [
-  [10, 2.45], [20, 2.65], [30, 2.78], [40, 2.85], [60, 2.95], [80, 3.05],
-  [100, 3.15], [120, 3.20], [140, 3.27], [160, 3.35], [180, 3.45], [200, 3.55],
-  [220, 3.65], [240, 3.75], [260, 3.85],
+  [10, 2.34], [20, 2.59], [30, 2.70], [40, 2.78], [50, 2.87], [60, 2.91],
+  [80, 2.96], [100, 3.02], [120, 3.08], [140, 3.15], [160, 3.23], [180, 3.31],
+  [200, 3.42], [220, 3.53], [240, 3.64], [260, 3.74], [280, 3.83], [300, 3.90],
+  [340, 4.06], [380, 4.22], [420, 4.38], [460, 4.54], [500, 4.70],
 ];
 const ES_BUNKER: Array<[number, number]> = [
-  [10, 2.60], [20, 2.85], [30, 2.92], [40, 3.00], [60, 3.15], [80, 3.25],
-  [100, 3.30], [150, 3.50], [200, 3.75],
+  [10, 2.43], [20, 2.53], [30, 2.66], [40, 2.82], [50, 2.99], [60, 3.15],
+  [70, 3.20], [80, 3.24], [100, 3.23], [120, 3.21], [140, 3.22], [160, 3.28],
+  [180, 3.40], [200, 3.55], [220, 3.70], [240, 3.84], [260, 3.93], [280, 4.00],
+  [300, 4.04], [350, 4.30], [400, 4.69], [450, 5.04], [500, 5.40],
 ];
 const ES_RECOVERY: Array<[number, number]> = [
-  [50, 3.80], [100, 3.85], [150, 3.95], [200, 4.05], [250, 4.20],
+  [100, 3.80], [140, 3.80], [180, 3.82], [220, 3.92], [260, 4.03], [300, 4.20],
+  [340, 4.44], [380, 4.66], [420, 4.79], [460, 4.91], [500, 5.03],
 ];
-/** Putting expected-strokes by distance in FEET (not yards). */
+/** Putting expected-strokes by distance in FEET (not yards). Book values:
+ *  make% at 8 ft is exactly 50%, the 2-putt/lag boundary sits near 33 ft. */
 const ES_GREEN_FT: Array<[number, number]> = [
-  [1, 1.001], [2, 1.009], [3, 1.053], [4, 1.147], [5, 1.265], [6, 1.385],
-  [7, 1.493], [8, 1.589], [10, 1.751], [15, 1.989], [20, 2.094],
-  [30, 2.273], [40, 2.392], [50, 2.476], [60, 2.546], [90, 2.788],
+  [1, 1.001], [2, 1.009], [3, 1.04], [4, 1.13], [5, 1.23], [6, 1.34],
+  [7, 1.42], [8, 1.50], [9, 1.56], [10, 1.61], [12, 1.68], [15, 1.78],
+  [20, 1.87], [25, 1.93], [30, 1.98], [35, 2.02], [40, 2.06], [45, 2.10],
+  [50, 2.14], [60, 2.21], [70, 2.28], [80, 2.34], [90, 2.40], [100, 2.46],
 ];
+
+/** "Every Shot Counts" ch. 3: for typical amateurs the LONG game (driving +
+ *  approach) explains ~two-thirds of the scoring gap to better players; the
+ *  short game ~20% and putting only ~15%. Served alongside a player's own
+ *  leak decomposition so the app can show "you vs the typical amateur" —
+ *  the book's central argument, personalised. */
+export const TYPICAL_AMATEUR_LOSS_SPLIT: Record<SGCategory, number> = {
+  off_tee: 0.28, approach: 0.37, around_green: 0.20, putting: 0.15,
+};
+
+/** Effective green radius used across the app's analytics (12 yds ≈ 36 ft). */
+export const GREEN_RADIUS_YDS = 12;
 
 function lerp(table: Array<[number, number]>, x: number): number {
   if (x <= table[0][0]) return table[0][1];

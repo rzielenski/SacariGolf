@@ -13,7 +13,7 @@ import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
 import { adjustDistance, windComponents, metersToFeet } from '../../../lib/weatherAdjust';
 import { C, F } from '../../../lib/colors';
-import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS } from '../../../lib/golfMath';
+import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS, tourAvgStrokes } from '../../../lib/golfMath';
 import { useScorePanel } from './hooks/useScorePanel';
 import { useShotTracking } from './hooks/useShotTracking';
 import { useLocation } from './hooks/useLocation';
@@ -3400,6 +3400,21 @@ export default function ScoringScreen() {
                 </Text>
               );
             })()}
+            {(() => {
+              // "Every Shot Counts" habit: think in expected strokes, not par.
+              // Tour average to hole out from the effective (plays-like when
+              // available) distance, fairway-lie assumption. Reads as "a tour
+              // player finishes this hole in 2.9 from here" — instantly frames
+              // club/target choice and takes the sting out of long par 4s.
+              if (gpsLooksFrozen) return null;
+              const eff = weatherAdjustment?.effective ?? slopeAdjustment?.playsLike ?? yardsToPin;
+              if (eff == null || eff <= 0) return null;
+              return (
+                <Text style={styles.pinDistTourAvg}>
+                  tour avg {tourAvgStrokes(eff).toFixed(1)}
+                </Text>
+              );
+            })()}
             {gpsAccuracyM != null && gpsAccuracyM > 15 && (
               // Surface poor GPS quality so the user understands why a
               // distance might be off. >15m horizontal accuracy is roughly
@@ -4210,6 +4225,7 @@ const styles = StyleSheet.create({
   pinDistLabel: { color: '#fff', fontWeight: '800', fontSize: 9, letterSpacing: 1.2 },
   pinDistVal: { color: '#fff', fontWeight: '900', fontSize: 16, marginTop: 2, fontFamily: F.serif },
   pinDistPlaysLike: { color: '#fff', fontWeight: '700', fontSize: 11, marginTop: 3, opacity: 0.95 },
+  pinDistTourAvg:   { color: '#fff', fontSize: 9, marginTop: 2, opacity: 0.75, letterSpacing: 0.3 },
   pinDistSamples: { color: '#fff', fontSize: 9, marginTop: 2, opacity: 0.75, fontStyle: 'italic' },
   pinDistWeak:    { color: '#FFCC66', fontSize: 9, marginTop: 2, opacity: 0.9, fontWeight: '700' },
 

@@ -92,8 +92,8 @@ export function PuttingApproachStats({ userId }: Props) {
         <Text style={s.emptyText}>
           Track shots in a few ranked rounds to unlock your putting and
           approach analytics. Compares your numbers against the PGA Tour
-          scratch baseline so you can see exactly where you're leaking
-          strokes.
+          averages from Mark Broadie's strokes-gained research, so you can
+          see exactly where you're leaking strokes.
         </Text>
       </View>
     );
@@ -102,7 +102,7 @@ export function PuttingApproachStats({ userId }: Props) {
   return (
     <View style={s.section}>
       <Text style={s.sectionTitle}>SHOT BREAKDOWN</Text>
-      <Text style={s.sectionSub}>your numbers vs PGA Tour scratch baseline</Text>
+      <Text style={s.sectionSub}>your numbers vs the PGA Tour average · Broadie baselines</Text>
 
       {/* ── Putting ──────────────────────────────────────────────── */}
       <Text style={s.subhead}>PUTTING — make % by distance</Text>

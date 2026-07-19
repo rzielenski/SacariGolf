@@ -206,3 +206,34 @@ export const SHOT_COLORS = [
   '#9d4edd', // violet
   '#ffd60a', // school-bus yellow
 ] as const;
+
+// ─── Expected strokes (tour average) ────────────────────────────────────────
+
+/** PGA Tour average strokes-to-hole-out from the FAIRWAY at a given distance,
+ *  from Mark Broadie's "Every Shot Counts" benchmark tables (lightly rounded;
+ *  the backend SG engine in backend/src/utils/sg.ts carries the full per-lie
+ *  set — keep the two in sync if either changes). Used for the on-course
+ *  "tour avg" readout: the book's core habit is thinking in expected strokes
+ *  instead of par, so the scoring screen shows the number directly. */
+const ES_TOUR_FAIRWAY: Array<[number, number]> = [
+  [10, 2.18], [20, 2.40], [30, 2.52], [40, 2.60], [60, 2.70], [80, 2.75],
+  [100, 2.80], [120, 2.85], [140, 2.91], [160, 2.98], [180, 3.08], [200, 3.19],
+  [220, 3.32], [240, 3.42], [260, 3.53], [280, 3.62], [300, 3.71], [340, 3.86],
+  [380, 3.96], [420, 4.03], [460, 4.20], [500, 4.48], [560, 4.78], [600, 4.88],
+];
+
+/** Tour-average expected strokes to hole out from `distYds` (fairway lie —
+ *  the neutral assumption when the actual lie is unknown mid-hole). */
+export function tourAvgStrokes(distYds: number): number {
+  const t = ES_TOUR_FAIRWAY;
+  if (distYds <= t[0][0]) return t[0][1];
+  if (distYds >= t[t.length - 1][0]) return t[t.length - 1][1];
+  for (let i = 0; i < t.length - 1; i++) {
+    const [x0, y0] = t[i];
+    const [x1, y1] = t[i + 1];
+    if (distYds >= x0 && distYds <= x1) {
+      return y0 + ((distYds - x0) / (x1 - x0)) * (y1 - y0);
+    }
+  }
+  return t[t.length - 1][1];
+}

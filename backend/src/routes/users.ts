@@ -6,7 +6,10 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { perUserRateLimit } from '../utils/rateLimit';
-import { Shot, Lie, sgForShot, categorize, expectedPutts } from '../utils/sg';
+import {
+  Shot, Lie, SGCategory, sgForShot, categorize, expectedPutts,
+  GREEN_RADIUS_YDS, TYPICAL_AMATEUR_LOSS_SPLIT,
+} from '../utils/sg';
 import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 import { equippedVisualSql } from '../utils/cosmeticSql';
 import { roundDifferential, whsHandicapIndex } from '../utils/handicap';
@@ -404,8 +407,11 @@ router.post('/me/friends/accept', requireAuth, wrap(async (req: AuthRequest, res
   return res.json({ success: true });
 }));
 
-/** Expected strokes to get down from a greenside chip (PGA-Tour-ish baseline).
- *  Around-green SG = this − how-close-the-chip-left-it − chips. Tunable. */
+/** Expected strokes to get down from a greenside chip. Calibrated to the book's
+ *  tables: a typical greenside lie mix at 20-30 yds sits between fairway
+ *  (2.40-2.52) and rough (2.59-2.70), so 2.5 is the neutral prior when all we
+ *  know is "the player chipped" (typed chips carry no lie or distance).
+ *  Around-green SG = this − how-close-the-chip-left-it − chips. */
 const AROUND_GREEN_BASELINE = 2.5;
 
 /**
@@ -430,6 +436,15 @@ async function computeStrokesGained(userId: string): Promise<{
   shots_used: number;
   holes_used: number;
   rounds_used: number;
+  /** Share of the player's total per-round LOSS by category (0-100, only
+   *  categories losing strokes). The book's "where does the gap come from"
+   *  decomposition — compare against TYPICAL_AMATEUR_LOSS_SPLIT. */
+  sg_decomposition: Partial<Record<SGCategory, number>> | null;
+  sg_biggest_leak: SGCategory | null;
+  /** Broadie-style what-ifs: play category X at the tour baseline and you
+   *  save `gain_per_round` strokes. Sorted biggest first. */
+  sg_what_if: Array<{ category: SGCategory; gain_per_round: number }>;
+  sg_three_putt: { per_round: number; sg_lost_per_round: number } | null;
 } | null> {
   // ── Long game (off-the-tee + approach) from GPS-tracked shots ─────────────
   const { rows } = await pool.query(
@@ -503,10 +518,21 @@ async function computeStrokesGained(userId: string): Promise<{
       let endLie: Lie;
       let endDist: number;
       if (isLast && typeof holed === 'number' && segments.length === holed) {
+        // Scorecard says the tracked shot count IS the hole score → the last
+        // tracked shot went in.
         endLie = 'green'; endDist = 0;
       } else if (endDist0 != null) {
-        endLie = endDist0 < 30 ? 'green' : 'fairway';
-        endDist = endDist0 < 3 ? 0 : endDist0;
+        // Where did this shot finish? The NEXT shot's tagged lie is ground
+        // truth (the player told us when they tracked it) — use it before any
+        // distance heuristic. Fallback: on the green iff within the app-wide
+        // 12-yd green radius (the old 30-yd cutoff scored balls 25 yds out
+        // "on the green", which reads the putting table at 75+ ft and skews
+        // approach SG). NEVER assume holed mid-hole: a shot finishing 2 yds
+        // out is a 6 ft putt (ES 1.34), not a make — the old <3yd → holed
+        // shortcut overpaid every near-miss approach by a third of a stroke.
+        const nextLie = (segments[i + 1]?.lie as Lie | undefined) ?? null;
+        endLie = nextLie ?? (endDist0 <= GREEN_RADIUS_YDS ? 'green' : 'fairway');
+        endDist = endDist0;
       } else {
         continue;
       }
@@ -545,6 +571,10 @@ async function computeStrokesGained(userId: string): Promise<{
     [userId]
   );
   let puttSG = 0, chipSG = 0;
+  // Book ch. 5: for most amateurs the single biggest PUTTING leak is the
+  // three-putt (lag speed from 20+ ft), not missed short ones. Count them and
+  // price them so the app can say "3-putts cost you N strokes a round."
+  let threePuttHoles = 0, threePuttLost = 0;
   const puttRounds = new Set<string>();
   const chipRounds = new Set<string>();
   for (const r of statRows) {
@@ -567,6 +597,11 @@ async function computeStrokesGained(userId: string): Promise<{
       if (puttCount > 0 && hasDialedPutt) {
         puttSG += expectedPutts(firstPuttFt) - puttCount;
         puttRounds.add(r.match_id);
+        if (puttCount >= 3) {
+          threePuttHoles += 1;
+          // Strokes lost vs the tour baseline ON the 3-putt holes specifically.
+          threePuttLost += puttCount - expectedPutts(firstPuttFt);
+        }
       }
       // Around-green: judged by how close the chip left it (the first putt's
       // distance). A chip with NO putt is assumed holed (chip-in → leave = 0).
@@ -595,11 +630,46 @@ async function computeStrokesGained(userId: string): Promise<{
 
   const total = r2((off_tee ?? 0) + (approach ?? 0) + (around_green ?? 0) + (putting ?? 0));
   const roundsUsed = new Set<string>([...gpsRounds, ...puttRounds, ...chipRounds]).size;
+
+  // ── "Where the strokes go" — the book's decomposition ────────────────────
+  // Split the total per-round LOSS across the categories that are losing
+  // strokes. This is the number the book says to practice from: not "am I a
+  // bad putter" but "what fraction of my gap is putting vs long game."
+  const perCat: Array<[SGCategory, number | null]> = [
+    ['off_tee', off_tee], ['approach', approach],
+    ['around_green', around_green], ['putting', putting],
+  ];
+  const losses = perCat
+    .filter((c): c is [SGCategory, number] => typeof c[1] === 'number' && c[1] < 0)
+    .map(([cat, v]) => [cat, -v] as [SGCategory, number]);
+  const lossTotal = losses.reduce((a, [, v]) => a + v, 0);
+  const sg_decomposition = lossTotal > 0
+    ? Object.fromEntries(losses.map(([cat, v]) => [cat, Math.round((v / lossTotal) * 100)]))
+    : null;
+  const sg_biggest_leak = losses.length
+    ? losses.reduce((a, b) => (b[1] > a[1] ? b : a))[0]
+    : null;
+  // What-if: erase one category's loss (play it at the tour baseline) and you
+  // save this many strokes per round. Sorted biggest first.
+  const sg_what_if = losses
+    .map(([category, v]) => ({ category, gain_per_round: r2(v) }))
+    .sort((a, b) => b.gain_per_round - a.gain_per_round);
+  const sg_three_putt = puttRounds.size > 0
+    ? {
+        per_round: r2(threePuttHoles / puttRounds.size),
+        sg_lost_per_round: r2(threePuttLost / puttRounds.size),
+      }
+    : null;
+
   return {
     sg_per_round: { off_tee, approach, around_green, putting, total },
     shots_used: offTeeShots + approachShots,
     holes_used: gpsHoles.size,
     rounds_used: roundsUsed,
+    sg_decomposition,
+    sg_biggest_leak,
+    sg_what_if,
+    sg_three_putt,
   };
 }
 
@@ -714,6 +784,15 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     sg_shots_used: shotSG?.shots_used ?? 0,
     sg_holes_used: shotSG?.holes_used ?? 0,
     sg_rounds_used: shotSG?.rounds_used ?? 0,
+    // Book-style improvement analytics (Every Shot Counts): where the strokes
+    // go, the single biggest leak, tour-baseline what-ifs, and 3-putt cost.
+    sg_decomposition: shotSG?.sg_decomposition ?? null,
+    sg_biggest_leak: shotSG?.sg_biggest_leak ?? null,
+    sg_what_if: shotSG?.sg_what_if ?? [],
+    sg_three_putt: shotSG?.sg_three_putt ?? null,
+    // Broadie's typical-amateur split, so the client can render "you vs the
+    // typical amateur" (long game ≈ 65% of the gap for most players).
+    sg_typical_split: TYPICAL_AMATEUR_LOSS_SPLIT,
   });
 }));
 
@@ -1115,16 +1194,17 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     { label: '16-25 ft', minFt: 15,  maxFt: 25,       attempts: 0, made: 0 },
     { label: '26+ ft',   minFt: 25,  maxFt: Infinity, attempts: 0, made: 0 },
   ];
-  // Scratch make% baseline from Mark Broadie's PGA Tour data. Numbers are
-  // approximate but widely cited. Used by the client to render "you vs
-  // scratch" comparison bars.
+  // PGA Tour make% baseline from Broadie's "Every Shot Counts" putting table
+  // (make% ≈ 2 − expected putts while 3-putts are rare: 8 ft = 1.50 exp putts
+  // = 50% make; 15 ft = 1.78 = 22%). Bucket values are the tour average across
+  // each range. Used by the client to render the "you vs tour" comparison bars.
   const SCRATCH_MAKE_PCT: Record<string, number> = {
     '0-3 ft':   99,
-    '4-6 ft':   73,
-    '7-10 ft':  41,
-    '11-15 ft': 22,
-    '16-25 ft': 11,
-    '26+ ft':   4,
+    '4-6 ft':   77,
+    '7-10 ft':  49,
+    '11-15 ft': 28,
+    '16-25 ft': 12,
+    '26+ ft':   5,
   };
 
   // ── Approach buckets ───────────────────────────────────────────────
@@ -1139,14 +1219,17 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     { label: '150-200 yd',    minYd: 150, maxYd: 200,      shots: 0, sumProxFt: 0 },
     { label: '200+ yd',       minYd: 200, maxYd: Infinity, shots: 0, sumProxFt: 0 },
   ];
-  // Scratch proximity baseline, also from Broadie. Reported in FEET because
-  // the typical golfer thinks of "proximity" in feet, not yards.
+  // Tour proximity baseline, from the book's expected-strokes identity:
+  // proximity from D ≈ the putt distance whose expected-putts equals
+  // ES_fairway(D) − 1. e.g. 125 yds: ES 2.87, minus the shot = 1.87 expected
+  // putts = the 20 ft row of the putting table. Reported in FEET because the
+  // typical golfer thinks of "proximity" in feet, not yards.
   const SCRATCH_PROXIMITY_FT: Record<string, number> = {
-    '<50 yd (chip)': 18,
-    '50-100 yd':     22,
-    '100-150 yd':    32,
-    '150-200 yd':    49,
-    '200+ yd':       72,
+    '<50 yd (chip)': 10,
+    '50-100 yd':     15,
+    '100-150 yd':    22,
+    '150-200 yd':    34,
+    '200+ yd':       55,
   };
 
   // 30 yd lands-near-green threshold. Wider than the 12yd putt radius
