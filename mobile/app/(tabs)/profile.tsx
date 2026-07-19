@@ -21,7 +21,6 @@ import { OrnamentTitle, Divider } from '../../components/Flourish';
 import { RankCrest, crestFootprint } from '../../components/RankCrest';
 import { rankForElo } from '../../lib/rank';
 import { accountLevel } from '../../lib/accountLevel';
-import { PuttingApproachStats } from '../../components/PuttingApproachStats';
 import { PressableScale } from '../../components/ui/PressableScale';
 import { CosmeticBackground, CosmeticBorder, CosmeticUsername } from '../../components/Cosmetics';
 import { GlowCard } from '../../components/ui/GlowCard';
@@ -87,7 +86,6 @@ export default function ProfileScreen() {
   // didn't have to keep haunting the Social area after that tab was
   // refocused on chats only.
   const [myTeams, setMyTeams] = useState<any[]>([]);
-  const [stats, setStats] = useState<any | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   const [handicap, setHandicap] = useState<{ handicap_index: number | null; num_rounds_used: number; total_rated_rounds: number } | null>(null);
   const [hcapModalVisible, setHcapModalVisible] = useState(false);
@@ -198,12 +196,6 @@ export default function ProfileScreen() {
     api.clans.mine()
       .then((teams) => setMyTeams(Array.isArray(teams) ? teams : []))
       .catch(() => { });
-  }, [user?.user_id]);
-
-  // Aggregated GIR / FW% / putts / strokes-gained from completed rounds
-  useEffect(() => {
-    if (!user) return;
-    api.users.stats(user.user_id).then(setStats).catch(() => { });
   }, [user?.user_id]);
 
   // Load calculated handicap
@@ -778,153 +770,10 @@ export default function ProfileScreen() {
         <HubTile icon="⚙" label="Settings" onPress={() => router.push('/settings' as any)} />
       </View>
 
-      {/* Aggregated round stats — only shown once user has any tracked data */}
-      {stats && (stats.gir_eligible > 0 || stats.fw_eligible > 0) && (
-        <>
-          <OrnamentTitle title="Performance" />
-          <View style={styles.perfGrid}>
-            <StatBox
-              label="GIR"
-              value={stats.gir_pct != null ? `${stats.gir_pct}%` : '—'}
-            />
-            <StatBox
-              label="Fairways"
-              value={stats.fw_pct != null ? `${stats.fw_pct}%` : (stats.fw_hit_pct != null ? `${stats.fw_hit_pct}%` : '—')}
-            />
-            <StatBox
-              label="Putts/Round"
-              value={stats.avg_putts_per_round != null ? stats.avg_putts_per_round.toFixed(1) : '—'}
-            />
-            <StatBox
-              label="Up-and-Down"
-              value={stats.up_and_down_pct != null ? `${stats.up_and_down_pct}%` : '—'}
-            />
-            <StatBox label="3-putts" value={stats.three_putt_count ?? 0} />
-            <StatBox
-              label="Avg/Hole"
-              value={stats.avg_strokes_per_hole != null ? stats.avg_strokes_per_hole.toFixed(2) : '—'}
-            />
-          </View>
-        </>
-      )}
-
-      {/* Strokes gained — its OWN section, independent of GIR/fairway tracking.
-          Putting + around-green come from typed putt distances; off-tee +
-          approach from tracked shots (— per category until there's data). */}
-      {stats?.sg_per_round && (
-        <>
-          <OrnamentTitle title="Strokes Gained" />
-          <Text style={styles.sgSubtitle}>
-            PER ROUND  ·  {stats.sg_rounds_used} round{stats.sg_rounds_used === 1 ? '' : 's'}
-          </Text>
-          {stats.sg_rounds_used < 5 && (
-            <Text style={styles.sgWarn}>Small sample — track more rounds for a reliable read.</Text>
-          )}
-          <View style={styles.sgRow}>
-            <SGCell label="Off-Tee" value={stats.sg_per_round.off_tee} />
-            <SGCell label="Approach" value={stats.sg_per_round.approach} />
-            <SGCell label="Around" value={stats.sg_per_round.around_green} />
-            <SGCell label="Putt" value={stats.sg_per_round.putting} />
-            <SGCell label="Total" value={stats.sg_per_round.total} highlight />
-          </View>
-          {/* "Every Shot Counts" layer: where the strokes actually go, plus
-              tour-baseline what-ifs, so "what should I practice" is answered
-              by data instead of putting-green folklore. */}
-          {(() => {
-            const label: Record<string, string> = {
-              off_tee: 'Off the tee', approach: 'Approach',
-              around_green: 'Around the green', putting: 'Putting',
-            };
-            const leak = stats.sg_biggest_leak as string | null;
-            const whatIf = (stats.sg_what_if ?? []) as { category: string; gain_per_round: number }[];
-            const dec = stats.sg_decomposition as Record<string, number> | null;
-            const tp = stats.sg_three_putt as { per_round: number; sg_lost_per_round: number } | null;
-            const worst = stats.sg_worst_bucket as { kind: string; bucket: string; sg_per_round: number } | null;
-            if (!leak && whatIf.length === 0 && !worst) return null;
-            // Only frame the long-game share when long-game data exists at all,
-            // otherwise a putts-only profile would read "0% long game".
-            const hasLongGame = stats.sg_per_round.off_tee != null || stats.sg_per_round.approach != null;
-            const longShare = dec && hasLongGame ? (dec.off_tee ?? 0) + (dec.approach ?? 0) : null;
-            return (
-              <View style={styles.sgInsightBox}>
-                {leak != null && (
-                  <Text style={styles.sgLeakLine}>
-                    BIGGEST LEAK: <Text style={styles.sgLeakName}>{(label[leak] ?? leak).toUpperCase()}</Text>
-                  </Text>
-                )}
-                {worst != null && (
-                  <Text style={styles.sgInsightLine}>
-                    · Sharpest leak: {worst.kind === 'approach' ? 'approach from' : 'putts from'} {worst.bucket} ({worst.sg_per_round.toFixed(1)} a round)
-                  </Text>
-                )}
-                {whatIf.slice(0, 2).map((w) => (
-                  <Text key={w.category} style={styles.sgInsightLine}>
-                    · {label[w.category] ?? w.category} at the tour baseline: +{w.gain_per_round.toFixed(1)} a round
-                  </Text>
-                ))}
-                {tp != null && tp.sg_lost_per_round >= 0.3 && (
-                  <Text style={styles.sgInsightLine}>
-                    · 3-putts alone cost {tp.sg_lost_per_round.toFixed(1)} a round ({tp.per_round.toFixed(1)} per round)
-                  </Text>
-                )}
-                {longShare != null && longShare > 0 && (
-                  <Text style={styles.sgSplitNote}>
-                    Long game: {longShare}% of your losses · typical amateur is ~65% (Broadie)
-                  </Text>
-                )}
-              </View>
-            );
-          })()}
-          {/* SG by distance — which yardages (and putt ranges) actually leak.
-              Values are per round and sum to the category's SG cell above. */}
-          {(() => {
-            const app = (stats.sg_approach_buckets ?? []) as { bucket: string; sg_per_round: number; shots: number }[];
-            const putt = (stats.sg_putting_buckets ?? []) as { bucket: string; sg_per_round: number; holes: number }[];
-            const appRows = app.filter((b) => b.shots > 0);
-            const puttRows = putt.filter((b) => b.holes > 0);
-            if (appRows.length === 0 && puttRows.length === 0) return null;
-            const valColor = (v: number) => (v > 0 ? C.green : v < 0 ? C.red : C.textMuted);
-            const fmt = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`;
-            return (
-              <View style={styles.sgBucketCard}>
-                {appRows.length > 0 && (
-                  <>
-                    <Text style={styles.sgBucketHead}>APPROACH · BY START DISTANCE</Text>
-                    {appRows.map((b) => (
-                      <View key={b.bucket} style={styles.sgBucketRow}>
-                        <Text style={styles.sgBucketLabel}>{b.bucket}</Text>
-                        <Text style={[styles.sgBucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
-                        <Text style={styles.sgBucketN}>{b.shots} shot{b.shots === 1 ? '' : 's'}</Text>
-                      </View>
-                    ))}
-                  </>
-                )}
-                {puttRows.length > 0 && (
-                  <>
-                    <Text style={[styles.sgBucketHead, appRows.length > 0 && { marginTop: 10 }]}>
-                      PUTTING · BY FIRST-PUTT DISTANCE
-                    </Text>
-                    {puttRows.map((b) => (
-                      <View key={b.bucket} style={styles.sgBucketRow}>
-                        <Text style={styles.sgBucketLabel}>{b.bucket}</Text>
-                        <Text style={[styles.sgBucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
-                        <Text style={styles.sgBucketN}>{b.holes} hole{b.holes === 1 ? '' : 's'}</Text>
-                      </View>
-                    ))}
-                  </>
-                )}
-                <Text style={styles.sgSplitNote}>per round vs the tour baseline</Text>
-              </View>
-            );
-          })()}
-        </>
-      )}
-
-      {/* Putting + approach bucketed by distance, with PGA scratch baselines.
-          Free for everyone now (analysis features aren't premium-gated). */}
-      {user && (
-        <PuttingApproachStats userId={user.user_id} />
-      )}
+      {/* Advanced stats live on the dedicated /stats screen (behind the VIEW
+          STATS button above), NOT here: strokes gained + its leak breakdown,
+          SG by distance, the shot breakdown, and the on-course percentages.
+          The profile stays a quick identity + record glance. */}
 
       {/* Best Round */}
       {bestRound && (
@@ -1440,32 +1289,6 @@ export default function ProfileScreen() {
   );
 }
 
-function SGCell({ label, value, highlight }: { label: string; value: number | null; highlight?: boolean }) {
-  // null = no data for this category yet (e.g. off-tee/approach before any shot
-  // is tracked) → render a dash. Otherwise sign + 1 decimal, green = gaining.
-  const has = typeof value === 'number';
-  const sign = has && (value as number) > 0 ? '+' : '';
-  const color = !has ? C.textDim : (value as number) > 0 ? C.green : (value as number) < 0 ? C.red : C.textMuted;
-  return (
-    <View style={[
-      stylesSG.cell,
-      highlight && { borderColor: C.gold },
-    ]}>
-      {/* shrink-to-fit one line so "APPROACH" can't wrap the H onto a 2nd row */}
-      <Text style={stylesSG.label} numberOfLines={1} adjustsFontSizeToFit>{label.toUpperCase()}</Text>
-      <Text style={[stylesSG.value, { color }]}>{has ? `${sign}${(value as number).toFixed(1)}` : '—'}</Text>
-    </View>
-  );
-}
-const stylesSG = StyleSheet.create({
-  cell: {
-    flex: 1, paddingVertical: 10, alignItems: 'center',
-    backgroundColor: C.card, borderRadius: 6, borderWidth: 1, borderColor: C.border,
-  },
-  label: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1.2 },
-  value: { fontSize: 18, fontWeight: '900', marginTop: 2, fontFamily: F.serif },
-});
-
 function StatBox({ label, value }: { label: string; value: string | number }) {
   return (
     <View style={styles.statBox}>
@@ -1815,29 +1638,6 @@ const styles = StyleSheet.create({
   pipFill: { height: '100%', borderRadius: 4 },
 
   statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 20 },
-  perfGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 12 },
-  sgSubtitle: { color: C.textDim, fontSize: 10, letterSpacing: 1, fontWeight: '700', marginTop: 4, marginBottom: 6 },
-  sgWarn: { color: C.gold, fontSize: 10, fontStyle: 'italic', marginTop: -2, marginBottom: 6 },
-  sgRow: { flexDirection: 'row', gap: 6, marginBottom: 12 },
-  // "Where the strokes go" insight block under the SG cells.
-  sgInsightBox: {
-    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
-    paddingVertical: 10, paddingHorizontal: 12, marginTop: -4, marginBottom: 12, gap: 3,
-  },
-  sgLeakLine: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
-  sgLeakName: { color: C.gold },
-  sgInsightLine: { color: C.text, fontSize: 12, lineHeight: 17 },
-  sgSplitNote: { color: C.textDim, fontSize: 10, fontStyle: 'italic', marginTop: 3 },
-  // SG-by-distance table (approach start distance / first-putt distance).
-  sgBucketCard: {
-    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
-    paddingVertical: 10, paddingHorizontal: 12, marginTop: -4, marginBottom: 12, gap: 4,
-  },
-  sgBucketHead: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 2 },
-  sgBucketRow: { flexDirection: 'row', alignItems: 'center' },
-  sgBucketLabel: { flex: 1, color: C.text, fontSize: 12 },
-  sgBucketVal: { width: 52, textAlign: 'right', fontSize: 13, fontWeight: '900', fontFamily: F.serif },
-  sgBucketN: { width: 70, textAlign: 'right', color: C.textDim, fontSize: 10 },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 14,
     padding: 16, alignItems: 'center', borderWidth: 1, borderColor: C.border,

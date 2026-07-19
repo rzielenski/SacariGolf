@@ -7,6 +7,7 @@ import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { OrnamentTitle } from '../components/Flourish';
+import { PuttingApproachStats } from '../components/PuttingApproachStats';
 import { parseCSV } from '../lib/importShots';
 import { fmtHandicap } from '../lib/golfMath';
 
@@ -165,6 +166,98 @@ export default function StatsScreen() {
                 <View style={s.totalDivider} />
                 <SGRow label="TOTAL"        value={stats.sg_per_round.total} bold />
               </View>
+
+              {/* Where the strokes go: biggest leak + tour-baseline what-ifs
+                  (Broadie's "Every Shot Counts" decomposition). */}
+              {(() => {
+                const label: Record<string, string> = {
+                  off_tee: 'Off the tee', approach: 'Approach',
+                  around_green: 'Around the green', putting: 'Putting',
+                };
+                const leak = stats.sg_biggest_leak as string | null;
+                const whatIf = (stats.sg_what_if ?? []) as { category: string; gain_per_round: number }[];
+                const dec = stats.sg_decomposition as Record<string, number> | null;
+                const tp = stats.sg_three_putt as { per_round: number; sg_lost_per_round: number } | null;
+                const worst = stats.sg_worst_bucket as { kind: string; bucket: string; sg_per_round: number } | null;
+                if (!leak && whatIf.length === 0 && !worst) return null;
+                // Only frame the long-game share when long-game data exists,
+                // else a putts-only profile would read "0% long game".
+                const hasLongGame = stats.sg_per_round.off_tee != null || stats.sg_per_round.approach != null;
+                const longShare = dec && hasLongGame ? (dec.off_tee ?? 0) + (dec.approach ?? 0) : null;
+                return (
+                  <View style={s.insightBox}>
+                    {leak != null && (
+                      <Text style={s.leakLine}>
+                        BIGGEST LEAK: <Text style={s.leakName}>{(label[leak] ?? leak).toUpperCase()}</Text>
+                      </Text>
+                    )}
+                    {worst != null && (
+                      <Text style={s.insightLine}>
+                        · Sharpest leak: {worst.kind === 'approach' ? 'approach from' : 'putts from'} {worst.bucket} ({worst.sg_per_round.toFixed(1)} a round)
+                      </Text>
+                    )}
+                    {whatIf.slice(0, 2).map((w) => (
+                      <Text key={w.category} style={s.insightLine}>
+                        · {label[w.category] ?? w.category} at the tour baseline: +{w.gain_per_round.toFixed(1)} a round
+                      </Text>
+                    ))}
+                    {tp != null && tp.sg_lost_per_round >= 0.3 && (
+                      <Text style={s.insightLine}>
+                        · 3-putts alone cost {tp.sg_lost_per_round.toFixed(1)} a round ({tp.per_round.toFixed(1)} per round)
+                      </Text>
+                    )}
+                    {longShare != null && longShare > 0 && (
+                      <Text style={s.splitNote}>
+                        Long game: {longShare}% of your losses · typical amateur is ~65% (Broadie)
+                      </Text>
+                    )}
+                  </View>
+                );
+              })()}
+
+              {/* SG by distance — which yardages / putt ranges leak. Per round;
+                  sums to the category totals above. */}
+              {(() => {
+                const app = (stats.sg_approach_buckets ?? []) as { bucket: string; sg_per_round: number; shots: number }[];
+                const putt = (stats.sg_putting_buckets ?? []) as { bucket: string; sg_per_round: number; holes: number }[];
+                const appRows = app.filter((b) => b.shots > 0);
+                const puttRows = putt.filter((b) => b.holes > 0);
+                if (appRows.length === 0 && puttRows.length === 0) return null;
+                const valColor = (v: number) => (v > 0 ? C.green : v < 0 ? C.red : C.textMuted);
+                const fmt = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`;
+                return (
+                  <View style={s.bucketCard}>
+                    {appRows.length > 0 && (
+                      <>
+                        <Text style={s.bucketHead}>APPROACH · BY START DISTANCE</Text>
+                        {appRows.map((b) => (
+                          <View key={b.bucket} style={s.bucketRow}>
+                            <Text style={s.bucketLabel}>{b.bucket}</Text>
+                            <Text style={[s.bucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
+                            <Text style={s.bucketN}>{b.shots} shot{b.shots === 1 ? '' : 's'}</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+                    {puttRows.length > 0 && (
+                      <>
+                        <Text style={[s.bucketHead, appRows.length > 0 && { marginTop: 10 }]}>
+                          PUTTING · BY FIRST-PUTT DISTANCE
+                        </Text>
+                        {puttRows.map((b) => (
+                          <View key={b.bucket} style={s.bucketRow}>
+                            <Text style={s.bucketLabel}>{b.bucket}</Text>
+                            <Text style={[s.bucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
+                            <Text style={s.bucketN}>{b.holes} hole{b.holes === 1 ? '' : 's'}</Text>
+                          </View>
+                        ))}
+                      </>
+                    )}
+                    <Text style={s.sample}>per round vs the tour baseline</Text>
+                  </View>
+                );
+              })()}
+
               <Text style={s.sample}>
                 A dash (—) means no data yet for that category. Putting & chipping need putt distances entered; off-tee & approach need tracked shots.
               </Text>
@@ -187,6 +280,12 @@ export default function StatsScreen() {
             <Stat label="3-Putts" value={stats?.three_putt_count ?? '—'} />
             <Stat label="Chips/Round" value={stats?.avg_chips_per_round != null ? stats.avg_chips_per_round.toFixed(1) : '—'} />
           </View>
+
+          {/* Shot breakdown — putting make% + approach proximity vs the PGA
+              Tour (Broadie) baselines. Self-contained card, fetches its own
+              data + handles its own empty state. */}
+          <View style={{ height: 4 }} />
+          {user && <PuttingApproachStats userId={user.user_id} />}
 
           {/* Club heatmap entry */}
           <View style={{ height: 12 }} />
@@ -286,6 +385,26 @@ const s = StyleSheet.create({
   sgLabel: { color: C.text, fontSize: 15, fontWeight: '600' },
   sgVal: { fontFamily: F.serif, fontSize: 20, fontWeight: '700' },
   totalDivider: { height: 1, backgroundColor: C.gold + '44', marginVertical: 12 },
+
+  // "Where the strokes go" insight block (biggest leak / tour-baseline
+  // what-ifs / 3-putt cost) + the SG-by-distance table under it.
+  insightBox: {
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    paddingVertical: 12, paddingHorizontal: 14, marginTop: 14, gap: 4,
+  },
+  leakLine: { color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  leakName: { color: C.gold },
+  insightLine: { color: C.text, fontSize: 13, lineHeight: 18 },
+  splitNote: { color: C.textMuted, fontSize: 11, fontStyle: 'italic', marginTop: 4 },
+  bucketCard: {
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    paddingVertical: 12, paddingHorizontal: 14, marginTop: 10, gap: 5,
+  },
+  bucketHead: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 2 },
+  bucketRow: { flexDirection: 'row', alignItems: 'center' },
+  bucketLabel: { flex: 1, color: C.text, fontSize: 13 },
+  bucketVal: { width: 56, textAlign: 'right', fontSize: 14, fontWeight: '900', fontFamily: F.serif },
+  bucketN: { width: 74, textAlign: 'right', color: C.textMuted, fontSize: 10 },
 
   statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 18, marginBottom: 16 },
   statBox: {
