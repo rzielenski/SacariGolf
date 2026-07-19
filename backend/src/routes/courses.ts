@@ -326,18 +326,29 @@ router.post('/scan-scorecard', requireAuth, wrap(async (req: AuthRequest, res: R
 }));
 
 router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {
+  // Separate boards, selected by query params:
+  //   • format = solo (default) | scramble. Solo board counts SOLO ranked
+  //     rounds only; scramble board counts scramble-format team rounds (each
+  //     player carries the shared team score — mirrored rounds).
+  //   • holes = 9 | 18 (default 18). Boards are per round LENGTH so raw
+  //     strokes compare like-for-like (a 9-hole course's "18" board is the
+  //     played-9-twice card; an 18-hole course's "9" board is front/back
+  //     nines). This replaced one mixed board where DISTINCT ON kept a single
+  //     row per player across ALL formats/lengths — if your best was a
+  //     scramble, your solo round vanished entirely.
+  // One row per player (their best), ranked by RAW to-par within the board.
+  // `to_par` (the 18-hole-equivalent normalized differential) is still
+  // returned — clients show it as the labeled secondary figure.
+  const format = req.query.format === 'scramble' ? 'scramble' : 'solo';
+  const holes = String(req.query.holes ?? '18') === '9' ? 9 : 18;
   const { rows } = await pool.query(
-    // One row per player — their single best round on this course — so a player
-    // can't occupy multiple spots; 2nd place goes to the next person. The inner
-    // DISTINCT ON keeps each user's lowest normalized to-par (ties → most
-    // recent), and the outer query ranks those by to-par. Ranking on the stored
-    // 18-hole-equivalent to-par keeps a 9-hole round from topping the board on
-    // raw strokes alone; to_par is returned so the client shows that same figure.
     `SELECT * FROM (
        SELECT DISTINCT ON (r.user_id)
               r.round_id, r.match_id, r.total_score, r.created_at, r.hole_scores,
               array_length(r.hole_scores, 1) AS holes_played,
               r.normalized_to_par AS to_par,
+              pp.par_played,
+              (r.total_score - pp.par_played)::int AS raw_to_par,
               u.username, u.user_id, u.avatar_url,
               t.teebox_id, t.name AS teebox_name, t.par, t.num_holes,
               m.match_type, m.format
@@ -345,12 +356,35 @@ router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Respo
          JOIN users u ON u.user_id = r.user_id
          JOIN teeboxes t ON t.teebox_id = r.teebox_id
          JOIN matches m ON m.match_id = r.match_id
-        WHERE t.course_id = $1 AND r.normalized_to_par IS NOT NULL AND m.completed = true AND m.is_practice = false
-        ORDER BY r.user_id, r.normalized_to_par ASC, r.created_at DESC
+         CROSS JOIN LATERAL (
+           -- Par for the holes ACTUALLY played, so raw to-par is honest:
+           -- full card = teebox par; 9-hole course played twice = par * 2;
+           -- front/back nine of an 18 = that nine's summed par.
+           SELECT CASE
+             WHEN array_length(r.hole_scores, 1) = t.num_holes THEN t.par
+             WHEN array_length(r.hole_scores, 1) = 18 AND t.num_holes = 9 THEN t.par * 2
+             WHEN array_length(r.hole_scores, 1) = 9 AND t.num_holes = 18 THEN
+               (SELECT SUM(h.par)::int FROM holes h
+                 WHERE h.teebox_id = t.teebox_id
+                   AND h.hole_num >= CASE WHEN m.holes_subset = 'back' THEN 10 ELSE 1 END
+                   AND h.hole_num <= CASE WHEN m.holes_subset = 'back' THEN 18 ELSE 9 END)
+             ELSE NULL
+           END AS par_played
+         ) pp
+        WHERE t.course_id = $1
+          AND m.completed = true AND m.is_practice = false
+          AND u.is_bot = false
+          AND r.total_score IS NOT NULL
+          AND array_length(r.hole_scores, 1) = $2
+          AND pp.par_played IS NOT NULL
+          AND (CASE WHEN $3 = 'scramble'
+                    THEN m.format = 'scramble'
+                    ELSE m.match_type = 'solo' AND COALESCE(m.format, 'stroke') <> 'scramble' END)
+        ORDER BY r.user_id, (r.total_score - pp.par_played) ASC, r.created_at ASC
      ) best
-     ORDER BY to_par ASC, created_at DESC
+     ORDER BY raw_to_par ASC, total_score ASC, created_at ASC
      LIMIT 50`,
-    [req.params.id]
+    [req.params.id, holes, format]
   );
   return res.json(rows);
 }));

@@ -359,6 +359,14 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
        -- pro-rates par by this, not match.num_holes, since the two can disagree
        -- (e.g. an 18-hole round on a match record that says 9 holes).
        array_length(r_me.hole_scores, 1) AS author_holes_played,
+       -- LIVE round state, read straight from the rounds row so an in-progress
+       -- round card shows a running score + "thru N" and ticks up as holes
+       -- post. SUM/COUNT ignore the NULL slots a not-yet-entered hole leaves
+       -- (no-default-scores), so these reflect only holes actually scored.
+       -- On a completed round the card uses author_strokes instead; these
+       -- just stop mattering.
+       (SELECT SUM(v)::int   FROM unnest(r_me.hole_scores) v WHERE v IS NOT NULL) AS author_live_strokes,
+       (SELECT COUNT(*)::int FROM unnest(r_me.hole_scores) v WHERE v IS NOT NULL) AS author_live_thru,
        -- Sum of the par of the actual holes the author played, computed
        -- identically to how the scorecard / round-recap modal does it
        -- (see components/Scorecard.tsx buildGridData). Sums teebox holes
@@ -414,6 +422,18 @@ router.get('/feed', requireAuth, wrap(async (req: AuthRequest, res: Response) =>
      -- every user's feed; everything else honors friends / local scope.
      WHERE u.is_bot = false
        AND (TRUE${scopeClause} OR p.is_announcement = TRUE)${beforeClause}
+       -- LIVE round privacy: an in-progress round exposes a running score, so
+       -- it's visible ONLY to the author and their accepted friends — the same
+       -- trust rule as live spectating (a non-friend opponent must not scout
+       -- your card off the feed). Once the match completes (or the match row
+       -- is gone) the round post is public like any other. Text / photo posts
+       -- are unaffected.
+       AND (
+         p.kind <> 'round'
+         OR COALESCE(m.completed, true) = true
+         OR p.user_id = $1
+         OR p.user_id IN (SELECT uid FROM my_friends)
+       )
      ORDER BY p.created_at DESC, p.post_id DESC
      LIMIT $${params.length}`,
     params

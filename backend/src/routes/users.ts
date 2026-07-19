@@ -445,6 +445,15 @@ async function computeStrokesGained(userId: string): Promise<{
    *  save `gain_per_round` strokes. Sorted biggest first. */
   sg_what_if: Array<{ category: SGCategory; gain_per_round: number }>;
   sg_three_putt: { per_round: number; sg_lost_per_round: number } | null;
+  /** Per-distance-bucket SG, per round — the book's sharpest practice lens:
+   *  not "approach is weak" but "approach from 150-200 is where it leaks."
+   *  Approach buckets come from GPS shots (start distance), putting buckets
+   *  from typed first-putt distances. Null until the source data exists. */
+  sg_approach_buckets: Array<{ bucket: string; sg_per_round: number; shots: number }> | null;
+  sg_putting_buckets: Array<{ bucket: string; sg_per_round: number; holes: number }> | null;
+  /** Single worst bucket across both (min 5 samples so one blow-up shot
+   *  can't own the headline). */
+  sg_worst_bucket: { kind: 'approach' | 'putting'; bucket: string; sg_per_round: number } | null;
 } | null> {
   // ── Long game (off-the-tee + approach) from GPS-tracked shots ─────────────
   const { rows } = await pool.query(
@@ -552,13 +561,28 @@ async function computeStrokesGained(userId: string): Promise<{
   // Aggregate ONLY off-tee + approach from the GPS shots. Putting / around-green
   // categorised from GPS are intentionally ignored — they come from the typed
   // putt distances below.
+  // Approach SG bucketed by START distance — the book's practice lens. Buckets
+  // mirror the shot-breakdown proximity card so the two read side by side.
+  // (<100 covers 31-99: inside 30 is around-green by definition. Par-3 tee
+  // shots land in the bucket of the hole's length, which is correct — they ARE
+  // approaches in the tour model.)
+  const approachBucketAgg = [
+    { bucket: '<100 yd',    min: 0,   max: 100,      sum: 0, shots: 0 },
+    { bucket: '100-150 yd', min: 100, max: 150,      sum: 0, shots: 0 },
+    { bucket: '150-200 yd', min: 150, max: 200,      sum: 0, shots: 0 },
+    { bucket: '200+ yd',    min: 200, max: Infinity, sum: 0, shots: 0 },
+  ];
   let offTeeSum = 0, approachSum = 0, offTeeShots = 0, approachShots = 0;
   for (const shot of allShots) {
     const sg = sgForShot(shot);
     if (!Number.isFinite(sg)) continue;
     const cat = categorize(shot);
     if (cat === 'off_tee') { offTeeSum += sg; offTeeShots += 1; }
-    else if (cat === 'approach') { approachSum += sg; approachShots += 1; }
+    else if (cat === 'approach') {
+      approachSum += sg; approachShots += 1;
+      const b = approachBucketAgg.find((x) => shot.start_dist_yds >= x.min && shot.start_dist_yds < x.max);
+      if (b) { b.sum += sg; b.shots += 1; }
+    }
   }
 
   // ── Short game (putting + around-green) from typed putt distances ─────────
@@ -575,6 +599,13 @@ async function computeStrokesGained(userId: string): Promise<{
   // three-putt (lag speed from 20+ ft), not missed short ones. Count them and
   // price them so the app can say "3-putts cost you N strokes a round."
   let threePuttHoles = 0, threePuttLost = 0;
+  // Putting SG bucketed by FIRST-putt distance: makeable range vs mid vs lag.
+  // The book's split — most amateur putting loss lives in the lag bucket.
+  const puttBucketAgg = [
+    { bucket: 'inside 10 ft', min: 0,  max: 10,       sum: 0, holes: 0 },
+    { bucket: '10-25 ft',     min: 10, max: 25,       sum: 0, holes: 0 },
+    { bucket: '25+ ft',       min: 25, max: Infinity, sum: 0, holes: 0 },
+  ];
   const puttRounds = new Set<string>();
   const chipRounds = new Set<string>();
   for (const r of statRows) {
@@ -595,8 +626,11 @@ async function computeStrokesGained(userId: string): Promise<{
       // typed distance is the made putt, so the count IS puttD.length). Skip a
       // hole where putts were recorded but no distance was dialed — undefined.
       if (puttCount > 0 && hasDialedPutt) {
-        puttSG += expectedPutts(firstPuttFt) - puttCount;
+        const holeSG = expectedPutts(firstPuttFt) - puttCount;
+        puttSG += holeSG;
         puttRounds.add(r.match_id);
+        const pb = puttBucketAgg.find((x) => firstPuttFt >= x.min && firstPuttFt < x.max);
+        if (pb) { pb.sum += holeSG; pb.holes += 1; }
         if (puttCount >= 3) {
           threePuttHoles += 1;
           // Strokes lost vs the tour baseline ON the 3-putt holes specifically.
@@ -661,6 +695,32 @@ async function computeStrokesGained(userId: string): Promise<{
       }
     : null;
 
+  // ── Per-distance buckets (per round, so they sum to the category value) ──
+  const sg_approach_buckets = approachShots > 0 && gpsRoundCount > 0
+    ? approachBucketAgg.map((b) => ({
+        bucket: b.bucket, sg_per_round: r2(b.sum / gpsRoundCount), shots: b.shots,
+      }))
+    : null;
+  const sg_putting_buckets = puttRounds.size > 0
+    ? puttBucketAgg.map((b) => ({
+        bucket: b.bucket, sg_per_round: r2(b.sum / puttRounds.size), holes: b.holes,
+      }))
+    : null;
+  // Worst single bucket across both. Min 5 samples: a one-shot disaster in a
+  // thin bucket shouldn't headline the profile.
+  const bucketCandidates = [
+    ...(sg_approach_buckets ?? []).map((b) => ({
+      kind: 'approach' as const, bucket: b.bucket, sg_per_round: b.sg_per_round, n: b.shots,
+    })),
+    ...(sg_putting_buckets ?? []).map((b) => ({
+      kind: 'putting' as const, bucket: b.bucket, sg_per_round: b.sg_per_round, n: b.holes,
+    })),
+  ].filter((c) => c.n >= 5 && c.sg_per_round < 0);
+  const worstB = bucketCandidates.sort((a, b) => a.sg_per_round - b.sg_per_round)[0] ?? null;
+  const sg_worst_bucket = worstB
+    ? { kind: worstB.kind, bucket: worstB.bucket, sg_per_round: worstB.sg_per_round }
+    : null;
+
   return {
     sg_per_round: { off_tee, approach, around_green, putting, total },
     shots_used: offTeeShots + approachShots,
@@ -670,6 +730,9 @@ async function computeStrokesGained(userId: string): Promise<{
     sg_biggest_leak,
     sg_what_if,
     sg_three_putt,
+    sg_approach_buckets,
+    sg_putting_buckets,
+    sg_worst_bucket,
   };
 }
 
@@ -790,6 +853,9 @@ router.get('/:id/stats', requireAuth, wrap(async (req: AuthRequest, res: Respons
     sg_biggest_leak: shotSG?.sg_biggest_leak ?? null,
     sg_what_if: shotSG?.sg_what_if ?? [],
     sg_three_putt: shotSG?.sg_three_putt ?? null,
+    sg_approach_buckets: shotSG?.sg_approach_buckets ?? null,
+    sg_putting_buckets: shotSG?.sg_putting_buckets ?? null,
+    sg_worst_bucket: shotSG?.sg_worst_bucket ?? null,
     // Broadie's typical-amateur split, so the client can render "you vs the
     // typical amateur" (long game ≈ 65% of the gap for most players).
     sg_typical_split: TYPICAL_AMATEUR_LOSS_SPLIT,
@@ -2092,7 +2158,19 @@ router.get('/:id/active-round', requireAuth, wrap(async (req: AuthRequest, res: 
       [active.match_id, req.userId]
     );
     if (shareRows.length && shareRows[0].side !== active.side) {
-      return res.json(null);
+      // Opponent in the SAME match. Normally hidden so nobody can scout a
+      // live opponent before their own round is in. Friends are the trusted
+      // exception: they've mutually agreed to be friends and can be relied on
+      // not to game it, so an accepted friend always follows the round — even
+      // one they're currently matched against. Non-friend opponents stay hidden.
+      const { rows: fr } = await pool.query(
+        `SELECT 1 FROM friends
+          WHERE status = 'accepted'
+            AND ((user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1))
+          LIMIT 1`,
+        [req.userId, req.params.id]
+      );
+      if (!fr.length) return res.json(null);
     }
   }
 

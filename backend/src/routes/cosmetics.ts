@@ -162,26 +162,47 @@ router.get('/weekly-cup/current', requireAuth, wrap(async (req: AuthRequest, res
   // Each player's best round during the window, pro-rated to holes
   // actually played (same formula as the user_profile best_round query).
   const { rows: leaderboard } = await pool.query(
-    `WITH best AS (
-       SELECT r.user_id,
-              -- Pre-computed 18-hole-equivalent to-par (app code fills the
-              -- column), so 9- and 18-hole rounds compare on one basis.
-              MIN(r.normalized_to_par) AS best_to_par,
-              MIN(r.created_at) AS first_at
-         FROM rounds r
-         JOIN matches m ON m.match_id = r.match_id
-        WHERE r.normalized_to_par IS NOT NULL
-          AND m.completed = true
-          AND m.is_practice = false
-          AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
-          AND r.created_at >= $1
-          AND r.created_at <  $2
-        GROUP BY r.user_id
-     )
-     SELECT b.user_id, b.best_to_par,
+    // Ranking metric stays the pre-computed 18-hole-equivalent to-par (the only
+    // fair basis across 9- and 18-hole rounds), but each row now carries the
+    // ACTUAL best round's raw figures too — clients display the raw score with
+    // the normalized value labeled, instead of a bare normalized number that
+    // reads like a real to-par (the "my 28 said -14" confusion).
+    `SELECT b.user_id, b.best_to_par, b.best_total_score, b.best_holes_played,
+            b.best_raw_to_par,
             u.username, u.avatar_url, u.elo,
             ${equippedVisualSql('u')} AS equipped_visual
-       FROM best b
+       FROM (
+         SELECT DISTINCT ON (r.user_id)
+                r.user_id,
+                r.normalized_to_par AS best_to_par,
+                r.total_score AS best_total_score,
+                array_length(r.hole_scores, 1) AS best_holes_played,
+                (r.total_score - pp.par_played)::int AS best_raw_to_par,
+                r.created_at AS first_at
+           FROM rounds r
+           JOIN matches m ON m.match_id = r.match_id
+           LEFT JOIN teeboxes t ON t.teebox_id = r.teebox_id
+           CROSS JOIN LATERAL (
+             SELECT CASE
+               WHEN t.teebox_id IS NULL THEN NULL
+               WHEN array_length(r.hole_scores, 1) = t.num_holes THEN t.par
+               WHEN array_length(r.hole_scores, 1) = 18 AND t.num_holes = 9 THEN t.par * 2
+               WHEN array_length(r.hole_scores, 1) = 9 AND t.num_holes = 18 THEN
+                 (SELECT SUM(h.par)::int FROM holes h
+                   WHERE h.teebox_id = t.teebox_id
+                     AND h.hole_num >= CASE WHEN m.holes_subset = 'back' THEN 10 ELSE 1 END
+                     AND h.hole_num <= CASE WHEN m.holes_subset = 'back' THEN 18 ELSE 9 END)
+               ELSE NULL
+             END AS par_played
+           ) pp
+          WHERE r.normalized_to_par IS NOT NULL
+            AND m.completed = true
+            AND m.is_practice = false
+            AND m.match_type = 'solo'   -- Sacari Cup counts SOLO rounds only
+            AND r.created_at >= $1
+            AND r.created_at <  $2
+          ORDER BY r.user_id, r.normalized_to_par ASC, r.created_at ASC
+       ) b
        JOIN users u ON u.user_id = b.user_id
       -- Bots can't win the cup, so they're kept out of the standings too.
       WHERE u.is_bot = false

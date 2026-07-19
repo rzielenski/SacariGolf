@@ -723,7 +723,9 @@ export async function resolveLinkedPair(
       `INSERT INTO posts (user_id, kind, match_id, body)
        SELECT pid, 'round', $2, r.caption
          FROM unnest($1::uuid[]) AS pid
-         LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
+         LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid
+       ON CONFLICT (user_id, match_id) WHERE kind = 'round'
+       DO UPDATE SET body = COALESCE(EXCLUDED.body, posts.body)`,
       [s1.map((p: any) => p.user_id), matchId]
     );
   };
@@ -822,11 +824,36 @@ router.get('/:id', requireAuth, wrap(async (req: AuthRequest, res: Response) => 
   const side2Optin = players.some((p: any) => p.side !== 1 && p.live_scores_optin);
   const liveScoresActive = side1Optin && side2Optin;
 
+  // Friends are exempt from the anti-scout redaction: a viewer always sees a
+  // friend's scores live AND after they finish, even a friend on the opposing
+  // side of this very match — they trust each other not to game it. Only
+  // ACCEPTED (mutual) friendships count; non-friend opponents stay redacted.
+  // Only needed while the match is still redacting (not final, not consensually
+  // live), and scoped to this match's other players so it's one small lookup.
+  const friendIds = new Set<string>();
+  if (!matchCompleted && !liveScoresActive) {
+    const otherIds = players
+      .map((p: any) => p.user_id)
+      .filter((uid: string) => uid && uid !== req.userId);
+    if (otherIds.length) {
+      const { rows: friendRows } = await pool.query(
+        `SELECT CASE WHEN user_id = $1 THEN friend_id ELSE user_id END AS fid
+           FROM friends
+          WHERE status = 'accepted'
+            AND ( (user_id = $1 AND friend_id = ANY($2::uuid[]))
+               OR (friend_id = $1 AND user_id = ANY($2::uuid[])) )`,
+        [req.userId, otherIds]
+      );
+      for (const r of friendRows) friendIds.add(r.fid);
+    }
+  }
+
   const redactedPlayers = players.map((p: any) => {
     if (matchCompleted) return p;
     if (liveScoresActive) return p;          // both sides agreed → show live
     if (p.user_id === req.userId) return p;
     if (mySide != null && p.side === mySide) return p;
+    if (friendIds.has(p.user_id)) return p;  // friend → trusted, always visible
     const playedLen = Array.isArray(p.hole_scores) ? p.hole_scores.length : 0;
     return {
       ...p,
@@ -1680,7 +1707,9 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT pid, 'round', $2, r.caption
            FROM unnest($1::uuid[]) AS pid
-           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid
+         ON CONFLICT (user_id, match_id) WHERE kind = 'round'
+         DO UPDATE SET body = COALESCE(EXCLUDED.body, posts.body)`,
         [allPlayerIds, matchId]
       );
       return {
@@ -1922,12 +1951,17 @@ router.post('/:id/scores', requireAuth, wrap(async (req: AuthRequest, res: Respo
       );
       await client.query(`UPDATE matches SET completed = true WHERE match_id = $1`, [matchId]);
       // Auto-post a 'round' card to each Arena player's feed — one batch
-      // INSERT to keep round-trip count flat regardless of field size.
+      // INSERT to keep round-trip count flat regardless of field size. UPSERT
+      // onto the LIVE post each player already has (created at their first
+      // score in /progress): update it in place with the final caption instead
+      // of minting a second card. The partial unique index makes this safe.
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT pid, 'round', $2, r.caption
            FROM unnest($1::uuid[]) AS pid
-           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid`,
+           LEFT JOIN rounds r ON r.match_id = $2 AND r.user_id = pid
+         ON CONFLICT (user_id, match_id) WHERE kind = 'round'
+         DO UPDATE SET body = COALESCE(EXCLUDED.body, posts.body)`,
         [players.map((p) => p.user_id), matchId]
       );
       return {
@@ -2477,12 +2511,13 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
   // their scorecard is genuinely shared. Other formats (stroke / stableford
   // / match_play / skins) keep per-player drafts as today.
   const { rows: matchRows } = await pool.query(
-    `SELECT completed, format FROM matches WHERE match_id = $1`,
+    `SELECT completed, format, is_practice FROM matches WHERE match_id = $1`,
     [req.params.id]
   );
   if (!matchRows.length) return res.status(404).json({ error: 'Match not found' });
   if (matchRows[0]?.completed) return res.json({ success: true, ignored: 'completed' });
   const matchFormat = matchRows[0]?.format as string | null;
+  const isPractice = matchRows[0]?.is_practice === true;
 
   // If client passed a teeboxId, persist it on match_players when not already set
   if (teeboxId) {
@@ -2514,6 +2549,24 @@ router.post('/:id/progress', requireAuth, wrap(async (req: AuthRequest, res: Res
                    teebox_id = COALESCE(rounds.teebox_id, EXCLUDED.teebox_id)`,
     [req.params.id, req.userId, pRows[0].course_id, pRows[0].teebox_id, holeScores, JSON.stringify(cleanStats)]
   );
+
+  // ── Live feed post ────────────────────────────────────────────────
+  // The first real score means the round is underway, so surface it on the
+  // social feed right away as a LIVE round card that updates as more holes
+  // post (the feed reads the running score straight from this rounds row).
+  // Idempotent via the partial unique index on posts(user_id, match_id)
+  // WHERE kind='round': this fires at START, the resolve path fires at
+  // COMPLETION, and whichever lands second is a no-op / caption update. Ranked
+  // rounds only (practice never posts). Bots never hit /progress, so no feed
+  // spam from them. Fire-and-forget: a feed hiccup must never fail a score save.
+  if (!isPractice && holeScores.some((s: any) => typeof s === 'number' && s > 0)) {
+    pool.query(
+      `INSERT INTO posts (user_id, kind, match_id)
+       VALUES ($1, 'round', $2)
+       ON CONFLICT (user_id, match_id) WHERE kind = 'round' DO NOTHING`,
+      [req.userId, req.params.id]
+    ).catch(() => { /* best-effort: the resolve path still posts at completion */ });
+  }
 
   // ── Scramble: mirror to teammates on the same side ─────────────────
   // Scramble teams play ONE ball per shot — they share a single scorecard

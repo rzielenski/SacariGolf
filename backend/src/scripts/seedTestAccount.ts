@@ -237,7 +237,8 @@ async function seed() {
       // Auto-post 'round' cards — one per player, same as resolveElo does.
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, created_at)
-         VALUES ($1, 'round', $2, ${created}), ($3, 'round', $2, ${created})`,
+         VALUES ($1, 'round', $2, ${created}), ($3, 'round', $2, ${created})
+         ON CONFLICT (user_id, match_id) WHERE kind = 'round' DO NOTHING`,
         [REVIEWER, spec.matchId, spec.opponent]
       );
     }

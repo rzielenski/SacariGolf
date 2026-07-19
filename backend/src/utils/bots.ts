@@ -418,7 +418,9 @@ export async function runBotMatchPass(): Promise<void> {
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT r.user_id, 'round', $1, r.caption
-           FROM rounds r WHERE r.match_id = $1 AND r.user_id = $2`,
+           FROM rounds r WHERE r.match_id = $1 AND r.user_id = $2
+         ON CONFLICT (user_id, match_id) WHERE kind = 'round'
+         DO UPDATE SET body = COALESCE(EXCLUDED.body, posts.body)`,
         [c.match_id, c.human_id],
       );
 
@@ -724,7 +726,9 @@ export async function runBotTeamMatchPass(): Promise<void> {
       await client.query(
         `INSERT INTO posts (user_id, kind, match_id, body)
          SELECT r.user_id, 'round', $1, r.caption
-           FROM rounds r WHERE r.match_id = $1 AND r.user_id = ANY($2)`,
+           FROM rounds r WHERE r.match_id = $1 AND r.user_id = ANY($2)
+         ON CONFLICT (user_id, match_id) WHERE kind = 'round'
+         DO UPDATE SET body = COALESCE(EXCLUDED.body, posts.body)`,
         [c.match_id, humanIds],
       );
 

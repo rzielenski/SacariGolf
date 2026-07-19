@@ -519,6 +519,30 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // LIVE round posts. A round post is now created the moment a player enters
+    // their first score (see /matches/:id/progress), not only at completion,
+    // so friends can follow the round on the feed as it fills in. To make that
+    // safe against the completion-time inserts (resolveElo, bots, backfill),
+    // there must be at most ONE round post per (user, match) that everything
+    // can UPSERT onto. First collapse any pre-existing duplicates to the
+    // earliest row, then add the partial unique index the ON CONFLICT clauses
+    // arbitrate on. match_id IS NULL rows (orphaned when a match is wiped) are
+    // left alone — NULLs are distinct in the index, so they don't collide.
+    name: 'posts.round_unique_for_live',
+    sql: `
+      DELETE FROM posts p
+        USING posts keep
+       WHERE p.kind = 'round' AND keep.kind = 'round'
+         AND p.user_id  = keep.user_id
+         AND p.match_id = keep.match_id
+         AND p.match_id IS NOT NULL
+         AND (p.created_at > keep.created_at
+              OR (p.created_at = keep.created_at AND p.post_id > keep.post_id));
+      CREATE UNIQUE INDEX IF NOT EXISTS posts_round_user_match_uidx
+        ON posts(user_id, match_id) WHERE kind = 'round';
+    `,
+  },
+  {
     // Bag entries get free-text labels alongside the canonical code, so a
     // player can carry e.g. "Vokey 56°" and "Vokey 60°" both mapped to
     // the canonical 'sw' / 'lw' codes for analytics. Migrating in place:
