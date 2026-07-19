@@ -641,23 +641,23 @@ export default function MatchLobbyScreen() {
 
       {/* Auto-rendered scorecards — appear as soon as any player submits scores,
           so per-round strokes-gained shows up without waiting on opponents.
-          ANTI-SCOUT: until the match is completed, only the player and their
-          same-side teammates can see scorecards. Opponents (even friends) are
-          hidden so nobody can pace themselves to a known target. The backend
-          additionally redacts hole_scores/hole_stats on those rows. */}
+          ANTI-SCOUT: until the match is completed, only the player, their
+          same-side teammates, and their accepted FRIENDS (who trust each other
+          not to scout) can see scorecards. Non-friend opponents stay hidden so
+          nobody can pace themselves to a known target. The visibility decision
+          lives on the backend, which nulls out hole_scores/hole_stats on rows
+          this viewer isn't allowed to see — so the client just trusts it. */}
       {(() => {
         const matchCompleted = !!match.completed;
-        const me = match.players?.find((p) => p.user_id === user?.user_id);
-        const mySide = me?.side ?? null;
-        const visiblePlayers = (match.players ?? []).filter((p) => {
-          if (!p.hole_scores?.length) return false;
-          // Both sides opted into the live scoreboard → everything visible.
-          if (matchCompleted || liveActive) return true;
-          if (p.user_id === user?.user_id) return true;
-          // Same-side teammates (duo/squad) — fine to see during play.
-          // Different side (solo opponent, Arena rival) — hidden until done.
-          return mySide != null && p.side === mySide;
-        });
+        // Single source of truth = the server's redaction. A redacted opponent
+        // arrives with hole_scores nulled out (LENGTH preserved so "thru N"
+        // still works), so a row is visible iff it carries at least one real
+        // number. This naturally covers self, teammates, friends (even
+        // mid-match), and the final / both-sides-live cases without the client
+        // re-deriving the rule (which used to hide friends the server revealed).
+        const visiblePlayers = (match.players ?? []).filter(
+          (p) => Array.isArray(p.hole_scores) && p.hole_scores.some((s) => typeof s === 'number')
+        );
         if (!visiblePlayers.length && !(match.guest_players ?? []).some((g) => g.scores?.length)) {
           return null;
         }

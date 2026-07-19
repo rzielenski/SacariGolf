@@ -571,6 +571,9 @@ export const api = {
       leaderboard: Array<{
         user_id: string; username: string; avatar_url: string | null;
         elo: number; best_to_par: number; rank: number; is_me: boolean;
+        // Raw figures behind best_to_par (which is the 18-hole equivalent).
+        best_total_score?: number | null; best_holes_played?: number | null;
+        best_raw_to_par?: number | null;
       }>;
       my_row: any | null;
       past_champions: Array<{
@@ -707,7 +710,11 @@ export const api = {
     search: (q: string) => request<any[]>('GET', `/courses/search?q=${encodeURIComponent(q)}`),
     nearby: (lat: number, lng: number) => request<any[]>('GET', `/courses/nearby?lat=${lat}&lng=${lng}`),
     get: (id: string) => request<any>('GET', `/courses/${id}`),
-    leaderboard: (id: string) => request<any[]>('GET', `/courses/${id}/leaderboard`),
+    /** Per-course boards. Separate solo/scramble boards, split by round length
+     *  (9 or 18 holes) so raw strokes compare like-for-like. Rows carry
+     *  raw_to_par (primary display) + to_par (18-hole-equivalent, secondary). */
+    leaderboard: (id: string, opts?: { format?: 'solo' | 'scramble'; holes?: 9 | 18 }) =>
+      request<any[]>('GET', `/courses/${id}/leaderboard?format=${opts?.format ?? 'solo'}&holes=${opts?.holes ?? 18}`),
     /**
      * Submit a "please add this course" request. Goes into the
      * course_requests inbox for an admin to review and add by hand.

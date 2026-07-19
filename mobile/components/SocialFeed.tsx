@@ -153,6 +153,41 @@ export function SocialFeed({ headerComponent, onRefreshExtra }: Props) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Keep LIVE round cards ticking. While any in-progress round post is on the
+  // list, re-pull the first page every 20s and patch ONLY the mutable live
+  // fields (running score / thru / and the flip to completed) into the rows
+  // we already have — matched by post_id, so scroll position and the
+  // infinite-scroll pages below are never disturbed. The interval is stable
+  // (depends only on scope) and reads the live list from postsRef, so it
+  // doesn't churn on every patch. No-ops when nothing is live.
+  useEffect(() => {
+    const t = setInterval(async () => {
+      const hasLive = postsRef.current.some((p) => p.kind === 'round' && !p.match_completed);
+      if (!hasLive) return;
+      try {
+        const res = await api.posts.feed({ limit: PAGE_SIZE, scope });
+        const fresh = new Map((res.posts ?? []).map((p: any) => [p.post_id, p]));
+        setPosts((prev) => {
+          let changed = false;
+          const next = prev.map((p) => {
+            if (p.kind !== 'round' || p.match_completed) return p;
+            const f = fresh.get(p.post_id);
+            if (!f) return p;
+            if (f.author_live_strokes !== p.author_live_strokes
+              || f.author_live_thru !== p.author_live_thru
+              || f.match_completed !== p.match_completed) {
+              changed = true;
+              return { ...p, ...f };
+            }
+            return p;
+          });
+          return changed ? next : prev;
+        });
+      } catch { /* a missed tick is fine — the next one catches up */ }
+    }, 20_000);
+    return () => clearInterval(t);
+  }, [scope]);
+
   /** Switch the feed audience. Clears the list immediately so the user sees
    *  a spinner rather than stale posts from the previous scope while the new
    *  fetch is in flight (the `load` effect re-fires because `scope` changed). */
@@ -862,7 +897,17 @@ function MentionText({ text, censor, style }: { text: string; censor: boolean; s
 
 /** Round card body — pulls from the server-joined match fields. */
 function RoundCardBody({ post }: { post: any }) {
-  const strokes = post.author_strokes;
+  // LIVE vs completed. A round post now exists from the player's FIRST score,
+  // so until the match completes the card shows a running total + "thru N"
+  // that ticks up (the feed re-pulls it every 20s); on completion it flips to
+  // the final strokes + result badge. Solo rounds have no opponent, so they
+  // never show a win/loss badge — just the score.
+  const isLive = !post.match_completed;
+  const isSolo = post.match_type === 'solo';
+  const liveThru = typeof post.author_live_thru === 'number' ? post.author_live_thru : 0;
+  const strokes = isLive
+    ? (typeof post.author_live_strokes === 'number' ? post.author_live_strokes : null)
+    : post.author_strokes;
   // Par is the SUM of the per-hole pars across the slice of holes the
   // author actually played, computed server-side in the same way the
   // round-recap scorecard does it (see backend/src/routes/posts.ts +
@@ -929,9 +974,17 @@ function RoundCardBody({ post }: { post: any }) {
       onPress={() => post.match_id && router.push(`/match/${post.match_id}` as any)}
       activeOpacity={0.85}
     >
-      <Text style={s.roundCourse}>
-        {post.course_name ?? 'A course'} · {post.teebox_name ?? '—'}{holesSuffix}
-      </Text>
+      <View style={s.roundTopRow}>
+        <Text style={[s.roundCourse, { flex: 1 }]} numberOfLines={1}>
+          {post.course_name ?? 'A course'} · {post.teebox_name ?? '—'}{holesSuffix}
+        </Text>
+        {isLive && (
+          <View style={s.liveBadge}>
+            <View style={s.liveBadgeDot} />
+            <Text style={s.liveBadgeText}>LIVE</Text>
+          </View>
+        )}
+      </View>
       <View style={s.roundScoreRow}>
         <Text style={[s.roundScore, { color: ouColor }]}>
           {typeof strokes === 'number' ? strokes : '—'}
@@ -940,7 +993,9 @@ function RoundCardBody({ post }: { post: any }) {
           <Text style={[s.roundDelta, { color: ouColor }]}>{ouLabel}</Text>
         )}
         <View style={{ flex: 1 }} />
-        {post.match_completed && (
+        {/* Result badge only once the match is final AND competitive — a solo
+            round has no opponent, so it just shows the score. */}
+        {post.match_completed && !isSolo && (
           <View style={[
             s.resultBadge,
             wonByMe ? s.resultWin : tied ? s.resultTie : s.resultLoss,
@@ -955,11 +1010,9 @@ function RoundCardBody({ post }: { post: any }) {
         )}
       </View>
       <Text style={s.roundMeta}>
-        {post.match_type ? post.match_type.toUpperCase() : 'MATCH'}
-        {post.format && post.format !== 'stroke' ? ` · ${post.format}` : ''}
-        {shownDelta != null && post.match_completed
-          ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${shownDelta} SR`
-          : ''}
+        {isLive
+          ? `${liveThru > 0 ? `THRU ${liveThru}${matchNumHoles ? ` OF ${matchNumHoles}` : ''}` : 'TEEING OFF'} · tap to follow`
+          : `${post.match_type ? post.match_type.toUpperCase() : 'MATCH'}${post.format && post.format !== 'stroke' ? ` · ${post.format}` : ''}${shownDelta != null && !isSolo ? ` · ${wonByMe ? '+' : tied ? '±' : '−'}${shownDelta} SR` : ''}`}
       </Text>
     </TouchableOpacity>
   );
@@ -1160,7 +1213,16 @@ const s = StyleSheet.create({
     backgroundColor: C.bg, borderRadius: 6, padding: 12,
     borderWidth: 1, borderColor: C.gold + '33',
   },
+  roundTopRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   roundCourse: { color: C.gold, fontWeight: '800', fontSize: 13 },
+  // LIVE pill on an in-progress round card.
+  liveBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: C.green + '22', borderColor: C.green, borderWidth: 1,
+    borderRadius: 4, paddingHorizontal: 7, paddingVertical: 2,
+  },
+  liveBadgeDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: C.green },
+  liveBadgeText: { color: C.green, fontWeight: '900', fontSize: 10, letterSpacing: 1 },
   roundScoreRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 6 },
   roundScore: { fontFamily: F.serif, fontWeight: '900', fontSize: 32 },
   roundDelta: { fontFamily: F.serif, fontWeight: '700', fontSize: 18 },

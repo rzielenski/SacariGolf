@@ -129,7 +129,7 @@ export default function HomeScreen() {
               {lastChampion.best_to_par > 0
                 ? `+${lastChampion.best_to_par}`
                 : lastChampion.best_to_par === 0 ? 'E' : lastChampion.best_to_par}
-              {' '}· week of {new Date(lastChampion.week_starts_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              {' '}18-eq · week of {new Date(lastChampion.week_starts_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </Text>
           </View>
           <Text style={styles.champChev}>›</Text>

@@ -334,9 +334,11 @@ export default function UserProfileScreen() {
           {/* Tap → opens the friend's live scorecard (per-hole breakdown
               using the same ScorecardModal as completed rounds). Long-press
               → drops into the satellite shot-map spectator view for watching
-              shots arrive in real time. Anti-cheat: the backend already
-              returns null for opposing-side viewers in the same match,
-              so this card simply won't appear in that case. */}
+              shots arrive in real time. Anti-cheat: the backend returns null
+              for opposing-side viewers in the same match UNLESS the two are
+              accepted friends (friends trust each other not to scout), so this
+              card appears for friends even mid-match but stays hidden for
+              non-friend opponents. */}
           <TouchableOpacity
             style={[styles.roundCard, { borderColor: C.green }]}
             onPress={() => openScorecard({

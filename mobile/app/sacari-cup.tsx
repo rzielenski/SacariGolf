@@ -26,6 +26,11 @@ import { fmtToPar } from '../lib/golfMath';
 type LBRow = {
   user_id: string; username: string; avatar_url: string | null;
   elo: number; best_to_par: number; rank: number; is_me: boolean;
+  // Raw figures of the round behind best_to_par (which is the 18-hole
+  // equivalent the cup ranks on) — shown so the number isn't mistaken for a
+  // raw to-par. Optional: older payloads don't carry them.
+  best_total_score?: number | null; best_holes_played?: number | null;
+  best_raw_to_par?: number | null;
 };
 
 function fmtTimeLeft(weekEndsAt: string): string {
@@ -113,7 +118,11 @@ export default function SacariCupScreen() {
                     <Text style={s.meRank}>#{data.my_row.rank}</Text>
                     <View style={{ flex: 1 }}>
                       <Text style={s.meName}>{data.my_row.username}</Text>
-                      <Text style={s.meMeta}>{fmtToPar(data.my_row.best_to_par)} this week</Text>
+                      <Text style={s.meMeta}>
+                        {data.my_row.best_total_score != null
+                          ? `${data.my_row.best_total_score} on ${data.my_row.best_holes_played ?? '?'} this week · 18-eq ${fmtToPar(data.my_row.best_to_par)}`
+                          : `18-eq ${fmtToPar(data.my_row.best_to_par)} this week`}
+                      </Text>
                     </View>
                   </View>
                 </View>
@@ -221,7 +230,10 @@ function LBItem({ row }: { row: LBRow }) {
       </View>
       <View style={s.lbScoreBox}>
         <Text style={s.lbScore}>{fmtToPar(row.best_to_par)}</Text>
-        <Text style={s.lbScoreLabel}>best</Text>
+        <Text style={s.lbScoreLabel}>18-eq best</Text>
+        {row.best_total_score != null && (
+          <Text style={s.lbScoreRaw}>{row.best_total_score} on {row.best_holes_played ?? '?'}</Text>
+        )}
       </View>
     </TouchableOpacity>
   );
@@ -279,9 +291,10 @@ const s = StyleSheet.create({
   lbRank: { fontWeight: '900', fontSize: 13, width: 32, textAlign: 'center' },
   lbName: { color: C.text, fontWeight: '700', fontSize: 14 },
   lbMeta: { color: C.textMuted, fontSize: 12, marginTop: 2 },
-  lbScoreBox: { alignItems: 'flex-end', minWidth: 50 },
+  lbScoreBox: { alignItems: 'flex-end', minWidth: 62 },
   lbScore: { color: C.gold, fontFamily: F.serif, fontSize: 18, fontWeight: '900' },
   lbScoreLabel: { color: C.textDim, fontSize: 9 },
+  lbScoreRaw: { color: C.textMuted, fontSize: 10, marginTop: 1 },
 
   empty: { alignItems: 'center', paddingVertical: 30 },
   emptyText: { color: C.textMuted, fontSize: 13, textAlign: 'center', lineHeight: 19, marginBottom: 16 },

@@ -316,7 +316,7 @@ export default function TournamentDetailScreen() {
                       return v === 0 ? 'E' : v > 0 ? `+${v}` : `${v}`;
                     })()}
                   </Text>
-                  <Text style={s.lbUnit}>{t.scoring === 'wins' ? 'wins' : 'to par'}</Text>
+                  <Text style={s.lbUnit}>{t.scoring === 'wins' ? 'wins' : '18-eq to par'}</Text>
                 </View>
               </TouchableOpacity>
             ))

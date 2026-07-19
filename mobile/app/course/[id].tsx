@@ -19,6 +19,11 @@ export default function CourseInfoScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lbTab, setLbTab] = useState<'stroke' | 'scramble'>('stroke');
+  // Board length: 9 or 18. Null until the course loads, then defaults to the
+  // course's native length (18 if any 18-hole teebox exists, else 9). A 9-hole
+  // course still offers the 18 board (played-9-twice cards); an 18-hole course
+  // offers the 9 board (front/back-nine rounds).
+  const [lbHoles, setLbHoles] = useState<9 | 18 | null>(null);
   const [scorecardEntry, setScorecardEntry] = useState<ScorecardEntry | null>(null);
   // The teebox whose generic (par/yardage/HCP) scorecard is open, if any.
   const [teeScorecard, setTeeScorecard] = useState<any | null>(null);
@@ -51,14 +56,13 @@ export default function CourseInfoScreen() {
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     try {
-      const [details, lb] = await Promise.all([
-        api.courses.get(id),
-        api.courses.leaderboard(id),
-      ]);
+      const details = await api.courses.get(id);
       setCourse(details);
-      setLeaderboard(lb);
+      // Default the board length to the course's native length, once.
+      setLbHoles((prev) => prev
+        ?? ((details?.teeboxes ?? []).some((t: any) => t.num_holes === 18) ? 18 : 9));
     } catch (e: any) {
-      // silent on leaderboard fail
+      // silent
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -66,6 +70,21 @@ export default function CourseInfoScreen() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Board fetch — server-side solo/scramble split + 9/18 length filter, so
+  // each board is complete (the old single fetch kept ONE row per player
+  // across all formats: a scramble best hid that player's solo round).
+  const fetchBoard = useCallback(async (holes: 9 | 18, tab: 'stroke' | 'scramble') => {
+    try {
+      setLeaderboard(await api.courses.leaderboard(id, {
+        format: tab === 'scramble' ? 'scramble' : 'solo',
+        holes,
+      }));
+    } catch { /* silent on leaderboard fail */ }
+  }, [id]);
+  useEffect(() => {
+    if (lbHoles != null) fetchBoard(lbHoles, lbTab);
+  }, [lbHoles, lbTab, fetchBoard]);
 
   if (loading) {
     return <View style={styles.centered}><ActivityIndicator size="large" color={C.gold} /></View>;
@@ -81,9 +100,8 @@ export default function CourseInfoScreen() {
     );
   }
 
-  const strokeLb = leaderboard.filter((r) => r.format !== 'scramble');
-  const scrambleLb = leaderboard.filter((r) => r.format === 'scramble');
-  const displayLb = lbTab === 'stroke' ? strokeLb : scrambleLb;
+  // Boards are already filtered server-side (format + holes).
+  const displayLb = leaderboard;
 
   // Summarise tee boxes for display
   const par18 = course.teeboxes?.find((t: any) => t.num_holes === 18)?.par;
@@ -93,7 +111,7 @@ export default function CourseInfoScreen() {
     <ScrollView
       style={styles.container}
       contentContainerStyle={{ paddingBottom: 60 }}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor={C.gold} />}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { load(true); if (lbHoles != null) fetchBoard(lbHoles, lbTab); }} tintColor={C.gold} />}
     >
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 16 }]}>
@@ -171,7 +189,23 @@ export default function CourseInfoScreen() {
             onPress={() => setLbTab(t)}
           >
             <Text style={[styles.lbTabText, lbTab === t && styles.lbTabTextActive]}>
-              {t === 'stroke' ? 'Stroke Play' : 'Scramble'}
+              {t === 'stroke' ? 'Solo' : 'Scramble'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {/* Board length: raw strokes only compare within one length, so 9- and
+          18-hole cards get their own boards (a 9-hole course's 18 board is
+          the played-9-twice card; an 18's 9 board is front/back nines). */}
+      <View style={[styles.lbTabRow, { marginTop: 6 }]}>
+        {([9, 18] as const).map((h) => (
+          <TouchableOpacity
+            key={h}
+            style={[styles.lbTab, lbHoles === h && styles.lbTabActive]}
+            onPress={() => setLbHoles(h)}
+          >
+            <Text style={[styles.lbTabText, lbHoles === h && styles.lbTabTextActive]}>
+              {h} Holes
             </Text>
           </TouchableOpacity>
         ))}
@@ -179,7 +213,7 @@ export default function CourseInfoScreen() {
 
       {displayLb.length === 0 ? (
         <Text style={styles.empty}>
-          No {lbTab === 'stroke' ? 'stroke play' : 'scramble'} rounds recorded here yet.
+          No {lbHoles ?? 18}-hole {lbTab === 'stroke' ? 'solo' : 'scramble'} rounds recorded here yet.
         </Text>
       ) : (
         displayLb.map((r, i) => (
@@ -211,15 +245,23 @@ export default function CourseInfoScreen() {
               </Text>
             </View>
             <View style={styles.lbScoreBox}>
-              <Text style={styles.lbScore}>{r.total_score}</Text>
-              <Text style={styles.lbPar}>
-                {(() => {
-                  // 18-hole-equivalent to-par from the backend (what the board
-                  // is ranked on). Falls back to raw par-diff for older payloads.
-                  const tp = r.to_par ?? (r.total_score - r.par);
-                  return tp > 0 ? `+${tp}` : tp === 0 ? 'E' : `${tp}`;
-                })()}
-              </Text>
+              {(() => {
+                // RAW score is the headline (a 28 on 9 holes reads -8, exactly
+                // what happened on the course). The 18-hole-equivalent stays as
+                // a labeled secondary so cross-length comparisons are possible
+                // without a bare normalized number masquerading as the real one.
+                const fmt = (n: number) => (n > 0 ? `+${n}` : n === 0 ? 'E' : `${n}`);
+                const raw = r.raw_to_par ?? (r.par_played != null ? r.total_score - r.par_played : r.total_score - r.par);
+                return (
+                  <>
+                    <Text style={styles.lbScore}>{r.total_score}</Text>
+                    <Text style={styles.lbPar}>{fmt(raw)}</Text>
+                    {r.to_par != null && r.to_par !== raw && (
+                      <Text style={styles.lbNorm}>18-eq {fmt(r.to_par)}</Text>
+                    )}
+                  </>
+                );
+              })()}
             </View>
           </TouchableOpacity>
         ))
@@ -536,9 +578,10 @@ const styles = StyleSheet.create({
   lbRank: { fontFamily: F.serif, fontSize: 15, fontWeight: '700', width: 32, textAlign: 'center' },
   lbUser: { color: C.text, fontWeight: '700', fontSize: 14 },
   lbMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
-  lbScoreBox: { alignItems: 'center', minWidth: 48 },
+  lbScoreBox: { alignItems: 'center', minWidth: 56 },
   lbScore: { color: C.text, fontSize: 20, fontWeight: '900' },
   lbPar: { color: C.textMuted, fontSize: 11, marginTop: 1 },
+  lbNorm: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   empty: { color: C.textMuted, fontSize: 13, paddingHorizontal: 20, paddingVertical: 12 },
   tapHint: { color: C.textDim, fontSize: 11, textAlign: 'center', paddingVertical: 12, paddingHorizontal: 20 },

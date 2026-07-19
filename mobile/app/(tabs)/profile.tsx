@@ -839,7 +839,8 @@ export default function ProfileScreen() {
             const whatIf = (stats.sg_what_if ?? []) as { category: string; gain_per_round: number }[];
             const dec = stats.sg_decomposition as Record<string, number> | null;
             const tp = stats.sg_three_putt as { per_round: number; sg_lost_per_round: number } | null;
-            if (!leak && whatIf.length === 0) return null;
+            const worst = stats.sg_worst_bucket as { kind: string; bucket: string; sg_per_round: number } | null;
+            if (!leak && whatIf.length === 0 && !worst) return null;
             // Only frame the long-game share when long-game data exists at all,
             // otherwise a putts-only profile would read "0% long game".
             const hasLongGame = stats.sg_per_round.off_tee != null || stats.sg_per_round.approach != null;
@@ -849,6 +850,11 @@ export default function ProfileScreen() {
                 {leak != null && (
                   <Text style={styles.sgLeakLine}>
                     BIGGEST LEAK: <Text style={styles.sgLeakName}>{(label[leak] ?? leak).toUpperCase()}</Text>
+                  </Text>
+                )}
+                {worst != null && (
+                  <Text style={styles.sgInsightLine}>
+                    · Sharpest leak: {worst.kind === 'approach' ? 'approach from' : 'putts from'} {worst.bucket} ({worst.sg_per_round.toFixed(1)} a round)
                   </Text>
                 )}
                 {whatIf.slice(0, 2).map((w) => (
@@ -866,6 +872,48 @@ export default function ProfileScreen() {
                     Long game: {longShare}% of your losses · typical amateur is ~65% (Broadie)
                   </Text>
                 )}
+              </View>
+            );
+          })()}
+          {/* SG by distance — which yardages (and putt ranges) actually leak.
+              Values are per round and sum to the category's SG cell above. */}
+          {(() => {
+            const app = (stats.sg_approach_buckets ?? []) as { bucket: string; sg_per_round: number; shots: number }[];
+            const putt = (stats.sg_putting_buckets ?? []) as { bucket: string; sg_per_round: number; holes: number }[];
+            const appRows = app.filter((b) => b.shots > 0);
+            const puttRows = putt.filter((b) => b.holes > 0);
+            if (appRows.length === 0 && puttRows.length === 0) return null;
+            const valColor = (v: number) => (v > 0 ? C.green : v < 0 ? C.red : C.textMuted);
+            const fmt = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`;
+            return (
+              <View style={styles.sgBucketCard}>
+                {appRows.length > 0 && (
+                  <>
+                    <Text style={styles.sgBucketHead}>APPROACH · BY START DISTANCE</Text>
+                    {appRows.map((b) => (
+                      <View key={b.bucket} style={styles.sgBucketRow}>
+                        <Text style={styles.sgBucketLabel}>{b.bucket}</Text>
+                        <Text style={[styles.sgBucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
+                        <Text style={styles.sgBucketN}>{b.shots} shot{b.shots === 1 ? '' : 's'}</Text>
+                      </View>
+                    ))}
+                  </>
+                )}
+                {puttRows.length > 0 && (
+                  <>
+                    <Text style={[styles.sgBucketHead, appRows.length > 0 && { marginTop: 10 }]}>
+                      PUTTING · BY FIRST-PUTT DISTANCE
+                    </Text>
+                    {puttRows.map((b) => (
+                      <View key={b.bucket} style={styles.sgBucketRow}>
+                        <Text style={styles.sgBucketLabel}>{b.bucket}</Text>
+                        <Text style={[styles.sgBucketVal, { color: valColor(b.sg_per_round) }]}>{fmt(b.sg_per_round)}</Text>
+                        <Text style={styles.sgBucketN}>{b.holes} hole{b.holes === 1 ? '' : 's'}</Text>
+                      </View>
+                    ))}
+                  </>
+                )}
+                <Text style={styles.sgSplitNote}>per round vs the tour baseline</Text>
               </View>
             );
           })()}
@@ -912,6 +960,12 @@ export default function ProfileScreen() {
                   <Text style={[styles.roundToPar, { color: (toPar ?? 0) <= 0 ? C.green : C.red }]}>
                     {fmtToPar(toPar)}
                   </Text>
+                  {/* The stored 18-hole-equivalent (what cross-player boards
+                      rank on) as a labeled secondary, so raw vs normalized is
+                      never ambiguous. Hidden when identical to the raw figure. */}
+                  {bestRound.to_par != null && bestRound.to_par !== toPar && (
+                    <Text style={styles.roundNormSub}>18-eq {fmtToPar(bestRound.to_par)}</Text>
+                  )}
                 </View>
               </TouchableOpacity>
             );
@@ -1735,6 +1789,7 @@ const styles = StyleSheet.create({
   roundScoreBox: { alignItems: 'flex-end', minWidth: 50 },
   roundScore: { color: C.text, fontFamily: F.serif, fontSize: 22, fontWeight: '700' },
   roundToPar: { fontSize: 12, fontWeight: '700', marginTop: 1 },
+  roundNormSub: { color: C.textDim, fontSize: 9, marginTop: 1 },
 
   hcapHero: { alignItems: 'center', paddingVertical: 24, marginBottom: 8 },
   hcapBigNum: { fontFamily: F.serif, fontSize: 64, fontWeight: '700', color: C.gold },
@@ -1773,6 +1828,16 @@ const styles = StyleSheet.create({
   sgLeakName: { color: C.gold },
   sgInsightLine: { color: C.text, fontSize: 12, lineHeight: 17 },
   sgSplitNote: { color: C.textDim, fontSize: 10, fontStyle: 'italic', marginTop: 3 },
+  // SG-by-distance table (approach start distance / first-putt distance).
+  sgBucketCard: {
+    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
+    paddingVertical: 10, paddingHorizontal: 12, marginTop: -4, marginBottom: 12, gap: 4,
+  },
+  sgBucketHead: { color: C.textMuted, fontSize: 9, fontWeight: '800', letterSpacing: 1, marginBottom: 2 },
+  sgBucketRow: { flexDirection: 'row', alignItems: 'center' },
+  sgBucketLabel: { flex: 1, color: C.text, fontSize: 12 },
+  sgBucketVal: { width: 52, textAlign: 'right', fontSize: 13, fontWeight: '900', fontFamily: F.serif },
+  sgBucketN: { width: 70, textAlign: 'right', color: C.textDim, fontSize: 10 },
   statBox: {
     flex: 1, minWidth: '45%', backgroundColor: C.card, borderRadius: 14,
     padding: 16, alignItems: 'center', borderWidth: 1, borderColor: C.border,
