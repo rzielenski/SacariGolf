@@ -34,7 +34,6 @@ import { useAuth } from '../../lib/auth';
  *  so we have to fall back to the system camera (ImagePicker) when this
  *  is true — otherwise the in-app camera screen crashes at import time. */
 const isExpoGo = Constants.appOwnership === 'expo';
-import { isPremium } from '../../lib/premium';
 import { C, F } from '../../lib/colors';
 import { CLUB_LABELS } from '../../lib/proSwingStats';
 import {
@@ -60,7 +59,8 @@ const PICKABLE_CLUBS: { key: string; label: string }[] = [
 
 export default function ReviewSesh() {
   const { user } = useAuth();
-  const userIsPremium = isPremium(user as any);
+  // Swing review is free now (only cosmetics are premium).
+  const userIsPremium = true;
   const [swings, setSwings] = useState<RangeSwing[]>([]);
   const [club, setClub] = useState<string>('7iron');
   const [cameraAngle, setCameraAngle] = useState<CameraAngle>('face_on');

@@ -24,6 +24,9 @@ export const OPEN_BETA_PREMIUM: boolean = (() => {
   const v = (process.env.PREMIUM_OPEN_BETA ?? '').toLowerCase().trim();
   if (v === 'false' || v === '0' || v === 'off') return false;
   if (v === 'true'  || v === '1' || v === 'on')  return true;
-  // Default: open beta is ON
-  return true;
+  // Default: open beta is OVER (2026-07-10). Premium is now a real paid
+  // cosmetics tier; `is_premium` comes from the DB. Everyone who was signed up
+  // at the cutover was granted lifetime premium (see the users.grandfather_beta
+  // migration). Set PREMIUM_OPEN_BETA=true to temporarily re-open it if needed.
+  return false;
 })();

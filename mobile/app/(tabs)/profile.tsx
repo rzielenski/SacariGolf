@@ -830,11 +830,9 @@ export default function ProfileScreen() {
         </>
       )}
 
-      {/* Premium-only: putting + approach bucketed by distance, with PGA
-          scratch baselines. Component handles its own loading + 403 (non-
-          premium) state, so we can render it unconditionally and let it
-          self-suppress when the user isn't eligible. */}
-      {user && isPremium(user as any) && (
+      {/* Putting + approach bucketed by distance, with PGA scratch baselines.
+          Free for everyone now (analysis features aren't premium-gated). */}
+      {user && (
         <PuttingApproachStats userId={user.user_id} />
       )}
 

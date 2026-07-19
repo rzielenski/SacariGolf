@@ -79,7 +79,8 @@
       "router": {},
       "eas": {
         "projectId": "a442cf20-2e9b-44a1-a36e-5615b84ab145"
-      }
+      },
+      "revenueCatPublicKey": ""
     },
     "owner": "rich1468",
     "runtimeVersion": {

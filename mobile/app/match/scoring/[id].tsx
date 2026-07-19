@@ -11,7 +11,6 @@ import { useLocalSearchParams, router } from 'expo-router';
 import { api, OfflineError, ServerError, NotAuthenticatedError } from '../../../lib/api';
 import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
-import { isPremium } from '../../../lib/premium';
 import { adjustDistance, windComponents, metersToFeet } from '../../../lib/weatherAdjust';
 import { C, F } from '../../../lib/colors';
 import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS } from '../../../lib/golfMath';
@@ -141,7 +140,9 @@ export default function ScoringScreen() {
   };
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherSheetVisible, setWeatherSheetVisible] = useState(false);
-  const userIsPremium = isPremium(user as any);
+  // Gameplay + analysis features are free for everyone now (only cosmetics are
+  // premium). Kept as a flag so the many gates below don't each need editing.
+  const userIsPremium = true;
   // Past shots from previous rounds on the current hole — premium overlay.
   // Indexed by hole_num; each entry is the full raw shot track from an old
   // round. Filtering to "near current GPS" happens at render time so the

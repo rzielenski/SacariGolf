@@ -19,7 +19,7 @@ import pool from '../db/pool';
 import { requireAuth, AuthRequest } from '../middleware/auth';
 import { wrap } from '../utils/asyncHandler';
 import { equippedVisualSql } from '../utils/cosmeticSql';
-import { isOwner } from '../utils/owner';
+import { isOwner, isPremiumEffective } from '../utils/owner';
 
 const router = Router();
 
@@ -45,16 +45,24 @@ router.get('/users/me/cosmetics', requireAuth, wrap(async (req: AuthRequest, res
   // Owned set + the equipped slot for each kind. Single round-trip; the
   // mobile screen renders the catalog separately and intersects.
   const owner = await isOwner(req.userId);
+  const premiumEff = owner ? true : await isPremiumEffective(req.userId);
   const [{ rows: owned }, { rows: equippedRows }] = await Promise.all([
     // Owners dynamically own the entire catalog — no per-item grant rows,
     // so the locker is always complete even as the catalog grows.
     owner
       ? pool.query(`SELECT cosmetic_id FROM cosmetics`)
       : pool.query(
-          `SELECT cosmetic_id, unlocked_at, unlock_source
-             FROM user_cosmetics
-            WHERE user_id = $1`,
-          [req.userId],
+          // Own a cosmetic if: it's FREE, OR the user is PREMIUM and it's a
+          // premium item, OR they earned it (a user_cosmetics grant row). Rank
+          // TIER, cup, and tournament prize cosmetics are EARNED only — premium
+          // does not hand those out; they need the rank / the win.
+          `SELECT c.cosmetic_id
+             FROM cosmetics c
+            WHERE c.unlock_kind = 'free'
+               OR ($2 AND c.unlock_kind = 'premium')
+               OR EXISTS (SELECT 1 FROM user_cosmetics uc
+                           WHERE uc.user_id = $1 AND uc.cosmetic_id = c.cosmetic_id)`,
+          [req.userId, premiumEff],
         ),
     pool.query(
       `SELECT equipped_border, equipped_background, equipped_username,
@@ -97,14 +105,19 @@ router.post('/users/me/cosmetics/equip', requireAuth, wrap(async (req: AuthReque
   // the user doesn't own. Owners skip the ownership half (they own
   // everything) but the kind check still applies to everyone.
   const owner = await isOwner(req.userId);
+  const premiumEff = owner ? true : await isPremiumEffective(req.userId);
   const { rows: check } = owner
     ? await pool.query(`SELECT kind FROM cosmetics WHERE cosmetic_id = $1`, [cosmetic_id])
     : await pool.query(
-        `SELECT c.kind
-           FROM cosmetics c
-           JOIN user_cosmetics uc ON uc.cosmetic_id = c.cosmetic_id
-          WHERE uc.user_id = $1 AND c.cosmetic_id = $2`,
-        [req.userId, cosmetic_id],
+        // Same ownership rule as /mine: free, OR premium + a premium item, OR
+        // earned (rank/cup/tournament grant rows).
+        `SELECT c.kind FROM cosmetics c
+          WHERE c.cosmetic_id = $2
+            AND (c.unlock_kind = 'free'
+              OR ($3 AND c.unlock_kind = 'premium')
+              OR EXISTS (SELECT 1 FROM user_cosmetics uc
+                          WHERE uc.user_id = $1 AND uc.cosmetic_id = c.cosmetic_id))`,
+        [req.userId, cosmetic_id, premiumEff],
       );
   if (!check.length) {
     return res.status(403).json({

@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import pool from '../db/pool';
-import { requireAuth, requirePremium, AuthRequest } from '../middleware/auth';
+import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { perUserRateLimit } from '../utils/rateLimit';
@@ -1058,10 +1058,10 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
  * Returned alongside each bucket so the client can render side-by-side
  * comparisons without hard-coding the numbers in the UI layer.
  *
- * Premium-gated — this is the kind of detailed analysis that drives
- * subscription conversion for serious-improvement-oriented players.
+ * Free for everyone — analysis / gameplay features are no longer premium-gated
+ * (only cosmetics are). Left the rich breakdown in place; just dropped the gate.
  */
-router.get('/:id/shot-stats', requireAuth, requirePremium, wrap(async (req: AuthRequest, res: Response) => {
+router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
   // Pull every tracked shot for this user that has a pin location to compare
   // against. INNER JOIN on holes filters out shots from holes that don't have
   // a known pin (a course with no contributions yet) — those shots are

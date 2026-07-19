@@ -21,7 +21,6 @@ import {
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { useAuth } from '../lib/auth';
-import { isPremium } from '../lib/premium';
 import { api } from '../lib/api';
 import { C, F } from '../lib/colors';
 import { useCensor } from '../lib/censor';
@@ -31,7 +30,8 @@ type Mode = 'all' | 'duo' | 'squad';
 export default function TeamsBrowseScreen() {
   const { user } = useAuth();
   const censor = useCensor();
-  const userIsPremium = isPremium(user as any);
+  // Team creation is free + uncapped now (non-cosmetic features aren't gated).
+  const userIsPremium = true;
   const [teams, setTeams] = useState<any[]>([]);
   const [myTeams, setMyTeams] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);

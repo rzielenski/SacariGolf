@@ -6,7 +6,6 @@ import { requireAuth, AuthRequest } from '../middleware/auth';
 import { sendPush } from '../utils/notify';
 import { wrap } from '../utils/asyncHandler';
 import { perUserRateLimit } from '../utils/rateLimit';
-import { OPEN_BETA_PREMIUM } from '../utils/openBeta';
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || '/app/uploads';
 const CLAN_AVATARS_DIR = path.join(UPLOADS_DIR, 'clan-avatars');
@@ -14,47 +13,12 @@ if (!fs.existsSync(CLAN_AVATARS_DIR)) fs.mkdirSync(CLAN_AVATARS_DIR, { recursive
 
 const router = Router();
 
-/** Per-mode team caps for non-premium users. The user can be on at most
- *  this many DUOs and this many SQUADs simultaneously. Premium users are
- *  uncapped. Counts include teams the user leads. */
-const FREE_TEAM_CAP: Record<'duo' | 'squad', number> = { duo: 2, squad: 2 };
-
-/** Check whether the user has room for another team in the given mode.
- *  Returns `{ ok: true }` when they can join, or `{ ok: false, error,
- *  status }` with a ready-to-return HTTP envelope. Premium users always
- *  return ok. */
+/** Room for another team? Team creation is now FREE and uncapped for everyone
+ *  — non-cosmetic features are no longer premium-gated. Kept as a function so
+ *  the call sites don't change; it just always says yes now. */
 async function checkTeamQuota(
-  userId: string, mode: 'duo' | 'squad',
+  _userId: string, _mode: 'duo' | 'squad',
 ): Promise<{ ok: true } | { ok: false; status: number; body: any }> {
-  // Open-beta override: while OPEN_BETA_PREMIUM is on, everyone gets the
-  // unlimited cap (same posture the per-feature gates use).
-  if (OPEN_BETA_PREMIUM) return { ok: true };
-  const { rows } = await pool.query(
-    `SELECT
-       (SELECT is_premium FROM users WHERE user_id = $1) AS is_premium,
-       (SELECT premium_until FROM users WHERE user_id = $1) AS premium_until,
-       (SELECT COUNT(*)::int FROM clan_members cm
-          JOIN clans c ON c.clan_id = cm.clan_id
-         WHERE cm.user_id = $1 AND c.clan_mode = $2) AS current_count`,
-    [userId, mode],
-  );
-  const row = rows[0] ?? {};
-  const isPremium = !!row.is_premium
-    && (row.premium_until == null || new Date(row.premium_until) > new Date());
-  if (isPremium) return { ok: true };
-  const current: number = row.current_count ?? 0;
-  if (current >= FREE_TEAM_CAP[mode]) {
-    return {
-      ok: false,
-      status: 402,
-      body: {
-        error: `Free accounts can be on at most ${FREE_TEAM_CAP[mode]} ${mode} teams. Upgrade to Premium for unlimited teams.`,
-        upgrade_required: true,
-        cap: FREE_TEAM_CAP[mode],
-        mode,
-      },
-    };
-  }
   return { ok: true };
 }
 

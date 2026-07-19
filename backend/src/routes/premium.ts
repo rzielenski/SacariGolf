@@ -26,36 +26,39 @@ const router = Router();
  * Catalog of planned premium features, served to the mobile upgrade screen.
  * Centralised here so marketing copy can be updated without an app release.
  */
+// Premium is COSMETICS ONLY — every gameplay/analysis feature is free. This
+// list is the cosmetic loadout premium unlocks. Rank-earned items still require
+// hitting the tier; premium covers everything else.
 const FEATURES = [
   {
-    id: 'advanced_stats',
-    name: 'Deep Stats',
-    blurb: 'Per-club strokes-gained, distance distributions, miss tendency heatmaps.',
+    id: 'backgrounds',
+    name: 'Animated Profile Backgrounds',
+    blurb: 'Aurora, storms, nebula, matrix, holographic, lava, and more. your card, alive.',
   },
   {
-    id: 'unlimited_shot_tracking',
-    name: 'Unlimited Shot Tracking',
-    blurb: 'Save every shot of every round. Free tier keeps the last 5 rounds.',
+    id: 'borders',
+    name: 'Avatar Borders',
+    blurb: 'Traveling-light rings, holographic sweeps, flame, frost, tesla, and plasma frames.',
   },
   {
-    id: 'rivalries',
-    name: 'Rivalries',
-    blurb: 'Head-to-head leaderboards, streaks, and trash-talk DMs vs. specific friends.',
+    id: 'usernames',
+    name: 'Username Flair',
+    blurb: 'Gradient, shimmer, holographic, neon, and glitch effects on your name.',
   },
   {
-    id: 'custom_clan_branding',
-    name: 'Custom Clan Branding',
-    blurb: 'Banner art, custom colors, and a vanity URL for your clan page.',
+    id: 'ball_trails',
+    name: 'Ball Trails',
+    blurb: 'Paint your shot lines on the map with fire, galaxy, crackle, and rainbow trails.',
   },
   {
-    id: 'ad_free',
-    name: 'No Ads',
-    blurb: 'When ads ship to free users, premium stays clean.',
+    id: 'app_themes',
+    name: 'App Themes',
+    blurb: 'Re-skin the entire app. Ultra White, Old Glory, Nebula, Aurora, and a dozen more.',
   },
   {
-    id: 'priority_matchmaking',
-    name: 'Priority Matchmaking',
-    blurb: 'Skip the queue when finding ranked opponents at peak times.',
+    id: 'celebration_fx',
+    name: 'Celebration FX',
+    blurb: 'Bigger, flashier birdie/eagle/ace celebration overlays that are all yours.',
   },
 ];
 

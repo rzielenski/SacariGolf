@@ -137,12 +137,12 @@ export default function PremiumScreen() {
             <View style={s.activeBanner}>
               <Text style={s.activeTitle}>
                 {(user as any)?.premium_plan === 'open_beta'
-                  ? '★  Premium is on us  ★'
+                  ? '★  Premium for life  ★'
                   : "You're a member."}
               </Text>
               <Text style={s.activeSub}>
                 {(user as any)?.premium_plan === 'open_beta'
-                  ? "As a thanks for being in our first 100 users, premium is on the house. Every paid feature below is unlocked, no card, no expiry. Enjoy."
+                  ? 'As an early Sacari member, premium is yours for life. every cosmetic below is unlocked, no card, no expiry. Thanks for being here early.'
                   : (daysLeft != null ? `${daysLeft} day${daysLeft === 1 ? '' : 's'} remaining` : 'Lifetime access')}
               </Text>
             </View>

@@ -2390,6 +2390,24 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS crash_reports_created_idx ON crash_reports(created_at DESC);
     `,
   },
+  {
+    // Premium-on-the-house is OVER (2026-07-10). Grandfather EVERY user who was
+    // already signed up at the cutover to LIFETIME premium, so ending the open
+    // beta doesn't yank premium from the people who were here for it. Runs once
+    // (idempotent by name); anyone who signs up AFTER this migration starts as
+    // non-premium and can buy in. Bots are skipped. premium_until = NULL means
+    // lifetime; premium_plan 'open_beta' drives the "premium is on the house"
+    // banner + hides the paywall for these grandfathered accounts.
+    name: 'users.grandfather_beta_lifetime',
+    sql: `
+      UPDATE users
+         SET is_premium    = TRUE,
+             premium_since = COALESCE(premium_since, NOW()),
+             premium_until = NULL,
+             premium_plan  = COALESCE(premium_plan, 'open_beta')
+       WHERE COALESCE(is_bot, false) = false;
+    `,
+  },
 ];
 
 export async function runMigrations() {
