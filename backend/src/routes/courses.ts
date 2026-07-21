@@ -8,7 +8,7 @@ import {
   estimateRatingSlope, looksPlausibleRating, validateTeebox, HoleInput,
 } from '../utils/courseEstimate';
 import { scanScorecard, ScorecardScanError } from '../utils/scorecardScan';
-import { isAdminAuthed } from '../utils/adminAuth';
+import { perUserRateLimit } from '../utils/rateLimit';
 
 const router = Router();
 
@@ -759,11 +759,17 @@ router.get('/:id/elevation-at', requireAuth, wrap(async (req: any, res: Response
  * NOTE: the URL still says `/admin/set-pins` to avoid breaking the existing
  * curl runbook + admin client cache key. It's not actually gated anymore.
  */
-router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response) => {
-  // Admin-gated: this overwrites canonical pin coordinates for ALL teeboxes of a
-  // course (global shared data), so it needs the admin token, not just a login.
-  // In-round per-player pin contributions still flow through /matches/:id/pin.
-  if (!isAdminAuthed(req, res)) return;
+router.post('/admin/set-pins', requireAuth,
+  // NOT admin-gated. The "Place / Correct Pins" screen is offered to every
+  // player from the course page, and pin coverage is what unlocks distance /
+  // slope / weather for everyone, so gating this behind an admin token broke
+  // the whole crowd-sourcing loop (every contributor just got a 403).
+  // Abuse is contained WITHOUT locking contributors out: this per-user rate
+  // limit caps mass overwrites, `pin_set_by` / `pin_set_at` leave an audit
+  // trail to roll back, and last-write-wins lets the next player correct a bad
+  // pin. In-round per-player contributions still flow through /matches/:id/pin.
+  perUserRateLimit({ max: 15, windowMs: 60_000 }),
+  wrap(async (req: any, res: Response) => {
   const { courseId, pins } = req.body ?? {};
   if (typeof courseId !== 'string' || !courseId) {
     return res.status(400).json({ error: 'courseId required' });
@@ -826,9 +832,13 @@ router.post('/admin/set-pins', requireAuth, wrap(async (req: any, res: Response)
  *
  * Response: { updated: N, missing_hole_nums: [...] }
  */
-router.post('/admin/set-teeboxes', requireAuth, wrap(async (req: any, res: Response) => {
-  // Admin-gated — overwrites canonical per-hole tee data (global shared data).
-  if (!isAdminAuthed(req, res)) return;
+router.post('/admin/set-teeboxes', requireAuth,
+  // Same story as set-pins: the "Mark Tee Boxes" button sits next to
+  // "Place / Correct Pins" on the course page and is open to every player, so
+  // an admin token here 403'd every legitimate contributor. Rate-limited +
+  // stamped with the contributor + last-write-wins instead.
+  perUserRateLimit({ max: 15, windowMs: 60_000 }),
+  wrap(async (req: any, res: Response) => {
   const { teeboxId, tees } = req.body ?? {};
   if (typeof teeboxId !== 'string' || !teeboxId) {
     return res.status(400).json({ error: 'teeboxId required' });
