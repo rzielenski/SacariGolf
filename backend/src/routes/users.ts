@@ -1391,6 +1391,206 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
 }));
 
 /**
+ * Full performance data export — a stable, VERSIONED JSON another app can
+ * ingest and re-pull anytime. Self-only (this is the caller's own personal
+ * data). Four datasets, matching what it was built for:
+ *   • clubs              — per-club distance + lateral DISPERSION as a
+ *                          distribution (mean / stddev / percentiles) AND raw
+ *                          samples, so the consumer can use the fitted curve or
+ *                          the points (the "heatmap of every club").
+ *   • strokes_gained     — SG per round by the four Broadie categories + by
+ *                          distance bucket, with an explicit INSIDE-100 figure.
+ *   • approach_proximity — avg proximity to the pin by start-distance bucket,
+ *                          fine-grained INSIDE 100 yds so the consuming app
+ *                          needs no separately-collected partial-wedge data.
+ *   • putting            — make% + attempts by distance bucket, vs the tour.
+ * Units: distances in yards, proximity + putt distance in feet, SG in
+ * strokes/round relative to the PGA Tour baseline.
+ */
+router.get('/:id/data-export', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  // Personal bulk data — only the owner can pull their own export.
+  if (req.userId !== req.params.id) {
+    return res.status(403).json({ error: 'You can only export your own data.' });
+  }
+  const userId = req.params.id;
+
+  const { rows: uRows } = await pool.query(
+    `SELECT username, handicap_index FROM users WHERE user_id = $1`, [userId],
+  );
+  if (!uRows.length) return res.status(404).json({ error: 'User not found' });
+
+  // ── Clubs: distance + lateral dispersion ─────────────────────────────────
+  // Solo shots (or scramble shots the player was tagged as owning) so the
+  // distribution is genuinely THEIR ball.
+  const { rows: clubShots } = await pool.query(
+    `SELECT s.club, s.total_yds, s.lateral_yds
+       FROM shots s JOIN matches m ON m.match_id = s.match_id
+      WHERE COALESCE(s.owner_user_id, s.user_id) = $1
+        AND (m.match_type = 'solo' OR s.owner_user_id IS NOT NULL)
+        AND m.is_practice = false
+        AND s.club IS NOT NULL AND s.club <> 'unknown'
+        AND s.total_yds IS NOT NULL
+      ORDER BY s.recorded_at DESC
+      LIMIT 8000`,
+    [userId],
+  );
+  const clubMap = new Map<string, { d: number; lat: number | null }[]>();
+  for (const s of clubShots) {
+    const d = Number(s.total_yds);
+    if (!Number.isFinite(d) || d <= 0) continue;
+    const lat = (s.lateral_yds != null && Number.isFinite(Number(s.lateral_yds))) ? Number(s.lateral_yds) : null;
+    const arr = clubMap.get(s.club) ?? [];
+    arr.push({ d, lat });
+    clubMap.set(s.club, arr);
+  }
+  const mean = (a: number[]) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+  const stddev = (a: number[]) => {
+    if (a.length < 2) return 0;
+    const m = mean(a);
+    return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / (a.length - 1));
+  };
+  const pctile = (sorted: number[], p: number): number | null => {
+    if (!sorted.length) return null;
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))));
+    return sorted[idx];
+  };
+  const r1 = (n: number | null): number | null => (n == null ? null : Math.round(n * 10) / 10);
+  const clubs = [...clubMap.entries()]
+    .map(([club, arr]) => {
+      const ds = arr.map((x) => x.d).sort((a, b) => a - b);
+      const lats = arr.map((x) => x.lat).filter((x): x is number => x != null);
+      return {
+        club,
+        shot_count: arr.length,
+        distance_yds: {
+          mean: r1(mean(ds)), stddev: r1(stddev(ds)),
+          min: r1(ds[0]), max: r1(ds[ds.length - 1]),
+          p10: r1(pctile(ds, 10)), p50: r1(pctile(ds, 50)), p90: r1(pctile(ds, 90)),
+        },
+        // Signed lateral: + = right of target, − = left. stddev = spread width.
+        lateral_yds: lats.length
+          ? { mean: r1(mean(lats)), stddev: r1(stddev(lats)), samples: lats.length }
+          : null,
+        // Raw points (capped) so the consumer can plot the real heatmap or fit
+        // its own distribution rather than trusting our summary.
+        samples: arr.slice(0, 300).map((x) => ({ distance_yds: r1(x.d), lateral_yds: r1(x.lat) })),
+      };
+    })
+    .sort((a, b) => (b.distance_yds.mean ?? 0) - (a.distance_yds.mean ?? 0));
+
+  // ── Strokes gained (canonical Broadie engine) ────────────────────────────
+  const sg = await computeStrokesGained(userId);
+  const approachUnder100 = sg?.sg_approach_buckets?.find((b) => b.bucket === '<100 yd')?.sg_per_round ?? null;
+  const aroundGreen = sg?.sg_per_round?.around_green ?? null;
+  const inside100Sg = (approachUnder100 != null || aroundGreen != null)
+    ? Math.round(((approachUnder100 ?? 0) + (aroundGreen ?? 0)) * 100) / 100
+    : null;
+  const strokes_gained = {
+    rounds_used: sg?.rounds_used ?? 0,
+    shots_used: sg?.shots_used ?? 0,
+    per_round: sg?.sg_per_round ?? { off_tee: null, approach: null, around_green: null, putting: null, total: 0 },
+    by_distance: {
+      approach: sg?.sg_approach_buckets ?? [],
+      putting: sg?.sg_putting_buckets ?? [],
+    },
+    inside_100: {
+      sg_per_round: inside100Sg,
+      components: { around_green: aroundGreen, approach_under_100_yd: approachUnder100 },
+      note: 'Strokes gained inside 100 yards (greenside + wedge approaches), so a consuming app needs no separately-collected partial-shot data.',
+    },
+  };
+
+  // ── Approach proximity, fine-grained inside 100 (GPS-tracked shots) ───────
+  const { rows: shotRows } = await pool.query(
+    `SELECT s.start_lat, s.start_lng, s.end_lat, s.end_lng, h.pin_lat, h.pin_lng
+       FROM shots s
+       JOIN rounds r ON r.match_id = s.match_id AND r.user_id = COALESCE(s.owner_user_id, s.user_id)
+       JOIN holes  h ON h.teebox_id = r.teebox_id AND h.hole_num = s.hole_num
+      WHERE COALESCE(s.owner_user_id, s.user_id) = $1
+        AND s.match_id IS NOT NULL AND h.pin_lat IS NOT NULL AND h.pin_lng IS NOT NULL
+      LIMIT 10000`,
+    [userId],
+  );
+  const R_M = 6371000, M_TO_YDS = 1.0936132983;
+  const toRad = (d: number) => d * Math.PI / 180;
+  const distYds = (la1: number, lo1: number, la2: number, lo2: number): number => {
+    const dLat = toRad(la2 - la1), dLng = toRad(lo2 - lo1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(la1)) * Math.cos(toRad(la2)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R_M * Math.asin(Math.sqrt(a)) * M_TO_YDS;
+  };
+  const PUTT_RADIUS_YDS = 12, APPROACH_END_RADIUS_YDS = 30;
+  const apBuckets = [
+    { label: '0-30 yd', min: 0, max: 30 }, { label: '30-50 yd', min: 30, max: 50 },
+    { label: '50-75 yd', min: 50, max: 75 }, { label: '75-100 yd', min: 75, max: 100 },
+    { label: '100-125 yd', min: 100, max: 125 }, { label: '125-150 yd', min: 125, max: 150 },
+    { label: '150-175 yd', min: 150, max: 175 }, { label: '175-200 yd', min: 175, max: 200 },
+    { label: '200+ yd', min: 200, max: Infinity },
+  ].map((b) => ({ ...b, shots: 0, sumProxFt: 0 }));
+  for (const s of shotRows) {
+    const startToPin = distYds(s.start_lat, s.start_lng, s.pin_lat, s.pin_lng);
+    const endToPin = distYds(s.end_lat, s.end_lng, s.pin_lat, s.pin_lng);
+    if (startToPin <= PUTT_RADIUS_YDS) continue;         // that's a putt
+    if (endToPin > APPROACH_END_RADIUS_YDS) continue;    // didn't reach the green area
+    const b = apBuckets.find((x) => startToPin >= x.min && startToPin < x.max);
+    if (b) { b.shots += 1; b.sumProxFt += endToPin * 3; }
+  }
+  const approach_proximity = apBuckets.map((b) => ({
+    bucket: b.label, shots: b.shots,
+    avg_proximity_ft: b.shots ? Math.round((b.sumProxFt / b.shots) * 10) / 10 : null,
+  }));
+
+  // ── Putting make% by distance (typed putt distances) ─────────────────────
+  const puttBuckets = [
+    { label: '0-3 ft', min: 0, max: 3 }, { label: '4-6 ft', min: 3, max: 6 },
+    { label: '7-10 ft', min: 6, max: 10 }, { label: '11-15 ft', min: 10, max: 15 },
+    { label: '16-25 ft', min: 15, max: 25 }, { label: '26+ ft', min: 25, max: Infinity },
+  ].map((b) => ({ ...b, attempts: 0, made: 0 }));
+  const TOUR_MAKE_PCT: Record<string, number> = {
+    '0-3 ft': 99, '4-6 ft': 77, '7-10 ft': 49, '11-15 ft': 28, '16-25 ft': 12, '26+ ft': 5,
+  };
+  const { rows: prRows } = await pool.query(
+    `SELECT hole_stats FROM rounds WHERE user_id = $1 ORDER BY created_at DESC LIMIT 2000`,
+    [userId],
+  );
+  for (const r of prRows) {
+    const hsArr: any[] = Array.isArray(r.hole_stats) ? r.hole_stats : [];
+    for (const h of hsArr) {
+      const dists: number[] = Array.isArray(h?.puttDistances)
+        ? h.puttDistances.filter((d: any) => typeof d === 'number' && d > 0) : [];
+      for (let i = 0; i < dists.length; i++) {
+        const b = puttBuckets.find((x) => dists[i] >= x.min && dists[i] < x.max);
+        if (!b) continue;
+        b.attempts += 1;
+        if (i === dists.length - 1) b.made += 1;   // last putt in the array = the make
+      }
+    }
+  }
+  const putting = puttBuckets.map((b) => ({
+    bucket: b.label, attempts: b.attempts, made: b.made,
+    make_pct: b.attempts ? Math.round((b.made / b.attempts) * 1000) / 10 : null,
+    tour_make_pct: TOUR_MAKE_PCT[b.label],
+  }));
+
+  return res.json({
+    schema: 'sacari.performance-export',
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    player: { user_id: userId, username: uRows[0].username, handicap_index: uRows[0].handicap_index },
+    units: {
+      distance: 'yards',
+      lateral: 'yards (+ right / − left of target line)',
+      proximity: 'feet',
+      putt_distance: 'feet',
+      strokes_gained: 'strokes per round vs PGA Tour baseline (positive = gaining)',
+    },
+    clubs,
+    strokes_gained,
+    approach_proximity,
+    putting,
+  });
+}));
+
+/**
  * Delete a single shot owned by the authenticated user. Used from the club
  * heatmap / advanced stats screen when the player wants to drop a mistracked
  * shot from their stats. Restricted to the shot's owner — no admin override.

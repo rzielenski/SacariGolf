@@ -248,6 +248,28 @@ app.get('/account/clubs', requireAuth, async (req, res) => {
   }
 });
 
+// ----- Performance data export ----------------------------------------------
+// Downloads the caller's full stats bundle (club dispersion, strokes gained,
+// approach proximity, putting) as a stable versioned JSON another app can
+// re-ingest. Proxies the backend's self-only /data-export and forces a file
+// download. The JWT stays in the httpOnly cookie — never exposed to the page.
+app.get('/account/export.json', requireAuth, async (req, res) => {
+  try {
+    const me = await apiGet('/users/me', req.token);
+    const data = await apiGet(`/users/${me.user_id}/data-export`, req.token);
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safeName = String(me.username || 'data').replace(/[^a-z0-9]/gi, '') || 'data';
+    res.set('Cache-Control', 'private, no-store');
+    res.set('Content-Type', 'application/json; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="sacari-${safeName}-${stamp}.json"`);
+    res.send(JSON.stringify(data, null, 2));
+  } catch (err) {
+    if (err.code === 401) { clearSession(res); res.redirect('/login'); return; }
+    console.error('export error:', err);
+    res.status(500).send(R.renderNotFound());
+  }
+});
+
 // ----- Pin editor (crowdsourced pin placement) ------------------------------
 app.get('/course/:id/pins', requireAuth, async (req, res) => {
   const id = String(req.params.id || '');

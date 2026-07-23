@@ -1487,6 +1487,16 @@ function renderClubs({ sg, clubs }) {
     <a class="cta-ghost" href="/account">Back to account</a>
   </section>
   <section class="tees">
+    <div class="dash-card">
+      <div class="dash-card-title">Export your data</div>
+      <p style="color:var(--muted);font-size:14px;line-height:1.5;margin:6px 0 12px">
+        One JSON file another app can import and re-pull anytime: per-club distance
+        &amp; lateral dispersion (a distribution plus raw samples), strokes gained by
+        shot type with an inside-100 breakdown, approach proximity by distance, and
+        putting make% by distance. Stable, versioned schema.
+      </p>
+      <a class="cta" href="/account/export.json" download>↓ Download my data (JSON)</a>
+    </div>
     ${sgBlock}
     ${rows
       ? `<table class="tee-table"><thead><tr><th>Club</th><th>Shots</th><th>Median</th><th>Avg</th><th>Tendency</th></tr></thead><tbody>${rows}</tbody></table>`
