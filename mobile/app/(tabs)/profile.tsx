@@ -710,7 +710,7 @@ export default function ProfileScreen() {
       <View style={styles.hubGrid}>
         <HubTile icon="⚑"  label="My Matches"    onPress={() => router.push('/matches' as any)} />
         <HubTile icon="★"  label="Leaderboard"   onPress={() => router.push('/leaderboard' as any)} />
-        <HubTile icon="◆"  label="Leagues"       onPress={() => router.push('/creator-leagues' as any)} />
+        <HubTile icon="◆"  label="Leagues"       onPress={() => router.push('/leagues' as any)} />
         <HubTile icon="♛"  label="Tournaments"   onPress={() => router.push('/tournaments' as any)} />
         <HubTile icon="🏆" label="Sacari Cup"    onPress={() => router.push('/sacari-cup' as any)} />
         <HubTile icon="◎"  label="Closest Pin"   onPress={() => router.push('/closest-to-pin' as any)} />

@@ -53,11 +53,11 @@ export async function autoPostSoloRoundToLeague(
   if (m[0].is_practice) return;            // never practice rounds
 
   const { rows: lg } = await client.query(
-    `SELECT t.tournament_id, t.target_to_par
+    `SELECT t.tournament_id, t.target_to_par, t.league_type, t.handicap_adjusted
        FROM tournament_players tp
        JOIN tournaments t ON t.tournament_id = tp.tournament_id
       WHERE tp.user_id = $1 AND tp.auto_post = TRUE
-        AND t.is_creator_league = TRUE AND t.status = 'active'
+        AND t.league_type IN ('creator', 'buddies') AND t.status = 'active'
       ORDER BY tp.joined_at ASC
       LIMIT 1`,
     [userId],
@@ -67,14 +67,28 @@ export async function autoPostSoloRoundToLeague(
 
   await client.query(`UPDATE matches SET tournament_id = $1 WHERE match_id = $2`, [league.tournament_id, matchId]);
 
-  // Beat-the-creator feed moment.
-  if (league.target_to_par != null) {
-    const { rows: rr } = await client.query(`SELECT normalized_to_par FROM rounds WHERE round_id = $1`, [roundId]);
-    const v = rr[0]?.normalized_to_par;
-    if (v != null && Number(v) <= Number(league.target_to_par)) {
-      const { rows: u } = await client.query(`SELECT username FROM users WHERE user_id = $1`, [userId]);
-      const name = u[0]?.username ?? 'A challenger';
-      await postLeagueEvent(client, league.tournament_id, userId, `🎯 ${name} beat the creator with ${fmtToPar(v)}`);
+  // Feed moment for the round (best-effort — the leaderboard already updated).
+  // A beat-the-creator league celebrates clearing the target; a buddies league
+  // just keeps the feed alive with each posted round, shown NET when the league
+  // is handicap-adjusted so the number matches the standings.
+  const { rows: rr } = await client.query(
+    `SELECT r.normalized_to_par, COALESCE(u.handicap_index, 0) AS hcp, u.username
+       FROM rounds r JOIN users u ON u.user_id = r.user_id
+      WHERE r.round_id = $1`,
+    [roundId],
+  );
+  const info = rr[0];
+  if (info && info.normalized_to_par != null) {
+    const gross = Number(info.normalized_to_par);
+    const name = info.username ?? 'A member';
+    if (league.target_to_par != null && gross <= Number(league.target_to_par)) {
+      await postLeagueEvent(client, league.tournament_id, userId, `🎯 ${name} beat the creator with ${fmtToPar(gross)}`);
+    } else {
+      const shown = league.handicap_adjusted ? Math.round(gross - Number(info.hcp)) : gross;
+      await postLeagueEvent(
+        client, league.tournament_id, userId,
+        `⛳ ${name} posted ${fmtToPar(shown)}${league.handicap_adjusted ? ' net' : ''}`,
+      );
     }
   }
 }
@@ -90,7 +104,7 @@ export async function runCreatorLeagueSeasons(): Promise<void> {
     const { rows: due } = await pool.query(
       `SELECT tournament_id
          FROM tournaments
-        WHERE is_creator_league = TRUE
+        WHERE league_type IN ('creator', 'buddies')
           AND status = 'active'
           AND reset_period IN ('weekly', 'monthly')
           AND season_started_at IS NOT NULL
@@ -103,7 +117,8 @@ export async function runCreatorLeagueSeasons(): Promise<void> {
       try {
         await client.query('BEGIN');
         const { rows: chk } = await client.query(
-          `SELECT season_started_at, reset_period, scoring FROM tournaments WHERE tournament_id = $1 FOR UPDATE`,
+          `SELECT season_started_at, reset_period, scoring, handicap_adjusted, league_type
+             FROM tournaments WHERE tournament_id = $1 FOR UPDATE`,
           [d.tournament_id],
         );
         if (!chk.length) { await client.query('ROLLBACK'); continue; }
@@ -115,7 +130,12 @@ export async function runCreatorLeagueSeasons(): Promise<void> {
         if (!stillDue[0]?.due) { await client.query('ROLLBACK'); continue; }
         const seasonStart = chk[0].season_started_at;
 
-        const order = chk[0].scoring === 'total_strokes' ? 'SUM(r.normalized_to_par)' : 'MIN(r.normalized_to_par)';
+        // Crown by NET when the league is handicap-adjusted, matching how its
+        // leaderboard ranks (server-derived expr, safe to interpolate).
+        const netExpr = chk[0].handicap_adjusted
+          ? '(r.normalized_to_par - COALESCE(u.handicap_index, 0))'
+          : 'r.normalized_to_par';
+        const order = chk[0].scoring === 'total_strokes' ? `SUM(${netExpr})` : `MIN(${netExpr})`;
         const { rows: top } = await client.query(
           `SELECT u.user_id, u.username
              FROM tournament_players tp
@@ -133,13 +153,18 @@ export async function runCreatorLeagueSeasons(): Promise<void> {
         const winnerName: string | null = top[0]?.username ?? null;
 
         if (winnerId) {
-          await client.query(
-            `INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
-               SELECT $1, c.cosmetic_id, $2 FROM cosmetics c
-                WHERE c.unlock_kind = 'tournament_winner' AND (c.unlock_data ->> 'place')::int = 1
-             ON CONFLICT (user_id, cosmetic_id) DO NOTHING`,
-            [winnerId, `league_${d.tournament_id}_season`],
-          );
+          // Exclusive prize cosmetics are creator-league only. a buddies
+          // champion gets the crown + bragging rights, not a scarce cosmetic
+          // (else any 2-person league could mint them and dilute the pool).
+          if (chk[0].league_type !== 'buddies') {
+            await client.query(
+              `INSERT INTO user_cosmetics (user_id, cosmetic_id, unlock_source)
+                 SELECT $1, c.cosmetic_id, $2 FROM cosmetics c
+                  WHERE c.unlock_kind = 'tournament_winner' AND (c.unlock_data ->> 'place')::int = 1
+               ON CONFLICT (user_id, cosmetic_id) DO NOTHING`,
+              [winnerId, `league_${d.tournament_id}_season`],
+            );
+          }
           await postLeagueEvent(client, d.tournament_id, winnerId, `🏆 Season champion: ${winnerName}. A new season has begun.`);
         } else {
           await postLeagueEvent(client, d.tournament_id, null, 'A new season has begun.');

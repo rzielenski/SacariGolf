@@ -2303,6 +2303,26 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     `,
   },
   {
+    // Private "buddies leagues" — a peer-hosted league flavor of tournaments
+    // that ANY user can create (no approved-creator gate), invite-only, and
+    // scored NET (handicap-adjusted) so a 20-handicap and a scratch golfer
+    // compete fairly in the same group.
+    //   - league_type: 'none' (plain tournament) | 'creator' | 'buddies'.
+    //     Backfilled to 'creator' for existing creator leagues so the season /
+    //     social plumbing can key off league_type <> 'none' uniformly instead
+    //     of is_creator_league (which stays TRUE only for public creator ones).
+    //   - handicap_adjusted: the leaderboard subtracts each player's
+    //     users.handicap_index from their normalized (18-eq) to-par.
+    name: 'buddies_leagues',
+    sql: `
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS league_type       TEXT NOT NULL DEFAULT 'none';
+      ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS handicap_adjusted  BOOLEAN NOT NULL DEFAULT FALSE;
+      UPDATE tournaments SET league_type = 'creator' WHERE is_creator_league = TRUE AND league_type = 'none';
+      CREATE INDEX IF NOT EXISTS tournaments_league_type_idx
+        ON tournaments(league_type, status) WHERE league_type <> 'none';
+    `,
+  },
+  {
     // Comment replies (one level) + image attachments, on both comment
     // surfaces. parent_comment_id points at a TOP-LEVEL comment; the routes
     // normalize a reply-to-a-reply back to its top-level ancestor so threads

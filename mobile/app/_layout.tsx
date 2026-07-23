@@ -318,6 +318,7 @@ export default function RootLayout() {
         <Stack.Screen name="tournaments" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="tournament/[id]" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="creator-leagues" options={{ animation: 'slide_from_right', headerShown: true }} />
+        <Stack.Screen name="leagues" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="join/[code]" options={{ animation: 'fade' }} />
         <Stack.Screen name="blocked-users" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="match/[id]" options={{ animation: 'slide_from_right' }} />

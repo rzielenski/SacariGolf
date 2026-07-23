@@ -62,6 +62,11 @@ export default function TournamentDetailScreen() {
   const winnerName = (t.players ?? []).find((p: any) => p.user_id === t.winner_id)?.username
     ?? (t.leaderboard ?? [])[0]?.username ?? null;
   const isCreatorLeague = !!t.is_creator_league;
+  const isBuddies = t.league_type === 'buddies';
+  // A "league" (creator or buddies) gets the feed, chat, seasons + auto-post;
+  // only CREATOR leagues get branding (accent, tagline, beat-the-creator).
+  const isLeague = isCreatorLeague || isBuddies;
+  const isNet = !!t.handicap_adjusted;   // net (handicap-adjusted) standings
   const accent = isCreatorLeague ? (t.accent_color || C.gold) : C.gold;
   const myRow = (t.leaderboard ?? []).find((r: any) => r.user_id === user?.user_id);
   const iBeat = !!myRow?.beat_creator;
@@ -98,7 +103,7 @@ export default function TournamentDetailScreen() {
   const shareCode = async () => {
     if (!t.join_code) return;
     await Share.share({
-      message: `Join my Sacari Golf tournament "${t.name}" with code ${t.join_code}.`,
+      message: `Join my Sacari Golf ${t.league_type === 'buddies' ? 'buddies league' : t.is_creator_league ? 'league' : 'tournament'} "${t.name}" with code ${t.join_code}.`,
     });
   };
 
@@ -169,11 +174,17 @@ export default function TournamentDetailScreen() {
         <>
           <Text style={s.title}>{c(t.name)}</Text>
           {t.description ? <Text style={s.desc}>{c(t.description)}</Text> : null}
-          <Text style={s.meta}>
-            {label('scoring', t.scoring)} · {label('format', t.format)}
-            {t.course_name ? ` · ${t.course_name}` : ''}
-            {t.ends_at ? ` · ends ${new Date(t.ends_at).toLocaleDateString()}` : ''}
-          </Text>
+          {isBuddies ? (
+            <Text style={s.meta}>
+              Buddies league · {label('scoring', t.scoring)}{isNet ? ' · handicap-adjusted' : ''} · private
+            </Text>
+          ) : (
+            <Text style={s.meta}>
+              {label('scoring', t.scoring)} · {label('format', t.format)}
+              {t.course_name ? ` · ${t.course_name}` : ''}
+              {t.ends_at ? ` · ends ${new Date(t.ends_at).toLocaleDateString()}` : ''}
+            </Text>
+          )}
           <Text style={s.meta}>Hosted by {c(t.owner_username)}</Text>
         </>
       )}
@@ -226,11 +237,15 @@ export default function TournamentDetailScreen() {
           onPress={() => router.push(`/play?type=group&tournament=${t.tournament_id}` as any)}
           activeOpacity={0.85}
         >
-          <Text style={s.runBtnText}>{isCreatorLeague ? '＋ Play your attempt' : '＋ Run a group round'}</Text>
+          <Text style={s.runBtnText}>
+            {isCreatorLeague ? '＋ Play your attempt' : isBuddies ? '＋ Play a round' : '＋ Run a group round'}
+          </Text>
           <Text style={s.runBtnSub}>
             {isCreatorLeague
               ? 'Play a round that counts toward this league. Post the target score or better to beat the creator.'
-              : 'Score your group on one phone. Every player\'s round counts toward this leaderboard.'}
+              : isBuddies
+                ? 'Turn on auto-post below and every solo round you play counts. Or score a group here.'
+                : 'Score your group on one phone. Every player\'s round counts toward this leaderboard.'}
           </Text>
         </TouchableOpacity>
       )}
@@ -244,14 +259,14 @@ export default function TournamentDetailScreen() {
       )}
 
       {/* Last season champion (recurring leagues) */}
-      {isCreatorLeague && t.last_champion_name && (
+      {isLeague && t.last_champion_name && (
         <View style={[s.champStrip, { borderColor: accent + '55' }]}>
           <Text style={s.champStripText}>Last season champion: 🏆 {c(t.last_champion_name)}</Text>
         </View>
       )}
 
-      {/* Leaderboard / Feed tabs + chat (creator leagues only) */}
-      {isCreatorLeague && (
+      {/* Leaderboard / Feed tabs + chat (any league) */}
+      {isLeague && (
         <View style={s.tabBar}>
           <TouchableOpacity style={[s.tabBtn, tab === 'leaderboard' && { borderBottomColor: accent }]} onPress={() => setTab('leaderboard')}>
             <Text style={[s.tabBtnText, tab === 'leaderboard' && { color: accent }]}>Leaderboard</Text>
@@ -268,9 +283,9 @@ export default function TournamentDetailScreen() {
         </View>
       )}
 
-      {(!isCreatorLeague || tab === 'leaderboard') && (
+      {(!isLeague || tab === 'leaderboard') && (
         <>
-          {isCreatorLeague && isMember && (
+          {isLeague && isMember && (
             <View style={s.settingRow}>
               <View style={{ flex: 1, marginRight: 12 }}>
                 <Text style={s.settingLabel}>Auto-post my solo rounds</Text>
@@ -284,7 +299,7 @@ export default function TournamentDetailScreen() {
             </View>
           )}
 
-          {!isCreatorLeague ? <OrnamentTitle title="Leaderboard" /> : <View style={{ height: 8 }} />}
+          {!isLeague ? <OrnamentTitle title="Leaderboard" /> : <View style={{ height: 8 }} />}
           {(!t.leaderboard || t.leaderboard.length === 0) ? (
             <Text style={s.empty}>No rounds played yet. Standings update automatically as people submit scores.</Text>
           ) : (
@@ -305,6 +320,7 @@ export default function TournamentDetailScreen() {
                   </View>
                   <Text style={s.lbMeta}>
                     {row.rounds_played ?? 0} round{row.rounds_played === 1 ? '' : 's'} played
+                    {isNet && row.handicap != null ? ` · hcp ${row.handicap}` : ''}
                   </Text>
                 </View>
                 <View style={{ alignItems: 'flex-end' }}>
@@ -316,7 +332,7 @@ export default function TournamentDetailScreen() {
                       return v === 0 ? 'E' : v > 0 ? `+${v}` : `${v}`;
                     })()}
                   </Text>
-                  <Text style={s.lbUnit}>{t.scoring === 'wins' ? 'wins' : '18-eq to par'}</Text>
+                  <Text style={s.lbUnit}>{t.scoring === 'wins' ? 'wins' : isNet ? 'net' : '18-eq to par'}</Text>
                 </View>
               </TouchableOpacity>
             ))
@@ -385,7 +401,7 @@ export default function TournamentDetailScreen() {
       )}
 
       <View style={{ marginTop: 30, gap: 10 }}>
-        {isOwner && isCreatorLeague && isActive && (
+        {isOwner && isLeague && isActive && (
           <View style={s.seasonBox}>
             <Text style={s.seasonLabel}>SEASON CADENCE</Text>
             <Text style={s.seasonHint}>Auto-crown a champion and reset the leaderboard on a schedule.</Text>

@@ -1070,6 +1070,11 @@ export const api = {
       isCreatorLeague?: boolean;
       accentColor?: string;   // #rrggbb
       tagline?: string;
+      // Private "buddies league": peer-hosted, invite-only, net (handicap-
+      // adjusted) scored. Any user can create one (no approved-creator gate).
+      leagueType?: 'buddies' | 'creator';
+      handicapAdjusted?: boolean;
+      resetPeriod?: 'none' | 'weekly' | 'monthly';
     }) => request<any>('POST', '/tournaments', body),
     /** Owner-only: set the "beat the creator" target (a standing to-par the
      *  field chases). Pass toPar directly, roundId to derive it, or toPar:null
