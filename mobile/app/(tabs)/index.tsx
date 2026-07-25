@@ -102,19 +102,16 @@ export default function HomeScreen() {
           <Text style={styles.greeting}>Welcome back,</Text>
           <Text style={styles.username}>{censor(user.username)}</Text>
         </View>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-          <TouchableOpacity
-            style={styles.chatCornerBtn}
-            onPress={() => router.push('/social' as any)}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="chatbubbles-outline" size={22} color={C.gold} />
-          </TouchableOpacity>
-          <View style={[styles.rankBadge, { borderColor: rank.color }]}>
-            <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
-          </View>
-        </View>
+        {/* Chat only — the rank badge that used to sit here was redundant
+            (the SR card right below shows it) and crowded the chat button. */}
+        <TouchableOpacity
+          style={styles.chatCornerBtn}
+          onPress={() => router.push('/social' as any)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="chatbubbles-outline" size={22} color={C.gold} />
+        </TouchableOpacity>
       </View>
 
       {/* Last week's Sacari Cup champion — gold trophy banner. Hidden
