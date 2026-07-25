@@ -216,6 +216,19 @@ export default function UserProfileScreen() {
             >
               <Text style={[styles.friendBtnText, { color: C.bg }]}>Message</Text>
             </TouchableOpacity>
+            {/* Challenge — direct 1v1 against THIS player. Jumps into the
+                Play wizard's challenge mode (locks Ranked 1v1, sends them
+                the invite on create). This flow existed but had no button
+                anywhere — resurrected in the UX redesign. */}
+            <TouchableOpacity
+              style={[styles.friendBtn, { backgroundColor: C.gold }]}
+              onPress={() => router.push(
+                `/play?challenge=${profile.user_id}&challengeName=${encodeURIComponent(profile.username)}` as any,
+              )}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.friendBtnText, { color: '#000' }]}>⚔ Challenge</Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>

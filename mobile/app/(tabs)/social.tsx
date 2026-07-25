@@ -16,21 +16,19 @@
  *     button row; the per-row Challenge button on the friends list was
  *     duplicative with the Play tab's challenge flow.
  *
- * What remains here:
- *   • Match Invites and Team Invites surfaces — actionable items that
- *     don't have an obvious home elsewhere yet.
- *   • Direct Messages, Match Chats, Team Chats — the three chat lists
- *     that drove ~all the navigation traffic from this tab anyway.
+ * What remains here (4-tab redesign): the pure chats inbox — Direct
+ * Messages, Match Chats, Team Chats. Match + team INVITES moved to the
+ * Team tab (the invites hub); this screen is no longer a tab and opens
+ * from the chat icon in Home's top corner (route: /social, href:null).
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Alert, ActivityIndicator, Animated, Easing,
+  ActivityIndicator, Animated, Easing,
 } from 'react-native';
 import { router } from 'expo-router';
 import { api } from '../../lib/api';
-import { MatchInvite } from '../../types';
 import { C } from '../../lib/colors';
 import { UserAvatar } from '../../components/UserAvatar';
 import { useAuth } from '../../lib/auth';
@@ -74,11 +72,10 @@ export default function SocialScreen() {
   const { user } = useAuth();
   // Default ON: censor unless the viewer explicitly turned it off.
   const censor = user?.censor_offensive_language !== false;
-  // Invites — actionable items that surface alongside the chats. Match
-  // invites and Team invites both need accept/decline before they can
-  // open a chat, so we render them at the top of the same scroll view.
-  const [matchInvites, setMatchInvites] = useState<MatchInvite[]>([]);
-  const [clanInvites, setClanInvites] = useState<any[]>([]);
+  // NOTE: match + team invites used to render at the top of this screen.
+  // They moved to the Team tab (the invites hub with the badge) in the
+  // 4-tab redesign — this screen is now purely the chats inbox, opened
+  // from the chat icon in Home's top corner.
 
   // Chats
   const [dms, setDms] = useState<any[]>([]);
@@ -94,16 +91,12 @@ export default function SocialScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [invites, ci, convs, allMatches, myClans, unread] = await Promise.all([
-        api.invites.list(),
-        api.clans.clanInvites(),
+      const [convs, allMatches, myClans, unread] = await Promise.all([
         api.messages.conversations(),
         api.matches.list(),
         api.clans.mine(),
         api.messages.unreadSummary().catch(() => ({ matches: [], clans: [] })),
       ]);
-      setMatchInvites(invites);
-      setClanInvites(ci);
       setDms(convs);
       setMatches(allMatches.filter((m: any) => !m.completed));
       setClans(myClans);
@@ -113,48 +106,6 @@ export default function SocialScreen() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
-
-  // ── Invite actions ──────────────────────────────────────────────────────
-  const acceptMatchInvite = async (invite: MatchInvite) => {
-    try {
-      const result = await api.invites.accept(invite.invite_id);
-      router.push(`/match/${result.matchId}` as any);
-    } catch (e: any) { Alert.alert('Error', e.message); }
-  };
-  const declineMatchInvite = async (inviteId: string) => {
-    try {
-      await api.invites.decline(inviteId);
-      setMatchInvites((prev) => prev.filter((i) => i.invite_id !== inviteId));
-    } catch { /* silent */ }
-  };
-  const acceptClanInvite = async (invite: any) => {
-    try {
-      const result = await api.clans.acceptClanInvite(invite.invite_id);
-      setClanInvites((prev) => prev.filter((i) => i.invite_id !== invite.invite_id));
-      Alert.alert('Joined!', `You joined ${invite.clan_name}.`, [
-        { text: 'View Team', onPress: () => router.push(`/clan/${result.clanId}` as any) },
-        { text: 'OK' },
-      ]);
-    } catch (e: any) {
-      const msg = e?.message ?? 'Could not accept';
-      // Surface the free-tier cap as an upgrade prompt rather than a
-      // generic error toast (server emits 402 + upgrade_required).
-      if (e?.status === 402 || /Upgrade to Premium/i.test(msg)) {
-        Alert.alert('Team limit reached', msg, [
-          { text: 'Not now', style: 'cancel' },
-          { text: 'See Premium', onPress: () => router.push('/premium' as any) },
-        ]);
-      } else {
-        Alert.alert('Error', msg);
-      }
-    }
-  };
-  const declineClanInvite = async (inviteId: string) => {
-    try {
-      await api.clans.declineClanInvite(inviteId);
-      setClanInvites((prev) => prev.filter((i) => i.invite_id !== inviteId));
-    } catch { /* silent */ }
-  };
 
   // Sort each list: unread first (preserving their relative order), then
   // read. Stable partition keeps server-side ordering (most-recent-first)
@@ -182,8 +133,15 @@ export default function SocialScreen() {
       {/* Title row + Find Friends. DMs are friends-only, so the place you
           read chats needs a direct path to growing the friends list. It
           used to live only behind Profile's follower counts. */}
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <Text style={styles.title}>Chats</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          {/* No longer a tab — opened from Home's chat icon, so give it a
+              way back. */}
+          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Text style={{ color: C.gold, fontSize: 22, fontWeight: '600' }}>‹</Text>
+          </TouchableOpacity>
+          <Text style={[styles.title, { marginBottom: 0 }]}>Chats</Text>
+        </View>
         <TouchableOpacity
           onPress={() => router.push('/friends?tab=add' as any)}
           activeOpacity={0.7}
@@ -197,71 +155,6 @@ export default function SocialScreen() {
         </TouchableOpacity>
       </View>
       <ScrollView style={{ flex: 1 }}>
-        {/* ── Match Invites ─────────────────────────────────────────── */}
-        {matchInvites.length > 0 && (
-          <>
-            <Text style={styles.sectionTitle}>Match Invites</Text>
-            <Text style={styles.inviteHint}>Tap Join to enter the match, then Start Scoring to play your round.</Text>
-            {matchInvites.map((inv) => (
-              <View key={inv.invite_id} style={styles.inviteRow}>
-                <UserAvatar username={inv.from_username} avatarUrl={inv.from_avatar_url} size={36} borderRadius={4} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.userName} numberOfLines={1}>{censorText(inv.from_username, censor)} invited you</Text>
-                  <Text style={styles.userElo} numberOfLines={1}>
-                    {(inv.match_type ?? 'match').charAt(0).toUpperCase() + (inv.match_type ?? 'match').slice(1)}
-                    {inv.match_name ? ` · ${censorText(inv.match_name, censor)}` : ''}
-                    {' · '}{inv.from_elo} SR
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.inviteBtn, { backgroundColor: C.green + '22', borderColor: C.green }]}
-                  onPress={() => acceptMatchInvite(inv)}
-                >
-                  <Text style={[styles.inviteBtnText, { color: C.green }]}>Join</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.inviteBtn, { backgroundColor: C.card, borderColor: C.border }]}
-                  onPress={() => declineMatchInvite(inv.invite_id)}
-                >
-                  <Text style={[styles.inviteBtnText, { color: C.textMuted }]}>✕</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-          </>
-        )}
-
-        {/* ── Team Invites ──────────────────────────────────────────── */}
-        {clanInvites.length > 0 && (
-          <>
-            <Text style={styles.sectionTitle}>Team Invites</Text>
-            {clanInvites.map((inv) => (
-              <View key={inv.invite_id} style={styles.inviteRow}>
-                <View style={[styles.userAvatar, { backgroundColor: C.gold + '22' }]}>
-                  <Text style={styles.avatarText}>{censorText(inv.clan_name ?? '', censor)[0]?.toUpperCase() ?? '?'}</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.userName} numberOfLines={1}>{censorText(inv.clan_name, censor)}</Text>
-                  <Text style={styles.userElo} numberOfLines={1}>
-                    {inv.clan_mode.toUpperCase()} · {inv.member_count}/{inv.max_players} · from {censorText(inv.from_username, censor)}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[styles.inviteBtn, { backgroundColor: C.green + '22', borderColor: C.green }]}
-                  onPress={() => acceptClanInvite(inv)}
-                >
-                  <Text style={[styles.inviteBtnText, { color: C.green }]}>Join</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.inviteBtn, { backgroundColor: C.card, borderColor: C.border }]}
-                  onPress={() => declineClanInvite(inv.invite_id)}
-                >
-                  <Text style={[styles.inviteBtnText, { color: C.textMuted }]}>✕</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-          </>
-        )}
-
         {/* ── Direct Messages ─────────────────────────────────────── */}
         <Text style={styles.sectionTitle}>Direct Messages</Text>
         {dmsSorted.length === 0 && (

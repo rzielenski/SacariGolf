@@ -49,6 +49,11 @@ export default function TabLayout() {
         tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
       }}
     >
+      {/* ── 4-tab layout (UX feedback: 6 tabs overwhelmed new players) ──
+          Home · Play · Team · Profile. Courses folded into the Play flow,
+          Finds lives on the Home hub, and Chats moved to a top-corner icon
+          on Home. Those three screens stay ROUTABLE below via href:null —
+          same paths, just no tab-bar slot. */}
       <Tabs.Screen
         name="index"
         options={{
@@ -68,35 +73,15 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="courses"
+        name="team"
         options={{
-          title: 'Courses',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="map" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="social"
-        options={{
-          // Renamed from "Social" — the tab is now a chats-only inbox.
-          // Friends + Teams moved to the profile screen; user lookup
-          // ("add a friend") moved to the Following / Followers lists.
-          title: 'Chats',
-          // Badge surfaces pending match + team invites so they're not missed.
+          // The people hub: match + team invites (the badge), my teams,
+          // friends. One obvious place to accept anything.
+          title: 'Team',
           tabBarBadge: inviteCount > 0 ? inviteCount : undefined,
           tabBarBadgeStyle: { backgroundColor: C.gold, color: '#000', fontWeight: '900' },
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="chatbubbles" size={size} color={color} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="finds"
-        options={{
-          title: 'Finds',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="camera" size={size} color={color} />
+            <Ionicons name="people" size={size} color={color} />
           ),
         }}
       />
@@ -109,6 +94,14 @@ export default function TabLayout() {
           ),
         }}
       />
+
+      {/* Hidden-but-routable former tabs. href:null removes the tab-bar
+          entry while keeping the routes alive, so every existing
+          router.push('/courses' | '/finds' | deep link to chats) still works
+          with zero file moves. */}
+      <Tabs.Screen name="courses" options={{ href: null }} />
+      <Tabs.Screen name="finds" options={{ href: null }} />
+      <Tabs.Screen name="social" options={{ href: null }} />
     </Tabs>
   );
 }

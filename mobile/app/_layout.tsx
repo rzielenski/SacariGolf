@@ -150,7 +150,8 @@ function AuthGuard() {
       if (!data || typeof data !== 'object') return;
       switch (data.type) {
         case 'invite':
-          router.push('/(tabs)/social' as any);
+          // Invites live on the Team tab now (the invites hub), not Chats.
+          router.push('/(tabs)/team' as any);
           break;
         case 'matchFound':
           if (typeof data.matchId === 'string') router.push(`/match/${data.matchId}` as any);

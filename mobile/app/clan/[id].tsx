@@ -42,6 +42,8 @@ export default function ClanDetailScreen() {
   // Invite state
   const [inviteVisible, setInviteVisible] = useState(false);
   const [friends, setFriends] = useState<any[]>([]);
+  const [inviteQuery, setInviteQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
   const [loadingFriends, setLoadingFriends] = useState(false);
 
   // Avatar / theme state
@@ -206,11 +208,26 @@ export default function ClanDetailScreen() {
   const openInvite = async () => {
     setInviteVisible(true);
     setLoadingFriends(true);
+    setInviteQuery('');
+    setSearchResults([]);
     try {
       const memberIds = new Set((clan?.members ?? []).map((m) => m.user_id));
       const all = await api.users.friends();
       setFriends((all as any[]).filter((f: any) => !memberIds.has(f.user_id)));
     } catch { setFriends([]); } finally { setLoadingFriends(false); }
+  };
+
+  // Username search — team invites aren't limited to existing friends (the
+  // backend never was; only this modal's data source). Search any player,
+  // same as match invites.
+  const searchInvitees = async (q: string) => {
+    setInviteQuery(q);
+    if (q.trim().length < 2) { setSearchResults([]); return; }
+    try {
+      const res = await api.users.search(q.trim());
+      const memberIds = new Set((clan?.members ?? []).map((m) => m.user_id));
+      setSearchResults((Array.isArray(res) ? res : []).filter((u: any) => !memberIds.has(u.user_id)));
+    } catch { setSearchResults([]); }
   };
 
   const inviteFriend = async (friendId: string, friendName: string) => {
@@ -424,12 +441,44 @@ export default function ClanDetailScreen() {
               <Text style={styles.modalCancel}>Done</Text>
             </TouchableOpacity>
           </View>
-          <ScrollView style={styles.modalBody}>
+          <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
+            {/* Search ANY player by username — not limited to friends. */}
+            <TextInput
+              style={{
+                backgroundColor: C.card, color: C.text, borderRadius: 10,
+                paddingHorizontal: 14, paddingVertical: 12, fontSize: 15,
+                borderWidth: 1, borderColor: C.border, marginBottom: 10,
+              }}
+              value={inviteQuery}
+              onChangeText={searchInvitees}
+              placeholder="Search any player by username…"
+              placeholderTextColor={C.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {inviteQuery.trim().length >= 2 && searchResults.map((f: any) => (
+              <View key={`s-${f.user_id}`} style={styles.friendInviteRow}>
+                <UserAvatar username={f.username} avatarUrl={f.avatar_url} size={40} borderRadius={6} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.memberName}>{c(f.username)}</Text>
+                  <Text style={styles.memberMeta}>{f.elo} SR</Text>
+                </View>
+                <TouchableOpacity style={styles.inviteBtn} onPress={() => inviteFriend(f.user_id, f.username)}>
+                  <Text style={styles.inviteBtnText}>Invite</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+            {inviteQuery.trim().length >= 2 && searchResults.length === 0 && (
+              <Text style={{ color: C.textMuted, textAlign: 'center', marginVertical: 12 }}>No players match</Text>
+            )}
+            {inviteQuery.trim().length >= 2 && friends.length > 0 && (
+              <Text style={{ color: C.gold, fontSize: 11, fontWeight: '900', letterSpacing: 1.2, marginTop: 8, marginBottom: 6 }}>FRIENDS</Text>
+            )}
             {loadingFriends
               ? <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
-              : friends.length === 0
+              : friends.length === 0 && inviteQuery.trim().length < 2
                 ? <Text style={{ color: C.textMuted, textAlign: 'center', marginTop: 40 }}>
-                    No friends available to invite
+                    No friends to list — search any player by username above.
                   </Text>
                 : friends.map((f) => (
                   <View key={f.user_id} style={styles.friendInviteRow}>

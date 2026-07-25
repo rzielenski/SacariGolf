@@ -21,6 +21,7 @@ import {
   View, Text, StyleSheet, TouchableOpacity, Alert,
 } from 'react-native';
 import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../lib/auth';
 import { api } from '../../lib/api';
 import { C, F } from '../../lib/colors';
@@ -94,14 +95,25 @@ export default function HomeScreen() {
    *  ListHeaderComponent so the whole screen scrolls as one surface. */
   const header = (
     <View style={styles.header}>
-      {/* Greeting + rank badge */}
+      {/* Greeting + rank badge + chat (top corner — Chats left the tab bar
+          in the 4-tab redesign; this icon is its home now) */}
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.greeting}>Welcome back,</Text>
           <Text style={styles.username}>{censor(user.username)}</Text>
         </View>
-        <View style={[styles.rankBadge, { borderColor: rank.color }]}>
-          <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <TouchableOpacity
+            style={styles.chatCornerBtn}
+            onPress={() => router.push('/social' as any)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="chatbubbles-outline" size={22} color={C.gold} />
+          </TouchableOpacity>
+          <View style={[styles.rankBadge, { borderColor: rank.color }]}>
+            <Text style={[styles.rankLabel, { color: rank.color }]}>{rank.label}</Text>
+          </View>
         </View>
       </View>
 
@@ -254,11 +266,29 @@ export default function HomeScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Primary action — the #1 thing Home was missing. One tap into the
+          guided Start-a-Round wizard on the Play tab. */}
+      <TouchableOpacity
+        style={styles.playCta}
+        onPress={() => router.push('/play' as any)}
+        activeOpacity={0.85}
+      >
+        <Text style={styles.playCtaMark}>⛳︎</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.playCtaTitle}>Start a Round</Text>
+          <Text style={styles.playCtaSub}>Solo, ranked, or with your group</Text>
+        </View>
+        <Text style={styles.playCtaChev}>›</Text>
+      </TouchableOpacity>
+
       {/* Quick-access hub: the home tab doubles as the app's map. Every
           marquee surface is one tap from here, so features stop being
-          "buried somewhere in Profile". 3-wide compact tiles. */}
+          "buried somewhere in Profile". 3-wide compact tiles. Finds +
+          Courses live here now that they left the tab bar. */}
       <View style={styles.hubGrid}>
         {([
+          { mark: '📸', label: 'Finds', to: '/finds' },
+          { mark: '🗺', label: 'Courses', to: '/courses' },
           { mark: '★', label: 'Leaderboard', to: '/leaderboard' },
           { mark: '◆', label: 'Creator Leagues', to: '/creator-leagues' },
           { mark: '♛', label: 'Tournaments', to: '/tournaments' },
@@ -294,6 +324,22 @@ const styles = StyleSheet.create({
   header: { padding: 20, paddingTop: 60 },
 
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 },
+  // Top-corner chat button (Chats' home since it left the tab bar).
+  chatCornerBtn: {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+  },
+  // Primary "Start a Round" CTA above the hub grid.
+  playCta: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: C.gold, borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 14, marginBottom: 14,
+  },
+  playCtaMark: { fontSize: 22 },
+  playCtaTitle: { color: '#000', fontWeight: '900', fontSize: 16, letterSpacing: 0.3 },
+  playCtaSub: { color: '#00000099', fontWeight: '600', fontSize: 12, marginTop: 1 },
+  playCtaChev: { color: '#000', fontSize: 24, fontWeight: '300' },
   greeting: { color: C.textMuted, fontSize: 14 },
   username: { color: C.text, fontSize: 24, fontWeight: '800' },
   rankBadge: { borderRadius: 20, borderWidth: 1.5, paddingHorizontal: 12, paddingVertical: 5 },

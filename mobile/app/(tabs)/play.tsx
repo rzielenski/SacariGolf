@@ -49,6 +49,34 @@ type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
 
 const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'ffa', 'group', 'practice'];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Round types, GROUPED + RENAMED for clarity (UX feedback: 6 flat equal-weight
+// cards were overwhelming, and "Solo" reading as play-by-myself when it means
+// ranked-1v1 was the #1 confusion). Internal ids are unchanged — 'practice' is
+// presented as "Solo Round", 'solo' as "Ranked 1v1". Casual group first so a
+// brand-new player's most likely intent is the first thing they see.
+// ─────────────────────────────────────────────────────────────────────────────
+const TYPE_META: Record<MatchType, { name: string; badge: string; desc: string }> = {
+  practice: { name: 'Solo Round',  badge: 'YOU', desc: 'Just you. Track your round, shots, and stats — no SR on the line.' },
+  group:    { name: 'Group Round', badge: 'GRP', desc: 'Keep score for your whole group on one phone. Casual, live leaderboard.' },
+  solo:     { name: 'Ranked 1v1',  badge: '1v1', desc: 'Auto-matched against a player near your SR. Winner takes rating.' },
+  ffa:      { name: 'Arena',       badge: 'ARN', desc: 'Ranked free-for-all — invite up to 15 players. Lowest score wins.' },
+  duo:      { name: 'Duo',         badge: '2v2', desc: 'Ranked 2v2 with your duo team.' },
+  squad:    { name: 'Squad',       badge: '4v4', desc: 'Ranked 4v4 with your squad.' },
+};
+const TYPE_GROUPS: { header: string; sub: string; types: MatchType[] }[] = [
+  { header: 'Just Play',    sub: 'Casual · no SR',        types: ['practice', 'group'] },
+  { header: 'Ranked',       sub: 'Play for SR',           types: ['solo', 'ffa'] },
+  { header: 'Ranked Teams', sub: 'Play with your team',   types: ['duo', 'squad'] },
+];
+
+/** The full step pathway for a given round type. Drives the "STEP X OF Y"
+ *  progress readout so the wizard reads as one guided, can't-mess-it-up path. */
+const stepFlow = (t: MatchType): Step[] =>
+  t === 'duo' || t === 'squad' ? ['type', 'clan', 'format', 'course', 'teebox']
+  : t === 'practice' || t === 'group' ? ['type', 'course', 'teebox']
+  : ['type', 'format', 'course', 'teebox'];
+
 export default function PlayScreen() {
   const { user } = useAuth();
   // Optional URL params drive two unified entry points into this wizard:
@@ -72,6 +100,11 @@ export default function PlayScreen() {
   const [joinId, setJoinId] = useState('');
   const [joining, setJoining] = useState(false);
   const [matchType, setMatchType] = useState<MatchType>('solo');
+  // Forced pathway: nothing is pre-selected. The user must explicitly pick a
+  // round type before the holes picker + Continue appear, so nobody starts a
+  // ranked match (or anything else) by accident. Deep links (?type=,
+  // ?challenge=) count as an explicit choice.
+  const [typeChosen, setTypeChosen] = useState(false);
   // Active-match count for the "Resume Round" banner at the top of the
   // type step. Cheap one-shot fetch on mount; the banner just routes the
   // player to /resume (or straight into the only active match) so they
@@ -102,6 +135,14 @@ export default function PlayScreen() {
   const [selectedClanId, setSelectedClanId] = useState<string | null>(null);
   const [myclans, setMyClans] = useState<any[]>([]);
   const [loadingClans, setLoadingClans] = useState(false);
+  // Inline team-create + invite, so the duo/squad path never dead-ends into
+  // "go build a team somewhere else." Create the team and fire the invites
+  // without ever leaving the wizard.
+  const [teamName, setTeamName] = useState('');
+  const [creatingTeam, setCreatingTeam] = useState(false);
+  const [inviteTeamId, setInviteTeamId] = useState<string | null>(null);
+  const [wizFriends, setWizFriends] = useState<any[]>([]);
+  const [invitedIds, setInvitedIds] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [courses, setCourses] = useState<Course[]>([]);
   const [nearbyCourses, setNearbyCourses] = useState<Course[]>([]);
@@ -160,11 +201,13 @@ export default function PlayScreen() {
   useEffect(() => {
     if (challengeUserId) {
       setMatchType('solo');
+      setTypeChosen(true);
       setStep('type');
       return;
     }
     if (typeof params.type === 'string' && (TYPE_VALUES as readonly string[]).includes(params.type)) {
       setMatchType(params.type as MatchType);
+      setTypeChosen(true);
       setStep('type');
     }
   }, [challengeUserId, params.type]);
@@ -215,20 +258,55 @@ export default function PlayScreen() {
       }
     : null;
 
-  // Load clans when clan step becomes active
+  // Load clans when clan step becomes active. ALL teams of the right mode are
+  // shown — eligible ones are selectable, not-ready ones show their status
+  // (e.g. "1/2 · waiting for your partner") instead of vanishing, so the step
+  // never looks broken while an invite is pending.
   useEffect(() => {
     if (step !== 'clan') return;
     setLoadingClans(true);
     api.clans.mine()
-      .then((all) => {
-        const filtered = matchType === 'duo'
-          ? all.filter((c: any) => c.clan_mode === 'duo' && c.member_count === 2)
-          : all.filter((c: any) => c.clan_mode === 'squad' && c.role === 'leader' && c.member_count >= 3);
-        setMyClans(filtered);
-      })
+      .then((all) => setMyClans(
+        (Array.isArray(all) ? all : []).filter((c: any) => c.clan_mode === (matchType === 'duo' ? 'duo' : 'squad')),
+      ))
       .catch(() => { })
       .finally(() => setLoadingClans(false));
   }, [step, matchType]);
+
+  /** Can this team actually start a match right now? Mirrors the old filter. */
+  const clanEligible = (c: any) => matchType === 'duo'
+    ? c.member_count === 2
+    : c.role === 'leader' && c.member_count >= 3;
+
+  const loadWizFriends = () => {
+    api.users.friends()
+      .then((f: any) => setWizFriends(Array.isArray(f) ? f : []))
+      .catch(() => setWizFriends([]));
+  };
+
+  const createTeamInline = async () => {
+    const name = teamName.trim();
+    if (!name) { Alert.alert('Team name', 'Give your team a name first.'); return; }
+    setCreatingTeam(true);
+    try {
+      const created = await api.clans.create(name, matchType === 'duo' ? 'duo' : 'squad');
+      setTeamName('');
+      const all = await api.clans.mine().catch(() => []);
+      setMyClans((Array.isArray(all) ? all : []).filter((c: any) => c.clan_mode === (matchType === 'duo' ? 'duo' : 'squad')));
+      const newId = created?.clan_id ?? created?.clanId ?? null;
+      setInviteTeamId(newId);           // flow straight into inviting
+      loadWizFriends();
+    } catch (e: any) { Alert.alert('Error', e.message); }
+    finally { setCreatingTeam(false); }
+  };
+
+  const inviteToTeam = async (friendId: string) => {
+    if (!inviteTeamId) return;
+    try {
+      await api.clans.invite(inviteTeamId, friendId);
+      setInvitedIds((prev) => new Set(prev).add(friendId));
+    } catch (e: any) { Alert.alert('Could not invite', e.message); }
+  };
 
   const handleJoinById = async () => {
     if (!joinId.trim()) { Alert.alert('Enter a Match ID'); return; }
@@ -316,6 +394,7 @@ export default function PlayScreen() {
   };
 
   const goToNextStep = () => {
+    if (!typeChosen) return; // forced pathway: no advancing without a choice
     if (matchType === 'duo' || matchType === 'squad') {
       setStep('clan');
     } else if (matchType === 'practice' || matchType === 'group') {
@@ -333,6 +412,29 @@ export default function PlayScreen() {
     matchType === 'duo' || matchType === 'squad' ? 'Select Team →' :
     matchType === 'practice' || matchType === 'group' ? 'Select Course →' :
     'Choose Format →';
+
+  // ── Guided-pathway header bits ─────────────────────────────────────────────
+  // "STEP X OF Y" per round type, plus a context strip that carries everything
+  // chosen so far, so the player always knows exactly what kind of round
+  // they're building — no way to lose track mid-flow.
+  const flow = stepFlow(matchType);
+  const progressLabel = (s: Step): string => {
+    const i = flow.indexOf(s);
+    return i >= 0 ? `STEP ${i + 1} OF ${flow.length}` : '';
+  };
+  const ctxChips = (opts?: { withFormat?: boolean }) => (
+    <View style={styles.ctxRow}>
+      <Text style={[styles.ctxChip, styles.ctxChipType]}>{TYPE_META[matchType].name.toUpperCase()}</Text>
+      <Text style={styles.ctxChip}>
+        {numHoles === 9 ? `${holesSubset === 'back' ? 'BACK' : 'FRONT'} 9` : '18 HOLES'}
+      </Text>
+      {opts?.withFormat && (
+        <Text style={styles.ctxChip}>
+          {(FORMAT_CARDS.find((f) => f.id === format)?.name ?? format).toUpperCase()}
+        </Text>
+      )}
+    </View>
+  );
 
   // ── Type selection ────────────────────────────────────────────────────────────
   if (step === 'type') {
@@ -374,76 +476,87 @@ export default function PlayScreen() {
         <Text style={styles.subtitle}>
           {challengeUserId
             ? `1v1 ranked match against ${challengeUsername ?? 'your friend'}`
-            : 'Choose your match type'}
+            : 'What kind of round today?'}
         </Text>
         <Divider style={{ marginTop: -8, marginBottom: 8 }} />
 
         {/* Type cards are hidden in challenge mode — the type is locked to
-            solo and there's no value in showing the other options. */}
-        {!challengeUserId && (['solo', 'duo', 'squad', 'ffa', 'group', 'practice'] as MatchType[]).map((t) => (
-          <TouchableOpacity
-            key={t}
-            style={[styles.typeCard, matchType === t && styles.typeCardActive]}
-            onPress={() => setMatchType(t)}
-          >
-            <View style={styles.typeMark}>
-              <Text style={[styles.typeMarkText, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? '1v1' : t === 'duo' ? '2v2' : t === 'squad' ? '4v4' : t === 'ffa' ? 'ARN' : t === 'group' ? 'GRP' : 'PRC'}
-              </Text>
+            solo and there's no value in showing the other options.
+            Grouped (Just Play / Ranked / Ranked Teams) with renamed cards so
+            the choice reads at a glance instead of 6 flat equal options. */}
+        {!challengeUserId && TYPE_GROUPS.map((g) => (
+          <View key={g.header}>
+            <View style={styles.typeGroupRow}>
+              <Text style={styles.typeGroupHeader}>{g.header.toUpperCase()}</Text>
+              <Text style={styles.typeGroupSub}>{g.sub}</Text>
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.typeName, matchType === t && { color: C.gold }]}>
-                {t === 'solo' ? 'Solo' : t === 'duo' ? 'Duo' : t === 'squad' ? 'Squad' : t === 'ffa' ? 'Arena' : t === 'group' ? 'Group' : 'Practice'}
-              </Text>
-              <Text style={styles.typeDesc}>
-                {t === 'solo' ? 'Ranked 1v1 — auto-matched by SR'
-                  : t === 'duo' ? 'Ranked 2v2 — stroke play or scramble'
-                  : t === 'squad' ? 'Ranked 4v4 — stroke play or scramble'
-                  : t === 'ffa' ? 'Ranked free-for-all — invite up to 15 friends, lowest score wins'
-                  : t === 'group' ? 'You keep score for the whole group on one phone. Casual, with a live leaderboard.'
-                  : 'No SR — just get the reps in'}
-              </Text>
-            </View>
-            {matchType === t && <Text style={styles.checkmark}>✓</Text>}
-          </TouchableOpacity>
+            {g.types.map((t) => {
+              const active = typeChosen && matchType === t;
+              const meta = TYPE_META[t];
+              return (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.typeCard, active && styles.typeCardActive]}
+                  onPress={() => { setMatchType(t); setTypeChosen(true); }}
+                >
+                  <View style={styles.typeMark}>
+                    <Text style={[styles.typeMarkText, active && { color: C.gold }]}>{meta.badge}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.typeName, active && { color: C.gold }]}>{meta.name}</Text>
+                    <Text style={styles.typeDesc}>{meta.desc}</Text>
+                  </View>
+                  {active && <Text style={styles.checkmark}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         ))}
 
-        <Text style={styles.holeLabel}>Holes</Text>
-        <View style={styles.holeRow}>
-          {([9, 18] as const).map((n) => (
-            <TouchableOpacity
-              key={n}
-              style={[styles.holeBtn, numHoles === n && styles.holeBtnActive]}
-              onPress={() => setNumHoles(n)}
-            >
-              <Text style={[styles.holeBtnText, numHoles === n && styles.holeBtnTextActive]}>{n} Holes</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Front 9 / Back 9 picker — only visible when the user picks 9. */}
-        {numHoles === 9 && (
+        {/* Holes + Continue only appear once a type is explicitly chosen —
+            the guided pathway reveals one decision at a time and can't be
+            advanced blind. */}
+        {typeChosen && (
           <>
-            <Text style={styles.holeLabel}>Which 9?</Text>
+            <Text style={styles.holeLabel}>Holes</Text>
             <View style={styles.holeRow}>
-              {(['front', 'back'] as const).map((side) => (
+              {([9, 18] as const).map((n) => (
                 <TouchableOpacity
-                  key={side}
-                  style={[styles.holeBtn, holesSubset === side && styles.holeBtnActive]}
-                  onPress={() => setHolesSubset(side)}
+                  key={n}
+                  style={[styles.holeBtn, numHoles === n && styles.holeBtnActive]}
+                  onPress={() => setNumHoles(n)}
                 >
-                  <Text style={[styles.holeBtnText, holesSubset === side && styles.holeBtnTextActive]}>
-                    {side === 'front' ? 'Front 9' : 'Back 9'}
-                  </Text>
+                  <Text style={[styles.holeBtnText, numHoles === n && styles.holeBtnTextActive]}>{n} Holes</Text>
                 </TouchableOpacity>
               ))}
             </View>
+
+            {/* Front 9 / Back 9 picker — only visible when the user picks 9. */}
+            {numHoles === 9 && (
+              <>
+                <Text style={styles.holeLabel}>Which 9?</Text>
+                <View style={styles.holeRow}>
+                  {(['front', 'back'] as const).map((side) => (
+                    <TouchableOpacity
+                      key={side}
+                      style={[styles.holeBtn, holesSubset === side && styles.holeBtnActive]}
+                      onPress={() => setHolesSubset(side)}
+                    >
+                      <Text style={[styles.holeBtnText, holesSubset === side && styles.holeBtnTextActive]}>
+                        {side === 'front' ? 'Front 9' : 'Back 9'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            )}
+
+            <Text style={styles.stepProgress}>{progressLabel('type')} · {TYPE_META[matchType].name}</Text>
+            <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
+              <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
+            </TouchableOpacity>
           </>
         )}
-
-        <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
-          <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
-        </TouchableOpacity>
 
         {/* Join-by-ID is irrelevant when this screen is the challenge flow —
             you already know who you're playing against. */}
@@ -475,6 +588,8 @@ export default function PlayScreen() {
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep('type')}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
+        <Text style={styles.stepProgress}>{progressLabel('clan')}</Text>
+        {ctxChips()}
         <Text style={styles.title}>
           {matchType === 'duo' ? 'Pick Your Duo' : 'Pick Your Squad'}
         </Text>
@@ -486,35 +601,100 @@ export default function PlayScreen() {
 
         {loadingClans
           ? <ActivityIndicator color={C.gold} style={{ marginTop: 40 }} />
-          : myclans.length === 0
-            ? (
-              <View style={styles.emptyBox}>
-                <Text style={styles.emptyText}>
-                  {matchType === 'duo'
-                    ? 'No eligible duos'
-                    : 'No eligible squads'}
-                </Text>
-                <Text style={styles.emptySub}>
-                  {matchType === 'duo'
-                    ? 'Your duo must have both members before starting a match'
-                    : 'Your squad needs at least 3 members and you must be the leader'}
-                </Text>
-              </View>
-            )
-            : myclans.map((c) => (
-              <TouchableOpacity
-                key={c.clan_id}
-                style={[styles.clanCard, selectedClanId === c.clan_id && styles.clanCardActive]}
-                onPress={() => setSelectedClanId(c.clan_id)}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.clanName, selectedClanId === c.clan_id && { color: C.gold }]}>{c.name}</Text>
-                  <Text style={styles.clanMeta}>{c.clan_mode.toUpperCase()} · {c.member_count}/{c.max_players} members · {c.elo} SR</Text>
-                </View>
-                {selectedClanId === c.clan_id && <Text style={{ color: C.gold, fontSize: 18 }}>✓</Text>}
-              </TouchableOpacity>
-            ))
+          : myclans.map((c) => {
+              const ready = clanEligible(c);
+              return (
+                <TouchableOpacity
+                  key={c.clan_id}
+                  style={[styles.clanCard, !ready && { opacity: 0.75 }, selectedClanId === c.clan_id && styles.clanCardActive]}
+                  onPress={() => {
+                    if (ready) { setSelectedClanId(c.clan_id); return; }
+                    // Not full yet → flow into inviting instead of dead-ending.
+                    setInviteTeamId(c.clan_id);
+                    loadWizFriends();
+                  }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.clanName, selectedClanId === c.clan_id && { color: C.gold }]}>{c.name}</Text>
+                    <Text style={styles.clanMeta}>
+                      {c.clan_mode.toUpperCase()} · {c.member_count}/{c.max_players} members · {c.elo} SR
+                      {!ready && (matchType === 'squad' && c.role !== 'leader'
+                        ? ' · only the leader can start'
+                        : ` · waiting for ${matchType === 'duo' ? 'your partner' : 'members'} — tap to invite`)}
+                    </Text>
+                  </View>
+                  {selectedClanId === c.clan_id && <Text style={{ color: C.gold, fontSize: 18 }}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })
         }
+
+        {/* Inline create — the duo/squad path never bounces you to another
+            tab. Name it here, invite here, and once your friends accept
+            (Team tab), this step shows the team ready to pick. */}
+        {!loadingClans && (
+          <View style={{ marginTop: myclans.length ? 16 : 4 }}>
+            {myclans.length === 0 && (
+              <Text style={styles.emptySub}>
+                {matchType === 'duo'
+                  ? 'No duo yet. Create one right here — it takes ten seconds.'
+                  : 'No squad yet. Create one right here — it takes ten seconds.'}
+              </Text>
+            )}
+            <Text style={styles.holeLabel}>{myclans.length ? 'Or create a new team' : 'Create your team'}</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TextInput
+                style={[styles.searchInput, { flex: 1, marginBottom: 0 }]}
+                value={teamName}
+                onChangeText={setTeamName}
+                placeholder={matchType === 'duo' ? 'Duo name…' : 'Squad name…'}
+                placeholderTextColor={C.textMuted}
+                maxLength={30}
+              />
+              <TouchableOpacity
+                style={[styles.nextBtn, { marginTop: 0, paddingHorizontal: 18 }, creatingTeam && { opacity: 0.6 }]}
+                onPress={createTeamInline}
+                disabled={creatingTeam}
+              >
+                {creatingTeam ? <ActivityIndicator color="#000" /> : <Text style={styles.nextBtnText}>Create</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        {/* Inline invites for the team being filled. */}
+        {inviteTeamId && (
+          <View style={{ marginTop: 16 }}>
+            <Text style={styles.holeLabel}>Invite friends to your team</Text>
+            {wizFriends.length === 0 ? (
+              <Text style={styles.emptySub}>
+                No friends yet — add some from the Team tab, or invite from the team page later.
+              </Text>
+            ) : wizFriends.map((f: any) => {
+              const sent = invitedIds.has(f.user_id);
+              return (
+                <View key={f.user_id} style={styles.clanCard}>
+                  <Text style={[styles.clanName, { flex: 1 }]} numberOfLines={1}>{f.username}</Text>
+                  <TouchableOpacity
+                    style={{
+                      paddingHorizontal: 14, paddingVertical: 7, borderRadius: 14, borderWidth: 1,
+                      borderColor: sent ? C.border : C.gold, backgroundColor: sent ? C.card : C.gold + '18',
+                    }}
+                    onPress={() => inviteToTeam(f.user_id)}
+                    disabled={sent}
+                  >
+                    <Text style={{ color: sent ? C.textMuted : C.gold, fontWeight: '800', fontSize: 12 }}>
+                      {sent ? 'Invited ✓' : 'Invite'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+            <Text style={styles.emptySub}>
+              They accept from their Team tab. Once your team is full, it shows up above ready to pick.
+            </Text>
+          </View>
+        )}
 
         {selectedClanId && (
           <TouchableOpacity style={[styles.nextBtn, { marginTop: 20 }]} onPress={() => setStep('format')}>
@@ -542,6 +722,8 @@ export default function PlayScreen() {
         <TouchableOpacity style={styles.backBtn} onPress={() => setStep(isTeam ? 'clan' : 'type')}>
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
+        <Text style={styles.stepProgress}>{progressLabel('format')}</Text>
+        {ctxChips()}
         <Text style={styles.title}>Choose Format</Text>
         <Text style={styles.subtitle}>{isTeam ? 'How will your team play?' : 'Pick the scoring style for this round.'}</Text>
 
@@ -624,9 +806,14 @@ export default function PlayScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
       <View style={styles.container}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'duo' || matchType === 'squad' ? 'format' : 'type')} >
+        {/* Back target mirrors the forward flow: practice/group skipped the
+            format step, everyone else came through it. (The old ternary sent
+            solo/Arena back to 'type', silently skipping their format pick.) */}
+        <TouchableOpacity style={styles.backBtn} onPress={() => setStep(matchType === 'practice' || matchType === 'group' ? 'type' : 'format')} >
           <Text style={styles.backBtnText}>← Back</Text>
         </TouchableOpacity>
+        <Text style={styles.stepProgress}>{progressLabel('course')}</Text>
+        {ctxChips({ withFormat: matchType !== 'practice' && matchType !== 'group' })}
         <Text style={styles.title}>Where to Play</Text>
         <TextInput
           style={styles.searchInput}
@@ -763,6 +950,8 @@ export default function PlayScreen() {
       <TouchableOpacity style={styles.backBtn} onPress={() => { setStep('course'); setCourseDetails(null); }}>
         <Text style={styles.backBtnText}>← Back</Text>
       </TouchableOpacity>
+      <Text style={styles.stepProgress}>{progressLabel('teebox')} · LAST STEP</Text>
+      {ctxChips({ withFormat: matchType !== 'practice' && matchType !== 'group' })}
       <Text style={styles.title}>{courseDetails?.course_name}</Text>
       <Text style={styles.subtitle}>
         Pick your tees — {numHoles === 9
@@ -883,6 +1072,20 @@ const styles = StyleSheet.create({
   resumeChev: { color: C.gold, fontSize: 24, fontWeight: '300', paddingHorizontal: 4 },
   backBtn: { marginBottom: 12 },
   backBtnText: { color: C.gold, fontSize: 16 },
+
+  // Grouped type-picker section headers ("JUST PLAY · Casual, no SR").
+  typeGroupRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, marginTop: 14, marginBottom: 8 },
+  typeGroupHeader: { color: C.gold, fontSize: 12, fontWeight: '900', letterSpacing: 1.6 },
+  typeGroupSub: { color: C.textDim, fontSize: 11 },
+  // Guided-pathway readouts: "STEP 2 OF 4" + the running context chips.
+  stepProgress: { color: C.textDim, fontSize: 10, fontWeight: '800', letterSpacing: 1.4, marginBottom: 6, marginTop: 2 },
+  ctxRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
+  ctxChip: {
+    color: C.textMuted, fontSize: 10, fontWeight: '800', letterSpacing: 0.8,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border,
+    borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4, overflow: 'hidden',
+  },
+  ctxChipType: { color: C.gold, borderColor: C.gold + '66' },
 
   typeCard: {
     backgroundColor: C.card, borderRadius: 6, padding: 16,
