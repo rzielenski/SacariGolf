@@ -45,7 +45,7 @@ const FORMAT_CARDS: { id: Format; name: string; mark: string; desc: string; team
   { id: 'skins',      name: 'Skins',       mark: 'SKN', desc: 'One skin per hole won. Halved holes carry the skin to the next hole, so a single great moment can pay off big.' },
   { id: 'scramble',   name: 'Scramble',    mark: 'SCR', desc: 'Everyone plays from the best shot each time. One final team score per side. Both teams must have equal players.', teamOnly: true },
 ];
-type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'teebox';
+type Step = 'type' | 'clan' | 'format' | 'join' | 'course' | 'holes' | 'teebox';
 
 const TYPE_VALUES: readonly MatchType[] = ['solo', 'duo', 'squad', 'ffa', 'group', 'practice'];
 
@@ -73,9 +73,9 @@ const TYPE_GROUPS: { header: string; sub: string; types: MatchType[] }[] = [
 /** The full step pathway for a given round type. Drives the "STEP X OF Y"
  *  progress readout so the wizard reads as one guided, can't-mess-it-up path. */
 const stepFlow = (t: MatchType): Step[] =>
-  t === 'duo' || t === 'squad' ? ['type', 'clan', 'format', 'course', 'teebox']
-  : t === 'practice' || t === 'group' ? ['type', 'course', 'teebox']
-  : ['type', 'format', 'course', 'teebox'];
+  t === 'duo' || t === 'squad' ? ['type', 'clan', 'format', 'course', 'holes', 'teebox']
+  : t === 'practice' || t === 'group' ? ['type', 'course', 'holes', 'teebox']
+  : ['type', 'format', 'course', 'holes', 'teebox'];
 
 export default function PlayScreen() {
   const { user } = useAuth();
@@ -338,7 +338,7 @@ export default function PlayScreen() {
     try {
       const details = await api.courses.get(course.course_id);
       setCourseDetails(details);
-      setStep('teebox');
+      setStep('holes');
     } catch (e: any) {
       Alert.alert('Error', e.message);
     } finally { setLoadingDetails(false); }
@@ -349,8 +349,12 @@ export default function PlayScreen() {
     try {
       // Only relevant when playing 9 holes on an 18-hole teebox; the backend
       // ignores it for 18-hole rounds.
+      // A fake-18 course (same nine entered twice) playing 9 always uses the
+      // front rows — front and back are physically the same holes there.
       const subsetForReq: 'front' | 'back' | 'full' =
-        numHoles === 9 && (teebox.num_holes ?? 18) >= 18 ? holesSubset : 'full';
+        numHoles === 9 && (teebox.num_holes ?? 18) >= 18
+          ? (courseEffective9 ? 'front' : holesSubset)
+          : 'full';
       const match = await api.matches.create({
         // A "group" round is just a casual practice match scored by one
         // organizer, so the backend only ever sees 'practice'.
@@ -413,6 +417,34 @@ export default function PlayScreen() {
     matchType === 'practice' || matchType === 'group' ? 'Select Course →' :
     'Choose Format →';
 
+  // ── Course-aware hole logic ────────────────────────────────────────────────
+  // A course is "effectively 9 holes" when (a) every teebox is 9 holes, or
+  // (b) it's stored as 18 but the back-9 hole locations basically repeat the
+  // front 9 (same physical nine entered twice). Either way: no front/back
+  // question, and 18 holes = the same 9 played twice.
+  const courseEffective9 = useMemo(() => {
+    const tees: any[] = (courseDetails as any)?.teeboxes ?? [];
+    if (!tees.length) return false;
+    if (tees.every((t) => (t.num_holes ?? 18) <= 9)) return true;
+    // Fake-18 check: compare hole N vs N+9 locations (pin preferred, tee as
+    // fallback) on an 18-hole teebox. ≥80% of comparable pairs within 40 m →
+    // it's the same nine twice.
+    const tb = tees.find((t) => (t.num_holes ?? 0) >= 18 && Array.isArray(t.holes) && t.holes.length >= 18);
+    if (!tb) return false;
+    const byNum = new Map<number, any>(tb.holes.map((h: any) => [h.hole_num, h]));
+    let pairs = 0, close = 0;
+    for (let i = 1; i <= 9; i++) {
+      const a = byNum.get(i), b = byNum.get(i + 9);
+      if (!a || !b) continue;
+      const aLat = a.pin_lat ?? a.tee_lat, aLng = a.pin_lng ?? a.tee_lng;
+      const bLat = b.pin_lat ?? b.tee_lat, bLng = b.pin_lng ?? b.tee_lng;
+      if (aLat == null || aLng == null || bLat == null || bLng == null) continue;
+      pairs += 1;
+      if (distMetres(aLat, aLng, bLat, bLng) < 40) close += 1;
+    }
+    return pairs >= 5 && close / pairs >= 0.8;
+  }, [courseDetails]);
+
   // ── Guided-pathway header bits ─────────────────────────────────────────────
   // "STEP X OF Y" per round type, plus a context strip that carries everything
   // chosen so far, so the player always knows exactly what kind of round
@@ -422,12 +454,16 @@ export default function PlayScreen() {
     const i = flow.indexOf(s);
     return i >= 0 ? `STEP ${i + 1} OF ${flow.length}` : '';
   };
-  const ctxChips = (opts?: { withFormat?: boolean }) => (
+  const ctxChips = (opts?: { withFormat?: boolean; withHoles?: boolean }) => (
     <View style={styles.ctxRow}>
       <Text style={[styles.ctxChip, styles.ctxChipType]}>{TYPE_META[matchType].name.toUpperCase()}</Text>
-      <Text style={styles.ctxChip}>
-        {numHoles === 9 ? `${holesSubset === 'back' ? 'BACK' : 'FRONT'} 9` : '18 HOLES'}
-      </Text>
+      {opts?.withHoles && (
+        <Text style={styles.ctxChip}>
+          {numHoles === 9
+            ? (courseEffective9 ? '9 HOLES' : `${holesSubset === 'back' ? 'BACK' : 'FRONT'} 9`)
+            : '18 HOLES'}
+        </Text>
+      )}
       {opts?.withFormat && (
         <Text style={styles.ctxChip}>
           {(FORMAT_CARDS.find((f) => f.id === format)?.name ?? format).toUpperCase()}
@@ -516,41 +552,10 @@ export default function PlayScreen() {
         {/* Holes + Continue only appear once a type is explicitly chosen —
             the guided pathway reveals one decision at a time and can't be
             advanced blind. */}
+        {/* Holes + which-9 moved AFTER course selection so they can adapt to
+            the actual course (a 9-hole course never asks front-vs-back). */}
         {typeChosen && (
           <>
-            <Text style={styles.holeLabel}>Holes</Text>
-            <View style={styles.holeRow}>
-              {([9, 18] as const).map((n) => (
-                <TouchableOpacity
-                  key={n}
-                  style={[styles.holeBtn, numHoles === n && styles.holeBtnActive]}
-                  onPress={() => setNumHoles(n)}
-                >
-                  <Text style={[styles.holeBtnText, numHoles === n && styles.holeBtnTextActive]}>{n} Holes</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Front 9 / Back 9 picker — only visible when the user picks 9. */}
-            {numHoles === 9 && (
-              <>
-                <Text style={styles.holeLabel}>Which 9?</Text>
-                <View style={styles.holeRow}>
-                  {(['front', 'back'] as const).map((side) => (
-                    <TouchableOpacity
-                      key={side}
-                      style={[styles.holeBtn, holesSubset === side && styles.holeBtnActive]}
-                      onPress={() => setHolesSubset(side)}
-                    >
-                      <Text style={[styles.holeBtnText, holesSubset === side && styles.holeBtnTextActive]}>
-                        {side === 'front' ? 'Front 9' : 'Back 9'}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </>
-            )}
-
             <Text style={styles.stepProgress}>{progressLabel('type')} · {TYPE_META[matchType].name}</Text>
             <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
               <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
@@ -920,6 +925,63 @@ export default function PlayScreen() {
     );
   }
 
+  // ── Holes (course-aware; asked AFTER the course so it can adapt) ──────────────
+  if (step === 'holes') {
+    return (
+      <ScrollView style={styles.scrollContainer} contentContainerStyle={styles.scrollContent}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => { setStep('course'); setCourseDetails(null); }}>
+          <Text style={styles.backBtnText}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={styles.stepProgress}>{progressLabel('holes')}</Text>
+        {ctxChips({ withFormat: matchType !== 'practice' && matchType !== 'group' })}
+        <Text style={styles.title}>{courseDetails?.course_name}</Text>
+        <Text style={styles.subtitle}>
+          {courseEffective9 ? 'A 9-hole course. How much golf today?' : 'How much golf today?'}
+        </Text>
+
+        <Text style={styles.holeLabel}>Holes</Text>
+        <View style={styles.holeRow}>
+          {([9, 18] as const).map((n) => (
+            <TouchableOpacity
+              key={n}
+              style={[styles.holeBtn, numHoles === n && styles.holeBtnActive]}
+              onPress={() => setNumHoles(n)}
+            >
+              <Text style={[styles.holeBtnText, numHoles === n && styles.holeBtnTextActive]}>{n} Holes</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        {courseEffective9 && numHoles === 18 && (
+          <Text style={styles.emptySub}>18 here = playing the same 9 twice. Scores count as a full 18.</Text>
+        )}
+
+        {/* Front/back only exists on a REAL 18-hole course playing 9. */}
+        {numHoles === 9 && !courseEffective9 && (
+          <>
+            <Text style={styles.holeLabel}>Which 9?</Text>
+            <View style={styles.holeRow}>
+              {(['front', 'back'] as const).map((side) => (
+                <TouchableOpacity
+                  key={side}
+                  style={[styles.holeBtn, holesSubset === side && styles.holeBtnActive]}
+                  onPress={() => setHolesSubset(side)}
+                >
+                  <Text style={[styles.holeBtnText, holesSubset === side && styles.holeBtnTextActive]}>
+                    {side === 'front' ? 'Front 9' : 'Back 9'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
+
+        <TouchableOpacity style={styles.nextBtn} onPress={() => setStep('teebox')}>
+          <Text style={styles.nextBtnText}>Pick Tees →</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+  }
+
   // ── Teebox selection ──────────────────────────────────────────────────────────
   // Find the user's last-played teebox AT THIS COURSE so we can highlight the
   // matching card. This is one of the highest-friction parts of every other
@@ -947,11 +1009,11 @@ export default function PlayScreen() {
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity style={styles.backBtn} onPress={() => { setStep('course'); setCourseDetails(null); }}>
+      <TouchableOpacity style={styles.backBtn} onPress={() => setStep('holes')}>
         <Text style={styles.backBtnText}>← Back</Text>
       </TouchableOpacity>
       <Text style={styles.stepProgress}>{progressLabel('teebox')} · LAST STEP</Text>
-      {ctxChips({ withFormat: matchType !== 'practice' && matchType !== 'group' })}
+      {ctxChips({ withFormat: matchType !== 'practice' && matchType !== 'group', withHoles: true })}
       <Text style={styles.title}>{courseDetails?.course_name}</Text>
       <Text style={styles.subtitle}>
         Pick your tees — {numHoles === 9

@@ -2966,12 +2966,15 @@ export default function ScoringScreen() {
 
       {/* ── Top bar (floats over map) ── */}
       <View style={styles.topBar}>
-        {/* Leave button — a plain back arrow in preview (just leave), the
-            ⋮ leave/cancel/forfeit menu in a real round. */}
-        <TouchableOpacity onPress={handleLeave} style={styles.topBarLeave} disabled={forfeiting}>
+        {/* Leave button — a plain back arrow in preview (just leave); in a
+            real round an explicit "↩ LEAVE" pill (the old ⋮ read as a menu,
+            not as "this exits your round" — launch feedback). */}
+        <TouchableOpacity onPress={handleLeave} style={[styles.topBarLeave, !preview && styles.topBarLeavePill]} disabled={forfeiting}>
           {forfeiting
             ? <ActivityIndicator color={C.textMuted} size="small" />
-            : <Text style={styles.topBarLeaveText}>{preview ? '←' : '⋮'}</Text>}
+            : preview
+              ? <Text style={styles.topBarLeaveText}>←</Text>
+              : <Text style={styles.topBarLeavePillText}>↩ LEAVE</Text>}
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.topBarCenter}
@@ -4048,6 +4051,10 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: C.border,
   },
   topBarLeaveText: { color: C.textMuted, fontSize: 20, fontWeight: '700', lineHeight: 22 },
+  // Real-round variant: an explicit labeled pill so it's obvious this exits
+  // the round (options: save & leave / cancel / forfeit).
+  topBarLeavePill: { width: undefined, paddingHorizontal: 10 },
+  topBarLeavePillText: { color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 0.8 },
   topBarCenter: { flex: 1 },
   courseName2: { color: C.text, fontWeight: '700', fontSize: 13 },
   teeboxName2: { color: C.textMuted, fontSize: 10 },

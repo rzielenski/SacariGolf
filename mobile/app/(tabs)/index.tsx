@@ -302,7 +302,8 @@ export default function HomeScreen() {
             onPress={() => router.push(t.to as any)}
             style={styles.hubTile}
           >
-            <Text style={styles.hubTileMark}>{t.mark}</Text>
+            {/* Text-only chips — the big emoji marks made the hub eat half
+                the screen (launch feedback: "too much space"). */}
             <Text style={styles.hubTileLabel} numberOfLines={1}>{t.label}</Text>
           </PressableScale>
         ))}
@@ -431,16 +432,14 @@ const styles = StyleSheet.create({
     marginTop: 4, marginBottom: 24,
   },
   hubTile: {
-    // Three per row: (100% - 2 gaps of 10) / 3. flexBasis + grow keeps
-    // rows balanced if the list isn't a multiple of three.
+    // Compact text-only chips, three per row. No marks, thin padding —
+    // the hub is a launcher, not a hero section.
     flexBasis: '30%', flexGrow: 1,
-    backgroundColor: C.card, borderRadius: 10,
-    paddingVertical: 12, paddingHorizontal: 8,
-    borderWidth: 1, borderColor: C.gold + '55', alignItems: 'center',
-    shadowColor: C.gold, shadowOpacity: 0.12, shadowRadius: 6, shadowOffset: { width: 0, height: 0 },
+    backgroundColor: C.card, borderRadius: 8,
+    paddingVertical: 9, paddingHorizontal: 8,
+    borderWidth: 1, borderColor: C.border, alignItems: 'center',
   },
-  hubTileMark: { color: C.gold, fontFamily: F.serif, fontSize: 20, fontWeight: '900' },
-  hubTileLabel: { color: C.text, fontSize: 12, fontWeight: '800', marginTop: 5 },
+  hubTileLabel: { color: C.text, fontSize: 12, fontWeight: '700' },
 
   feedHeader: {
     color: C.textMuted, fontSize: 11, fontWeight: '700',
