@@ -28,6 +28,11 @@ import { MentionInput } from '../../../components/MentionInput';
 const { width: SCREEN_W } = Dimensions.get('window');
 const COLLAPSED_H = 110;
 const EXPANDED_H = 380;
+/** How far the player must move before we re-fetch DEM terrain elevation.
+ *  Terrain doesn't change meaningfully inside this radius on a golf course,
+ *  and each fetch is a radio wakeup — at the old 5m this fired ~1000× per
+ *  round while walking. */
+const ELEV_REFETCH_MOVE_M = 25;
 
 // ── Small stepper for per-hole stats (putts / chips) ───────────────────────
 function StatStepper({ label, value, onChange }: {
@@ -176,8 +181,9 @@ export default function ScoringScreen() {
 
   // Precise terrain elevation at the player's CURRENT position, sourced from
   // the high-resolution DEM endpoint (USGS 3DEP for US, Copernicus elsewhere).
-  // Refreshed when the player moves >5m horizontally. This replaces the GPS
-  // altimeter (±15m noise + frame mismatch) for slope calculations.
+  // Refreshed when the player moves >ELEV_REFETCH_MOVE_M horizontally, and
+  // only when the crowdsourced relative path isn't already covering slope.
+  // This replaces the GPS altimeter (±15m noise + frame mismatch) for slope.
   const [playerElevationM, setPlayerElevationM] = useState<number | null>(null);
   const lastElevFetchCoord = useRef<{ lat: number; lng: number } | null>(null);
   // Per-session cache so we don't refetch the same lat/lng across renders.
@@ -1160,7 +1166,9 @@ export default function ScoringScreen() {
   const {
     shotsByHole, currentShots, activeShot, pendingClub, pendingPartial, clubPickerVisible,
     setClubPickerVisible, pickClubManual, pickClubAuto, pickPartial, isManualPick,
-    onTrackPress, onTrackLongPress, cancelActiveShot, deleteShotAt, setShotOwner,
+    // onTrackLongPress intentionally not used — the screen routes the
+    // long-press through confirmUndoLastShot so it can't delete silently.
+    onTrackPress, cancelActiveShot, deleteShotAt, setShotOwner,
     canTrackForgottenShot, trackForgottenShot,
   } = tracking;
 
@@ -1172,6 +1180,27 @@ export default function ScoringScreen() {
     const p = (match?.players ?? []).find((pl: any) => pl.user_id === ownerId);
     return p?.username ?? null;
   }, [match?.players, myUserId]);
+
+  /** Remove the most recent tracked shot on this hole, with a confirm that
+   *  names the shot (club + distance) so it's obvious what's going. A tracked
+   *  shot can't be recreated after you've walked away from it, so this is
+   *  worth one tap of friction. Shared by the UNDO button and the TRACK
+   *  long-press shortcut. */
+  const confirmUndoLastShot = useCallback(() => {
+    if (currentHoleNum == null) return;
+    const idx = currentShots.length - 1;
+    const last = currentShots[idx];
+    if (!last) return;
+    const yds = Math.round(distYards(last.start.lat, last.start.lng, last.end.lat, last.end.lng));
+    Alert.alert(
+      'Remove last shot?',
+      `${(last.club ?? 'Shot').toUpperCase()} · ${yds} yds. This removes it from the map and your stats.`,
+      [
+        { text: 'Keep', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => deleteShotAt(currentHoleNum, idx) },
+      ],
+    );
+  }, [currentHoleNum, currentShots, deleteShotAt]);
 
   // ── Capture barometric anchor on FIRST track press of the round ────────
   // When activeShot transitions from null → not-null for the first time in
@@ -1292,19 +1321,44 @@ export default function ScoringScreen() {
   }, [measurePin?.latitude, measurePin?.longitude]);
 
   // ── Precise player elevation (DEM-sourced) ─────────────────────────────
-  // Fetches every time the player moves >5m horizontally. Hits the
-  // high-resolution elevation endpoint (USGS 3DEP for US courses, Copernicus
-  // DEM elsewhere). This is the foundation of accurate slope.
+  // Hits the high-resolution elevation endpoint (USGS 3DEP for US courses,
+  // Copernicus DEM elsewhere). This feeds the FALLBACK slope path only.
+  //
+  // BATTERY GATE: `playerElevationM` is consumed by exactly two things — the
+  // DEM fallback branch of `slopeAdjustment`, and the measure tool. When the
+  // crowdsourced RELATIVE path is live (course well mapped + this pin has a
+  // cached contributor point + we have a round offset + an altitude fix),
+  // slopeAdjustment returns from its preferred branch and never reads this
+  // value, so every fetch is a radio wakeup whose result is thrown away.
+  // At the old 5m trigger that was ~1000 discarded requests per round on a
+  // fully-mapped course. We still fetch while the measure tool is open, since
+  // it needs a DEM-frame player elevation to compare against the tapped point
+  // (mixing DEM and GPS frames is exactly the mismatch this state exists to
+  // avoid).
+  //
+  // THROTTLE: 25m of movement, not 5m. Terrain doesn't change meaningfully
+  // inside 25m on a golf course, and this alone drops request volume ~80% on
+  // courses that DO still need the DEM path.
   useEffect(() => {
     if (!userCoord) return;
+    const relativePathLive =
+      elevationWellMapped === true
+      && pinRelElevM != null
+      && elevOffsetM != null
+      && typeof userCoord.altitude === 'number';
+    if (relativePathLive && !measurePin) return;
+
     const last = lastElevFetchCoord.current;
     if (last) {
       const moved = distMetres(last.lat, last.lng, userCoord.latitude, userCoord.longitude);
-      if (moved < 5) return;
+      if (moved < ELEV_REFETCH_MOVE_M) return;
     }
     lastElevFetchCoord.current = { lat: userCoord.latitude, lng: userCoord.longitude };
-    // Fine-grid cache key — matches server-side rounding.
-    const k = `${userCoord.latitude.toFixed(5)},${userCoord.longitude.toFixed(5)}`;
+    // Coarse cell key (~11m at 4dp) so walking actually HITS this cache — the
+    // old 5dp key (~1.1m) missed on essentially every step. The measure-tool
+    // lookup below keeps its finer 5dp key; the two never collide because the
+    // strings differ, they just cache independently.
+    const k = `${userCoord.latitude.toFixed(4)},${userCoord.longitude.toFixed(4)}`;
     const cached = elevCacheRef.current.get(k);
     if (cached != null) { setPlayerElevationM(cached); return; }
     let cancelled = false;
@@ -1316,7 +1370,8 @@ export default function ScoringScreen() {
       })
       .catch(() => { /* slope just won't update this tick — non-fatal */ });
     return () => { cancelled = true; };
-  }, [userCoord?.latitude, userCoord?.longitude]);
+  }, [userCoord?.latitude, userCoord?.longitude, userCoord?.altitude,
+      elevationWellMapped, pinRelElevM, elevOffsetM, measurePin]);
 
   // ── Relative-elevation: establish per-round offset ─────────────────────
   // Run once when we first have a fix at a known course. Aligns the
@@ -3065,9 +3120,10 @@ export default function ScoringScreen() {
           )}
         </TouchableOpacity>
 
-        {/* TRACK SHOT — toggles start/stop. Long-press while idle removes
-            the most recent shot; long-press while tracking cancels. Hidden in
-            preview (you're pinned to the tee, so there's no shot to walk). */}
+        {/* TRACK SHOT — toggles start/stop. Hidden in preview (you're pinned
+            to the tee, so there's no shot to walk). Long-press still cancels /
+            undoes, but the visible UNDO button beside it is now the primary
+            path — the long-press was effectively a hidden feature. */}
         {!preview && (
         <TouchableOpacity
           style={[
@@ -3084,7 +3140,10 @@ export default function ScoringScreen() {
             if (sinceFix != null && sinceFix > 5000) refreshGps();
             onTrackPress();
           }}
-          onLongPress={onTrackLongPress}
+          // Route the long-press through the SAME confirmed handler as the
+          // button, so the shortcut can't silently delete a finalized shot
+          // (it used to remove the last shot with no confirmation at all).
+          onLongPress={() => { if (activeShot) cancelActiveShot(); else confirmUndoLastShot(); }}
           delayLongPress={500}
           disabled={!userCoord}
           activeOpacity={0.7}
@@ -3100,6 +3159,25 @@ export default function ScoringScreen() {
                 : `Shot ${currentShots.length + 1}`}
           </Text>
         </TouchableOpacity>
+        )}
+
+        {/* UNDO / CANCEL — narrow (not flex:1, so it barely narrows the three
+            main chips) and rendered ONLY when there's actually something to
+            remove. A fresh hole shows nothing at all, so it costs zero
+            clutter until the moment it's useful. */}
+        {!preview && (activeShot || currentShots.length > 0) && (
+          <TouchableOpacity
+            style={[styles.topChip, styles.topChipUndo]}
+            onPress={activeShot ? cancelActiveShot : confirmUndoLastShot}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.topChipLabel, { color: C.red }]}>
+              {activeShot ? 'CANCEL' : 'UNDO'}
+            </Text>
+            <Text style={[styles.topChipValue, { color: C.red, fontSize: 15 }]}>
+              {activeShot ? '✕' : '↶'}
+            </Text>
+          </TouchableOpacity>
         )}
 
         {/* CLUB picker. Required before TRACK can be pressed. Premium users
@@ -4083,6 +4161,8 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   topChipPrimary: { borderColor: C.gold, borderWidth: 2 },
+  // Narrow, fixed-width so adding it doesn't squeeze the three flex:1 chips.
+  topChipUndo: { flex: 0, width: 54, paddingHorizontal: 4, borderColor: C.red + '88' },
   topChipTracking: { borderColor: C.red, borderWidth: 2, backgroundColor: C.red + '22' },
   topChipLocked:  { borderColor: C.textMuted + '88' },
   topChipLabel:   { color: C.textMuted, fontWeight: '800', fontSize: 9, letterSpacing: 1 },

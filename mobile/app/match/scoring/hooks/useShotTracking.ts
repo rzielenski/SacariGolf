@@ -11,6 +11,10 @@
  *     and clears pendingClub so the next shot prompts a fresh club pick.
  *   • Long-press TRACK while recording → `onTrackLongPress` cancels active.
  *   • Long-press TRACK while idle → removes the most recent shot.
+ *     NOTE: the scoring screen no longer wires `onTrackLongPress` — it routes
+ *     the long-press (and its visible UNDO button) through its own
+ *     `confirmUndoLastShot`, so a finalized shot can't be deleted without a
+ *     confirm. Kept here for other callers / back-compat.
  *
  * Manual-vs-auto club choice is tracked via `manualPickRef` so the
  * auto-suggest effect can call `pickClubAuto` without clobbering a
