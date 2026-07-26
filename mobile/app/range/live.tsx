@@ -24,7 +24,7 @@ import {
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import Svg, {
-  Defs, LinearGradient, Stop, Path, Circle, G, Ellipse, Line,
+  Defs, LinearGradient, Stop, Path, Circle, G, Line,
   Text as SvgText,
 } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -41,17 +41,24 @@ import { CLUBS_CATALOG, clubLabel } from '../../lib/clubs';
 const BRIDGE_KEY = 'range_live_bridge_url';
 
 /**
- * Range backdrop art. Swap these two files with your own photos and the range
- * picks them up — no code change needed. Keep them roughly 9:16 and 16:9.
+ * Range backdrop art. Swap these files to change the scenery — no code change.
+ *
+ * NOTE the mapping: the file named "range-portrait.jpg" is actually the WIDE
+ * (1168×784) shot and "range-landscape.jpg" is the TALL (832×1248) one, so
+ * they're wired to the orientation whose SHAPE they fit, not their filename.
+ * If you re-export the art, match it by shape rather than trusting the names.
  */
 const RANGE_ART = {
-  portrait: require('../../assets/range/range-portrait.png'),
-  landscape: require('../../assets/range/range-landscape.png'),
+  /** Tall art for a portrait phone. */
+  portrait: require('../../assets/range/range-landscape.jpg'),
+  /** Wide art for a rotated phone. */
+  landscape: require('../../assets/range/range-portrait.jpg'),
 };
-/** Where the horizon sits in the art, as a fraction of image height. If you
- *  swap in photos whose horizon isn't at 42%, set this to match and the ball
- *  flight will line up with the real ground plane. */
-const HORIZON_FRAC = 0.42;
+/** Where the turf meets the treeline in the art, as a fraction of image
+ *  height — this is the vanishing-point row the ball flight is projected
+ *  against. Both photos sit at roughly 53%. If you swap in art with a
+ *  different horizon, change this or shots won't meet the ground. */
+const HORIZON_FRAC = 0.53;
 
 const TARGET_GREENS = [50, 100, 150, 200, 250];
 const CAM_H = 6;         // camera height above the tee, yards
@@ -257,26 +264,22 @@ export default function RangeLive() {
             return <Line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#ffffff" strokeOpacity={0.15} strokeWidth={1} />;
           })()}
 
-          {/* Target greens + flags */}
+          {/* Distance grid. The photos already contain real target greens and
+              flags, so drawing synthetic ones on top looked like a bad collage.
+              Instead: a faint tick across the range at each reference distance
+              with its yardage, which is the part that's actually useful and
+              reads clearly as an overlay rather than fake scenery. */}
           {TARGET_GREENS.map((d) => {
-            const c0 = project({ x: d, y: 0, z: 0 });
-            const edge = project({ x: d, y: 9, z: 0 });
-            const rx = Math.max(4, Math.abs(edge.x - c0.x));
-            const ry = Math.max(1.6, rx * 0.30);
-            const flagTop = project({ x: d, y: 0, z: 2.8 });
+            const l = project({ x: d, y: -14, z: 0 });
+            const r = project({ x: d, y: 14, z: 0 });
+            const fade = Math.max(0.16, 0.4 - d / 900);
             return (
-              <G key={`g${d}`} opacity={0.92}>
-                <Ellipse cx={c0.x} cy={c0.y} rx={rx} ry={ry} fill="#8fce7e" opacity={0.5} />
-                <Ellipse cx={c0.x} cy={c0.y} rx={rx * 0.4} ry={ry * 0.4} fill="#a9e096" opacity={0.55} />
-                <Line x1={c0.x} y1={c0.y} x2={flagTop.x} y2={flagTop.y} stroke="#ffffff" strokeWidth={1.3} />
-                <Path
-                  d={`M${flagTop.x} ${flagTop.y} L${flagTop.x + Math.max(6, rx * 0.55)} ${flagTop.y + 3} L${flagTop.x} ${flagTop.y + 6} Z`}
-                  fill={C.gold}
-                />
+              <G key={`d${d}`}>
+                <Line x1={l.x} y1={l.y} x2={r.x} y2={r.y} stroke="#ffffff" strokeOpacity={fade} strokeWidth={1} />
                 <SvgText
-                  x={c0.x} y={c0.y + ry + 11}
-                  fill="#ffffff" fontSize={Math.max(8, 13 - d / 30)} fontWeight="bold"
-                  textAnchor="middle" opacity={0.85}
+                  x={r.x + 6} y={r.y + 3}
+                  fill="#ffffff" fontSize={Math.max(8, 13 - d / 34)} fontWeight="bold"
+                  opacity={0.62}
                 >
                   {d}
                 </SvgText>
