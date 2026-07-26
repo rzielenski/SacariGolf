@@ -2,7 +2,7 @@
   "expo": {
     "name": "Sacari",
     "slug": "sacari",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "_comment_orientation": "Was 'portrait'. Set to 'default' so iOS PERMITS landscape at the Info.plist level; every screen is still locked to portrait by the root Stack's screenOptions.orientation, and only Range Live opts into 'all'. Changing this back to 'portrait' would silently re-break landscape on that screen.",
     "orientation": "default",
     "icon": "./assets/icon.jpg",
