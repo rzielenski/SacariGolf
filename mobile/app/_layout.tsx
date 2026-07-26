@@ -312,7 +312,10 @@ export default function RootLayout() {
         <AuthGuard />
         {/* C.bg, not literal black: on a light skin a hardcoded #000 flashed
             black behind every screen transition. */}
-        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg } }}>
+        {/* orientation:'portrait' here is the app-wide lock. app.json now says
+            "default" (so iOS ALLOWS rotation at all), and screens opt in
+            individually — currently only range/live. */}
+        <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: C.bg }, orientation: 'portrait' }}>
         <Stack.Screen name="(auth)" options={{ animation: 'fade' }} />
         <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
         <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
@@ -347,7 +350,8 @@ export default function RootLayout() {
             against the status bar / notch. */}
         <Stack.Screen name="range/index" options={{ animation: 'slide_from_right', headerShown: true }} />
         <Stack.Screen name="range/analyze" options={{ animation: 'slide_from_right', headerShown: true }} />
-        <Stack.Screen name="range/live" options={{ animation: 'slide_from_right', headerShown: true }} />
+        {/* The one screen that rotates — a driving range reads far better wide. */}
+        <Stack.Screen name="range/live" options={{ animation: 'slide_from_right', headerShown: true, orientation: 'all' }} />
         {/* Vision-camera-powered swing recorder. Slides up from the bottom
             because it's a focused capture surface — same UX rhythm as
             the system camera. */}

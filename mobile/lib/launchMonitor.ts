@@ -196,6 +196,24 @@ export function connectLaunchMonitor(
 /** GSPro Connect's standard port, then the alternates bridges commonly use. */
 export const BRIDGE_PORTS = [921, 8888, 2483, 9000];
 
+/**
+ * True when this BINARY can do local networking at all.
+ *
+ * expo-network is a native module and NSLocalNetworkUsageDescription is an
+ * Info.plist key — both only exist in a build made after they were added. On
+ * an older build the scan finds nothing and manual entry throws a generic
+ * socket error, which looks like "the bridge is broken" when really the app
+ * simply can't reach the LAN yet. The UI uses this to say so plainly.
+ */
+export function localNetworkReady(): boolean {
+  try {
+    const N = require('expo-network');
+    return typeof N?.getIpAddressAsync === 'function';
+  } catch {
+    return false;
+  }
+}
+
 /** Probe one ws:// URL. Resolves true only if the socket actually opens. */
 function probe(url: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -219,6 +237,63 @@ function probe(url: string, timeoutMs: number): Promise<boolean> {
     ws.onerror = () => finish(false);
     ws.onclose = () => finish(false);
   });
+}
+
+export interface Diagnostics {
+  /** Can this BINARY reach the LAN at all (native module + entitlement)? */
+  ready: boolean;
+  /** The phone's own address, or null if we can't read it. */
+  ip: string | null;
+  /** The /24 the scan will sweep, e.g. "192.168.1." */
+  subnet: string | null;
+  /** Human-readable reason when something is missing. */
+  note: string;
+}
+
+/**
+ * What the app can actually see right now. Surfaced in the setup sheet so a
+ * failed connection reports facts (build capability, phone IP, subnet) instead
+ * of a generic error — you can't debug a network from "connection error".
+ */
+export async function getDiagnostics(): Promise<Diagnostics> {
+  if (!localNetworkReady()) {
+    return {
+      ready: false, ip: null, subnet: null,
+      note: 'This build has no local-network support. It needs expo-network and the NSLocalNetworkUsageDescription entitlement, which only ship in a new native build.',
+    };
+  }
+  let ip: string | null = null;
+  try {
+    const N = require('expo-network');
+    ip = await N.getIpAddressAsync();
+  } catch (e: any) {
+    return { ready: true, ip: null, subnet: null, note: `Could not read this device's IP: ${e?.message ?? 'unknown error'}` };
+  }
+  if (!ip || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+    return { ready: true, ip, subnet: null, note: 'No IPv4 address — the phone may not be on WiFi.' };
+  }
+  if (ip.startsWith('127.')) {
+    return { ready: true, ip, subnet: null, note: 'Only a loopback address — the phone is not on a WiFi network.' };
+  }
+  const subnet = ip.slice(0, ip.lastIndexOf('.') + 1);
+  return {
+    ready: true, ip, subnet,
+    note: `Scanning ${subnet}1-254 on ports ${BRIDGE_PORTS.join(', ')}. The computer running your bridge must be on this same subnet.`,
+  };
+}
+
+/** Probe a single address and describe what happened, for the manual test. */
+export async function testAddress(url: string, timeoutMs = 2500): Promise<{ ok: boolean; note: string }> {
+  if (!localNetworkReady()) {
+    return { ok: false, note: 'This build cannot open local-network connections yet.' };
+  }
+  if (!/^wss?:\/\//i.test(url)) {
+    return { ok: false, note: 'Address must start with ws:// (or wss://).' };
+  }
+  const ok = await probe(url, timeoutMs);
+  return ok
+    ? { ok: true, note: 'Opened successfully — this is a working bridge.' }
+    : { ok: false, note: 'Nothing accepted a WebSocket there. Either no bridge is listening on that host and port, or the phone and computer are on different networks.' };
 }
 
 export interface DiscoverOptions {
