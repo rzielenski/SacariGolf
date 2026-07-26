@@ -17,6 +17,7 @@ type Summary = { total_shots: number; range_shots: number; putting_shots: number
 type Sesh = { session_id: string; kind: 'range' | 'putting'; shots: number; duration_s: number; bpm: number | null; created_at: string };
 
 const MODES = [
+  { key: 'live',    title: 'Range Live',   sub: 'Launch monitor → real ball flight',  icon: 'radio',           href: '/range/live' },
   { key: 'range',   title: 'Range Sesh',   sub: 'Auto-count contact + metronome', icon: 'golf',            href: '/range/sesh?kind=range' },
   { key: 'putting', title: 'Putting Sesh', sub: 'Auto-count putts + metronome',   icon: 'ellipse-outline', href: '/range/sesh?kind=putting' },
   { key: 'review',  title: 'Review Sesh',  sub: 'Record, slow-mo + draw on swings', icon: 'videocam',      href: '/range/review' },

@@ -195,7 +195,8 @@ function CreateModal({ visible, onClose, onCreated }: { visible: boolean; onClos
         <ChipRow
           options={[
             ['stroke', 'Stroke'],
-            ['stableford', 'Stableford'],
+            // Stableford temporarily removed as a choice (unused); the label
+            // helper + backend keep it so existing tournaments still render.
             ['match_play', 'Match Play'],
             ['skins', 'Skins'],
           ]}

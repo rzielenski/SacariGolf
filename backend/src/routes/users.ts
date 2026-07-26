@@ -1088,6 +1088,22 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     const m = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
   };
+  /** Robust "average" club distance: a 20% trimmed mean. Drops the longest and
+   *  shortest 20% of shots (the shanks, tops, and career shots) and averages
+   *  the central cluster — so the number behaves much like the median but stays
+   *  smooth, instead of a raw mean that a couple of mishits drag around. Under
+   *  5 shots there's nothing safe to trim, so it falls back to the plain mean.
+   *  The data-export endpoint keeps a TRUE mean+stddev (separate code path) —
+   *  that's a documented external contract; this only affects the in-app stat. */
+  const trimmedMean = (arr: number[]) => {
+    if (!arr.length) return 0;
+    if (arr.length < 5) return arr.reduce((a, b) => a + b, 0) / arr.length;
+    const sorted = [...arr].sort((a, b) => a - b);
+    const cut = Math.floor(sorted.length * 0.2);
+    const kept = sorted.slice(cut, sorted.length - cut);
+    const src = kept.length ? kept : sorted;
+    return src.reduce((a, b) => a + b, 0) / src.length;
+  };
 
   /** Distance for stat aggregation: plays-like if the client computed it
    *  at recording time, else raw GPS distance. */
@@ -1161,7 +1177,9 @@ router.get('/:id/club-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
     clubs.push({
       club,
       shots: vecs.length,
-      avg_yds:    Math.round(statYds.reduce((a, b) => a + b, 0) / statYds.length),
+      // Robust (20% trimmed mean), NOT a raw average — one shank shouldn't
+      // move a club's stated distance.
+      avg_yds:    Math.round(trimmedMean(statYds)),
       median_yds: Math.round(medYds),
       partials,
       dispersion,

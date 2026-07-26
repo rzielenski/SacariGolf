@@ -164,6 +164,10 @@ export default function ScoringScreen() {
     avg_yds: number;
     median_yds: number;
     dispersion: { lateral_yds: number; long_yds: number; dist_yds: number }[];
+    /** Partial-swing distances tracked at the range or on-course (e.g. a 3/4
+     *  PW). Powers the between-clubs suggestion when the target sits in the
+     *  gap between two full swings. */
+    partials?: { label: string; shots: number; median_yds: number }[];
   };
   const [clubStats, setClubStats] = useState<ClubStat[] | null>(null);
 
@@ -2119,6 +2123,7 @@ export default function ScoringScreen() {
 
     // Derive shot bearing (player → pin) for wind decomposition.
     let along = 0;
+    let cross = 0;
     if (knownPin && userCoord && weather.wind_speed_mph && weather.wind_from_bearing != null) {
       const lat1 = userCoord.latitude * Math.PI / 180;
       const lat2 = knownPin.lat * Math.PI / 180;
@@ -2128,6 +2133,7 @@ export default function ScoringScreen() {
       const shotBearingDeg = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
       const comps = windComponents(weather.wind_speed_mph, weather.wind_from_bearing, shotBearingDeg);
       along = comps.along_mph;
+      cross = comps.cross_mph;   // positive = wind from the LEFT (pushes ball right)
     }
 
     // Use measured GPS altitude as a fallback if upstream elevation is missing.
@@ -2160,12 +2166,59 @@ export default function ScoringScreen() {
     // a 10mph headwind ended up displaying "plays 135" on a 150 target
     // (suggesting LESS club), which is exactly backwards.
     const effective = Math.round(baseYds + adj.effective_delta_yds);
-    if (effective === baseYds) return null;
+    // Crosswind aim-off: drift scales with crosswind speed AND shot length.
+    // Calibrated to launch-monitor ballparks (10 mph full crosswind moves a
+    // 150-yd shot ~4 yds, a 275-yd driver ~8): drift ≈ mph × (dist/100) × 0.28.
+    // Positive cross = wind FROM the left pushing the ball right → aim LEFT.
+    const aimOffRaw = cross * (effective / 100) * 0.28;
+    const aimOffYds = Math.round(Math.abs(aimOffRaw));
+    const aimSide: 'left' | 'right' | null =
+      aimOffYds >= 2 ? (aimOffRaw > 0 ? 'left' : 'right') : null;
+    // Keep the sheet alive for a pure-crosswind day (no net distance change
+    // but a real aim-off) — previously this bailed whenever effective == base.
+    if (effective === baseYds && aimSide == null) return null;
     return {
-      effective, breakdown: adj, windAlong: along,
+      effective, breakdown: adj, windAlong: along, windCross: cross,
+      aimOffYds, aimSide,
       altRelative: homeElevationFt != null,
       altDeltaFt,
     };
+  })();
+
+  // ── Between-clubs partial suggestion ─────────────────────────────────────
+  // When the (plays-like) target sits in the gap between two full swings but
+  // a tracked PARTIAL swing covers it well (e.g. "3/4 PW goes 98"), surface
+  // that as a tappable suggestion. This is the payoff for logging partials at
+  // the range: the gap yardage stops being a guess. Needs a meaningful gap
+  // (best full swing ≥6 yds off) AND a partial that's clearly closer (by 3+),
+  // with ≥3 tracked samples so one range mishit can't drive club choice.
+  const partialSuggestion = (() => {
+    if (yardsToPin == null || !clubStats?.length || activeShot) return null;
+    // Same bag filter the auto-suggest uses (local-first, then server).
+    const bag = localBag ?? user?.clubs_in_bag;
+    const bagCodes = (Array.isArray(bag) && bag.length > 0)
+      ? bag.map((e: any) => typeof e === 'string' ? e : e?.code).filter(Boolean) as string[]
+      : null;
+    const bagSet = bagCodes ? new Set(bagCodes) : null;
+    const inBag = (club: string) => !bagSet || bagSet.has(club);
+    const target = weatherAdjustment?.effective ?? slopeAdjustment?.playsLike ?? yardsToPin;
+    let bestFullDiff = Infinity;
+    for (const c of clubStats) {
+      if (c.club === 'putter' || !inBag(c.club) || !(c.median_yds > 0)) continue;
+      bestFullDiff = Math.min(bestFullDiff, Math.abs(c.median_yds - target));
+    }
+    if (!(bestFullDiff >= 6)) return null;   // full swing covers it — no need
+    let best: { club: string; label: string; yds: number; diff: number } | null = null;
+    for (const c of clubStats) {
+      if (c.club === 'putter' || !inBag(c.club)) continue;
+      for (const p of c.partials ?? []) {
+        if (p.shots < 3 || !(p.median_yds > 0)) continue;
+        const diff = Math.abs(p.median_yds - target);
+        if (!best || diff < best.diff) best = { club: c.club, label: p.label, yds: p.median_yds, diff };
+      }
+    }
+    if (!best || best.diff + 3 > bestFullDiff) return null;
+    return best;
   })();
 
   const markPin = () => {
@@ -3029,7 +3082,7 @@ export default function ScoringScreen() {
             ? <ActivityIndicator color={C.textMuted} size="small" />
             : preview
               ? <Text style={styles.topBarLeaveText}>←</Text>
-              : <Text style={styles.topBarLeavePillText}>↩ LEAVE</Text>}
+              : <Text style={styles.topBarLeavePillText}>LEAVE</Text>}
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.topBarCenter}
@@ -3070,29 +3123,27 @@ export default function ScoringScreen() {
               <Text style={[styles.topBarBtnText, { color: C.gold }]}>+ Invite</Text>
             </TouchableOpacity>
           )}
-          {onCourse ? (
-            <TouchableOpacity
-              style={[styles.topBarBtn, following && styles.topBarBtnActive]}
-              onPress={() => {
-                if (!onCourse) return;
-                setFollowing(true);
-                if (userCoord && mapRef.current) {
-                  mapRef.current.animateToRegion(
-                    { latitude: userCoord.latitude, longitude: userCoord.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
-                    400,
-                  );
-                }
-              }}
-            >
-              <Text style={[styles.topBarBtnText, following && { color: C.gold }]}>
-                {following ? 'GPS' : 'Find Me'}
-              </Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={[styles.topBarBtn, { opacity: 0.4 }]}>
-              <Text style={styles.topBarBtnText}>Off Course</Text>
-            </View>
-          )}
+          {/* Recenter control. The old "Off Course" status chip that replaced
+              it when away from the course was noise — the button just dims
+              and no-ops instead. */}
+          <TouchableOpacity
+            style={[styles.topBarBtn, following && styles.topBarBtnActive, !onCourse && { opacity: 0.4 }]}
+            disabled={!onCourse}
+            onPress={() => {
+              if (!onCourse) return;
+              setFollowing(true);
+              if (userCoord && mapRef.current) {
+                mapRef.current.animateToRegion(
+                  { latitude: userCoord.latitude, longitude: userCoord.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
+                  400,
+                );
+              }
+            }}
+          >
+            <Text style={[styles.topBarBtnText, following && onCourse && { color: C.gold }]}>
+              {following ? 'GPS' : 'Find Me'}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -3174,8 +3225,8 @@ export default function ScoringScreen() {
             <Text style={[styles.topChipLabel, { color: C.red }]}>
               {activeShot ? 'CANCEL' : 'UNDO'}
             </Text>
-            <Text style={[styles.topChipValue, { color: C.red, fontSize: 15 }]}>
-              {activeShot ? '✕' : '↶'}
+            <Text style={[styles.topChipValue, { color: C.red }]}>
+              {activeShot ? 'Shot' : 'Last'}
             </Text>
           </TouchableOpacity>
         )}
@@ -3215,7 +3266,25 @@ export default function ScoringScreen() {
           activeOpacity={0.8}
         >
           <Text style={styles.forgotShotText}>
-            ↩  Forgot to start? Log this shot from {currentShots.length > 0 ? 'your last shot' : 'the tee'}
+            Forgot to start? Log this shot from {currentShots.length > 0 ? 'your last shot' : 'the tee'}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Between-clubs suggestion — the target sits in a gap between full
+          swings but a tracked partial covers it. Tap arms that club + partial
+          for the next TRACK press. */}
+      {!preview && partialSuggestion && (
+        <TouchableOpacity
+          style={styles.partialSuggestBtn}
+          onPress={() => {
+            pickClubManual(partialSuggestion.club);
+            pickPartial(partialSuggestion.label);
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.forgotShotText}>
+            Between clubs: your {partialSuggestion.label} {partialSuggestion.club.toUpperCase()} goes {partialSuggestion.yds} · tap to use
           </Text>
         </TouchableOpacity>
       )}
@@ -3612,6 +3681,22 @@ export default function ScoringScreen() {
                         <Text style={styles.wxTotalLabel}>PLAYS LIKE</Text>
                         <Text style={styles.wxTotalVal}>{weatherAdjustment.effective} yds</Text>
                       </View>
+                      {/* Lateral: how far to aim off for the crosswind. The
+                          rows above only cover the along-wind DISTANCE effect;
+                          this is the left/right component, sized to the shot. */}
+                      {weatherAdjustment.aimSide != null && (
+                        <View style={styles.wxTotalRow}>
+                          <Text style={styles.wxTotalLabel}>CROSSWIND</Text>
+                          <Text style={styles.wxTotalVal}>
+                            aim {weatherAdjustment.aimOffYds} yds {weatherAdjustment.aimSide.toUpperCase()}
+                          </Text>
+                        </View>
+                      )}
+                      {weatherAdjustment.aimSide != null && (
+                        <Text style={styles.wxBaseLine}>
+                          {Math.round(Math.abs(weatherAdjustment.windCross))} mph crosswind from the {weatherAdjustment.windCross > 0 ? 'left' : 'right'}
+                        </Text>
+                      )}
                     </>
                   )}
                 </>
@@ -4179,6 +4264,17 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   forgotShotText: { color: C.gold, fontWeight: '800', fontSize: 11 },
+  // Between-clubs partial suggestion — same visual family as forgotShotBtn,
+  // seated one slot lower so the two can coexist without overlap.
+  partialSuggestBtn: {
+    position: 'absolute', top: 216, left: 12, right: 12, zIndex: 5,
+    backgroundColor: C.bg + 'ee',
+    borderRadius: 6, borderWidth: 1, borderColor: C.gold + '66',
+    paddingVertical: 7, paddingHorizontal: 10,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 4, shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
+  },
 
   // ── Bottom-right pin anchor — bottom value follows panel height ────────
   pinDistAnchor: { position: 'absolute', right: 12 },

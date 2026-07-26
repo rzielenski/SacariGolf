@@ -227,7 +227,7 @@ export default function UserProfileScreen() {
               )}
               activeOpacity={0.7}
             >
-              <Text style={[styles.friendBtnText, { color: '#000' }]}>⚔ Challenge</Text>
+              <Text style={[styles.friendBtnText, { color: '#000' }]}>Challenge</Text>
             </TouchableOpacity>
           </View>
         )}

@@ -81,12 +81,17 @@ export default function ClubHeatmapScreen() {
                   const filtered = c.dispersion.filter(d => d.shot_id !== shotId);
                   if (filtered.length === c.dispersion.length) return c;
                   const dists = filtered.map(d => d.dist_yds);
-                  const median = dists.length
-                    ? Math.round([...dists].sort((a, b) => a - b)[Math.floor(dists.length / 2)])
-                    : 0;
-                  const avg = dists.length
-                    ? Math.round(dists.reduce((a, b) => a + b, 0) / dists.length)
-                    : 0;
+                  const sorted = [...dists].sort((a, b) => a - b);
+                  const median = sorted.length ? Math.round(sorted[Math.floor(sorted.length / 2)]) : 0;
+                  // 20% trimmed mean — mirrors the backend's robust avg_yds so
+                  // the "AVG" cell doesn't jump to a raw mean after a delete.
+                  let avg = 0;
+                  if (sorted.length) {
+                    const cut = sorted.length < 5 ? 0 : Math.floor(sorted.length * 0.2);
+                    const kept = cut ? sorted.slice(cut, sorted.length - cut) : sorted;
+                    const src = kept.length ? kept : sorted;
+                    avg = Math.round(src.reduce((a, b) => a + b, 0) / src.length);
+                  }
                   return { ...c, dispersion: filtered, shots: filtered.length, median_yds: median, avg_yds: avg };
                 }).filter(c => c.shots > 0),
               };

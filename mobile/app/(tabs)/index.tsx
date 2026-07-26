@@ -270,7 +270,6 @@ export default function HomeScreen() {
         onPress={() => router.push('/play' as any)}
         activeOpacity={0.85}
       >
-        <Text style={styles.playCtaMark}>⛳︎</Text>
         <View style={{ flex: 1 }}>
           <Text style={styles.playCtaTitle}>Start a Round</Text>
           <Text style={styles.playCtaSub}>Solo, ranked, or with your group</Text>
@@ -284,15 +283,15 @@ export default function HomeScreen() {
           Courses live here now that they left the tab bar. */}
       <View style={styles.hubGrid}>
         {([
-          { mark: '📸', label: 'Finds', to: '/finds' },
-          { mark: '🗺', label: 'Courses', to: '/courses' },
-          { mark: '★', label: 'Leaderboard', to: '/leaderboard' },
-          { mark: '◆', label: 'Creator Leagues', to: '/creator-leagues' },
-          { mark: '♛', label: 'Tournaments', to: '/tournaments' },
-          { mark: '🏆', label: 'Sacari Cup', to: '/sacari-cup' },
-          { mark: '▼', label: 'Season Pass', to: '/season-pass' },
-          { mark: '✦', label: 'Locker Room', to: '/locker-room' },
-          { mark: '⛳︎', label: 'Range', to: '/range' },
+          { label: 'Finds', to: '/finds' },
+          { label: 'Courses', to: '/courses' },
+          { label: 'Leaderboard', to: '/leaderboard' },
+          { label: 'Creator Leagues', to: '/creator-leagues' },
+          { label: 'Tournaments', to: '/tournaments' },
+          { label: 'Sacari Cup', to: '/sacari-cup' },
+          { label: 'Season Pass', to: '/season-pass' },
+          { label: 'Locker Room', to: '/locker-room' },
+          { label: 'Range', to: '/range' },
         ] as const).map((t) => (
           <PressableScale
             key={t.to}
@@ -334,7 +333,6 @@ const styles = StyleSheet.create({
     backgroundColor: C.gold, borderRadius: 12,
     paddingHorizontal: 16, paddingVertical: 14, marginBottom: 14,
   },
-  playCtaMark: { fontSize: 22 },
   playCtaTitle: { color: '#000', fontWeight: '900', fontSize: 16, letterSpacing: 0.3 },
   playCtaSub: { color: '#00000099', fontWeight: '600', fontSize: 12, marginTop: 1 },
   playCtaChev: { color: '#000', fontSize: 24, fontWeight: '300' },

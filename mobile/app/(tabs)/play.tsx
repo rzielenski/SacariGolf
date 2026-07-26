@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   TextInput, FlatList, ActivityIndicator, Alert,
@@ -79,6 +79,12 @@ const stepFlow = (t: MatchType): Step[] =>
 
 export default function PlayScreen() {
   const { user } = useAuth();
+  // Ref on the type-step scroll view + a captured Y for the reveal-on-select
+  // scroll. The Continue button lives below the type cards, so on a small
+  // screen it can be under the fold — users didn't realize a round type had
+  // to be confirmed. Picking a type now scrolls it into view.
+  const typeScrollRef = useRef<ScrollView>(null);
+  const continueYRef = useRef(0);
   // Optional URL params drive two unified entry points into this wizard:
   //   • ?type=solo|duo|squad|practice — pre-selects the match type so
   //     the home-tab quick actions land on the right flow with one tap.
@@ -476,6 +482,7 @@ export default function PlayScreen() {
   if (step === 'type') {
     return (
       <ScrollView
+        ref={typeScrollRef}
         style={styles.scrollContainer}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
@@ -533,7 +540,13 @@ export default function PlayScreen() {
                 <TouchableOpacity
                   key={t}
                   style={[styles.typeCard, active && styles.typeCardActive]}
-                  onPress={() => { setMatchType(t); setTypeChosen(true); }}
+                  onPress={() => {
+                    setMatchType(t);
+                    setTypeChosen(true);
+                    // Reveal the Continue button (may be below the fold). The
+                    // timeout lets the button mount first so continueYRef is set.
+                    setTimeout(() => typeScrollRef.current?.scrollTo({ y: Math.max(0, continueYRef.current - 120), animated: true }), 60);
+                  }}
                 >
                   <View style={styles.typeMark}>
                     <Text style={[styles.typeMarkText, active && { color: C.gold }]}>{meta.badge}</Text>
@@ -555,12 +568,12 @@ export default function PlayScreen() {
         {/* Holes + which-9 moved AFTER course selection so they can adapt to
             the actual course (a 9-hole course never asks front-vs-back). */}
         {typeChosen && (
-          <>
+          <View onLayout={(e) => { continueYRef.current = e.nativeEvent.layout.y; }}>
             <Text style={styles.stepProgress}>{progressLabel('type')} · {TYPE_META[matchType].name}</Text>
             <TouchableOpacity style={styles.nextBtn} onPress={goToNextStep}>
               <Text style={styles.nextBtnText}>{nextStepLabel}</Text>
             </TouchableOpacity>
-          </>
+          </View>
         )}
 
         {/* Join-by-ID is irrelevant when this screen is the challenge flow —
@@ -718,6 +731,11 @@ export default function PlayScreen() {
     // scramble too AND hides match_play / skins, which are inherently 1v1
     // and don't generalise to N-player free-for-all.
     const visibleCards = FORMAT_CARDS.filter((c) => {
+      // TEMPORARILY hidden as a choice — almost nobody picked Stableford. The
+      // card, the Format type, and the backend scoring/rendering all stay
+      // intact so existing Stableford matches still work and re-enabling is
+      // just deleting this line.
+      if (c.id === 'stableford') return false;
       if (c.teamOnly) return isTeam;
       if (isFFA && (c.id === 'match_play' || c.id === 'skins')) return false;
       return true;

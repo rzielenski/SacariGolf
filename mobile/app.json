@@ -24,6 +24,7 @@
         "NSCameraUsageDescription": "Sacari uses the camera so you can record your golf swings in slow motion right inside the app.",
         "NSMicrophoneUsageDescription": "Sacari uses the microphone so you can send voice messages in chats with friends, teammates, and opponents.",
         "NSMotionUsageDescription": "Sacari uses the iPhone barometer to measure elevation changes between your ball and the pin so plays-like distance is accurate.",
+        "NSLocalNetworkUsageDescription": "Sacari finds your launch monitor on the same WiFi network so Range Live can receive your shots.",
         "ITSAppUsesNonExemptEncryption": false
       }
     },

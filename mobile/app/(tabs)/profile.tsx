@@ -1312,10 +1312,12 @@ function MenuRow({ label, onPress }: { label: string; onPress: () => void }) {
 /** Compact tap-tile for the profile's navigation hub. Replaces the long
  *  full-width menu rows so a whole section (e.g. COMPETE's 9 destinations)
  *  fits in a few scannable rows instead of a long list to scroll past. */
-function HubTile({ icon, label, onPress }: { icon: string; label: string; onPress: () => void }) {
+// Text-only hub tile. The `icon` prop is accepted but no longer rendered
+// (UX feedback: decorative glyphs on every tile were clutter) — kept in the
+// signature so the ~20 call sites don't all need editing.
+function HubTile({ label, onPress }: { icon?: string; label: string; onPress: () => void }) {
   return (
     <TouchableOpacity style={styles.hubTile} onPress={onPress} activeOpacity={0.75}>
-      <Text style={styles.hubIcon}>{icon}</Text>
       <Text style={styles.hubLabel} numberOfLines={2}>{label}</Text>
     </TouchableOpacity>
   );
@@ -1344,13 +1346,13 @@ const styles = StyleSheet.create({
   // Navigation hub: compact 3-across tile grid (flexBasis + flexGrow so a
   // row of 3 fills evenly, and a short section of 2 spreads to halves).
   hubGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 2 },
+  // Compact text-only tiles (no icon row) — shorter now that the glyph is gone.
   hubTile: {
-    flexBasis: '30%', flexGrow: 1, minHeight: 76,
-    backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10,
-    paddingVertical: 12, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center', gap: 6,
+    flexBasis: '30%', flexGrow: 1, minHeight: 44,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 8,
+    paddingVertical: 11, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center',
   },
-  hubIcon: { fontSize: 20, color: C.gold },
-  hubLabel: { color: C.text, fontSize: 11.5, fontWeight: '700', textAlign: 'center', lineHeight: 14 },
+  hubLabel: { color: C.text, fontSize: 12, fontWeight: '700', textAlign: 'center', lineHeight: 15 },
   teamsEmpty: {
     color: C.textMuted, fontSize: 12, fontStyle: 'italic',
     marginBottom: 12, lineHeight: 17,
