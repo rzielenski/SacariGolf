@@ -37,6 +37,7 @@ import {
   LaunchShot, LaunchMonitorLink, LinkStatus, Diagnostics,
 } from '../../lib/launchMonitor';
 import { CLUBS_CATALOG, clubLabel } from '../../lib/clubs';
+import { MevoClient, MevoState, MEVO_HOST_CANDIDATES, MEVO_PORT } from '../../lib/mevo/client';
 
 const BRIDGE_KEY = 'range_live_bridge_url';
 
@@ -104,6 +105,11 @@ export default function RangeLive() {
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
+  // Direct mode: phone → Mevo+ over raw TCP, no laptop bridge.
+  const [mevoState, setMevoState] = useState<MevoState>('idle');
+  const [mevoLog, setMevoLog] = useState<string[]>([]);
+  const [mevoHost, setMevoHost] = useState(MEVO_HOST_CANDIDATES[0]);
+  const mevoRef = useRef<MevoClient | null>(null);
   const linkRef = useRef<LaunchMonitorLink | null>(null);
   const scanSignal = useRef<{ cancelled: boolean }>({ cancelled: false });
   const nextId = useRef(1);
@@ -191,7 +197,39 @@ export default function RangeLive() {
   }, [ingest]);
   connectRef.current = connect;
 
-  useEffect(() => () => { linkRef.current?.close(); }, []);
+  useEffect(() => () => { linkRef.current?.close(); mevoRef.current?.close(); }, []);
+
+  /** Connect straight to the Mevo+ over TCP (phone joined to its WiFi). */
+  const connectMevoDirect = useCallback((host: string) => {
+    linkRef.current?.close();          // bridge and direct are mutually exclusive
+    mevoRef.current?.close();
+    setMevoLog([]);
+    const c = new MevoClient({
+      onState: (st, detail) => {
+        setMevoState(st);
+        setStatusDetail(detail ?? null);
+        // Mirror into the main pill so the range header reflects direct mode.
+        setStatus(st === 'ready' || st === 'shot' ? 'connected'
+          : st === 'error' ? 'error'
+          : st === 'closed' ? 'closed' : 'connecting');
+      },
+      onShot: (s) => ingest(
+        {
+          ballSpeedMph: s.ballSpeedMph,
+          launchAngleDeg: s.launchAngleDeg,
+          azimuthDeg: s.azimuthDeg,
+          spinRpm: s.spinRpm,
+          spinAxisDeg: s.spinAxisDeg,
+          clubSpeedMph: null, smashFactor: null, deviceCarryYds: null,
+        },
+        clubRef.current,
+      ),
+      // Keep the tail only — a session emits thousands of frames.
+      onLog: (line) => setMevoLog((prev) => [...prev.slice(-160), line]),
+    });
+    mevoRef.current = c;
+    c.connect(host, MEVO_PORT);
+  }, [ingest]);
 
   const saveSession = async () => {
     if (!shots.length) return;
@@ -497,6 +535,54 @@ export default function RangeLive() {
             and that the bridge is running.
           </Text>
 
+          {/* ── Direct mode ─────────────────────────────────────────────
+              Talks to the Mevo+ over raw TCP with no laptop in the middle.
+              Needs a dev/production build (native TCP module). */}
+          <Text style={s.setupLabel}>DIRECT TO MEVO+ (NO LAPTOP)</Text>
+          <Text style={s.setupBody}>
+            Join your phone to the Mevo+'s own WiFi, then connect. Sacari speaks the
+            device's protocol directly. This is experimental: if it doesn't arm, the
+            log below shows exactly how far it got.
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+            {MEVO_HOST_CANDIDATES.map((h) => (
+              <TouchableOpacity
+                key={h}
+                style={[s.hostChip, mevoHost === h && s.hostChipActive]}
+                onPress={() => setMevoHost(h)}
+              >
+                <Text style={[s.hostChipText, mevoHost === h && { color: '#000' }]}>{h}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <TouchableOpacity
+            style={[s.setupConnect, { backgroundColor: C.card, borderWidth: 1, borderColor: C.gold }]}
+            onPress={() => connectMevoDirect(mevoHost)}
+          >
+            <Text style={[s.setupConnectText, { color: C.gold }]}>
+              {mevoState === 'idle' || mevoState === 'closed' ? 'Connect to Mevo+' : `Reconnect (${mevoState})`}
+            </Text>
+          </TouchableOpacity>
+          {mevoState !== 'idle' && (
+            <Text style={mevoState === 'error' ? s.setupErr : s.setupOk}>
+              Device state: {mevoState}
+            </Text>
+          )}
+          {mevoLog.length > 0 && (
+            <>
+              <Text style={s.setupLabel}>PROTOCOL LOG</Text>
+              <ScrollView style={s.logBox} nestedScrollEnabled>
+                {mevoLog.map((l, i) => (
+                  <Text key={i} style={s.logLine}>{l}</Text>
+                ))}
+              </ScrollView>
+              <Text style={s.setupNote}>
+                Send me this log if it doesn't arm. the last few lines tell us which
+                handshake step the device is waiting on.
+              </Text>
+            </>
+          )}
+
           <TouchableOpacity onPress={() => setShowManual((v) => !v)} activeOpacity={0.7}>
             <Text style={s.setupToggle}>{showManual ? 'Hide manual setup' : 'Enter an address manually'}</Text>
           </TouchableOpacity>
@@ -695,5 +781,16 @@ const s = StyleSheet.create({
   diagKey: { color: C.textMuted, fontSize: 12 },
   diagVal: { color: C.text, fontSize: 12, fontWeight: '700', fontFamily: F.mono, flexShrink: 1, textAlign: 'right' },
   diagNote: { color: C.textDim, fontSize: 11, lineHeight: 16, marginTop: 4 },
+  hostChip: {
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6,
+    borderWidth: 1, borderColor: C.border, backgroundColor: C.card,
+  },
+  hostChipActive: { backgroundColor: C.gold, borderColor: C.gold },
+  hostChipText: { color: C.text, fontSize: 12, fontWeight: '700', fontFamily: F.mono },
+  logBox: {
+    maxHeight: 220, backgroundColor: '#000', borderRadius: 8,
+    borderWidth: 1, borderColor: C.border, padding: 10,
+  },
+  logLine: { color: '#9fe89f', fontSize: 10, fontFamily: F.mono, lineHeight: 14 },
   setupNote: { color: C.textDim, fontSize: 12, lineHeight: 17, marginTop: 18, fontStyle: 'italic' },
 });
