@@ -109,6 +109,10 @@ export default function RangeLive() {
   const [mevoState, setMevoState] = useState<MevoState>('idle');
   const [mevoLog, setMevoLog] = useState<string[]>([]);
   const [mevoHost, setMevoHost] = useState(MEVO_HOST_CANDIDATES[0]);
+  /** Gateway inferred from the phone's own address (x.y.z.1). On the Mevo+'s
+   *  AP the device IS the gateway, so this is the address to talk to — the
+   *  same value iOS shows as "Router" under the network's (i) button. */
+  const [detectedGateway, setDetectedGateway] = useState<string | null>(null);
   const mevoRef = useRef<MevoClient | null>(null);
   const linkRef = useRef<LaunchMonitorLink | null>(null);
   const scanSignal = useRef<{ cancelled: boolean }>({ cancelled: false });
@@ -481,7 +485,19 @@ export default function RangeLive() {
         animationType="slide"
         presentationStyle="pageSheet"
         onRequestClose={() => setSetupOpen(false)}
-        onShow={() => { getDiagnostics().then(setDiag).catch(() => setDiag(null)); }}
+        onShow={() => {
+          getDiagnostics().then((d) => {
+            setDiag(d);
+            // Derive the gateway from our own address and offer it as the
+            // Mevo+ host, so the user never has to go read it off the WiFi
+            // settings screen.
+            if (d.subnet) {
+              const gw = `${d.subnet}1`;
+              setDetectedGateway(gw);
+              setMevoHost(gw);
+            }
+          }).catch(() => setDiag(null));
+        }}
       >
         <ScrollView style={s.modal} contentContainerStyle={{ padding: 20 }}>
           <View style={s.modalHeader}>
@@ -544,8 +560,23 @@ export default function RangeLive() {
             device's protocol directly. This is experimental: if it doesn't arm, the
             log below shows exactly how far it got.
           </Text>
+          {/* Detected gateway. When the phone is on the Mevo+'s own WiFi the
+              device IS the router, so x.y.z.1 on our subnet is almost always
+              the right address — same number iOS shows as "Router" under the
+              network's (i). Offered first so nobody has to go read it. */}
+          {detectedGateway && (
+            <TouchableOpacity
+              style={[s.hostChip, { alignSelf: 'flex-start', marginTop: 10 },
+                mevoHost === detectedGateway && s.hostChipActive]}
+              onPress={() => setMevoHost(detectedGateway)}
+            >
+              <Text style={[s.hostChipText, mevoHost === detectedGateway && { color: '#000' }]}>
+                {detectedGateway}  ·  detected
+              </Text>
+            </TouchableOpacity>
+          )}
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {MEVO_HOST_CANDIDATES.map((h) => (
+            {MEVO_HOST_CANDIDATES.filter((h) => h !== detectedGateway).map((h) => (
               <TouchableOpacity
                 key={h}
                 style={[s.hostChip, mevoHost === h && s.hostChipActive]}
