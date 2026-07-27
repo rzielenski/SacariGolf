@@ -2452,6 +2452,45 @@ const MIGRATIONS: { name: string; sql: string }[] = [
        WHERE COALESCE(is_bot, false) = false;
     `,
   },
+  {
+    // Crowd-sourced course SHAPES — the fairways, greens, bunkers, water and
+    // rough traced out on the satellite map by players in the web editor.
+    // Pins and tees told us where a hole starts and ends; polygons tell us
+    // what the ball is actually sitting on, which is what simulator play and
+    // real lie-aware strategy need.
+    //
+    // Rings are stored as JSONB [[lat,lng], ...] rather than PostGIS geometry
+    // on purpose: Railway's Postgres has no PostGIS extension, and every
+    // consumer (the RN app included) does its own point-in-polygon anyway.
+    // The bbox columns are denormalised from the ring so a "what am I standing
+    // on?" lookup can reject almost every polygon with an index-friendly
+    // comparison before running the expensive ray cast.
+    //
+    // `kind` is deliberately un-CHECKed so a new feature type ships without a
+    // migration; the route validates against its own allow-list.
+    name: 'course_polygons',
+    sql: `
+      CREATE TABLE IF NOT EXISTS course_polygons (
+        polygon_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        course_id   UUID NOT NULL REFERENCES courses(course_id) ON DELETE CASCADE,
+        hole_num    SMALLINT,
+        kind        TEXT NOT NULL,
+        ring        JSONB NOT NULL,
+        min_lat     REAL NOT NULL,
+        max_lat     REAL NOT NULL,
+        min_lng     REAL NOT NULL,
+        max_lng     REAL NOT NULL,
+        created_by  UUID REFERENCES users(user_id) ON DELETE SET NULL,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS course_polygons_course_idx
+        ON course_polygons (course_id);
+      CREATE INDEX IF NOT EXISTS course_polygons_hole_idx
+        ON course_polygons (course_id, hole_num);
+      CREATE INDEX IF NOT EXISTS course_polygons_bbox_idx
+        ON course_polygons (course_id, min_lat, max_lat, min_lng, max_lng);
+    `,
+  },
 ];
 
 export async function runMigrations() {

@@ -325,6 +325,78 @@ router.post('/scan-scorecard', requireAuth, wrap(async (req: AuthRequest, res: R
   }
 }));
 
+/**
+ * Courses playable in the SIMULATOR.
+ *
+ * Simulator play needs real geometry per hole, not just a scorecard: a tee to
+ * stand on and a pin to aim at, both of which come from players marking them
+ * during real rounds. A course with a scorecard but no coordinates would put
+ * the ball nowhere, so it's excluded rather than shown broken.
+ *
+ * Bar for a teebox to qualify:
+ *   • pin coords on at least SIM_MIN_HOLE_FRACTION of its holes
+ *   • tee coords on at least SIM_MIN_HOLE_FRACTION of its holes
+ *   • at least 9 holes with BOTH, so there's a real nine to play
+ * Elevation samples are reported but NOT required — flat play still works,
+ * and slope only refines the plays-like number.
+ *
+ * Defined before '/:id' so the literal path isn't swallowed by the param.
+ */
+const SIM_MIN_HOLE_FRACTION = 0.9;
+const SIM_MIN_HOLES = 9;
+
+router.get('/sim-ready', requireAuth, wrap(async (_req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT c.course_id, c.course_name, c.city, c.state,
+            t.teebox_id, t.name AS teebox_name, t.par, t.num_holes, t.total_yards,
+            COUNT(h.hole_id)::int                                            AS holes_total,
+            COUNT(*) FILTER (WHERE h.pin_lat IS NOT NULL)::int               AS holes_with_pins,
+            COUNT(*) FILTER (WHERE h.tee_lat IS NOT NULL)::int               AS holes_with_tees,
+            COUNT(*) FILTER (WHERE h.pin_lat IS NOT NULL
+                               AND h.tee_lat IS NOT NULL)::int               AS holes_playable,
+            COALESCE((SELECT SUM(samples)::int FROM course_elevation_points e
+                       WHERE e.course_id = c.course_id), 0)                  AS elevation_samples
+       FROM courses c
+       JOIN teeboxes t ON t.course_id = c.course_id
+       JOIN holes h    ON h.teebox_id = t.teebox_id
+      GROUP BY c.course_id, c.course_name, c.city, c.state,
+               t.teebox_id, t.name, t.par, t.num_holes, t.total_yards
+     HAVING COUNT(*) FILTER (WHERE h.pin_lat IS NOT NULL AND h.tee_lat IS NOT NULL) >= $1::int
+        AND COUNT(*) FILTER (WHERE h.pin_lat IS NOT NULL AND h.tee_lat IS NOT NULL)
+              >= CEIL(COUNT(h.hole_id) * $2::numeric)
+      ORDER BY c.course_name, t.total_yards DESC NULLS LAST`,
+    [SIM_MIN_HOLES, SIM_MIN_HOLE_FRACTION],
+  );
+
+  // Collapse to one entry per course, carrying its qualifying teeboxes.
+  const byCourse = new Map<string, any>();
+  for (const r of rows) {
+    if (!byCourse.has(r.course_id)) {
+      byCourse.set(r.course_id, {
+        course_id: r.course_id,
+        course_name: r.course_name,
+        city: r.city,
+        state: r.state,
+        elevation_samples: r.elevation_samples,
+        teeboxes: [],
+      });
+    }
+    byCourse.get(r.course_id).teeboxes.push({
+      teebox_id: r.teebox_id,
+      name: r.teebox_name,
+      par: r.par,
+      num_holes: r.num_holes,
+      total_yards: r.total_yards,
+      holes_playable: r.holes_playable,
+      holes_total: r.holes_total,
+    });
+  }
+  return res.json({
+    courses: [...byCourse.values()],
+    requirements: { min_holes: SIM_MIN_HOLES, min_hole_fraction: SIM_MIN_HOLE_FRACTION },
+  });
+}));
+
 router.get('/:id/leaderboard', requireAuth, wrap(async (req: Request, res: Response) => {
   // Separate boards, selected by query params:
   //   • format = solo (default) | scramble. Solo board counts SOLO ranked
@@ -482,6 +554,139 @@ router.post('/:id/corrections', requireAuth, wrap(async (req: any, res: Response
  * them — server can tune the cutoff (e.g. 30 elevation points, 50% of holes
  * with pins) without an app release.
  */
+/* ───────────────────────── Course polygons ─────────────────────────────
+ * Player-traced course features (fairway, green, bunker, water, …). Same
+ * crowd-sourced, rate-limited trust model as pins and tee boxes: no admin
+ * gate, because gating it means nobody can contribute.
+ */
+
+/** Feature types the editor offers. Adding one here is the whole change —
+ *  `kind` is an unconstrained TEXT column by design. */
+export const POLYGON_KINDS = [
+  'green', 'fairway', 'tee', 'bunker', 'water', 'rough',
+  'native', 'trees', 'path', 'oob',
+] as const;
+const KIND_SET = new Set<string>(POLYGON_KINDS);
+
+/** Guards against a runaway trace bloating a row (and the app's download). */
+const MAX_RING_POINTS = 500;
+const MIN_RING_POINTS = 3;
+
+type Ring = [number, number][];
+
+/**
+ * Validate an incoming ring. Returns the cleaned ring + bbox, or an error
+ * string. Rejects anything that isn't a closed-able simple list of sane
+ * coordinates, and drops a duplicated closing vertex (Leaflet sends the ring
+ * open; some clients close it) so storage is consistent.
+ */
+function parseRing(raw: unknown): { ring: Ring; bbox: [number, number, number, number] } | string {
+  if (!Array.isArray(raw)) return 'ring must be an array';
+  const pts: Ring = [];
+  for (const p of raw) {
+    if (!Array.isArray(p) || p.length < 2) return 'each point must be [lat, lng]';
+    const lat = Number(p[0]);
+    const lng = Number(p[1]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return 'coordinates must be numbers';
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return 'coordinates out of range';
+    // Round to ~1cm. Full float precision is noise for a hand-traced shape
+    // and triples the stored size.
+    pts.push([Math.round(lat * 1e7) / 1e7, Math.round(lng * 1e7) / 1e7]);
+  }
+  // A repeated last==first vertex is redundant; we treat rings as implicitly closed.
+  if (pts.length > 1) {
+    const a = pts[0], b = pts[pts.length - 1];
+    if (a[0] === b[0] && a[1] === b[1]) pts.pop();
+  }
+  if (pts.length < MIN_RING_POINTS) return `a shape needs at least ${MIN_RING_POINTS} points`;
+  if (pts.length > MAX_RING_POINTS) return `a shape can have at most ${MAX_RING_POINTS} points`;
+
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+  for (const [lat, lng] of pts) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  return { ring: pts, bbox: [minLat, maxLat, minLng, maxLng] };
+}
+
+/** All traced features for a course. Drives the web editor and, later, the
+ *  app's lie lookup. Cheap enough to serve whole: a fully mapped 18 is a few
+ *  hundred KB and the client caches it. */
+router.get('/:id/polygons', requireAuth, wrap(async (req: AuthRequest, res: Response) => {
+  const { rows } = await pool.query(
+    `SELECT polygon_id, hole_num, kind, ring, created_at,
+            min_lat, max_lat, min_lng, max_lng
+       FROM course_polygons
+      WHERE course_id = $1
+      ORDER BY hole_num NULLS FIRST, kind, created_at`,
+    [req.params.id],
+  );
+  return res.json({ polygons: rows });
+}));
+
+/**
+ * Trace a new feature. Crowd-sourced and additive — overlapping shapes are
+ * allowed (a bunker sits inside a fairway), so there's no upsert here; the
+ * editor deletes and re-draws to correct a shape.
+ */
+router.post(
+  '/:id/polygons',
+  requireAuth,
+  perUserRateLimit({ max: 120, windowMs: 60_000 }),
+  wrap(async (req: AuthRequest, res: Response) => {
+    const courseId = req.params.id;
+    const { kind, holeNum, ring } = req.body ?? {};
+
+    if (typeof kind !== 'string' || !KIND_SET.has(kind)) {
+      return res.status(400).json({ error: `kind must be one of: ${POLYGON_KINDS.join(', ')}` });
+    }
+    let hole: number | null = null;
+    if (holeNum !== null && holeNum !== undefined && holeNum !== '') {
+      hole = Number(holeNum);
+      if (!Number.isInteger(hole) || hole < 1 || hole > 18) {
+        return res.status(400).json({ error: 'holeNum must be 1-18, or omitted for a course-wide feature' });
+      }
+    }
+    const parsed = parseRing(ring);
+    if (typeof parsed === 'string') return res.status(400).json({ error: parsed });
+
+    const { rows: courseRows } = await pool.query(
+      `SELECT 1 FROM courses WHERE course_id = $1`, [courseId],
+    );
+    if (!courseRows.length) return res.status(404).json({ error: 'course not found' });
+
+    const [minLat, maxLat, minLng, maxLng] = parsed.bbox;
+    const { rows } = await pool.query(
+      `INSERT INTO course_polygons
+         (course_id, hole_num, kind, ring, min_lat, max_lat, min_lng, max_lng, created_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9)
+       RETURNING polygon_id, hole_num, kind, ring, created_at,
+                 min_lat, max_lat, min_lng, max_lng`,
+      [courseId, hole, kind, JSON.stringify(parsed.ring),
+       minLat, maxLat, minLng, maxLng, req.userId],
+    );
+    return res.json({ polygon: rows[0] });
+  }),
+);
+
+/** Remove a traced feature. Scoped to the course so a stale id from another
+ *  course can't delete anything. */
+router.delete(
+  '/:id/polygons/:polygonId',
+  requireAuth,
+  perUserRateLimit({ max: 120, windowMs: 60_000 }),
+  wrap(async (req: AuthRequest, res: Response) => {
+    const { rowCount } = await pool.query(
+      `DELETE FROM course_polygons WHERE polygon_id = $1 AND course_id = $2`,
+      [req.params.polygonId, req.params.id],
+    );
+    if (!rowCount) return res.status(404).json({ error: 'not found' });
+    return res.json({ success: true });
+  }),
+);
+
 router.get('/:id/data-quality', requireAuth, wrap(async (req: any, res: Response) => {
   const courseId = req.params.id;
 

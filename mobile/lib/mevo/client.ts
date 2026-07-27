@@ -42,6 +42,34 @@ export interface MevoEvents {
 
 const hex = (n: number) => `0x${n.toString(16).padStart(2, '0').toUpperCase()}`;
 
+const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+/**
+ * Decode a base64 string to raw bytes.
+ *
+ * Hand-rolled because React Native's Hermes engine provides neither Node's
+ * `Buffer` nor a dependable global `atob` across versions — and reaching for
+ * a polyfill package to move a few hundred bytes per shot isn't worth it.
+ * Ignores whitespace and padding; unknown characters are skipped.
+ */
+export function base64ToBytes(b64: string): number[] {
+  const out: number[] = [];
+  let acc = 0;
+  let bits = 0;
+  for (let i = 0; i < b64.length; i++) {
+    const ch = b64[i];
+    if (ch === '=') break;
+    const v = B64_CHARS.indexOf(ch);
+    if (v < 0) continue;            // whitespace / newline / stray char
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 0xff);
+    }
+  }
+  return out;
+}
+
 export class MevoClient {
   private socket: any = null;
   private reader = new FrameReader();
@@ -54,13 +82,29 @@ export class MevoClient {
   private pending: Partial<MevoShot> | null = null;
   private emitTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Detection mode sent in 0xA5 before arming. The device reports the value
+   *  back in its "ARMED DetectionMode=NN" text, so the log confirms it took. */
+  detectionMode = 0x00;
+  /** How far the unit sits BEHIND the ball, mm. Mevo+ is normally set up
+   *  around 8 ft (2438 mm). */
+  unitDistanceMm = 2438;
+  /** Height of the hitting surface above the unit's base, mm (0 = level). */
+  surfaceHeightMm = 0;
+
   constructor(events: MevoEvents) { this.events = events; }
 
   private setState(s: MevoState, detail?: string) {
     this.state = s;
     this.events.onState(s, detail);
   }
-  private log(line: string) { this.events.onLog(line); }
+  private log(line: string) {
+    this.events.onLog(line);
+    // Mirror to the JS console so the line also lands in the Metro terminal.
+    // That makes the protocol trace readable on the DEV MACHINE (and teeable
+    // to a file) instead of only on the phone screen — the difference between
+    // debugging this from a transcript and squinting at a handset.
+    console.log(`[mevo] ${line}`);
+  }
 
   /** Open the socket and start the lifecycle. */
   connect(host: string = MEVO_DEFAULT_HOST, port: number = MEVO_PORT) {
@@ -86,9 +130,11 @@ export class MevoClient {
     }
 
     this.socket.on('data', (data: any) => {
-      // RN gives a Buffer-like or base64 string depending on platform/version.
+      // RN hands back either a base64 STRING or a Uint8Array depending on
+      // platform/version. Node's Buffer does NOT exist in Hermes, so decode
+      // base64 ourselves rather than reaching for a polyfill.
       const bytes: number[] = typeof data === 'string'
-        ? Array.from(Buffer.from(data, 'base64'))
+        ? base64ToBytes(data)
         : Array.from(data as Uint8Array);
       for (const f of this.reader.push(bytes)) this.onFrame(f);
     });
@@ -124,7 +170,9 @@ export class MevoClient {
     if (!this.socket || this.closed) return;
     const frame = encodeFrame(dest, BUS.APP, type, payload);
     try {
-      this.socket.write(Buffer.from(frame));
+      // Uint8Array, NOT Buffer — react-native-tcp-socket accepts it directly
+      // and Buffer is a Node global that Hermes doesn't provide.
+      this.socket.write(Uint8Array.from(frame));
       this.log(`→ ${hex(type)} to ${hex(dest)}${payload.length ? ` [${payload.map(hex).join(' ')}]` : ''}`);
     } catch (e: any) {
       this.log(`write failed: ${e?.message ?? e}`);
@@ -144,11 +192,40 @@ export class MevoClient {
     setTimeout(() => this.send(BUS.AVR, MSG.STATUS, [0x01, 0x01]), 500);
     setTimeout(() => this.send(BUS.AVR, MSG.INFO_REQ), 620);
     setTimeout(() => this.send(BUS.AVR, MSG.CONFIG_QUERY), 740);
-    setTimeout(() => this.arm(), 900);
+    setTimeout(() => this.configure(), 880);
+  }
+
+  /**
+   * Post-sync configuration — the step whose absence made the device reject
+   * ARM with 0x94 ("unknown"). The unit will not arm until it has been told a
+   * detection mode and had that committed; the documented order is:
+   *
+   *   0xA5 [02 00 MODE]  set detection mode   → AVR echoes 0xA5
+   *   0xB0 [01 00]       commit               → 0x95
+   *   0xA4 [06 …]        radar calibration    → AVR echoes 0xA4
+   *   0xB0 [01 00]       commit               → 0x95
+   *
+   * only THEN is 0xB0 [01 01] (ARM) accepted.
+   */
+  private configure() {
+    this.log(`configuring: mode=${hex(this.detectionMode)}, unit ${this.unitDistanceMm}mm back, ${this.surfaceHeightMm}mm up`);
+    this.send(BUS.AVR, MSG.MODE_SET, [0x02, 0x00, this.detectionMode]);
+    setTimeout(() => this.send(BUS.AVR, MSG.CONFIG, [0x01, 0x00]), 150);
+    setTimeout(() => {
+      // [06 RR RR 00 HH 00 00] — RR RR = distance behind the ball in mm
+      // (big-endian), HH = surface height in mm.
+      const d = Math.max(0, Math.min(0xffff, Math.round(this.unitDistanceMm)));
+      this.send(BUS.AVR, MSG.RADAR_CAL, [
+        0x06, (d >> 8) & 0xff, d & 0xff, 0x00,
+        Math.max(0, Math.min(0xff, Math.round(this.surfaceHeightMm))), 0x00, 0x00,
+      ]);
+    }, 300);
+    setTimeout(() => this.send(BUS.AVR, MSG.CONFIG, [0x01, 0x00]), 450);
+    setTimeout(() => this.arm(), 620);
   }
 
   /** 0xB0 [01 01] is the ARM trigger; the device confirms with 0x95 then an
-   *  unsolicited "ARMED DetectionMode=…" text. */
+   *  unsolicited "ARMED DetectionMode=…" text. Only valid after configure(). */
   private arm() {
     this.setState('arming');
     this.send(BUS.AVR, MSG.CONFIG, [0x01, 0x01]);
@@ -172,15 +249,33 @@ export class MevoClient {
     }, 1000);
   }
 
-  /** After a shot the device waits to be acked and re-armed, or it goes quiet. */
+  /**
+   * Acknowledge a finished shot. Called on "PROCESSED".
+   *
+   * IMPORTANT: this does NOT re-arm. The device is still finishing up at
+   * PROCESSED (it saves raw samples, drops to System State 5, then emits
+   * "IDLE"); arming before that lands is rejected with 0x94 and the session
+   * silently stops accepting shots. Re-arming is driven by the IDLE text
+   * instead — see onFrame.
+   */
+  private ackShot() {
+    this.send(BUS.AVR, MSG.SHOT_DATA_ACK);
+    this.send(BUS.AVR, MSG.SHOT_DATA_ACK);
+  }
+
+  /** Re-arm for the next shot. Only safe once the device reports IDLE. */
   private reArm() {
-    this.send(BUS.AVR, MSG.SHOT_DATA_ACK);
-    this.send(BUS.AVR, MSG.SHOT_DATA_ACK);
-    setTimeout(() => this.send(BUS.AVR, MSG.CONFIG_QUERY), 80);
-    setTimeout(() => {
-      this.send(BUS.AVR, MSG.CONFIG, [0x01, 0x01]);
-      this.setState('ready');
-    }, 160);
+    this.log('device idle — re-arming');
+    this.send(BUS.AVR, MSG.CONFIG_QUERY);
+    setTimeout(() => this.send(BUS.AVR, MSG.CONFIG, [0x01, 0x01]), 120);
+    // The device confirms with an "ARMED …" text, which flips us to ready.
+    if (this.armTimer) clearTimeout(this.armTimer);
+    this.armTimer = setTimeout(() => {
+      if (this.state !== 'ready') {
+        this.log('re-arm not confirmed after 4s');
+        this.setState('error', 'Device did not re-arm for the next shot.');
+      }
+    }, 4000);
   }
 
   // ── Frame handling ─────────────────────────────────────────────────────────
@@ -204,18 +299,85 @@ export class MevoClient {
           this.setState('ready', text);
         }
         if (/BALL TRIGGER/i.test(text)) this.setState('shot');
-        if (/PROCESSED/i.test(text)) { this.flushShot(); this.reArm(); }
+
+        // The device narrates its own solution before sending the binary
+        // result: "Distance Model Success: Vb = 29.2, LA = 30.4, Spin = 6381".
+        // That's a genuine fallback — on short/indoor shots the 0xD4 record
+        // comes back zeroed (ERROR_MODEL_TOO_LITTLE_TIME) and this text is the
+        // only place the launch conditions survive. Only fills gaps; the
+        // binary records win when they carry real values.
+        const m = text.match(/Vb\s*=\s*([\d.]+).*?LA\s*=\s*(-?[\d.]+).*?Spin\s*=\s*([\d.]+)/i);
+        if (m) {
+          const vbMs = parseFloat(m[1]);
+          const la = parseFloat(m[2]);
+          const spin = parseFloat(m[3]);
+          if (Number.isFinite(vbMs) && vbMs > 0) {
+            const prev = this.pending ?? {};
+            this.pending = {
+              ...prev,
+              ballSpeedMph: prev.ballSpeedMph || vbMs * 2.2369363,
+              launchAngleDeg: prev.launchAngleDeg ?? la,
+              spinRpm: prev.spinRpm || spin,
+            };
+            this.log(`← ${from} text solution: ${(vbMs * 2.2369363).toFixed(1)} mph, LA ${la}°, spin ${spin}`);
+            this.scheduleEmit();
+          }
+        }
+        // Horizontal launch shows up separately on the trigger line.
+        const h = text.match(/HLA\s*=\s*(-?[\d.]+)/i);
+        if (h) {
+          const hla = parseFloat(h[1]);
+          if (Number.isFinite(hla)) {
+            this.pending = { ...(this.pending ?? {}), azimuthDeg: this.pending?.azimuthDeg ?? hla };
+          }
+        }
+
+        // PROCESSED = results done, but the device is still writing samples.
+        // Ack now; wait for IDLE before re-arming or it rejects with 0x94.
+        if (/PROCESSED/i.test(text)) { this.flushShot(); this.ackShot(); }
+        if (/\bIDLE\b/i.test(text)) this.reArm();
+        return;
+      }
+      case MSG.NAK: {
+        // The device refused the command. Historically this was the silent
+        // killer: ARM sent before configuration returned 0x94 and we just sat
+        // in 'arming' until the unit dropped the socket.
+        this.log(`← ${from} REJECTED (0x94) — device refused the last command`);
+        if (this.state === 'arming') {
+          this.setState('error', 'Device refused ARM. it needs configuring first (see log).');
+        }
+        return;
+      }
+      case MSG.CONFIG_ACK: {
+        this.log(`← ${from} ack${f.payload.length ? ` [${f.payload.map(hex).join(' ')}]` : ''}`);
+        return;
+      }
+      case MSG.MODE_SET: {
+        this.log(`← ${from} mode accepted [${f.payload.map(hex).join(' ')}]`);
+        return;
+      }
+      case MSG.RADAR_CAL: {
+        this.log(`← ${from} radar cal accepted`);
         return;
       }
       case MSG.FLIGHT_RESULT: {
         const d = decodeFlightResult(f.payload);
-        if (d) {
-          this.pending = { ...(this.pending ?? {}), ...d };
-          this.log(`← ${from} FLIGHT_RESULT ball ${d.ballSpeedMph?.toFixed(1)} mph, launch ${d.launchAngleDeg?.toFixed(1)}°`);
-          this.scheduleEmit();
-        } else {
+        if (!d) {
           this.log(`← ${from} FLIGHT_RESULT (${f.payload.length}B) — too short to decode`);
+          return;
         }
+        // A ZEROED record is real and expected: when the device logs
+        // "Distance Model Error … TOO_LITTLE_TIME" (short or indoor shots) it
+        // still sends 0xD4, full of zeros. Merging that would wipe the good
+        // preliminary reading from 0xE8, so treat it as no-data.
+        if (!d.ballSpeedMph || d.ballSpeedMph < 1) {
+          this.log(`← ${from} FLIGHT_RESULT empty (device reported no solution) — keeping earlier values`);
+          this.scheduleEmit();
+          return;
+        }
+        this.pending = { ...(this.pending ?? {}), ...d };
+        this.log(`← ${from} FLIGHT_RESULT ball ${d.ballSpeedMph?.toFixed(1)} mph, launch ${d.launchAngleDeg?.toFixed(1)}°`);
+        this.scheduleEmit();
         return;
       }
       case MSG.FLIGHT_RESULT_V1: {

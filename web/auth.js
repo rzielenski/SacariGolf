@@ -65,6 +65,20 @@ async function apiPost(path, token, body) {
   return data;
 }
 
+async function apiDelete(path, token) {
+  const r = await fetch(`${BACKEND_URL}${path}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error || `api ${r.status}`);
+    err.code = r.status;
+    throw err;
+  }
+  return data;
+}
+
 function setSession(req, res, token) {
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
   res.cookie(COOKIE, token, {
@@ -88,4 +102,4 @@ function requireAuth(req, res, next) {
   next();
 }
 
-module.exports = { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth, COOKIE };
+module.exports = { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, apiDelete, setSession, clearSession, requireAuth, COOKIE };

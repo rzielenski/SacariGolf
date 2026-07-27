@@ -18,21 +18,15 @@ type Sesh = { session_id: string; kind: 'range' | 'putting'; shots: number; dura
 
 const MODES = [
   { key: 'live',    title: 'Range Live',   sub: 'Launch monitor → real ball flight',  icon: 'radio',           href: '/range/live' },
+  { key: 'sim',     title: 'Play a Course', sub: 'Simulator round on a mapped course', icon: 'map',            href: '/range/course-sim' },
   { key: 'range',   title: 'Range Sesh',   sub: 'Auto-count contact + metronome', icon: 'golf',            href: '/range/sesh?kind=range' },
   { key: 'putting', title: 'Putting Sesh', sub: 'Auto-count putts + metronome',   icon: 'ellipse-outline', href: '/range/sesh?kind=putting' },
   { key: 'review',  title: 'Review Sesh',  sub: 'Record, slow-mo + draw on swings', icon: 'videocam',      href: '/range/review' },
 ] as const;
 
-/** TEMPORARY bundle marker. Prints to the Metro terminal when this screen
- *  opens, and renders on screen. If you don't see BOTH, the app is running a
- *  cached/OTA bundle rather than your dev server. Delete once connectivity
- *  is confirmed. */
-const BUNDLE_MARKER = 'BUILD-CHECK-A1';
-
 export default function TheGrind() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [sessions, setSessions] = useState<Sesh[] | null>(null);
-  console.log(`[Sacari] The Grind mounted — ${BUNDLE_MARKER} — modes: ${MODES.map((m) => m.title).join(', ')}`);
 
   const reload = useCallback(() => {
     api.practice.summary().then(setSummary).catch(() => { });
@@ -47,11 +41,6 @@ export default function TheGrind() {
       <ScrollView contentContainerStyle={s.scroll}>
         <Text style={s.title}>The Grind</Text>
         <Text style={s.sub}>Put in the reps. Every shot you log here counts toward your lifetime total.</Text>
-        {/* TEMPORARY — see BUNDLE_MARKER above. Delete once confirmed. */}
-        <Text style={{ color: C.gold, fontSize: 11, fontWeight: '900', marginBottom: 8 }}>
-          {BUNDLE_MARKER} · {MODES.length} modes
-        </Text>
-
         <View style={s.banner}>
           <Text style={s.bannerNum}>{summary ? summary.total_shots.toLocaleString() : '—'}</Text>
           <Text style={s.bannerLabel}>TOTAL SHOTS HIT</Text>

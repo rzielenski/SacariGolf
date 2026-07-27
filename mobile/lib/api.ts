@@ -841,6 +841,19 @@ export const api = {
       request<{ elevationRelM: number; samples: number; distM: number; lat: number; lng: number } | null>(
         'GET', `/courses/${id}/elevation-at?lat=${lat}&lng=${lng}&radiusM=${radiusM}`
       ),
+    /** Courses with enough crowdsourced geometry (pins + tee boxes on ~all
+     *  holes) to be playable in the simulator. */
+    simReady: () => request<{
+      courses: {
+        course_id: string; course_name: string; city: string | null; state: string | null;
+        elevation_samples: number;
+        teeboxes: {
+          teebox_id: string; name: string; par: number | null; num_holes: number | null;
+          total_yards: number | null; holes_playable: number; holes_total: number;
+        }[];
+      }[];
+      requirements: { min_holes: number; min_hole_fraction: number };
+    }>('GET', '/courses/sim-ready'),
     dataQuality: (id: string) => request<{
       elevation_points: number;
       elevation_samples: number;

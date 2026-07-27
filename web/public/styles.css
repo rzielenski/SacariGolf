@@ -368,6 +368,45 @@ main { flex: 1; width: 100%; }
 .pin-bar .cta { border: 0; cursor: pointer; font-family: inherit; }
 .pin-bar .cta:disabled { opacity: 0.45; cursor: default; }
 .pin-msg { color: var(--gold); font-size: 0.88rem; margin-top: 10px; min-height: 1.2em; }
+.pin-msg.ok { color: var(--good); }
+.pin-msg.err { color: var(--bad); }
+
+/* Course polygon editor. Reuses .pin-map / .pin-bar / .pin-steps from the pin
+   editor; only the palette, hole selector and shape list are new. */
+.poly { max-width: 940px; margin: 0 auto; padding: 8px 18px 44px; }
+.poly-why { color: var(--muted); font-size: 0.88rem; line-height: 1.55; margin: 0 0 18px;
+  border-left: 2px solid var(--border); padding-left: 12px; }
+.poly-h2 { font-size: 1.1rem; font-weight: 900; margin: 30px 0 12px; }
+.poly-controls { margin-bottom: 14px; }
+.poly-kinds { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+/* .cta-ghost and .cta assume an <a>; on a <button> the UA supplies its own
+   font and background, so reset both wherever they're used on buttons. */
+.kind-btn { display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 8px 13px; border-radius: 999px; font-family: inherit; font-size: 0.85rem; font-weight: 700;
+  background: var(--card); border: 1px solid var(--border); color: var(--text); }
+.kind-btn:hover { border-color: var(--gold); }
+.kind-btn.active { border-color: var(--gold); background: rgba(205,170,98,0.16); color: var(--gold-light); }
+.kind-swatch { width: 12px; height: 12px; border-radius: 3px; flex: none;
+  border: 1px solid rgba(0,0,0,0.45); }
+.poly-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.poly-label { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; }
+.poly-select { background: var(--card); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 9px 12px; font-family: inherit; font-size: 0.9rem; }
+.poly-jump { padding: 9px 14px; font-size: 0.85rem; background: none; cursor: pointer; font-family: inherit; }
+.pin-bar .cta-ghost { padding: 10px 16px; font-size: 0.85rem; background: none;
+  cursor: pointer; font-family: inherit; }
+.pin-bar .cta-ghost:disabled { opacity: 0.45; cursor: default; border-color: var(--border); color: var(--text); }
+.poly-list { display: flex; flex-direction: column; gap: 6px; }
+.poly-item { display: flex; align-items: center; gap: 10px; padding: 10px 13px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+.poly-item-name { font-weight: 700; font-size: 0.9rem; }
+.poly-item-hole { flex: 1; color: var(--muted); font-size: 0.8rem; }
+.poly-show, .poly-del { background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 5px 11px; font-family: inherit; font-size: 0.78rem;
+  font-weight: 700; cursor: pointer; }
+.poly-show:hover { border-color: var(--gold); color: var(--gold); }
+.poly-del:hover { border-color: var(--bad); color: var(--bad); }
+.poly-del:disabled { opacity: 0.4; cursor: default; }
 
 /* Course scorecard + hole-by-hole viewer */
 .course-card-sec { max-width: 920px; margin: 0 auto; padding: 18px 20px 0; }

@@ -622,6 +622,7 @@ function renderCourse({ course, teeboxes, topRounds, holeRows }) {
     <h1>${esc(course.course_name)}</h1>
     ${loc ? `<p>${esc(loc)}</p>` : ''}
     <a class="cta-ghost" href="/course/${esc(course.course_id)}/pins">Add or correct pin locations</a>
+    <a class="cta-ghost" href="/course/${esc(course.course_id)}/polygons">Map the course shapes</a>
   </section>
   ${tees ? `<section class="tees course-card-sec">
     <h2>Tees</h2>
@@ -1560,6 +1561,120 @@ function renderCoursePins({ course, holes }) {
   return page({ title: `Place pins · ${course.course_name}. Sacari Golf`, description: 'Add crowd-sourced pin locations on Sacari Golf.', active: 'courses', authed: true, noindex: true, body });
 }
 
+// ----- Course polygon editor ------------------------------------------------
+/**
+ * Trace the real shapes of a course on satellite imagery. Same Leaflet + Esri
+ * World Imagery stack as the pin editor.
+ *
+ * The kind list and its colours are defined ONCE here and handed to the client
+ * as data, so adding a feature type is a one-line change that flows through to
+ * the palette, the legend and the rendered overlays. Keep the keys in sync with
+ * POLYGON_KINDS in backend/src/routes/courses.ts.
+ */
+const POLYGON_KINDS = [
+  { key: 'green',   label: 'Green',      color: '#4ade80' },
+  { key: 'fairway', label: 'Fairway',    color: '#65a30d' },
+  { key: 'tee',     label: 'Tee box',    color: '#a3e635' },
+  { key: 'bunker',  label: 'Bunker',     color: '#fbbf24' },
+  { key: 'water',   label: 'Water',      color: '#38bdf8' },
+  { key: 'rough',   label: 'Rough',      color: '#166534' },
+  { key: 'native',  label: 'Native area', color: '#a16207' },
+  { key: 'trees',   label: 'Trees',      color: '#14532d' },
+  { key: 'path',    label: 'Cart path',  color: '#d6d3d1' },
+  { key: 'oob',     label: 'Out of bounds', color: '#ef4444' },
+];
+
+function renderCoursePolygons({ course, holes, polygons }) {
+  const lat = course.latitude != null ? Number(course.latitude) : null;
+  const lng = course.longitude != null ? Number(course.longitude) : null;
+  let center = (lat != null && lng != null) ? [lat, lng] : null;
+  if (!center) {
+    const wp = (holes || []).find((h) => h.pin_lat != null && h.pin_lng != null);
+    if (wp) center = [Number(wp.pin_lat), Number(wp.pin_lng)];
+  }
+  const loc = [course.city, course.state].filter(Boolean).join(', ');
+
+  const data = {
+    courseId: course.course_id,
+    baseUrl: `/course/${course.course_id}/polygons`,
+    center,
+    kinds: POLYGON_KINDS,
+    holes: (holes || []).map((h) => ({
+      n: h.hole_num,
+      par: h.par,
+      pin: h.pin_lat != null ? [Number(h.pin_lat), Number(h.pin_lng)] : null,
+      tee: h.tee_lat != null ? [Number(h.tee_lat), Number(h.tee_lng)] : null,
+    })),
+    polygons: (polygons || []).map((p) => ({
+      id: p.polygon_id, hole: p.hole_num, kind: p.kind, ring: p.ring,
+    })),
+  };
+  const json = JSON.stringify(data).replace(/</g, '\\u003c');
+
+  const palette = POLYGON_KINDS.map((k, i) => `
+    <button type="button" class="kind-btn${i === 0 ? ' active' : ''}" data-kind="${k.key}">
+      <span class="kind-swatch" style="background:${k.color}"></span>${esc(k.label)}
+    </button>`).join('');
+
+  const holeOpts = ['<option value="">Whole course</option>']
+    .concat((holes || []).map((h) => `<option value="${h.hole_num}">Hole ${esc(h.hole_num)}</option>`))
+    .join('');
+
+  const body = `
+  <section class="page-head">
+    <h1>Map the course shapes</h1>
+    <p>${esc(course.course_name)}${loc ? ' · ' + esc(loc) : ''}</p>
+    <a class="cta-ghost" href="/course/${esc(course.course_id)}">Back to course</a>
+  </section>
+  <section class="poly">
+    <ol class="pin-steps">
+      <li>Pick a feature type, and the hole it belongs to.</li>
+      <li>Click around the edge of the shape on the map. Each click drops a point.</li>
+      <li>Press Finish to close the shape and save it. Undo removes the last point.</li>
+    </ol>
+    <p class="poly-why">
+      Pins tell the app where a hole starts and ends. These shapes tell it what the
+      ball is sitting on, which is what makes lie-aware strategy and simulator play possible.
+    </p>
+
+    ${(holes && holes.length) ? `
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+
+    <div class="poly-controls">
+      <div class="poly-kinds">${palette}</div>
+      <div class="poly-row">
+        <label class="poly-label" for="poly-hole">Applies to</label>
+        <select id="poly-hole" class="poly-select">${holeOpts}</select>
+        <button type="button" id="poly-jump" class="cta-ghost poly-jump">Go to hole</button>
+      </div>
+    </div>
+
+    <div id="map" class="pin-map"></div>
+
+    <div class="pin-bar">
+      <div id="poly-info" class="pin-info">Pick a type, then click the map to start tracing.</div>
+      <button type="button" id="poly-undo" class="cta-ghost" disabled>Undo point</button>
+      <button type="button" id="poly-cancel" class="cta-ghost" disabled>Cancel</button>
+      <button type="button" id="poly-finish" class="cta" disabled>Finish shape</button>
+    </div>
+    <div id="poly-msg" class="pin-msg"></div>
+
+    <h2 class="poly-h2">Shapes on this course (<span id="poly-count">${(polygons || []).length}</span>)</h2>
+    <div id="poly-list" class="poly-list"></div>
+
+    <script>window.POLY_DATA = ${json};</script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="/polygons.js?v=${ASSET_V}" defer></script>
+    ` : '<div class="empty">This course has no hole data yet.</div>'}
+  </section>`;
+
+  return page({
+    title: `Map shapes · ${course.course_name}. Sacari Golf`,
+    description: 'Trace fairways, greens, bunkers and hazards on Sacari Golf.',
+    active: 'courses', authed: true, noindex: true, body,
+  });
+}
+
 // ----- Invite landing -------------------------------------------------------
 /**
  * Public referral landing. Tapping a /invite/<code> link sent by an existing
@@ -1657,6 +1772,6 @@ module.exports = {
   renderRecap, renderProfile, renderUserRecaps, renderStatic, renderNotFound, esc,
   renderLogin, renderSignup, renderVerifyEmail,
   renderAppHome, renderAppPlay, renderAppMatch, renderAppScore, renderAppReview, renderAppReviewCompare,
-  renderDashboard, renderClubs, renderCoursePins,
+  renderDashboard, renderClubs, renderCoursePins, renderCoursePolygons,
   renderInvite,
 };

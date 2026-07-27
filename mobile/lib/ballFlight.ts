@@ -54,6 +54,18 @@ export const AERO = {
   CD_0: 0.188,
   CD_S: 0.487,
   CD_S2: -0.275,
+  /**
+   * Lateral-only multiplier on the Magnus force. Carry/apex/descent are
+   * calibrated hard against Trackman's published table, so this exists to
+   * tune CURVE without touching any of that.
+   *
+   * Published guidance is inconsistent here (one widely-cited figure puts
+   * 1,500 rpm of sidespin at 20-30 yds of curve, which is far less than the
+   * raw physics produces), so this is deliberately a single honest knob:
+   * compare the app's offline number against what the launch monitor reports
+   * on a fade or slice and adjust. 1.0 = pure physics.
+   */
+  SIDE_SCALE: 0.55,
 };
 
 /** Spin ratio is clamped before evaluating coefficients. Real golf shots top
@@ -99,10 +111,21 @@ function accel(s: State, wx: number, wy: number, wz: number): [number, number, n
   const v = Math.hypot(s.vx, s.vy, s.vz);
   if (v < 1e-6) return [0, 0, -G];
 
-  const wMag = Math.hypot(wx, wy, wz);
-  const S = Math.min(MAX_SPIN_RATIO, (wMag * RADIUS_M) / v);   // spin ratio
+  // ω × v. Its magnitude carries the only spin that matters aerodynamically.
+  const cx = wy * s.vz - wz * s.vy;
+  const cy = wz * s.vx - wx * s.vz;
+  const cz = wx * s.vy - wy * s.vx;
+  const cMag = Math.hypot(cx, cy, cz);
+
+  // Spin ratio from the PERPENDICULAR spin component, not raw |ω|. Spin about
+  // the flight axis ("rifle spin") generates no Magnus force, and a tilted
+  // axis puts progressively more of the ball's spin there — especially as the
+  // shot steepens into its descent. Using |ω| overstates both lift and curve
+  // on any shot that isn't pure backspin.
+  const wPerp = cMag / v;                                      // rad/s
+  const S = Math.min(MAX_SPIN_RATIO, (wPerp * RADIUS_M) / v);  // spin ratio
   const Cd = AERO.CD_0 + AERO.CD_S * S + AERO.CD_S2 * S * S;
-  const Cl = wMag > 1e-6 ? (AERO.CL_A * S) / (AERO.CL_B + S) : 0;
+  const Cl = wPerp > 1e-6 ? (AERO.CL_A * S) / (AERO.CL_B + S) : 0;
 
   const q = 0.5 * RHO * AREA_M2 * v * v;                 // dynamic pressure × area
   // Drag — straight back along the velocity unit vector.
@@ -111,19 +134,15 @@ function accel(s: State, wx: number, wy: number, wz: number): [number, number, n
   const ay0 = -dragMag * (s.vy / v);
   const az0 = -dragMag * (s.vz / v);
 
-  // Magnus — along the unit vector of (ω × v).
+  // Magnus — along the unit vector of (ω × v). The sideways component is
+  // additionally scaled by AERO.SIDE_SCALE so curvature can be calibrated
+  // against real launch-monitor data without disturbing carry or apex.
   let ax1 = 0, ay1 = 0, az1 = 0;
-  if (Cl > 0) {
-    const cx = wy * s.vz - wz * s.vy;
-    const cy = wz * s.vx - wx * s.vz;
-    const cz = wx * s.vy - wy * s.vx;
-    const cMag = Math.hypot(cx, cy, cz);
-    if (cMag > 1e-9) {
-      const liftMag = (q * Cl) / MASS_KG;
-      ax1 = liftMag * (cx / cMag);
-      ay1 = liftMag * (cy / cMag);
-      az1 = liftMag * (cz / cMag);
-    }
+  if (Cl > 0 && cMag > 1e-9) {
+    const liftMag = (q * Cl) / MASS_KG;
+    ax1 = liftMag * (cx / cMag);
+    ay1 = liftMag * (cy / cMag) * AERO.SIDE_SCALE;
+    az1 = liftMag * (cz / cMag);
   }
   return [ax0 + ax1, ay0 + ay1, az0 + az1 - G];
 }

@@ -20,7 +20,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const { rankForElo, medallionFor } = require('./rank');
-const { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, setSession, clearSession, requireAuth } = require('./auth');
+const { backendLogin, backendRegister, apiGet, apiGetSafe, apiPost, apiDelete, setSession, clearSession, requireAuth } = require('./auth');
 const R = require('./render');
 
 /** CSRF guard for state-changing requests: when the browser sends an Origin,
@@ -322,6 +322,97 @@ app.post('/course/:id/pins', requireAuth, async (req, res) => {
     if (err.code === 401) { res.status(401).json({ error: 'Session expired. Log in again.' }); return; }
     console.error('set-pin error:', err);
     res.status(500).json({ error: 'Could not save pin' });
+  }
+});
+
+/* ───────────────────────── Course polygon editor ───────────────────────────
+ * Trace the actual shapes of a course (fairway, green, bunker, water, rough)
+ * on satellite imagery. Pins told us where the hole is; polygons tell us what
+ * the ball is sitting on, which is what lie-aware strategy and simulator play
+ * need. Same crowd-sourced trust model as the pin editor.
+ */
+app.get('/course/:id/polygons', requireAuth, async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(404).send(R.renderNotFound('course')); return; }
+  try {
+    const { rows: cRows } = await pool.query(
+      `SELECT course_id, course_name, club_name, city, state, latitude, longitude
+         FROM courses WHERE course_id = $1`,
+      [id]
+    );
+    if (!cRows.length) { res.status(404).send(R.renderNotFound('course')); return; }
+
+    // Hole list (for the per-hole selector) and any pins, so the editor can
+    // jump the map straight to the hole being traced.
+    const { rows: holes } = await pool.query(
+      `SELECT h.hole_num,
+              MAX(h.par) AS par,
+              (ARRAY_AGG(h.pin_lat) FILTER (WHERE h.pin_lat IS NOT NULL))[1] AS pin_lat,
+              (ARRAY_AGG(h.pin_lng) FILTER (WHERE h.pin_lng IS NOT NULL))[1] AS pin_lng,
+              (ARRAY_AGG(h.tee_lat) FILTER (WHERE h.tee_lat IS NOT NULL))[1] AS tee_lat,
+              (ARRAY_AGG(h.tee_lng) FILTER (WHERE h.tee_lng IS NOT NULL))[1] AS tee_lng
+         FROM teeboxes t JOIN holes h ON h.teebox_id = t.teebox_id
+        WHERE t.course_id = $1
+        GROUP BY h.hole_num ORDER BY h.hole_num`,
+      [id]
+    );
+    // Read existing shapes through the API so the editor and the app agree on
+    // the shape of the data.
+    const existing = await apiGet(`/courses/${id}/polygons`, req.token).catch(() => ({ polygons: [] }));
+
+    res.set('Cache-Control', 'private, no-store');
+    res.send(R.renderCoursePolygons({
+      course: cRows[0], holes, polygons: (existing && existing.polygons) || [],
+    }));
+  } catch (err) {
+    console.error('polygons page error:', err);
+    res.status(500).send(R.renderNotFound('course'));
+  }
+});
+
+app.post('/course/:id/polygons', requireAuth, async (req, res) => {
+  if (!sameOrigin(req)) { res.status(403).json({ error: 'bad origin' }); return; }
+  const id = String(req.params.id || '');
+  if (!UUID_RE.test(id)) { res.status(400).json({ error: 'bad course id' }); return; }
+  const body = req.body || {};
+  // Shape-check here too so an obviously bad payload never leaves the web tier;
+  // the API is still the authority on what's valid.
+  if (!Array.isArray(body.ring) || body.ring.length < 3) {
+    res.status(400).json({ error: 'A shape needs at least 3 points' });
+    return;
+  }
+  if (body.ring.length > 500) {
+    res.status(400).json({ error: 'A shape can have at most 500 points' });
+    return;
+  }
+  try {
+    const result = await apiPost(`/courses/${id}/polygons`, req.token, {
+      kind: body.kind,
+      holeNum: body.holeNum === null || body.holeNum === undefined || body.holeNum === '' ? null : body.holeNum,
+      ring: body.ring,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    if (err.code === 401) { res.status(401).json({ error: 'Session expired. Log in again.' }); return; }
+    if (err.code === 400 || err.code === 404) { res.status(err.code).json({ error: err.message }); return; }
+    console.error('save polygon error:', err);
+    res.status(500).json({ error: 'Could not save that shape' });
+  }
+});
+
+app.delete('/course/:id/polygons/:polygonId', requireAuth, async (req, res) => {
+  if (!sameOrigin(req)) { res.status(403).json({ error: 'bad origin' }); return; }
+  const id = String(req.params.id || '');
+  const pid = String(req.params.polygonId || '');
+  if (!UUID_RE.test(id) || !UUID_RE.test(pid)) { res.status(400).json({ error: 'bad id' }); return; }
+  try {
+    await apiDelete(`/courses/${id}/polygons/${pid}`, req.token);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err.code === 401) { res.status(401).json({ error: 'Session expired. Log in again.' }); return; }
+    if (err.code === 404) { res.status(404).json({ error: 'Already gone' }); return; }
+    console.error('delete polygon error:', err);
+    res.status(500).json({ error: 'Could not delete that shape' });
   }
 });
 

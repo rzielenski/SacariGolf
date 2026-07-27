@@ -352,6 +352,7 @@ export default function RootLayout() {
         <Stack.Screen name="range/analyze" options={{ animation: 'slide_from_right', headerShown: true }} />
         {/* The one screen that rotates — a driving range reads far better wide. */}
         <Stack.Screen name="range/live" options={{ animation: 'slide_from_right', headerShown: true, orientation: 'all' }} />
+        <Stack.Screen name="range/course-sim" options={{ animation: 'slide_from_right', headerShown: true }} />
         {/* Vision-camera-powered swing recorder. Slides up from the bottom
             because it's a focused capture surface — same UX rhythm as
             the system camera. */}

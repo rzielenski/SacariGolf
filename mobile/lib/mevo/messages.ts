@@ -32,9 +32,13 @@ export const MSG = {
   PARAM_READ: 0xbe,
   SHOT_DATA_ACK: 0x69,
   SHOT_RESULT_REQ: 0x6d,
+  RADAR_CAL: 0xa4,           // [06 RRRR 00 HH 00 00] unit distance + height
 
   // ── device → app: acks ──
   CONFIG_ACK: 0x95,
+  /** Device rejected the command — "unknown"/not-ready. Seen when ARM is sent
+   *  before the unit has been configured (mode set + committed). */
+  NAK: 0x94,
   HW_RESP: 0xc8,
   INFO_RESP: 0xe7,
   CONFIG_RESP: 0xa0,

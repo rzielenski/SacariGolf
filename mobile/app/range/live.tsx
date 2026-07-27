@@ -18,9 +18,9 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, Alert, Modal, Animated, Easing,
-  ImageBackground, useWindowDimensions,
+  ImageBackground, useWindowDimensions, Share,
 } from 'react-native';
 import { Stack, router } from 'expo-router';
 import Svg, {
@@ -32,14 +32,16 @@ import { C, F } from '../../lib/colors';
 import { api } from '../../lib/api';
 import { simulateFlight, FlightResult, FlightPoint } from '../../lib/ballFlight';
 import {
-  connectLaunchMonitor, demoShot, discoverBridge, localNetworkReady,
-  getDiagnostics, testAddress, BRIDGE_PORTS,
+  connectLaunchMonitor, demoShot, discoverBridge, getDiagnostics,
   LaunchShot, LaunchMonitorLink, LinkStatus, Diagnostics,
 } from '../../lib/launchMonitor';
 import { CLUBS_CATALOG, clubLabel } from '../../lib/clubs';
 import { MevoClient, MevoState, MEVO_HOST_CANDIDATES, MEVO_PORT } from '../../lib/mevo/client';
 
 const BRIDGE_KEY = 'range_live_bridge_url';
+/** Last protocol trace, persisted so it survives the phone hopping off the
+ *  dev network (and app reloads) — see the replay button in the setup sheet. */
+const MEVO_LOG_KEY = 'range_live_mevo_log';
 
 /**
  * Range backdrop art. Swap these files to change the scenery — no code change.
@@ -60,6 +62,52 @@ const RANGE_ART = {
  *  against. Both photos sit at roughly 53%. If you swap in art with a
  *  different horizon, change this or shots won't meet the ground. */
 const HORIZON_FRAC = 0.53;
+
+/**
+ * Every stat a shot can display, in the order they're offered in settings.
+ * `from` marks provenance so the UI can be honest: 'device' values are what
+ * the launch monitor measured, 'flight' values come from our ball-flight
+ * model. A stat returns null when its source didn't provide it (e.g. club
+ * speed when ClubTrigger is disabled) and renders as a dash.
+ */
+type StatCtx = { shot: LaunchShot; flight: FlightResult };
+interface StatDef {
+  key: string;
+  label: string;
+  from: 'device' | 'flight';
+  value: (c: StatCtx) => string | null;
+}
+const STAT_DEFS: StatDef[] = [
+  { key: 'carry', label: 'CARRY', from: 'flight', value: (c) => `${Math.round(c.flight.carryYds)}` },
+  { key: 'total', label: 'TOTAL', from: 'flight', value: (c) => `${Math.round(c.flight.totalYds)}` },
+  { key: 'ballSpeed', label: 'BALL SPEED', from: 'device', value: (c) => c.shot.ballSpeedMph.toFixed(1) },
+  { key: 'launch', label: 'LAUNCH', from: 'device', value: (c) => `${c.shot.launchAngleDeg.toFixed(1)}°` },
+  { key: 'spin', label: 'TOTAL SPIN', from: 'device', value: (c) => `${Math.round(c.shot.spinRpm)}` },
+  { key: 'spinAxis', label: 'SPIN AXIS', from: 'device', value: (c) => `${c.shot.spinAxisDeg.toFixed(1)}°` },
+  { key: 'offline', label: 'OFFLINE', from: 'flight',
+    value: (c) => {
+      const o = Math.round(c.flight.offlineYds);
+      return o === 0 ? '0' : `${Math.abs(o)} ${o > 0 ? 'R' : 'L'}`;
+    } },
+  { key: 'apex', label: 'APEX', from: 'flight', value: (c) => `${c.flight.apexFt}` },
+  { key: 'descent', label: 'DESCENT', from: 'flight', value: (c) => `${c.flight.descentAngleDeg.toFixed(0)}°` },
+  { key: 'direction', label: 'LAUNCH DIR', from: 'device', value: (c) => `${c.shot.azimuthDeg.toFixed(1)}°` },
+  { key: 'backSpin', label: 'BACKSPIN', from: 'device',
+    value: (c) => `${Math.round(c.shot.spinRpm * Math.cos((c.shot.spinAxisDeg * Math.PI) / 180))}` },
+  { key: 'sideSpin', label: 'SIDESPIN', from: 'device',
+    value: (c) => `${Math.round(c.shot.spinRpm * Math.sin((c.shot.spinAxisDeg * Math.PI) / 180))}` },
+  { key: 'roll', label: 'ROLL', from: 'flight',
+    value: (c) => `${Math.round(c.flight.totalYds - c.flight.carryYds)}` },
+  { key: 'flightTime', label: 'HANG TIME', from: 'flight', value: (c) => `${c.flight.flightTimeS.toFixed(1)}s` },
+  { key: 'clubSpeed', label: 'CLUB SPEED', from: 'device',
+    value: (c) => (c.shot.clubSpeedMph != null ? c.shot.clubSpeedMph.toFixed(1) : null) },
+  { key: 'smash', label: 'SMASH', from: 'device',
+    value: (c) => (c.shot.smashFactor != null ? c.shot.smashFactor.toFixed(2) : null) },
+];
+const STAT_BY_KEY: Record<string, StatDef> = Object.fromEntries(STAT_DEFS.map((d) => [d.key, d]));
+/** Shown on the range overlay by default; the full set lives on the stats view. */
+const DEFAULT_STAT_ORDER = ['carry', 'total', 'ballSpeed', 'launch', 'spin', 'spinAxis', 'offline', 'apex', 'descent'];
+const STAT_ORDER_KEY = 'range_live_stat_order';
 
 const TARGET_GREENS = [50, 100, 150, 200, 250];
 const CAM_H = 6;         // camera height above the tee, yards
@@ -101,10 +149,13 @@ export default function RangeLive() {
   const [saving, setSaving] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanPct, setScanPct] = useState(0);
-  const [showManual, setShowManual] = useState(false);
   const [diag, setDiag] = useState<Diagnostics | null>(null);
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const [testing, setTesting] = useState(false);
+  const [connectingAuto, setConnectingAuto] = useState(false);
+  /** 'range' = fly the shot over the art; 'stats' = full numbers, no scenery
+   *  (what FSPro/GSPro call the data view). */
+  const [viewMode, setViewMode] = useState<'range' | 'stats'>('range');
+  const [statOrder, setStatOrder] = useState<string[]>(DEFAULT_STAT_ORDER);
+  const [statConfigOpen, setStatConfigOpen] = useState(false);
   // Direct mode: phone → Mevo+ over raw TCP, no laptop bridge.
   const [mevoState, setMevoState] = useState<MevoState>('idle');
   const [mevoLog, setMevoLog] = useState<string[]>([]);
@@ -118,51 +169,120 @@ export default function RangeLive() {
   const scanSignal = useRef<{ cancelled: boolean }>({ cancelled: false });
   const nextId = useRef(1);
   const connectRef = useRef<((url: string) => void) | null>(null);
+  /** connectMevoDirect is defined below (it depends on `ingest`); connectAuto
+   *  reaches it through this ref so declaration order doesn't matter. */
+  const connectMevoRef = useRef<((host: string) => Promise<boolean>) | null>(null);
 
   // Flight animation: 0 → 1 along the trajectory path.
   const flightAnim = useRef(new Animated.Value(0)).current;
   const [flightT, setFlightT] = useState(1);
+  /** Whether the current shot has finished flying — gates the landing dot so
+   *  we never reveal where the ball ends up before it gets there. */
+  const flightDone = flightT >= 1;
   useEffect(() => {
     const sub = flightAnim.addListener(({ value }) => setFlightT(value));
     return () => flightAnim.removeListener(sub);
   }, [flightAnim]);
 
-  const autoConnect = useCallback(async () => {
-    if (scanning) return;
-    // An older binary physically can't reach the LAN (no expo-network, no
-    // local-network entitlement). Say that instead of "nothing found", which
-    // sends people hunting for a hardware problem that doesn't exist.
-    if (!localNetworkReady()) {
-      setStatus('idle');
-      setStatusDetail(
-        'This version of the app can\'t search your network yet. Range Live needs the next app update. Demo Shot works now.',
-      );
-      return;
-    }
-    scanSignal.current = { cancelled: false };
-    setScanning(true);
-    setScanPct(0);
+  /**
+   * One-button connect. Tries the launch monitor DIRECTLY over TCP first
+   * (phone on the device's own WiFi — no laptop), and falls back to scanning
+   * for a GSPro-Connect bridge. Everything it does is logged, and the log is
+   * mirrored to the Metro terminal.
+   */
+  const connectAuto = useCallback(async () => {
+    if (connectingAuto) return;
+    setConnectingAuto(true);
     setStatusDetail(null);
+    setMevoLog([]);
     try {
+      const d = await getDiagnostics().catch(() => null);
+      setDiag(d);
+      if (!d?.ready) {
+        setStatusDetail('This build can\'t reach the local network. needs the native modules from a dev/production build.');
+        return;
+      }
+      if (!d.subnet) {
+        setStatusDetail(d.note);
+        return;
+      }
+      const gw = `${d.subnet}1`;
+      setDetectedGateway(gw);
+
+      // 1. The device itself, at the gateway and the known fallbacks.
+      const hosts = [gw, ...MEVO_HOST_CANDIDATES.filter((h) => h !== gw)];
+      for (const host of hosts) {
+        setMevoHost(host);
+        const ok = await connectMevoRef.current?.(host);
+        if (ok) return;                       // client took over; it logs from here
+      }
+
+      // 2. No device answered — look for a bridge instead.
+      setStatusDetail('No launch monitor answered directly. looking for a bridge.');
+      scanSignal.current = { cancelled: false };
+      setScanning(true);
+      setScanPct(0);
       const saved = await AsyncStorage.getItem(BRIDGE_KEY).catch(() => null);
-      if (saved) setBridgeUrl(saved);
       const found = await discoverBridge({
         preferred: saved, signal: scanSignal.current, onProgress: setScanPct,
       });
-      if (scanSignal.current.cancelled) return;
       if (found) {
         setBridgeUrl(found);
         AsyncStorage.setItem(BRIDGE_KEY, found).catch(() => { });
         connectRef.current?.(found);
+        setStatusDetail(null);
       } else {
-        setStatus('idle');
-        setStatusDetail('No launch monitor found on this WiFi.');
+        setStatusDetail('Nothing found. Check the phone is on the launch monitor\'s WiFi (or the bridge\'s network).');
       }
-    } finally { setScanning(false); }
-  }, [scanning]);
+    } finally {
+      setScanning(false);
+      setConnectingAuto(false);
+    }
+  }, [connectingAuto]);
+
+  /** Dump the whole buffered trace to the JS console in one go. Metro is
+   *  unreachable while the phone sits on the Mevo+'s WiFi, so this is how the
+   *  trace gets to the dev terminal: test on the device's network, rejoin the
+   *  normal WiFi (Metro reconnects), then replay. */
+  const printLogToTerminal = useCallback(() => {
+    const header = `phone ${diag?.ip ?? '?'}  gateway ${detectedGateway ?? '?'}  state=${mevoState}`;
+    console.log('\n===== SACARI MEVO+ LOG (start) =====');
+    console.log(header);
+    for (const line of mevoLog) console.log(line);
+    console.log(`===== SACARI MEVO+ LOG (end, ${mevoLog.length} lines) =====\n`);
+    Alert.alert('Printed', `${mevoLog.length} lines sent to the Metro terminal.`);
+  }, [mevoLog, diag, detectedGateway, mevoState]);
+
+  /** Persisted stat layout. Unknown keys are dropped so an old saved order
+   *  can't resurrect a stat that no longer exists. */
+  useEffect(() => {
+    AsyncStorage.getItem(STAT_ORDER_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved)) {
+          const clean = saved.filter((k: any) => typeof k === 'string' && STAT_BY_KEY[k]);
+          if (clean.length) setStatOrder(clean);
+        }
+      })
+      .catch(() => { });
+  }, []);
+  const saveStatOrder = useCallback((next: string[]) => {
+    setStatOrder(next);
+    AsyncStorage.setItem(STAT_ORDER_KEY, JSON.stringify(next)).catch(() => { });
+  }, []);
 
   useEffect(() => {
-    autoConnect();
+    // Restore the previous trace so a reload (or a trip onto the Mevo+'s
+    // network) doesn't lose it before it can be replayed.
+    AsyncStorage.getItem(MEVO_LOG_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved) && saved.length) setMevoLog((cur) => (cur.length ? cur : saved));
+      })
+      .catch(() => { });
+    connectAuto();
     return () => { scanSignal.current.cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -204,14 +324,30 @@ export default function RangeLive() {
   useEffect(() => () => { linkRef.current?.close(); mevoRef.current?.close(); }, []);
 
   /** Connect straight to the Mevo+ over TCP (phone joined to its WiFi). */
-  const connectMevoDirect = useCallback((host: string) => {
+  /**
+   * Open a direct TCP session to a candidate host. Resolves TRUE once the
+   * socket is genuinely up (state moved past 'connecting'), FALSE on error or
+   * if nothing happens within the probe window — that's what lets connectAuto
+   * walk a list of candidate addresses and stop at the one that answers.
+   */
+  const connectMevoDirect = useCallback((host: string): Promise<boolean> => new Promise((resolve) => {
     linkRef.current?.close();          // bridge and direct are mutually exclusive
     mevoRef.current?.close();
     setMevoLog([]);
+    let settled = false;
+    const done = (ok: boolean) => { if (!settled) { settled = true; resolve(ok); } };
+    // Nothing answered in time — move on to the next candidate.
+    const probeTimer = setTimeout(() => done(false), 3500);
     const c = new MevoClient({
       onState: (st, detail) => {
         setMevoState(st);
         setStatusDetail(detail ?? null);
+        // Anything past 'connecting' means the TCP session is real.
+        if (st === 'handshaking' || st === 'arming' || st === 'ready' || st === 'shot') {
+          clearTimeout(probeTimer); done(true);
+        } else if (st === 'error' || st === 'closed') {
+          clearTimeout(probeTimer); done(false);
+        }
         // Mirror into the main pill so the range header reflects direct mode.
         setStatus(st === 'ready' || st === 'shot' ? 'connected'
           : st === 'error' ? 'error'
@@ -228,12 +364,38 @@ export default function RangeLive() {
         },
         clubRef.current,
       ),
-      // Keep the tail only — a session emits thousands of frames.
-      onLog: (line) => setMevoLog((prev) => [...prev.slice(-160), line]),
+      // Keep the tail only — a session emits thousands of frames. Also
+      // persisted so the trace survives leaving the Mevo+'s WiFi, an app
+      // reload, or a crash — that's the whole point, since Metro is
+      // unreachable while the phone is on the device's own network.
+      onLog: (line) => setMevoLog((prev) => {
+        const next = [...prev.slice(-400), line];
+        AsyncStorage.setItem(MEVO_LOG_KEY, JSON.stringify(next)).catch(() => { });
+        return next;
+      }),
     });
     mevoRef.current = c;
     c.connect(host, MEVO_PORT);
-  }, [ingest]);
+  }), [ingest]);
+  connectMevoRef.current = connectMevoDirect;
+
+  /** Drop the most recent shot — the mishit you don't want polluting your
+   *  club averages. Removes it from the session and clears it off the range. */
+  const deleteLastShot = useCallback(() => {
+    setShots((prev) => {
+      if (!prev.length) return prev;
+      const [dropped, ...rest] = prev;   // newest first
+      setActive(rest.length ? rest[0] : null);
+      // The remaining shot is already flown; don't re-animate it.
+      flightAnim.setValue(1);
+      setFlightT(1);
+      if (dropped) {
+        // Keep the club selection in step with what's now showing.
+        setClub((c) => (rest.length ? rest[0].club : c));
+      }
+      return rest;
+    });
+  }, [flightAnim]);
 
   const saveSession = async () => {
     if (!shots.length) return;
@@ -254,6 +416,36 @@ export default function RangeLive() {
       Alert.alert('Could not save', e?.message ?? 'Try again.');
     } finally { setSaving(false); }
   };
+
+  /**
+   * Project the active shot's trajectory ONCE, and pre-build the cumulative
+   * SVG path string at every step.
+   *
+   * The flight used to re-project all ~60 points and rebuild the whole `d`
+   * string on every animation frame, which is what made it stutter. Now each
+   * frame is an array index plus one interpolated point.
+   */
+  const activePath = useMemo(() => {
+    if (!active) return null;
+    const pts = active.flight.path.map(project);
+    const ds: string[] = [];
+    let acc = '';
+    pts.forEach((p, i) => {
+      acc += `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)} ${p.y.toFixed(1)} `;
+      ds.push(acc);
+    });
+    return { pts, ds };
+  }, [active, project]);
+
+  /** Landing dots for previous shots — projected once per shot list change,
+   *  not once per animation frame. */
+  const landedDots = useMemo(
+    () => shots.slice(0, 40).map((sh) => ({
+      id: sh.id,
+      ...project({ x: sh.flight.carryYds, y: sh.flight.offlineYds, z: 0 }),
+    })),
+    [shots, project],
+  );
 
   const summary = useMemo(() => {
     const by = new Map<string, number[]>();
@@ -284,11 +476,24 @@ export default function RangeLive() {
     <View style={s.container}>
       <Stack.Screen options={{ headerShown: false }} />
 
+      {/* Fallback scenery, painted UNDER the photo. The JPEGs are ~300 KB and
+          take a moment to decode (and can fail outright), which is what made
+          the screen occasionally show as flat blue. Sky and turf split at the
+          same horizon the projection uses, so even the bare fallback reads as
+          a range and the ball still lands on the right line. */}
+      <View style={StyleSheet.absoluteFill} pointerEvents="none">
+        <View style={{ height: `${HORIZON_FRAC * 100}%`, backgroundColor: '#3d6485' }} />
+        <View style={{ flex: 1, backgroundColor: '#41703c' }} />
+      </View>
+
       {/* ── Full-screen range art ──────────────────────────────────────── */}
       <ImageBackground
         source={isLandscape ? RANGE_ART.landscape : RANGE_ART.portrait}
         style={StyleSheet.absoluteFill}
         resizeMode="cover"
+        // The fallback scenery underneath carries the screen if this fails;
+        // surface it in the log so a broken asset isn't invisible.
+        onError={(e) => console.warn('[range] backdrop failed to load', e?.nativeEvent)}
       >
         {/* Functional overlay only — the art supplies sky, turf and trees. */}
         <Svg width="100%" height="100%" viewBox={`0 0 ${winW} ${winH}`}>
@@ -329,13 +534,15 @@ export default function RangeLive() {
             );
           })}
 
-          {/* Landed shots */}
-          {shots.slice(0, 40).map((sh) => {
-            const p = project({ x: sh.flight.carryYds, y: sh.flight.offlineYds, z: 0 });
-            const isActive = active?.id === sh.id;
+          {/* Landed shots. The shot in flight is deliberately EXCLUDED until
+              it touches down — drawing its landing dot up front gave away
+              where the ball was going to finish. */}
+          {landedDots.map((p) => {
+            const isActive = active?.id === p.id;
+            if (isActive && !flightDone) return null;
             return (
               <Circle
-                key={`b${sh.id}`} cx={p.x} cy={p.y}
+                key={`b${p.id}`} cx={p.x} cy={p.y}
                 r={isActive ? 3.4 : 2.2}
                 fill={isActive ? C.gold : '#ffffff'}
                 opacity={isActive ? 1 : 0.55}
@@ -343,14 +550,18 @@ export default function RangeLive() {
             );
           })}
 
-          {/* Live tracer */}
-          {active && (() => {
-            const path = active.flight.path;
-            const upto = Math.max(1, Math.floor(path.length * flightT));
-            const pts = path.slice(0, upto).map(project);
-            if (pts.length < 2) return null;
-            const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
-            const head = pts[pts.length - 1];
+          {/* Live tracer. The head position is INTERPOLATED between path
+              points — with ~60 samples the ball would otherwise visibly hop
+              from one to the next. */}
+          {activePath && activePath.pts.length > 1 && (() => {
+            const { pts, ds } = activePath;
+            const exact = Math.max(0, Math.min(1, flightT)) * (pts.length - 1);
+            const i0 = Math.min(pts.length - 2, Math.floor(exact));
+            const frac = exact - i0;
+            const p0 = pts[i0];
+            const p1 = pts[i0 + 1];
+            const head = { x: p0.x + (p1.x - p0.x) * frac, y: p0.y + (p1.y - p0.y) * frac };
+            const d = `${ds[i0]}L${head.x.toFixed(1)} ${head.y.toFixed(1)}`;
             return (
               <G>
                 <Path d={d} stroke="url(#tracer)" strokeWidth={2.6} fill="none" strokeLinecap="round" />
@@ -362,21 +573,69 @@ export default function RangeLive() {
         </Svg>
       </ImageBackground>
 
+      {/* Stats view — the range art and tracer give way to nothing but the
+          numbers, laid out in the player's own order. */}
+      {viewMode === 'stats' && (
+        <View style={s.statsPage}>
+          {active ? (
+            <>
+              <View style={s.statsHead}>
+                <Text style={s.statsClub}>{clubLabel(active.club)}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+                  <TouchableOpacity onPress={() => setStatConfigOpen(true)}>
+                    <Text style={s.statsAction}>Configure</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={deleteLastShot}>
+                    <Text style={[s.statsAction, { color: C.red }]}>Delete</Text>
+                  </TouchableOpacity>
+                  <Text style={s.statsCount}>SHOT {shots.length}</Text>
+                </View>
+              </View>
+              <ScrollView contentContainerStyle={s.statsGrid}>
+                {statOrder.map((k) => {
+                  const def = STAT_BY_KEY[k];
+                  if (!def) return null;
+                  const v = def.value({ shot: active.shot, flight: active.flight });
+                  return (
+                    <View key={k} style={s.statCell}>
+                      <Text style={s.statCellLabel}>{def.label}</Text>
+                      <Text style={[s.statCellValue, v == null && { color: C.textDim }]}>{v ?? '—'}</Text>
+                      <Text style={s.statCellFrom}>{def.from === 'device' ? 'measured' : 'computed'}</Text>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </>
+          ) : (
+            <Text style={s.statsEmpty}>Hit a shot to see the numbers.</Text>
+          )}
+        </View>
+      )}
+
       {/* ── Floating chrome ────────────────────────────────────────────── */}
       <View style={s.topBar} pointerEvents="box-none">
         <TouchableOpacity style={s.iconBtn} onPress={() => router.back()} activeOpacity={0.8}>
           <Text style={s.iconBtnText}>Back</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={s.statusPill} onPress={() => setSetupOpen(true)} activeOpacity={0.8}>
-          <View style={[s.statusDot, { backgroundColor: statusColor }]} />
-          <Text style={[s.statusText, { color: statusColor }]}>{statusLabel}</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <TouchableOpacity
+            style={s.iconBtn}
+            onPress={() => setViewMode((m) => (m === 'range' ? 'stats' : 'range'))}
+            activeOpacity={0.8}
+          >
+            <Text style={s.iconBtnText}>{viewMode === 'range' ? 'Stats' : 'Range'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.statusPill} onPress={() => setSetupOpen(true)} activeOpacity={0.8}>
+            <View style={[s.statusDot, { backgroundColor: statusColor }]} />
+            <Text style={[s.statusText, { color: statusColor }]}>{statusLabel}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Shot readout — floats over the art, sized down in landscape so it
           never eats the range. */}
-      {active && (
-        <View style={[s.readout, isLandscape ? s.readoutLandscape : s.readoutPortrait]} pointerEvents="none">
+      {viewMode === 'range' && active && (
+        <View style={[s.readout, isLandscape ? s.readoutLandscape : s.readoutPortrait]}>
           <View style={s.readoutTop}>
             <Text style={s.readoutCarry}>{Math.round(active.flight.carryYds)}</Text>
             <View style={{ flex: 1 }}>
@@ -388,19 +647,31 @@ export default function RangeLive() {
                   : `${Math.abs(Math.round(active.flight.offlineYds))} ${active.flight.offlineYds > 0 ? 'R' : 'L'}`}
               </Text>
             </View>
-            <Text style={s.readoutClub}>{clubLabel(active.club)}</Text>
+            <View style={{ alignItems: 'flex-end' }}>
+              <Text style={s.readoutClub}>{clubLabel(active.club)}</Text>
+              {/* Ditch a mishit before it reaches your club averages. */}
+              <TouchableOpacity onPress={deleteLastShot} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Text style={s.readoutDelete}>Delete shot</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          <View style={s.metricRow}>
-            <Metric label="BALL" value={active.shot.ballSpeedMph.toFixed(1)} unit="mph" />
-            <Metric label="LAUNCH" value={`${active.shot.launchAngleDeg.toFixed(1)}°`} />
-            <Metric label="SPIN" value={`${Math.round(active.shot.spinRpm)}`} unit="rpm" />
-            <Metric label="APEX" value={`${active.flight.apexFt}`} unit="ft" />
-            <Metric label="DESC" value={`${active.flight.descentAngleDeg.toFixed(0)}°`} />
+          <View style={s.metricRow} pointerEvents="none">
+            {statOrder.slice(0, 5).map((k) => {
+              const def = STAT_BY_KEY[k];
+              if (!def) return null;
+              return (
+                <Metric
+                  key={k}
+                  label={def.label.length > 8 ? def.label.split(' ')[0] : def.label}
+                  value={def.value({ shot: active.shot, flight: active.flight }) ?? '—'}
+                />
+              );
+            })}
           </View>
         </View>
       )}
 
-      {!active && (
+      {viewMode === 'range' && !active && (
         <View style={[s.hint, isLandscape ? s.readoutLandscape : s.readoutPortrait]} pointerEvents="none">
           <Text style={s.hintText}>
             Connect your launch monitor, or tap Demo Shot. Every shot flies on Sacari's
@@ -431,6 +702,99 @@ export default function RangeLive() {
           {saving ? <ActivityIndicator color="#000" /> : <Text style={s.ctrlSaveText}>Save</Text>}
         </TouchableOpacity>
       </View>
+
+      {/* ── Stat layout ────────────────────────────────────────────────
+          Pick which numbers appear and in what order. The first five also
+          become the strip on the range overlay, so ordering does real work
+          rather than only affecting the stats page. */}
+      <Modal
+        visible={statConfigOpen}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setStatConfigOpen(false)}
+      >
+        <View style={s.modal}>
+          <View style={s.modalHeader}>
+            <Text style={s.modalTitle}>Stats Shown</Text>
+            <TouchableOpacity onPress={() => setStatConfigOpen(false)}><Text style={s.modalDone}>Done</Text></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 16 }}>
+            <Text style={s.cfgNote}>
+              Tap to add or remove. Use the arrows to reorder — the top five also show
+              on the range.
+            </Text>
+
+            <Text style={s.cfgSection}>SHOWING</Text>
+            {statOrder.map((k, i) => {
+              const def = STAT_BY_KEY[k];
+              if (!def) return null;
+              return (
+                <View key={k} style={s.cfgRow}>
+                  <Text style={s.cfgIndex}>{i + 1}</Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.cfgLabel}>{def.label}</Text>
+                    <Text style={s.cfgFrom}>{def.from === 'device' ? 'measured by monitor' : 'computed by Sacari'}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[s.cfgArrow, i === 0 && { opacity: 0.25 }]}
+                    disabled={i === 0}
+                    onPress={() => {
+                      const next = [...statOrder];
+                      [next[i - 1], next[i]] = [next[i], next[i - 1]];
+                      saveStatOrder(next);
+                    }}
+                  >
+                    <Text style={s.cfgArrowText}>↑</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[s.cfgArrow, i === statOrder.length - 1 && { opacity: 0.25 }]}
+                    disabled={i === statOrder.length - 1}
+                    onPress={() => {
+                      const next = [...statOrder];
+                      [next[i + 1], next[i]] = [next[i], next[i + 1]];
+                      saveStatOrder(next);
+                    }}
+                  >
+                    <Text style={s.cfgArrowText}>↓</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={s.cfgRemove}
+                    onPress={() => saveStatOrder(statOrder.filter((x) => x !== k))}
+                  >
+                    <Text style={s.cfgRemoveText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+
+            {STAT_DEFS.some((d) => !statOrder.includes(d.key)) && (
+              <>
+                <Text style={s.cfgSection}>AVAILABLE</Text>
+                {STAT_DEFS.filter((d) => !statOrder.includes(d.key)).map((def) => (
+                  <TouchableOpacity
+                    key={def.key}
+                    style={s.cfgRow}
+                    onPress={() => saveStatOrder([...statOrder, def.key])}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.cfgLabel}>{def.label}</Text>
+                      <Text style={s.cfgFrom}>{def.from === 'device' ? 'measured by monitor' : 'computed by Sacari'}</Text>
+                    </View>
+                    <Text style={s.cfgAdd}>+ Add</Text>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
+            <TouchableOpacity
+              style={s.cfgReset}
+              onPress={() => saveStatOrder(DEFAULT_STAT_ORDER)}
+            >
+              <Text style={s.cfgResetText}>Reset to default</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* ── Session summary ────────────────────────────────────────────── */}
       <Modal visible={sessionOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setSessionOpen(false)}>
@@ -479,7 +843,11 @@ export default function RangeLive() {
         </View>
       </Modal>
 
-      {/* ── Bridge setup ───────────────────────────────────────────────── */}
+      {/* ── Connect sheet ──────────────────────────────────────────────
+          One button. It figures out what's on the network itself: the Mevo+
+          directly over TCP if the phone is on the device's WiFi, otherwise a
+          GSPro-Connect bridge. Every step is logged, and the same lines are
+          mirrored to the Metro terminal with a [mevo] prefix. */}
       <Modal
         visible={setupOpen}
         animationType="slide"
@@ -488,14 +856,7 @@ export default function RangeLive() {
         onShow={() => {
           getDiagnostics().then((d) => {
             setDiag(d);
-            // Derive the gateway from our own address and offer it as the
-            // Mevo+ host, so the user never has to go read it off the WiFi
-            // settings screen.
-            if (d.subnet) {
-              const gw = `${d.subnet}1`;
-              setDetectedGateway(gw);
-              setMevoHost(gw);
-            }
+            if (d.subnet) setDetectedGateway(`${d.subnet}1`);
           }).catch(() => setDiag(null));
         }}
       >
@@ -504,165 +865,68 @@ export default function RangeLive() {
             <Text style={s.modalTitle}>Launch Monitor</Text>
             <TouchableOpacity onPress={() => setSetupOpen(false)}><Text style={s.modalDone}>Close</Text></TouchableOpacity>
           </View>
+
           <Text style={s.setupBody}>
-            Range Live needs two things: your phone and a computer on the same WiFi,
-            and bridge software running on that computer.
+            Join your phone to your launch monitor's WiFi (or the network running a
+            bridge), then connect. Sacari finds the device itself.
           </Text>
-          <Text style={s.setupBody}>
-            The Mevo+ speaks its own private protocol that phones can't read directly,
-            so a small bridge program on a laptop translates it. Connecting your phone
-            to the Mevo+'s own WiFi will not work on its own. Once the bridge is
-            running, Sacari finds it automatically. no addresses to type.
-          </Text>
-          {!localNetworkReady() && (
-            <Text style={s.setupErr}>
-              This app version can't search the network yet. that arrives in the next
-              app update. Demo Shot works right now.
-            </Text>
-          )}
 
           <TouchableOpacity
-            style={[s.setupConnect, scanning && { opacity: 0.6 }]}
-            onPress={() => { setSetupOpen(false); autoConnect(); }}
-            disabled={scanning}
+            style={[s.setupConnect, (scanning || connectingAuto) && { opacity: 0.6 }]}
+            onPress={connectAuto}
+            disabled={scanning || connectingAuto}
           >
-            {scanning ? <ActivityIndicator color="#000" /> : <Text style={s.setupConnectText}>Search my WiFi</Text>}
+            {(scanning || connectingAuto)
+              ? <ActivityIndicator color="#000" />
+              : <Text style={s.setupConnectText}>Find &amp; Connect</Text>}
           </TouchableOpacity>
 
-          {status === 'connected' && <Text style={s.setupOk}>Connected to {bridgeUrl}</Text>}
-          {statusDetail && <Text style={s.setupErr}>{statusDetail}</Text>}
-
-          {/* Diagnostics — facts, not guesses. Without this a failed connection
-              is indistinguishable from a broken bridge, a wrong network, or an
-              app build that can't do local networking at all. */}
-          <Text style={s.setupLabel}>DIAGNOSTICS</Text>
-          <View style={s.diagBox}>
-            <DiagRow k="Local network support" v={diag ? (diag.ready ? 'yes' : 'NO — needs new build') : '…'} bad={diag ? !diag.ready : false} />
-            <DiagRow k="This phone" v={diag?.ip ?? '—'} bad={!!diag && diag.ready && !diag.ip} />
-            <DiagRow k="Subnet scanned" v={diag?.subnet ? `${diag.subnet}1-254` : '—'} />
-            <DiagRow k="Ports tried" v={BRIDGE_PORTS.join(', ')} />
-            {diag?.note ? <Text style={s.diagNote}>{diag.note}</Text> : null}
-          </View>
-
+          {/* Compact status line — what it is, where, and how far it got. */}
           <Text style={s.setupNote}>
-            Works with any bridge that speaks the GSPro Connect format, which covers
-            the Mevo+ and most other monitors. If the search comes up empty, check that
-            the phone and the computer are on the same network (not a guest network),
-            and that the bridge is running.
+            {diag?.ip ? `This phone ${diag.ip}` : 'Reading network…'}
+            {detectedGateway ? `  ·  device likely ${detectedGateway}` : ''}
           </Text>
-
-          {/* ── Direct mode ─────────────────────────────────────────────
-              Talks to the Mevo+ over raw TCP with no laptop in the middle.
-              Needs a dev/production build (native TCP module). */}
-          <Text style={s.setupLabel}>DIRECT TO MEVO+ (NO LAPTOP)</Text>
-          <Text style={s.setupBody}>
-            Join your phone to the Mevo+'s own WiFi, then connect. Sacari speaks the
-            device's protocol directly. This is experimental: if it doesn't arm, the
-            log below shows exactly how far it got.
-          </Text>
-          {/* Detected gateway. When the phone is on the Mevo+'s own WiFi the
-              device IS the router, so x.y.z.1 on our subnet is almost always
-              the right address — same number iOS shows as "Router" under the
-              network's (i). Offered first so nobody has to go read it. */}
-          {detectedGateway && (
-            <TouchableOpacity
-              style={[s.hostChip, { alignSelf: 'flex-start', marginTop: 10 },
-                mevoHost === detectedGateway && s.hostChipActive]}
-              onPress={() => setMevoHost(detectedGateway)}
-            >
-              <Text style={[s.hostChipText, mevoHost === detectedGateway && { color: '#000' }]}>
-                {detectedGateway}  ·  detected
-              </Text>
-            </TouchableOpacity>
-          )}
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {MEVO_HOST_CANDIDATES.filter((h) => h !== detectedGateway).map((h) => (
-              <TouchableOpacity
-                key={h}
-                style={[s.hostChip, mevoHost === h && s.hostChipActive]}
-                onPress={() => setMevoHost(h)}
-              >
-                <Text style={[s.hostChipText, mevoHost === h && { color: '#000' }]}>{h}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TouchableOpacity
-            style={[s.setupConnect, { backgroundColor: C.card, borderWidth: 1, borderColor: C.gold }]}
-            onPress={() => connectMevoDirect(mevoHost)}
-          >
-            <Text style={[s.setupConnectText, { color: C.gold }]}>
-              {mevoState === 'idle' || mevoState === 'closed' ? 'Connect to Mevo+' : `Reconnect (${mevoState})`}
-            </Text>
-          </TouchableOpacity>
           {mevoState !== 'idle' && (
             <Text style={mevoState === 'error' ? s.setupErr : s.setupOk}>
-              Device state: {mevoState}
+              Mevo+: {mevoState}
             </Text>
           )}
+          {status === 'connected' && <Text style={s.setupOk}>Bridge connected: {bridgeUrl}</Text>}
+          {statusDetail && <Text style={s.setupErr}>{statusDetail}</Text>}
+
           {mevoLog.length > 0 && (
             <>
-              <Text style={s.setupLabel}>PROTOCOL LOG</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Text style={s.setupLabel}>PROTOCOL LOG</Text>
+                <TouchableOpacity
+                  onPress={printLogToTerminal}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={{ color: C.gold, fontSize: 12, fontWeight: '800' }}>Print to terminal</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    const body = [
+                      `Sacari Mevo+ log — ${new Date().toISOString()}`,
+                      `phone ${diag?.ip ?? '?'}  gateway ${detectedGateway ?? '?'}  state=${mevoState}`,
+                      '',
+                      ...mevoLog,
+                    ].join('\n');
+                    Share.share({ message: body }).catch(() => { });
+                  }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={{ color: C.gold, fontSize: 12, fontWeight: '800' }}>Share</Text>
+                </TouchableOpacity>
+              </View>
               <ScrollView style={s.logBox} nestedScrollEnabled>
                 {mevoLog.map((l, i) => (
                   <Text key={i} style={s.logLine}>{l}</Text>
                 ))}
               </ScrollView>
               <Text style={s.setupNote}>
-                Send me this log if it doesn't arm. the last few lines tell us which
-                handshake step the device is waiting on.
+                These same lines print in your Metro terminal prefixed [mevo].
               </Text>
-            </>
-          )}
-
-          <TouchableOpacity onPress={() => setShowManual((v) => !v)} activeOpacity={0.7}>
-            <Text style={s.setupToggle}>{showManual ? 'Hide manual setup' : 'Enter an address manually'}</Text>
-          </TouchableOpacity>
-          {showManual && (
-            <>
-              <Text style={s.setupLabel}>BRIDGE ADDRESS</Text>
-              <TextInput
-                style={s.setupInput}
-                value={bridgeUrl}
-                onChangeText={setBridgeUrl}
-                placeholder="ws://192.168.1.20:921"
-                placeholderTextColor={C.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <TouchableOpacity
-                  style={[s.setupConnect, { flex: 1, backgroundColor: C.card, borderWidth: 1, borderColor: C.border }, testing && { opacity: 0.6 }]}
-                  disabled={testing}
-                  onPress={async () => {
-                    const url = bridgeUrl.trim();
-                    if (!url) { setTestResult('Enter an address first.'); return; }
-                    setTesting(true); setTestResult(null);
-                    try {
-                      const r = await testAddress(url);
-                      setTestResult(`${r.ok ? 'OK — ' : 'Failed — '}${r.note}`);
-                    } finally { setTesting(false); }
-                  }}
-                >
-                  {testing
-                    ? <ActivityIndicator color={C.text} />
-                    : <Text style={[s.setupConnectText, { color: C.text }]}>Test</Text>}
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[s.setupConnect, { flex: 1, backgroundColor: C.card, borderWidth: 1, borderColor: C.gold }]}
-                  onPress={() => {
-                    const url = bridgeUrl.trim();
-                    if (!url) { Alert.alert('Address needed', 'Enter your bridge address.'); return; }
-                    AsyncStorage.setItem(BRIDGE_KEY, url).catch(() => { });
-                    connect(url);
-                    setSetupOpen(false);
-                  }}
-                >
-                  <Text style={[s.setupConnectText, { color: C.gold }]}>Connect</Text>
-                </TouchableOpacity>
-              </View>
-              {testResult && (
-                <Text style={testResult.startsWith('OK') ? s.setupOk : s.setupErr}>{testResult}</Text>
-              )}
             </>
           )}
 
@@ -739,6 +1003,50 @@ const s = StyleSheet.create({
   metricLabel: { color: '#ffffff99', fontSize: 8, fontWeight: '900', letterSpacing: 0.9 },
   metricValue: { color: '#fff', fontSize: 12, fontWeight: '800', marginTop: 2 },
   metricUnit: { color: '#ffffff99', fontSize: 9, fontWeight: '700' },
+
+  readoutDelete: { color: C.red, fontSize: 11, fontWeight: '800', marginTop: 4 },
+
+  // ── Stats view (no scenery, just the numbers) ──
+  statsPage: { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg, paddingTop: 96, paddingHorizontal: 14 },
+  statsHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  statsClub: { color: C.text, fontSize: 20, fontWeight: '900', fontFamily: F.serif },
+  statsAction: { color: C.gold, fontSize: 12, fontWeight: '800' },
+  statsCount: { color: C.textMuted, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
+  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingBottom: 110 },
+  statCell: {
+    flexBasis: '31%', flexGrow: 1,
+    backgroundColor: C.card, borderRadius: 10, borderWidth: 1, borderColor: C.border,
+    paddingVertical: 12, paddingHorizontal: 8, alignItems: 'center',
+  },
+  statCellLabel: { color: C.textMuted, fontSize: 8, fontWeight: '900', letterSpacing: 0.9 },
+  statCellValue: { color: C.text, fontFamily: F.serif, fontSize: 22, fontWeight: '900', marginTop: 3 },
+  statCellFrom: { color: C.textDim, fontSize: 8, marginTop: 2 },
+  statsEmpty: { color: C.textMuted, fontSize: 14, textAlign: 'center', marginTop: 40 },
+
+  // ── Stat layout config ──
+  cfgNote: { color: C.textMuted, fontSize: 12, lineHeight: 17, marginBottom: 6 },
+  cfgSection: { color: C.gold, fontSize: 10, fontWeight: '900', letterSpacing: 1.3, marginTop: 18, marginBottom: 8 },
+  cfgRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: C.card, borderRadius: 8, borderWidth: 1, borderColor: C.border,
+    paddingHorizontal: 12, paddingVertical: 10, marginBottom: 6,
+  },
+  cfgIndex: { color: C.gold, fontSize: 12, fontWeight: '900', width: 18 },
+  cfgLabel: { color: C.text, fontSize: 14, fontWeight: '700' },
+  cfgFrom: { color: C.textDim, fontSize: 10, marginTop: 1 },
+  cfgArrow: {
+    width: 30, height: 30, borderRadius: 6, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: C.border,
+  },
+  cfgArrowText: { color: C.text, fontSize: 15, fontWeight: '900' },
+  cfgRemove: { paddingHorizontal: 6 },
+  cfgRemoveText: { color: C.textMuted, fontSize: 11, fontWeight: '700' },
+  cfgAdd: { color: C.gold, fontSize: 12, fontWeight: '800' },
+  cfgReset: { marginTop: 22, alignSelf: 'center', padding: 10 },
+  cfgResetText: { color: C.textMuted, fontSize: 13, fontWeight: '700' },
 
   hint: {
     position: 'absolute', left: 14, right: 14,
