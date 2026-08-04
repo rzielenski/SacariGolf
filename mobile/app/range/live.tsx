@@ -97,7 +97,14 @@ const STAT_DEFS: StatDef[] = [
   { key: 'sideSpin', label: 'SIDESPIN', from: 'device',
     value: (c) => `${Math.round(c.shot.spinRpm * Math.sin((c.shot.spinAxisDeg * Math.PI) / 180))}` },
   { key: 'roll', label: 'ROLL', from: 'flight',
-    value: (c) => `${Math.round(c.flight.totalYds - c.flight.carryYds)}` },
+    value: (c) => `${Math.round(c.flight.rollYds)}` },
+  { key: 'bounces', label: 'BOUNCES', from: 'flight',
+    value: (c) => `${c.flight.bounces.length}` },
+  { key: 'finishOffline', label: 'FINISH OFFLINE', from: 'flight',
+    value: (c) => {
+      const o = Math.round(c.flight.finishOfflineYds);
+      return o === 0 ? '0' : `${Math.abs(o)}${o > 0 ? 'R' : 'L'}`;
+    } },
   { key: 'flightTime', label: 'HANG TIME', from: 'flight', value: (c) => `${c.flight.flightTimeS.toFixed(1)}s` },
   { key: 'clubSpeed', label: 'CLUB SPEED', from: 'device',
     value: (c) => (c.shot.clubSpeedMph != null ? c.shot.clubSpeedMph.toFixed(1) : null) },
@@ -404,7 +411,7 @@ export default function RangeLive() {
       const payload = shots.map((s) => ({
         club: s.club,
         distance_yds: Math.round(s.flight.totalYds),
-        lateral_yds: Math.round(s.flight.offlineYds),
+        lateral_yds: Math.round(s.flight.finishOfflineYds),
       }));
       const res = await api.users.importShots({ name: 'Range Sesh Live', shots: payload });
       Alert.alert('Saved', `${res.total_shots} shots added to your club stats.`, [
@@ -442,7 +449,9 @@ export default function RangeLive() {
   const landedDots = useMemo(
     () => shots.slice(0, 40).map((sh) => ({
       id: sh.id,
-      ...project({ x: sh.flight.carryYds, y: sh.flight.offlineYds, z: 0 }),
+      // Where the ball came to REST, so the scatter reflects the shot's real
+      // result rather than its pitch mark.
+      ...project({ x: sh.flight.totalYds, y: sh.flight.finishOfflineYds, z: 0 }),
     })),
     [shots, project],
   );

@@ -7,11 +7,16 @@
  * our ball-flight model (lib/ballFlight.ts) says where it finished, and the
  * ball advances down the real hole from the real tee toward the real pin.
  *
- * SCOPE (deliberate): no lies, no hazards, no putting. Courses have no
- * fairway/rough/green polygons yet, so pretending to know you're in a bunker
- * would be a lie. Instead the hole AUTO-COMPLETES once the ball is on the
- * green, and the score is strokes-to-green plus a two-putt — stated plainly
- * rather than hidden.
+ * LIES come from the shapes players traced in the web polygon editor: the ball
+ * is classified against them (lib/courseSurface.ts), the strike is transformed
+ * into what that swing would produce from THAT lie (lib/lie.ts), and the
+ * run-out happens on whatever it actually pitched on (lib/ballFlight.ts). A
+ * course with no shapes traced still plays; it assumes fairway and says so.
+ *
+ * SCOPE (deliberate): no putting — the hole AUTO-COMPLETES once the ball is on
+ * the green and scores as strokes-to-green plus a two-putt, stated plainly
+ * rather than hidden. Lie SLOPE is wired through the physics but always passed
+ * as flat, because per-point elevation is not plumbed in yet.
  *
  * Only courses that pass the geometry bar are offered (api.courses.simReady).
  */
@@ -25,10 +30,12 @@ import MapView, { Marker, Polyline, Region } from 'react-native-maps';
 import { C, F } from '../../lib/colors';
 import { api } from '../../lib/api';
 import { simulateFlight } from '../../lib/ballFlight';
+import { applyLie, Lie } from '../../lib/lie';
+import { CoursePolygon, locateBall, BallLocation } from '../../lib/courseSurface';
 import { demoShot, LaunchShot } from '../../lib/launchMonitor';
 import { useLaunchMonitorLink } from '../../lib/useLaunchMonitorLink';
 import { CLUBS_CATALOG, clubLabel } from '../../lib/clubs';
-import { bearingDeg, distYards, SHOT_COLORS } from '../../lib/golfMath';
+import { bearingDeg, distYards, SHOT_COLORS, isValidCoord } from '../../lib/golfMath';
 
 /** Ball is "on the green" — hole completes. 12 yds ≈ 36 ft, the same effective
  *  green radius the rest of the app's analytics use. */
@@ -43,7 +50,11 @@ type Hole = {
   tee_lat: number | null; tee_lng: number | null;
 };
 type Pt = { lat: number; lng: number };
-type PlayedShot = { start: Pt; end: Pt; club: string; carryYds: number; totalYds: number };
+type PlayedShot = {
+  start: Pt; end: Pt; club: string; carryYds: number; totalYds: number;
+  /** What it was played from and what it finished on, for the shot readout. */
+  fromLabel: string; toLabel: string; penalty: 'water' | 'oob' | null;
+};
 type HoleScore = { hole_num: number; par: number | null; strokes: number; toGreen: number };
 
 /**
@@ -79,6 +90,10 @@ export default function CourseSim() {
   const [scores, setScores] = useState<HoleScore[]>([]);
   const [club, setClub] = useState('driver');
   const [clubPickerOpen, setClubPickerOpen] = useState(false);
+  const [polygons, setPolygons] = useState<CoursePolygon[] | null>(null);
+  /** Penalty strokes on the current hole. Kept apart from `played` because a
+   *  penalty adds a stroke without adding a shot to trace. */
+  const [penalties, setPenalties] = useState(0);
   const [cardOpen, setCardOpen] = useState(false);
   const mapRef = useRef<MapView | null>(null);
 
@@ -95,10 +110,10 @@ export default function CourseSim() {
   }, []);
 
   const hole = holes[holeIdx] ?? null;
-  const tee: Pt | null = hole?.tee_lat != null && hole?.tee_lng != null
-    ? { lat: hole.tee_lat, lng: hole.tee_lng } : null;
-  const pin: Pt | null = hole?.pin_lat != null && hole?.pin_lng != null
-    ? { lat: hole.pin_lat, lng: hole.pin_lng } : null;
+  const tee: Pt | null = isValidCoord(hole?.tee_lat, hole?.tee_lng)
+    ? { lat: hole!.tee_lat as number, lng: hole!.tee_lng as number } : null;
+  const pin: Pt | null = isValidCoord(hole?.pin_lat, hole?.pin_lng)
+    ? { lat: hole!.pin_lat as number, lng: hole!.pin_lng as number } : null;
 
   /** Yards from the ball (or tee, before the first swing) to the pin. */
   const toPin = useMemo(() => {
@@ -117,7 +132,12 @@ export default function CourseSim() {
         .sort((a: any, b: any) => a.hole_num - b.hole_num);
       if (!hs.length) { Alert.alert('No geometry', 'This tee has no mapped holes.'); return; }
       setCourse(detail); setTeebox(full ?? tb); setHoles(hs);
-      setHoleIdx(0); setBall(null); setPlayed([]); setScores([]);
+      setHoleIdx(0); setBall(null); setPlayed([]); setScores([]); setPenalties(0);
+      // Traced shapes drive the lie and the run-out. A course without them
+      // still plays, it just assumes fairway everywhere and says so.
+      api.courses.polygons(c.course_id)
+        .then((r) => setPolygons(r.polygons as CoursePolygon[]))
+        .catch(() => setPolygons([]));
     } catch (e: any) {
       Alert.alert('Could not load course', e?.message ?? 'Try again.');
     } finally { setLoading(false); }
@@ -161,7 +181,7 @@ export default function CourseSim() {
         ? [{ text: 'See card', onPress: () => setCardOpen(true) }]
         : [{
             text: 'Next hole',
-            onPress: () => { setHoleIdx((i) => i + 1); setBall(null); setPlayed([]); },
+            onPress: () => { setHoleIdx((i) => i + 1); setBall(null); setPlayed([]); setPenalties(0); },
           }],
     );
   }, [hole, holeIdx, holes.length]);
@@ -171,47 +191,100 @@ export default function CourseSim() {
    * model gives carry/offline; we lay that onto the real hole from wherever
    * the ball currently sits, aimed at the pin.
    */
+  /** Where the ball currently sits, and therefore what it is played from. */
+  const currentLie: BallLocation = useMemo(() => {
+    const from = ball ?? tee;
+    if (!from) return locateBall(0, 0, null, null);
+    return locateBall(from.lat, from.lng, polygons, hole?.hole_num ?? null);
+  }, [ball, tee, polygons, hole]);
+
   const playShot = useCallback((ls: LaunchShot) => {
     if (!hole || !pin) return;
     const from = ball ?? tee;
     if (!from) return;
-    const flight = simulateFlight({
-      ballSpeedMph: ls.ballSpeedMph,
-      launchAngleDeg: ls.launchAngleDeg,
-      azimuthDeg: ls.azimuthDeg,
-      spinRpm: ls.spinRpm,
-      spinAxisDeg: ls.spinAxisDeg,
-    });
-    // Aim at the pin; the shot's own curve carries it off that line. The ball
-    // finishes wherever the physics puts it, long or short.
+
+    // 1. The lie the ball is actually sitting on. The player struck a flat mat,
+    //    so the strike is transformed into what that swing produces from here.
+    //    Slope is 0 until per-point elevation is wired in; the physics takes it.
+    const here = locateBall(from.lat, from.lng, polygons, hole.hole_num);
+    const lie: Lie = { surface: here.lieSurface, upslopeDeg: 0, crossSlopeDeg: 0 };
+    const adjusted = applyLie(
+      {
+        ballSpeedMph: ls.ballSpeedMph,
+        launchAngleDeg: ls.launchAngleDeg,
+        azimuthDeg: ls.azimuthDeg,
+        spinRpm: ls.spinRpm,
+        spinAxisDeg: ls.spinAxisDeg,
+      },
+      lie,
+    );
+
+    // 2. Fly it. Aim at the pin; the shot's own curve takes it off that line.
     const aim = bearingBetween(from, pin);
-    const end = offsetPoint(from, aim, flight.totalYds, flight.offlineYds);
+    const flight = simulateFlight(adjusted.conditions);
+
+    // 3. Where it pitched decides how it runs out, so classify the landing
+    //    point and re-run the ground phase on THAT surface.
+    if (!Number.isFinite(flight.carryYds) || !Number.isFinite(flight.totalYds)
+     || !Number.isFinite(flight.offlineYds) || !Number.isFinite(flight.finishOfflineYds)) {
+      Alert.alert('Bad shot data', 'That shot could not be simulated. Try again.');
+      return;
+    }
+    const pitch = offsetPoint(from, aim, flight.carryYds, flight.offlineYds);
+    const landedOn = locateBall(pitch.lat, pitch.lng, polygons, hole.hole_num);
+    const settled = simulateFlight(adjusted.conditions, { surface: landedOn.surface });
+    let end = offsetPoint(from, aim, settled.totalYds, settled.finishOfflineYds);
+
+    // 4. Whatever it finished on may be a penalty area.
+    const restOn = locateBall(end.lat, end.lng, polygons, hole.hole_num);
+    const penalty = restOn.penalty;
+    if (penalty) {
+      // Stroke and distance: legal for both water and out of bounds, and the
+      // only relief option that needs no extra geometry to adjudicate. The
+      // tracer still shows where it went, but the ball returns to `from`.
+      end = from;
+    }
 
     const shot: PlayedShot = {
       start: from, end, club,
-      carryYds: flight.carryYds, totalYds: flight.totalYds,
+      carryYds: settled.carryYds, totalYds: settled.totalYds,
+      fromLabel: here.mapped ? here.label : 'Fairway (unmapped)',
+      toLabel: penalty ? restOn.label : (landedOn.mapped ? landedOn.label : 'Fairway (unmapped)'),
+      penalty,
     };
     const nextPlayed = [...played, shot];
+    // The shot itself, plus one more if it found trouble.
+    const strokes = nextPlayed.length + (penalty ? 1 : 0);
     setPlayed(nextPlayed);
     setBall(end);
 
+    if (penalty) {
+      setPenalties((n) => n + 1);
+      Alert.alert(
+        penalty === 'water' ? 'In the water' : 'Out of bounds',
+        'One penalty stroke, replaying from where you just hit.',
+      );
+      return;
+    }
+
     const remaining = distYards(end.lat, end.lng, pin.lat, pin.lng);
     if (remaining <= GREEN_RADIUS_YDS) {
-      // On the green — hole is done, no putting simulated.
-      setTimeout(() => finishHole(nextPlayed.length), 350);
-    } else if (nextPlayed.length >= 12) {
-      // Safety valve so a badly-calibrated monitor can't trap the player.
+      setTimeout(() => finishHole(strokes), 350);
+    } else if (strokes >= 12) {
       Alert.alert('Hole abandoned', 'Twelve shots without reaching the green.', [
-        { text: 'Move on', onPress: () => finishHole(nextPlayed.length) },
+        { text: 'Move on', onPress: () => finishHole(strokes) },
       ]);
     }
-  }, [hole, pin, ball, tee, club, played, finishHole]);
+  }, [hole, pin, ball, tee, club, played, penalties, finishHole, polygons]);
   playShotRef.current = playShot;
 
   // Re-frame on a new hole and after each shot, but only then — leaving the
   // map uncontrolled in between means a pan or zoom sticks.
   useEffect(() => {
-    if (region) mapRef.current?.animateToRegion(region, 550);
+    if (region && isValidCoord(region.latitude, region.longitude)
+        && Number.isFinite(region.latitudeDelta) && Number.isFinite(region.longitudeDelta)) {
+      mapRef.current?.animateToRegion(region, 550);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holeIdx, played.length]);
 
@@ -296,8 +369,25 @@ export default function CourseSim() {
         </View>
         <View style={{ alignItems: 'flex-end' }}>
           <Text style={s.toPin}>{toPin ?? '—'}</Text>
-          <Text style={s.toPinLabel}>YDS TO PIN</Text>
+          <Text style={s.toPinLabel}>
+            YDS TO PIN{penalties > 0 ? `  ·  +${penalties} PEN` : ''}
+          </Text>
         </View>
+      </View>
+
+      <View style={s.lieBar}>
+        <Text style={s.lieLabel}>LIE</Text>
+        <Text style={s.lieValue}>
+          {currentLie.mapped ? currentLie.label : 'Fairway'}
+        </Text>
+        {!currentLie.mapped && (
+          <Text style={s.lieHint}>course not mapped, assuming fairway</Text>
+        )}
+        {played.length > 0 && (
+          <Text style={s.lieHint}>
+            last: {played[played.length - 1].fromLabel} → {played[played.length - 1].toLabel}
+          </Text>
+        )}
       </View>
 
       <TouchableOpacity
@@ -383,8 +473,10 @@ export default function CourseSim() {
           style={[s.ctrlBtn, !played.length && { opacity: 0.4 }]}
           disabled={!played.length}
           onPress={() => {
+            const dropped = played[played.length - 1];
             const next = played.slice(0, -1);
             setPlayed(next);
+            if (dropped?.penalty) setPenalties((n) => Math.max(0, n - 1));
             setBall(next.length ? next[next.length - 1].end : null);
           }}
           activeOpacity={0.85}
@@ -498,6 +590,15 @@ const s = StyleSheet.create({
   holeMeta: { color: C.textMuted, fontSize: 11, marginTop: 2 },
   toPin: { color: C.gold, fontFamily: F.serif, fontSize: 30, fontWeight: '900' },
   toPinLabel: { color: C.textMuted, fontSize: 8, fontWeight: '900', letterSpacing: 1 },
+
+  lieBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+    paddingHorizontal: 16, paddingVertical: 7,
+    borderBottomWidth: 1, borderBottomColor: C.border,
+  },
+  lieLabel: { color: C.textMuted, fontSize: 8, fontWeight: '900', letterSpacing: 1 },
+  lieValue: { color: C.text, fontSize: 13, fontWeight: '800' },
+  lieHint: { color: C.textDim, fontSize: 10, fontStyle: 'italic' },
 
   linkBar: {
     flexDirection: 'row', alignItems: 'center', gap: 8,

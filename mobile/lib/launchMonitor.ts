@@ -194,7 +194,7 @@ export function connectLaunchMonitor(
 // silently — no error, just nothing. It's declared in app.json.
 
 /** GSPro Connect's standard port, then the alternates bridges commonly use. */
-export const BRIDGE_PORTS = [921, 8888, 2483, 9000];
+const BRIDGE_PORTS = [921, 8888, 2483, 9000];
 
 /**
  * True when this BINARY can do local networking at all.
@@ -205,7 +205,7 @@ export const BRIDGE_PORTS = [921, 8888, 2483, 9000];
  * socket error, which looks like "the bridge is broken" when really the app
  * simply can't reach the LAN yet. The UI uses this to say so plainly.
  */
-export function localNetworkReady(): boolean {
+function localNetworkReady(): boolean {
   try {
     const N = require('expo-network');
     return typeof N?.getIpAddressAsync === 'function';
@@ -280,20 +280,6 @@ export async function getDiagnostics(): Promise<Diagnostics> {
     ready: true, ip, subnet,
     note: `Scanning ${subnet}1-254 on ports ${BRIDGE_PORTS.join(', ')}. The computer running your bridge must be on this same subnet.`,
   };
-}
-
-/** Probe a single address and describe what happened, for the manual test. */
-export async function testAddress(url: string, timeoutMs = 2500): Promise<{ ok: boolean; note: string }> {
-  if (!localNetworkReady()) {
-    return { ok: false, note: 'This build cannot open local-network connections yet.' };
-  }
-  if (!/^wss?:\/\//i.test(url)) {
-    return { ok: false, note: 'Address must start with ws:// (or wss://).' };
-  }
-  const ok = await probe(url, timeoutMs);
-  return ok
-    ? { ok: true, note: 'Opened successfully — this is a working bridge.' }
-    : { ok: false, note: 'Nothing accepted a WebSocket there. Either no bridge is listening on that host and port, or the phone and computer are on different networks.' };
 }
 
 export interface DiscoverOptions {

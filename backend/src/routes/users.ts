@@ -1295,13 +1295,18 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
   // Distance from pin at the SHOT'S START, in yards. The shot must land
   // close to the green to count as an approach (filters out OB recoveries
   // and wild misses that didn't get there).
-  type ApproachBucket = { label: string; minYd: number; maxYd: number; shots: number; sumProxFt: number };
+  // Proximities are kept as raw samples, not a running sum, because the
+  // reported stat is the MEDIAN. A raw mean lets one bladed wedge that
+  // finished 90 ft away move the whole bucket; the median is what the
+  // player's typical shot actually does. p75 is reported alongside as the
+  // honest "bad but normal" line — anything beyond it is mishit territory.
+  type ApproachBucket = { label: string; minYd: number; maxYd: number; proxFt: number[] };
   const approach: ApproachBucket[] = [
-    { label: '<50 yd (chip)', minYd: 0,   maxYd: 50,       shots: 0, sumProxFt: 0 },
-    { label: '50-100 yd',     minYd: 50,  maxYd: 100,      shots: 0, sumProxFt: 0 },
-    { label: '100-150 yd',    minYd: 100, maxYd: 150,      shots: 0, sumProxFt: 0 },
-    { label: '150-200 yd',    minYd: 150, maxYd: 200,      shots: 0, sumProxFt: 0 },
-    { label: '200+ yd',       minYd: 200, maxYd: Infinity, shots: 0, sumProxFt: 0 },
+    { label: '<50 yd (chip)', minYd: 0,   maxYd: 50,       proxFt: [] },
+    { label: '50-100 yd',     minYd: 50,  maxYd: 100,      proxFt: [] },
+    { label: '100-150 yd',    minYd: 100, maxYd: 150,      proxFt: [] },
+    { label: '150-200 yd',    minYd: 150, maxYd: 200,      proxFt: [] },
+    { label: '200+ yd',       minYd: 200, maxYd: Infinity, proxFt: [] },
   ];
   // Tour proximity baseline, from the book's expected-strokes identity:
   // proximity from D ≈ the putt distance whose expected-putts equals
@@ -1348,8 +1353,7 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
         // distance-to-pin in yards, accumulate proximity in feet.
         const bucket = approach.find((b) => startToPinYd >= b.minYd && startToPinYd < b.maxYd);
         if (!bucket) continue;
-        bucket.shots += 1;
-        bucket.sumProxFt += endToPinFt;
+        bucket.proxFt.push(endToPinFt);
       }
     }
   }
@@ -1399,12 +1403,27 @@ router.get('/:id/shot-stats', requireAuth, wrap(async (req: AuthRequest, res: Re
       make_pct: b.attempts ? Math.round((b.made / b.attempts) * 1000) / 10 : null,
       scratch_make_pct: SCRATCH_MAKE_PCT[b.label],
     })),
-    approach: approach.map((b) => ({
-      bucket: b.label,
-      shots: b.shots,
-      avg_proximity_ft: b.shots ? Math.round((b.sumProxFt / b.shots) * 10) / 10 : null,
-      scratch_proximity_ft: SCRATCH_PROXIMITY_FT[b.label],
-    })),
+    approach: approach.map((b) => {
+      const sorted = [...b.proxFt].sort((x, y) => x - y);
+      const q = (p: number) => {
+        if (!sorted.length) return null;
+        const idx = (sorted.length - 1) * p;
+        const lo = Math.floor(idx), hi = Math.ceil(idx);
+        const v = lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+        return Math.round(v * 10) / 10;
+      };
+      return {
+        bucket: b.label,
+        shots: b.proxFt.length,
+        // Kept for old clients and the data-export contract, but now the
+        // MEDIAN — the raw mean let one bladed wedge move the whole bucket.
+        avg_proximity_ft: q(0.5),
+        median_proximity_ft: q(0.5),
+        /** "Bad but normal": 3 of 4 shots finish inside this. */
+        p75_proximity_ft: q(0.75),
+        scratch_proximity_ft: SCRATCH_PROXIMITY_FT[b.label],
+      };
+    }),
   });
 }));
 

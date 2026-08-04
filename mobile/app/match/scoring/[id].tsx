@@ -13,7 +13,8 @@ import { queueSubmitScores, queueContributePin } from '../../../lib/outbox';
 import { useAuth } from '../../../lib/auth';
 import { adjustDistance, windComponents, metersToFeet } from '../../../lib/weatherAdjust';
 import { C, F } from '../../../lib/colors';
-import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS, tourAvgStrokes } from '../../../lib/golfMath';
+import { distMetres, distYards, bearingDeg, scoreLabel, scoreColor, SHOT_COLORS, tourAvgStrokes,
+  isValidCoord, safeCoord, safeCoords } from '../../../lib/golfMath';
 import { useScorePanel } from './hooks/useScorePanel';
 import { useShotTracking } from './hooks/useShotTracking';
 import { useLocation } from './hooks/useLocation';
@@ -264,11 +265,12 @@ export default function ScoringScreen() {
   const previewCoord = useMemo(() => {
     if (!preview) return null;
     const h: any = holes[currentHole];
-    if (h && typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') return { latitude: h.tee_lat, longitude: h.tee_lng, altitude: null };
-    if (h && typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') return { latitude: h.pin_lat, longitude: h.pin_lng, altitude: null };
-    const cl = Number((course as any)?.latitude), cn = Number((course as any)?.longitude);
-    if (Number.isFinite(cl) && Number.isFinite(cn)) return { latitude: cl, longitude: cn, altitude: null };
-    return null;
+    const tee = h && safeCoord(h.tee_lat, h.tee_lng, 'preview tee');
+    if (tee) return { ...tee, altitude: null };
+    const pin = h && safeCoord(h.pin_lat, h.pin_lng, 'preview pin');
+    if (pin) return { ...pin, altitude: null };
+    const centre = safeCoord(Number((course as any)?.latitude), Number((course as any)?.longitude), 'course centre');
+    return centre ? { ...centre, altitude: null } : null;
   }, [preview, holes, currentHole, course]);
   const {
     userCoord, onCourse, locGranted,
@@ -931,7 +933,8 @@ export default function ScoringScreen() {
   // Follow user on map (live rounds only — preview frames the hole instead).
   useEffect(() => {
     if (preview) return;
-    if (following && onCourse && userCoord && mapRef.current) {
+    if (following && onCourse && userCoord && mapRef.current
+        && isValidCoord(userCoord.latitude, userCoord.longitude)) {
       mapRef.current.animateToRegion(
         { latitude: userCoord.latitude, longitude: userCoord.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
         400,
@@ -946,8 +949,10 @@ export default function ScoringScreen() {
     if (!preview || !mapRef.current) return;
     const h: any = holes[currentHole];
     if (!h) return;
-    const tee = (typeof h.tee_lat === 'number' && typeof h.tee_lng === 'number') ? { lat: h.tee_lat, lng: h.tee_lng } : null;
-    const green = (typeof h.pin_lat === 'number' && typeof h.pin_lng === 'number') ? { lat: h.pin_lat, lng: h.pin_lng } : null;
+    const teeC = safeCoord(h.tee_lat, h.tee_lng, 'reframe tee');
+    const greenC = safeCoord(h.pin_lat, h.pin_lng, 'reframe pin');
+    const tee = teeC ? { lat: teeC.latitude, lng: teeC.longitude } : null;
+    const green = greenC ? { lat: greenC.latitude, lng: greenC.longitude } : null;
 
     if (tee && green) {
       const heading = bearingDeg(tee.lat, tee.lng, green.lat, green.lng);
@@ -958,10 +963,14 @@ export default function ScoringScreen() {
       const wantM = Math.max(distM * 1.7, 80);
       const mpp = wantM / Math.max(screenH * 0.78, 1);
       const zoom = Math.log2((156543.03392 * Math.cos(midLat * Math.PI / 180)) / mpp);
-      mapRef.current.animateCamera(
-        { center: { latitude: midLat, longitude: midLng }, heading, pitch: 0, zoom: Math.max(13, Math.min(19, zoom)) },
-        { duration: 600 },
-      );
+      const centre = safeCoord(midLat, midLng, 'reframe centre');
+      // A non-finite camera value crashes the process just like a bad marker.
+      if (centre && Number.isFinite(zoom) && Number.isFinite(heading)) {
+        mapRef.current.animateCamera(
+          { center: centre, heading, pitch: 0, zoom: Math.max(13, Math.min(19, zoom)) },
+          { duration: 600 },
+        );
+      }
       return;
     }
 
@@ -977,13 +986,13 @@ export default function ScoringScreen() {
     const lats = pts.map((p) => p.lat), lngs = pts.map((p) => p.lng);
     const minLat = Math.min(...lats), maxLat = Math.max(...lats);
     const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-    mapRef.current.animateCamera(
-      {
-        center: { latitude: (minLat + maxLat) / 2, longitude: (minLng + maxLng) / 2 },
-        heading: 0, pitch: 0,
-      },
-      { duration: 600 },
-    );
+    const fitCentre = safeCoord((minLat + maxLat) / 2, (minLng + maxLng) / 2, 'reframe fit');
+    if (fitCentre) {
+      mapRef.current.animateCamera(
+        { center: fitCentre, heading: 0, pitch: 0 },
+        { duration: 600 },
+      );
+    }
   }, [preview, currentHole, holes, course]);
 
   // ── Course selection helpers ─────────────────────────────────────────────────
@@ -1249,10 +1258,12 @@ export default function ScoringScreen() {
       }
       // Drop any malformed segment (missing / non-numeric coords) so the
       // overlay render can never deref undefined and crash the screen.
+      // isValidCoord, NOT `typeof === 'number'` — the latter is true for NaN,
+      // which is the one value that hard-crashes MapKit.
       segs = segs.filter((s: any) =>
-        s?.start && s?.end &&
-        typeof s.start.lat === 'number' && typeof s.start.lng === 'number' &&
-        typeof s.end.lat === 'number' && typeof s.end.lng === 'number');
+        s?.start && s?.end
+        && isValidCoord(s.start.lat, s.start.lng)
+        && isValidCoord(s.end.lat, s.end.lng));
       return { match_id: r.match_id, created_at: r.created_at, shots: segs };
     }).filter((r) => r.shots.length > 0);
   }, [userIsPremium, currentHoleNum, pastShotsByHole]);
@@ -1610,7 +1621,7 @@ export default function ScoringScreen() {
   // show users how confident the pin location is and encourage re-marking.
   const [pinSamplesByHole, setPinSamplesByHole] = useState<Record<string, number>>({});
   const currentHoleObj = holes[currentHole];
-  const knownPin: LocalPin | null = currentHoleObj
+  const knownPinRaw: LocalPin | null = currentHoleObj
     ? (pinByHole[currentHoleObj.hole_id] ??
        (currentHoleObj.pin_lat != null && currentHoleObj.pin_lng != null
          ? {
@@ -1620,6 +1631,10 @@ export default function ScoringScreen() {
            }
          : null))
     : null;
+  // A pin with a bad coordinate is worse than no pin: it renders a Marker and
+  // seeds every downstream yardage, heatmap and camera move.
+  const knownPin: LocalPin | null =
+    knownPinRaw && isValidCoord(knownPinRaw.lat, knownPinRaw.lng) ? knownPinRaw : null;
 
   const yardsToPin = (knownPin && userCoord)
     ? Math.round(distYards(userCoord.latitude, userCoord.longitude, knownPin.lat, knownPin.lng))
@@ -2027,7 +2042,15 @@ export default function ScoringScreen() {
       }
       return out;
     };
-    return { sigma1: buildRing(1), sigma2: buildRing(2), center };
+    // Same final gate as shotTendency. effectiveForward passes through the
+    // weather and slope adjustments, any of which can go non-finite if an
+    // upstream async value (DEM elevation, home elevation, wind) arrives
+    // unusable — and NaN here means 120 NaN coordinates in two native Polygons.
+    const s1 = safeCoords(buildRing(1), 'heatmap sigma1', 3);
+    const s2 = safeCoords(buildRing(2), 'heatmap sigma2', 3);
+    const c = safeCoord(center.latitude, center.longitude, 'heatmap centre');
+    if (!s1 || !s2 || !c) return null;
+    return { sigma1: s1, sigma2: s2, center: c };
   }, [
     // knownPin's primitives, not the object — see slopeAdjustment above; the
     // catalog-fallback literal is a new reference each render and would re-run
@@ -2060,7 +2083,7 @@ export default function ScoringScreen() {
     const pts: { lat: number; lng: number }[] = [];
     for (const round of pastHoleShots) {
       const seg = round.shots[si];
-      if (seg && typeof seg.end?.lat === 'number' && typeof seg.end?.lng === 'number') {
+      if (seg && isValidCoord(seg.end?.lat, seg.end?.lng)) {
         pts.push({ lat: seg.end.lat, lng: seg.end.lng });
       }
     }
@@ -2106,9 +2129,16 @@ export default function ScoringScreen() {
       });
     }
     const ORD = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'];
+    // Final gate before these reach a native Polygon. The eigen-decomposition
+    // above floors its inputs with Math.max, but Math.max(0, NaN) is NaN — so a
+    // single bad sample would propagate through every one of the 48 perimeter
+    // points. Drop the whole overlay rather than hand MapKit a NaN.
+    const safeEllipse = safeCoords(ellipse, 'shotTendency ellipse', 3);
+    const safeCentre = safeCoord(meanLat, meanLng, 'shotTendency centre');
+    if (!safeEllipse || !safeCentre) return null;
     return {
-      ellipse,
-      center: { latitude: meanLat, longitude: meanLng },
+      ellipse: safeEllipse,
+      center: safeCentre,
       count: N,
       label: ORD[si] ?? `${si + 1}th`,
     };
@@ -2692,11 +2722,15 @@ export default function ScoringScreen() {
   const frontScoreTotal = front.reduce((a, h, i) => (enteredHoles.has(i) ? a + (scores[i] ?? h.par) : a), 0);
   const backScoreTotal = back.reduce((a, h, i) => (enteredHoles.has(9 + i) ? a + (scores[9 + i] ?? h.par) : a), 0);
 
-  const cLat = course?.latitude ?? 0;
-  const cLng = course?.longitude ?? 0;
+  // Fall back through: live position → course centre → continental US. Every
+  // step is validated, because MapKit crashes on a bad initialRegion too.
+  const regionCentre =
+    (userCoord && onCourse ? safeCoord(userCoord.latitude, userCoord.longitude, 'region user') : null)
+    ?? safeCoord(course?.latitude, course?.longitude, 'region course')
+    ?? { latitude: 37.5, longitude: -100 };
   const initialRegion: Region = {
-    latitude: userCoord && onCourse ? userCoord.latitude : (cLat || 37.5),
-    longitude: userCoord && onCourse ? userCoord.longitude : (cLng || -100),
+    latitude: regionCentre.latitude,
+    longitude: regionCentre.longitude,
     latitudeDelta: 0.004,
     longitudeDelta: 0.004,
   };
@@ -2804,7 +2838,7 @@ export default function ScoringScreen() {
         }}
         onPanDrag={() => setFollowing(false)}
       >
-        {measurePin && (
+        {measurePin && isValidCoord(measurePin.latitude, measurePin.longitude) && (
           <>
             {/* tracksViewChanges={false} avoids the well-known react-native-maps
                 bug where iOS Markers can swallow the next map tap when their
@@ -2821,9 +2855,12 @@ export default function ScoringScreen() {
                 <View style={styles.pinInner} />
               </View>
             </Marker>
-            {userCoord && (
+            {userCoord && isValidCoord(userCoord.latitude, userCoord.longitude) && (
               <Polyline
-                coordinates={[userCoord, measurePin]}
+                coordinates={[
+                  { latitude: userCoord.latitude, longitude: userCoord.longitude },
+                  measurePin,
+                ]}
                 strokeColor={C.gold}
                 strokeWidth={2}
                 lineDashPattern={[6, 4]}
@@ -2950,7 +2987,7 @@ export default function ScoringScreen() {
 
         {/* Subtle tee-box mark for the current hole — shown in every round type
             (and preview) when the tee has been marked for this teebox. */}
-        {hole && (hole as any).tee_lat != null && (hole as any).tee_lng != null && (
+        {hole && isValidCoord((hole as any).tee_lat, (hole as any).tee_lng) && (
           <Marker
             coordinate={{ latitude: (hole as any).tee_lat, longitude: (hole as any).tee_lng }}
             anchor={{ x: 0.5, y: 0.5 }}
@@ -2965,6 +3002,10 @@ export default function ScoringScreen() {
             polyline, with a numbered start dot and end dot. */}
         {currentShots.map((shot, i) => {
           const color = SHOT_COLORS[i % SHOT_COLORS.length];
+          // A tracked shot with a bad coordinate would take the whole screen
+          // down rather than just render wrong.
+          if (!isValidCoord(shot.start?.lat, shot.start?.lng)
+           || !isValidCoord(shot.end?.lat, shot.end?.lng)) return null;
           return (
             <React.Fragment key={`shot-${i}`}>
               <Polyline
@@ -3027,7 +3068,9 @@ export default function ScoringScreen() {
             updates as the player walks. The yardage chip at the midpoint
             updates with every GPS fix so the player knows how far they've
             walked — useful as a sanity check before they tap TRACK→stop. */}
-        {activeShot && userCoord && (() => {
+        {activeShot && userCoord
+          && isValidCoord(activeShot.start?.lat, activeShot.start?.lng)
+          && isValidCoord(userCoord.latitude, userCoord.longitude) && (() => {
           const liveYds = Math.round(distYards(
             activeShot.start.lat, activeShot.start.lng,
             userCoord.latitude,   userCoord.longitude,
@@ -3132,7 +3175,8 @@ export default function ScoringScreen() {
             onPress={() => {
               if (!onCourse) return;
               setFollowing(true);
-              if (userCoord && mapRef.current) {
+              if (userCoord && mapRef.current
+                  && isValidCoord(userCoord.latitude, userCoord.longitude)) {
                 mapRef.current.animateToRegion(
                   { latitude: userCoord.latitude, longitude: userCoord.longitude, latitudeDelta: 0.003, longitudeDelta: 0.003 },
                   400,

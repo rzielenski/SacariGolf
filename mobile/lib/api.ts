@@ -405,7 +405,11 @@ export const api = {
       approach: {
         bucket: string;
         shots: number;
+        /** Now the MEDIAN server-side (kept name for old clients). */
         avg_proximity_ft: number | null;
+        median_proximity_ft?: number | null;
+        /** 75th percentile: 3 of 4 shots finish inside this. */
+        p75_proximity_ft?: number | null;
         scratch_proximity_ft: number;
       }[];
     }>('GET', `/users/${id}/shot-stats`),
@@ -854,6 +858,15 @@ export const api = {
       }[];
       requirements: { min_holes: number; min_hole_fraction: number };
     }>('GET', '/courses/sim-ready'),
+    /** Player-traced course shapes (fairway, green, bunker, water, …) that tell
+     *  the simulator what the ball is sitting on. */
+    polygons: (id: string) => request<{
+      polygons: {
+        polygon_id: string; hole_num: number | null; kind: string;
+        ring: [number, number][]; created_at: string;
+        min_lat: number; max_lat: number; min_lng: number; max_lng: number;
+      }[];
+    }>('GET', `/courses/${id}/polygons`),
     dataQuality: (id: string) => request<{
       elevation_points: number;
       elevation_samples: number;

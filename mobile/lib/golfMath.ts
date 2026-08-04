@@ -237,3 +237,64 @@ export function tourAvgStrokes(distYds: number): number {
   }
   return t[t.length - 1][1];
 }
+
+/* ───────────────────────── Map coordinate safety ─────────────────────────
+ * react-native-maps hands coordinates straight to MapKit / Google Maps, and
+ * those APIs HARD CRASH the process on a non-finite or out-of-range value.
+ * There is no JS exception, no error boundary, no red box — the app simply
+ * closes, and the only trace is an `abnormal_exit` crash report with a null
+ * stack. One bad float anywhere in a derived overlay kills the screen.
+ *
+ * The trap that caused exactly that: `typeof x === 'number'` is TRUE for NaN.
+ * Several call sites used that check believing it validated a coordinate. It
+ * rejects undefined / null / strings and waves NaN and ±Infinity straight
+ * through, which is the one case that actually crashes. Use these instead.
+ */
+
+/** Is this a coordinate MapKit will accept? Rejects NaN, ±Infinity and
+ *  anything outside the valid lat/lng envelope. */
+export function isValidCoord(lat: unknown, lng: unknown): boolean {
+  return typeof lat === 'number' && typeof lng === 'number'
+    && Number.isFinite(lat) && Number.isFinite(lng)
+    && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+}
+
+export interface LatLng { latitude: number; longitude: number }
+
+/**
+ * Coerce to a map-safe { latitude, longitude }, or null when the input can't
+ * be trusted. In dev it logs WHICH overlay produced the bad value, so the next
+ * occurrence names its own source instead of dying silently.
+ */
+export function safeCoord(lat: unknown, lng: unknown, label = 'coord'): LatLng | null {
+  if (!isValidCoord(lat, lng)) {
+    if (__DEV__) console.warn(`[map] dropped invalid ${label}: lat=${String(lat)} lng=${String(lng)}`);
+    return null;
+  }
+  return { latitude: lat as number, longitude: lng as number };
+}
+
+/**
+ * Filter a coordinate list down to the map-safe entries.
+ *
+ * `minPoints` guards shapes that are meaningless when partly dropped: a
+ * polygon that loses half its perimeter would render as a nonsense sliver, so
+ * returning null lets the caller skip the overlay entirely. Polylines pass 2.
+ */
+export function safeCoords(
+  pts: readonly { latitude?: unknown; longitude?: unknown }[] | null | undefined,
+  label = 'shape',
+  minPoints = 0,
+): LatLng[] | null {
+  if (!pts?.length) return null;
+  const out: LatLng[] = [];
+  for (const p of pts) {
+    if (isValidCoord(p?.latitude, p?.longitude)) {
+      out.push({ latitude: p.latitude as number, longitude: p.longitude as number });
+    }
+  }
+  if (out.length !== pts.length && __DEV__) {
+    console.warn(`[map] ${label}: dropped ${pts.length - out.length}/${pts.length} invalid points`);
+  }
+  return out.length >= Math.max(1, minPoints) ? out : null;
+}
